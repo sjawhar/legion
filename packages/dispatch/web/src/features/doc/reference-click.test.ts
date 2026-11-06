@@ -100,6 +100,7 @@ test("a pinned block of a spec opens the version under the slug the issue's summ
   const summary: IssueReferenceSummary = {
     documents: [
       {
+        height: null,
         id: "artifact-1",
         kind: "doc",
         latest_version: 4,
@@ -107,6 +108,7 @@ test("a pinned block of a spec opens the version under the slug the issue's summ
         name: "spec.md",
         primary: true,
         slug: "spec-md",
+        width: null,
       },
     ],
     key: "CORE-1",

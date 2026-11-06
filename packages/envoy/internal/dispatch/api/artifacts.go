@@ -8,6 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	// The three picture formats the standard library decodes, registered with image.DecodeConfig
+	// so pictureDimensions can read a header without naming a decoder for each; WebP has none in
+	// the standard library and is read by golang.org/x/image/webp below.
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -22,6 +29,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/image/webp"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -73,6 +81,11 @@ type artifactUploadInput struct {
 	supplied    *model.Actor
 	inline      bool
 	blank       bool
+	// width and height are the picture's own size in pixels, read from the bytes by
+	// pictureDimensions once the upload knows it stores a picture; both nil for anything else
+	// and for a picture whose header did not decode.
+	width  *int
+	height *int
 }
 
 // artifactTarget is the owner an upload or a slug lookup names: an issue (IssueKey), a project
@@ -238,6 +251,9 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		}
 	}
 	input.contentType = storedType
+	if kind == "image" {
+		input.width, input.height = pictureDimensions(storedType, input.content)
+	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
@@ -590,12 +606,14 @@ func (s *server) storeArtifact(
 		}
 		var versionAuthors []byte
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			returning number, named, summary, authors, created_at, size, mime, sha256
-		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue).Scan(
+			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary, width, height)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			returning number, named, summary, authors, created_at, size, mime, sha256, width, height
+		`, artifact.ID, nextNumber, content, input.contentType, size, sha, authors, input.summary != "", summaryValue,
+			input.width, input.height,
+		).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
-			&version.Size, &version.MIME, &version.SHA256,
+			&version.Size, &version.MIME, &version.SHA256, &version.Width, &version.Height,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -1649,8 +1667,9 @@ func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactT
 
 // versionColumns is the column list a version read selects over artifact_versions aliased v, in
 // the order scanned into model.Version: number, named, summary, authors, created_at, size, mime,
-// sha256. The size never reads a document's markdown (model.VersionSize).
-const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256`
+// sha256, width, height. The size never reads a document's markdown (model.VersionSize); the
+// width and height are the picture's own, null for everything else (pictureDimensions).
+const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256, v.width, v.height`
 
 // artifactVersionsStatement reads the versions of every artifact in $1 at once, so a list of
 // artifacts costs one statement rather than one per artifact. Ordering by the artifact first
@@ -1665,10 +1684,11 @@ const artifactVersionsStatement = `
 func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
 	var version model.Version
 	var authors []byte
-	targets := make([]any, 0, 8+len(extra))
+	targets := make([]any, 0, 10+len(extra))
 	targets = append(targets,
 		&version.Number, &version.Named, &version.Summary, &authors,
 		&version.CreatedAt, &version.Size, &version.MIME, &version.SHA256,
+		&version.Width, &version.Height,
 	)
 	targets = append(targets, extra...)
 	if err := row.Scan(targets...); err != nil {
@@ -1763,6 +1783,30 @@ func artifactKind(mediaType, declared string, content []byte) (kind, storedType 
 		return "image", sniffed
 	}
 	return "file", declared
+}
+
+// pictureDimensions is a picture's own width and height in pixels, read from the header of the
+// bytes the upload already holds, so the read costs no second copy of the file. storedType is
+// what artifactKind stored the picture under, which is what its bytes are; the caller asks this
+// of an image alone, so a video, a document and every other file record neither.
+//
+// The pair is recorded together or not at all: a header that does not decode, or that claims no
+// area, answers nil for both and the upload is stored and served exactly as it was before
+// Dispatch read a size (INFRA-760 R12). WebP is read by its own decoder, since the standard
+// library has none; the other three are image.DecodeConfig's, through the blank imports at the
+// head of this file. Each reads the header alone and decodes no pixel.
+func pictureDimensions(storedType string, content []byte) (width, height *int) {
+	var config image.Config
+	var err error
+	if storedType == "image/webp" {
+		config, err = webp.DecodeConfig(bytes.NewReader(content))
+	} else {
+		config, _, err = image.DecodeConfig(bytes.NewReader(content))
+	}
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return nil, nil
+	}
+	return &config.Width, &config.Height
 }
 
 func artifactSlug(name string) string {

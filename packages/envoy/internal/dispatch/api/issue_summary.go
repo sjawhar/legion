@@ -27,7 +27,9 @@ type issueSummary struct {
 // issueSummaryDocument is one artifact of an issue summary. LatestVersion is its greatest version
 // number, null only for an artifact with no version, which no committed write leaves. MIME is the
 // content type that version is stored under, which tells a video from a picture, null for an
-// artifact with no version and for a version stored under no type. Primary marks the issue's
+// artifact with no version and for a version stored under no type. Width and Height are that
+// version's own size in pixels, which a reference draws a picture's box from before its bytes
+// arrive, null together for everything that is not a decoded picture. Primary marks the issue's
 // spec, which a reference to a block of the spec (`<issue>/spec#b-…`) names.
 type issueSummaryDocument struct {
 	ID            string  `json:"id"`
@@ -36,12 +38,14 @@ type issueSummaryDocument struct {
 	Kind          string  `json:"kind"`
 	LatestVersion *int    `json:"latest_version"`
 	MIME          *string `json:"mime"`
+	Width         *int    `json:"width"`
+	Height        *int    `json:"height"`
 	Primary       bool    `json:"primary"`
 }
 
 // documentSummary is GET /api/v1/projects/{key}/artifacts/{slug}/summary: the project document
 // the full read resolves that reference to, with its greatest version number and that version's
-// content type.
+// content type and size.
 type documentSummary struct {
 	ID            string  `json:"id"`
 	Project       string  `json:"project"`
@@ -50,17 +54,25 @@ type documentSummary struct {
 	Kind          string  `json:"kind"`
 	LatestVersion *int    `json:"latest_version"`
 	MIME          *string `json:"mime"`
+	Width         *int    `json:"width"`
+	Height        *int    `json:"height"`
 }
 
-// summaryLatestVersion is the select-list term an artifact summary reads its latest version
-// through, over artifacts aliased a: one index probe of artifact_versions' (artifact_id, number)
-// key per artifact, inside the summary's one query.
-const summaryLatestVersion = `(select max(v.number) from artifact_versions v where v.artifact_id = a.id)`
-
-// summaryLatestMIME is the select-list term an artifact summary reads that latest version's
-// content type through, over the same alias and the same key: the type the version is stored
-// under, null where there is no version or the version stores none.
-const summaryLatestMIME = `(select v.mime from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1)`
+// summaryLatestJoin is how an artifact summary reads its latest version: one lateral over
+// artifacts aliased a, one index probe of artifact_versions' (artifact_id, number) key per
+// artifact, answering every column of that version a reference needs. A reference asks two
+// questions of it - what to draw, from the content type, and what box to reserve, from the size
+// the upload read out of the picture's own header - and one read answers both, so no page makes
+// a second. Its columns are selected through summaryLatestColumns, in that order.
+const (
+	summaryLatestJoin = ` left join lateral (
+			select v.number, v.mime, v.width, v.height
+			from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1
+		) latest on true`
+	// summaryLatestColumns is the latest version's number, content type and size, null
+	// throughout for an artifact with no version at all.
+	summaryLatestColumns = `latest.number, latest.mime, latest.width, latest.height`
+)
 
 func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -75,8 +87,9 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestMIME+`, a.is_primary
-		from artifacts a where a.issue_key = $1 order by a.created_at, a.id
+		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestColumns+`, a.is_primary
+		from artifacts a`+summaryLatestJoin+`
+		where a.issue_key = $1 order by a.created_at, a.id
 	`, summary.Key)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -99,9 +112,11 @@ func (s *server) getProjectDocumentSummary(w http.ResponseWriter, r *http.Reques
 	read := func(predicate string, value string) (documentSummary, error) {
 		var summary documentSummary
 		err := q.QueryRow(ctx, `
-			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestVersion+`, `+summaryLatestMIME+`
-			from artifacts a where `+predicate, value).Scan(
-			&summary.ID, &summary.Project, &summary.Slug, &summary.Name, &summary.Kind, &summary.LatestVersion, &summary.MIME,
+			select a.id::text, coalesce(a.project_key, ''), a.slug, a.name, a.kind, `+summaryLatestColumns+`
+			from artifacts a`+summaryLatestJoin+`
+			where `+predicate, value).Scan(
+			&summary.ID, &summary.Project, &summary.Slug, &summary.Name, &summary.Kind,
+			&summary.LatestVersion, &summary.MIME, &summary.Width, &summary.Height,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return documentSummary{}, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")

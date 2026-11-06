@@ -65,12 +65,18 @@ const refetchFailedOnFocus = (query: { readonly state: { readonly status: QueryS
 /** What a reference to a picture or a video draws, and where the browser loads it from: the
  *  same-origin bytes route of the version the reference shows. `kind` is what to draw, a picture
  *  in an `<img>` or a video in a player, which the stored content type decides rather than the
- *  artifact's kind: a video upload is a file, never an image. Every surface that draws a
- *  reference's media - the hook's `picture`, `watchPicturePath` for the document editors - uses
- *  this one shape, so they all answer the same question. */
+ *  artifact's kind: a video upload is a file, never an image. `width` and `height` are the
+ *  picture's own size in pixels as the summary recorded it, so a drawing place can reserve its
+ *  box before the bytes arrive; they are present together or not at all, and absent for a video,
+ *  for a picture whose version has no recorded size, and for a reference pinned below the
+ *  artifact's latest version, whose shape the summary does not answer for. Every surface that
+ *  draws a reference's media - the hook's `picture`, `usePinnedMedia`, `watchPicturePath` for
+ *  the document editors - uses this one shape, so they all answer the same question. */
 export interface ReferenceMedia {
   readonly kind: "picture" | "video";
   readonly src: string;
+  readonly width?: number;
+  readonly height?: number;
 }
 
 export interface ReferenceTarget {
@@ -172,21 +178,26 @@ export const blockQuery = (reference: string | undefined) =>
 
 /** The document a reference names, as much of it as a reference shows: an issue summary's
  *  document, a project document's summary, or an agent conversation's artifact cut to the same
- *  fields. `latest_version` is its greatest version number, null when it has none, and `mime`
- *  the content type that version is stored under, which tells a video from a picture. */
+ *  fields. `latest_version` is its greatest version number, null when it has none, `mime` the
+ *  content type that version is stored under, which tells a video from a picture, and `width`
+ *  and `height` that version's own size in pixels, null together for anything that is not a
+ *  decoded picture. One read answers both questions, so no page makes a second. */
 export type ReferenceArtifact = Pick<
   IssueReferenceSummaryDocument,
-  "id" | "kind" | "latest_version" | "mime" | "name"
+  "height" | "id" | "kind" | "latest_version" | "mime" | "name" | "width"
 >;
 
 /** An agent conversation's artifact as a `ReferenceArtifact`; its versions are in number order. */
 function agentReferenceArtifact(artifact: Artifact): ReferenceArtifact {
+  const latest = artifact.versions.at(-1);
   return {
+    height: latest?.height ?? null,
     id: artifact.id,
     kind: artifact.kind,
-    latest_version: artifact.versions.at(-1)?.number ?? null,
-    mime: artifact.versions.at(-1)?.mime ?? null,
+    latest_version: latest?.number ?? null,
+    mime: latest?.mime ?? null,
     name: artifact.name,
+    width: latest?.width ?? null,
   };
 }
 
@@ -533,15 +544,34 @@ export function isStoredVideo(mime: string | null | undefined): boolean {
   return isVideoContentType(type.trim());
 }
 
+/** The size a summary lets a reference reserve a box with: the pair it recorded for `artifact`'s
+ *  latest version, and nothing at all for a reference pinned below that version, because a later
+ *  upload may have another shape and the summary answers for the latest alone. The artifact page
+ *  and the Artifacts tab read a `Version`'s own pair instead, since they draw the version the
+ *  reader chose. Both numbers are carried together or neither is. */
+function recordedSize(
+  version: number,
+  artifact: Pick<ReferenceArtifact, "height" | "latest_version" | "width">
+): { width?: number; height?: number } {
+  const { height, width } = artifact;
+  if (version !== artifact.latest_version || width === null || height === null) {
+    return {};
+  }
+  return { height, width };
+}
+
 /** What the reference `named` draws and from where: the bytes route of the version it pins, else
  *  of `artifact`'s latest. A video is any artifact whose latest version is stored under a video
  *  type - an upload of one is a file, never an image kind - and a picture is an image with a
- *  version, as it has always been. Undefined for anything else: `artifact` (the document the
- *  reference names, once read) unread, versionless, or a document or another file, none of which
- *  the browser draws or plays. */
+ *  version, as it has always been, carrying the size the summary recorded (`recordedSize`); a
+ *  player sizes itself, so a video carries none. Undefined for anything else: `artifact` (the
+ *  document the reference names, once read) unread, versionless, or a document or another file,
+ *  none of which the browser draws or plays. */
 function referenceMedia(
   named: ReferencedArtifact,
-  artifact: Pick<ReferenceArtifact, "kind" | "latest_version" | "mime"> | undefined
+  artifact:
+    | Pick<ReferenceArtifact, "height" | "kind" | "latest_version" | "mime" | "width">
+    | undefined
 ): ReferenceMedia | undefined {
   const version = named.version ?? artifact?.latest_version;
   if (artifact === undefined || !version) {
@@ -551,7 +581,9 @@ function referenceMedia(
   if (isStoredVideo(artifact.mime)) {
     return { kind: "video", src };
   }
-  return artifact.kind === "image" ? { kind: "picture", src } : undefined;
+  return artifact.kind === "image"
+    ? { kind: "picture", src, ...recordedSize(version, artifact) }
+    : undefined;
 }
 
 /** Calls `onPicture` with what a summary's data says the reference draws, now and whenever the
@@ -620,11 +652,12 @@ export function watchPicturePath(
 
 /** What a reference pinned to a version draws: the bytes route it names, at once, with no read
  *  and no subscription of its own - a picture pinned by a document's source draws as it always
- *  has, never a link while something is in flight. Its type is the one the summary already in
- *  the query cache carries, where a link, a card or another picture on the page has read it, so
- *  a pinned video answers `video`; where the cache holds none it answers `picture`, which is
- *  what a pinned reference drew before a type was known. Undefined for a reference that pins no
- *  version, whose media is the hook's `picture`. */
+ *  has, never a link while something is in flight. Its type and its size are the ones the
+ *  summary already in the query cache carries, where a link, a card or another picture on the
+ *  page has read it, so a pinned video answers `video` and a picture pinned at the artifact's
+ *  latest version carries that version's shape (`recordedSize`); where the cache holds none it
+ *  answers `picture` with no size, which is what a pinned reference drew before either was
+ *  known. Undefined for a reference that pins no version, whose media is the hook's `picture`. */
 export function usePinnedMedia(
   route: DispatchReferenceRoute | undefined
 ): ReferenceMedia | undefined {
@@ -633,9 +666,15 @@ export function usePinnedMedia(
   if (route === undefined || named?.version === undefined) {
     return undefined;
   }
+  const artifact = cachedReferenceArtifact(queryClient, route);
+  const src = artifactVersionPath(named.owner, named.slug, named.version);
+  if (isStoredVideo(artifact?.mime)) {
+    return { kind: "video", src };
+  }
   return {
-    kind: isStoredVideo(cachedReferenceArtifact(queryClient, route)?.mime) ? "video" : "picture",
-    src: artifactVersionPath(named.owner, named.slug, named.version),
+    kind: "picture",
+    src,
+    ...(artifact === undefined ? {} : recordedSize(named.version, artifact)),
   };
 }
 

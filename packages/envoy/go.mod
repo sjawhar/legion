@@ -33,6 +33,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/nats v0.41.0
 	github.com/wasilibs/go-pgquery v0.0.0-20261027025405-3048dd293555
 	github.com/yuin/goldmark v1.8.6
+	golang.org/x/image v0.46.0
 	golang.org/x/net v0.59.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sync v0.23.0

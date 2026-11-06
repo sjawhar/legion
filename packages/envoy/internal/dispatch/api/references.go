@@ -571,6 +571,8 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 			&version.Size,
 			&version.MIME,
 			&version.SHA256,
+			&version.Width,
+			&version.Height,
 		); err != nil {
 			return nil, err
 		}

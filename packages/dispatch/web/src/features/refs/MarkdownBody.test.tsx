@@ -30,6 +30,7 @@ function withQueries(children: ReactNode): ReactNode {
 
 /** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
 const picture: IssueReferenceSummaryDocument = {
+  height: null,
   id: "artifact-shot",
   kind: "image",
   latest_version: 2,
@@ -37,6 +38,7 @@ const picture: IssueReferenceSummaryDocument = {
   name: "shot.png",
   primary: false,
   slug: "shot-png",
+  width: null,
 };
 
 /** CORE-1's summary read, the one read behind a reference to it or to its documents. */
@@ -208,6 +210,7 @@ describe("Dispatch pictures", () => {
 
   test("a picture line that pins no version and names a document reads as its reference", async () => {
     const notes: IssueReferenceSummaryDocument = {
+      height: null,
       id: "artifact-notes",
       kind: "doc",
       latest_version: 4,
@@ -215,6 +218,7 @@ describe("Dispatch pictures", () => {
       name: "notes.md",
       primary: false,
       slug: "notes-md",
+      width: null,
     };
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
     const view = render(
@@ -960,6 +964,7 @@ test("two references in one body each resolve their own inline link and title, r
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
   const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    height: null,
     id: "artifact-1",
     kind: "doc",
     latest_version: 4,
@@ -967,6 +972,7 @@ test("two references in one body each resolve their own inline link and title, r
     name: "Runbook.md",
     project: "CORE",
     slug: "runbook-md",
+    width: null,
   });
   const getIssue = spyOn(api, "getIssue");
   const getIssueSummary = spyOn(api, "getIssueSummary");

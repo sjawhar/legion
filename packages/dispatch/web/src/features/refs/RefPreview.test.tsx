@@ -613,6 +613,7 @@ test("an ask's card heads with its question formatted, not its source", async ()
 test("a document's card shows its owner, name, latest version and text from its summary and text reads", async () => {
   const getIssue = mockIssues();
   const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    height: null,
     id: "doc-9",
     kind: "doc",
     latest_version: 4,
@@ -620,6 +621,7 @@ test("a document's card shows its owner, name, latest version and text from its 
     name: "Runbook.md",
     project: "CORE",
     slug: "runbook-md",
+    width: null,
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "Restart the **pod** first.",
@@ -667,6 +669,7 @@ function summaryWithSpec(): IssueReferenceSummary {
   return {
     documents: [
       {
+        height: null,
         id: "spec",
         kind: "doc",
         latest_version: 3,
@@ -674,6 +677,7 @@ function summaryWithSpec(): IssueReferenceSummary {
         name: "Design.md",
         primary: true,
         slug: "design-md",
+        width: null,
       },
     ],
     key: "CORE-1",

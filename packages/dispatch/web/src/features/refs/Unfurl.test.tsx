@@ -38,6 +38,7 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
 const coreSummary: IssueReferenceSummary = {
   documents: [
     {
+      height: null,
       id: "artifact-1",
       kind: "doc",
       latest_version: 3,
@@ -45,6 +46,7 @@ const coreSummary: IssueReferenceSummary = {
       name: "design.md",
       primary: true,
       slug: "design",
+      width: null,
     },
   ],
   key: "CORE-1",
@@ -122,6 +124,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
 
 test("Unfurl unfurls a dispatch project document reference with its name and document link", async () => {
   const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    height: null,
     id: "artifact-1",
     kind: "doc",
     latest_version: 3,
@@ -129,6 +132,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     name: "Design notes",
     project: "CORE",
     slug: "design-notes",
+    width: null,
   });
   const getProjectArtifact = spyOn(api, "getProjectArtifact");
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
