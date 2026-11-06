@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { type Browser, expect, type Page, test } from "@playwright/test";
 
 import {
   createIssue,
@@ -246,6 +246,150 @@ test("a document whose state needs many sync frames loads whole and takes an edi
   } finally {
     await alice.close();
   }
+});
+
+/** The connection indicator while it names edits this browser holds that have not reached the
+ *  server: the notice is the sentence after the connection's own name (`ConnectionDot`). */
+function unsentNotice(page: Page) {
+  return page.getByRole("status", {
+    name: /saved in this browser, not sent to Dispatch yet\. Dispatch keeps trying\./,
+  });
+}
+
+test("a stalled handover names the edits this browser is still holding", async ({ browser }) => {
+  await createProject({ key: "UNSENT", name: "Unsent edits" });
+  const issue = await createIssue({
+    project: "UNSENT",
+    spec: "# Unsent\n\nOne paragraph of ordinary prose.\n",
+    title: "Name the edits a stalled server has not taken",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await openSpec(page, issue.key, "One paragraph of ordinary prose.");
+
+    // Only the server's acknowledgements are held: the socket stays open and synced and the
+    // page stays connected and writable, which is the state a stalled handover leaves it in and
+    // the one neither the offline nor the read-only sentence covers.
+    transport.holdServerFrames();
+    await typeAtEnd(page, "typed while nothing is acknowledged");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBeGreaterThan(0);
+    await expect(unsentNotice(page)).toBeVisible();
+
+    // The acknowledgements arrive, the rows land, and the sentence goes with them.
+    await transport.releaseServerFrames();
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    await expect(unsentNotice(page)).toHaveCount(0);
+    await expect(connectedDot(page)).toHaveText("connected");
+    expect((await getArtifactText(artifactId)).markdown).toContain(
+      "typed while nothing is acknowledged"
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * A pending offline edit replays on the next page, which is what the refusal rows below rest on:
+ * each of them pastes offline, closes that page and expects the saved edit to reach the server
+ * from the page after it. These two rows prove the replay itself, once into a document of one
+ * paragraph and once into one whose state needs many sync frames, since this change hands a
+ * document's state over as a series of bounded frames (sjawhar/ygo v1.55.1-sami.3 on) where one
+ * frame carried it before, and an editor that replays only after a sync it sees completed would
+ * lose the edit in the second where it keeps it in the first (INFRA-179).
+ */
+async function replaysAPendingPaste(
+  browser: Browser,
+  issueKey: string,
+  artifactId: string,
+  path: string,
+  anchor: string
+): Promise<void> {
+  const alice = await asUser(browser, "alice");
+  try {
+    const offline = await alice.newPage();
+    const transport = await documentTransport(offline);
+    await offline.goto(path);
+    await expect(documentEditor(offline)).toContainText(anchor);
+    await expect(connectedDot(offline)).toHaveText("connected");
+
+    transport.hold();
+    await transport.sever();
+    await paste(offline, { html: "", text: "pasted while offline" });
+    await expect.poll(() => pendingEditCount(offline, artifactId)).toBe(1);
+    await offline.close();
+
+    const page = await alice.newPage();
+    await page.goto(path);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown, { timeout: 60_000 })
+      .toContain("pasted while offline");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+  } finally {
+    await alice.close();
+  }
+  void issueKey;
+}
+
+test("a pending offline paste replays into a document of one paragraph", async ({ browser }) => {
+  test.setTimeout(AT_THE_BOUND_TIMEOUT_MS);
+  await createProject({ key: "REPLAY", name: "Pending replays" });
+  const issue = await createIssue({
+    project: "REPLAY",
+    spec: "# Replay\n\nOne paragraph of ordinary prose.\n",
+    title: "Replay a pending paste into a small document",
+  });
+  await replaysAPendingPaste(
+    browser,
+    issue.key,
+    issue.primary_artifact_id,
+    `/issues/${issue.key}/spec`,
+    "One paragraph of ordinary prose."
+  );
+});
+
+test("a pending offline paste replays into a document whose state needs many sync frames", async ({
+  browser,
+}) => {
+  test.setTimeout(AT_THE_BOUND_TIMEOUT_MS);
+  await createProject({ key: "REPLAYBIG", name: "Pending replays over many frames" });
+  const issue = await createIssue({
+    project: "REPLAYBIG",
+    title: "Replay a pending paste into a many-frame document",
+  });
+  const { artifact } = await createIssueArtifact(issue.key, {
+    content: markdownWithALastParagraph(),
+    name: "many-frames.md",
+  });
+  await replaysAPendingPaste(
+    browser,
+    issue.key,
+    artifact.id,
+    `/issues/${issue.key}/artifacts/${artifact.slug}`,
+    "At the bound"
+  );
+});
+
+test("a pending offline paste replays into the tangle row's own document when the hook never runs", async ({
+  browser,
+}) => {
+  test.setTimeout(AT_THE_BOUND_TIMEOUT_MS);
+  await createProject({ key: "RETANGLE", name: "Pending replays without the tangle" });
+  const issue = await createIssue({
+    project: "RETANGLE",
+    spec: "# Tangled\n\nThe tangle follows the next paragraph.\n",
+    title: "Replay a pending paste with no chain laid",
+  });
+  await replaysAPendingPaste(
+    browser,
+    issue.key,
+    issue.primary_artifact_id,
+    `/issues/${issue.key}/spec`,
+    "The tangle follows the next paragraph."
+  );
 });
 
 test("an edit past the document bound is dropped with its reason, and the next edit saves", async ({
@@ -587,14 +731,19 @@ test("a merge the server cannot scan through is dropped with its reason, and the
     // (docs.Service.TangleBeyondOneApplyForTest), each naming the place Alice's paste names: a
     // real document is tangled that far only where as many items were made at one place while a
     // browser was away, which no browser test can type. Merging her paste scans the chain to its
-    // end, past the items one apply of hers is allowed (27,528 of them for her 36-byte frame,
-    // scanCeiling), while the room keeps 932,471 of its 1,000,000-item scan total, which is what
+    // end, past the items one apply of hers is allowed (27,594 of them for her 36-byte frame,
+    // scanCeiling), while the room keeps most of its 1,000,000-item scan total, which is what
     // makes this refusal the too-tangled one and not a rebuild's.
     const tangled = await postAsPage(offline, `/api/v1/artifacts/${artifactId}/_test/tangled`);
     expect(tangled.status(), await tangled.text()).toBe(204);
     await offline.close();
 
-    // Alice comes back: her saved paste is sent, refused whole, and dropped with its reason.
+    // Alice comes back: her saved paste is sent, refused whole, and dropped with its reason. The
+    // room hands her the chain first, as a series of bounded frames, which is work this change's
+    // fork had to be made linear in the chain's length to do at all: before sjawhar/ygo
+    // v1.55.1-sami.7 the split walked its clients in the order the encoder writes them, against a
+    // chain whose dependencies run the other way, so this document's handover took about a
+    // hundred seconds of a pod's CPU and no browser of it ever synced (crdt/split.go).
     const page = await alice.newPage();
     const sockets = await recordDocumentSockets(page);
     await page.goto(`/issues/${issue.key}/spec`);
