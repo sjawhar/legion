@@ -124,6 +124,8 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names a file outside the partial filter" "$(contains "$out" 'packages/app/src/[a-z/]*\.ts and 1 more are built')"
 
+# `*` inside one directory is workflow_paths.test.sh's rule now; what this asserts is the file
+# this checker names when a single-star filter leaves a deeper source uncovered.
 echo "case: * stays inside one directory"
 root=$(fixture single-star)
 sed -i 's|      - "packages/app/\*\*"|      - "packages/app/*"\n      - "packages/app/src/*"|' \
@@ -148,24 +150,6 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names a negated file" "$(contains "$out" 'packages/app/src/')"
 
-echo "case: an event without a path filter covers everything"
-root=$(fixture unfiltered)
-cat > "$root/.github/workflows/image.yaml" <<'YAML'
-name: Image
-on:
-  push:
-    branches: [main]
-jobs:
-  docker:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: docker/build-push-action@v6
-        with:
-          file: docker/Dockerfile
-YAML
-run_check "$root"
-check "passes" "$(is "$status" 0)"
-
 echo "case: paths-ignore naming an input"
 root=$(fixture ignored)
 sed -i '/^    paths:$/,/^  workflow_dispatch:$/{/^  workflow_dispatch:$/!d}' "$root/.github/workflows/image.yaml"
@@ -175,6 +159,8 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the trigger" "$(contains "$out" 'on.push.paths-ignore does not cover packages/app')"
 
+# workflow_paths.test.sh owns the rule that `?`, `+` and `\` are refused; this asserts the
+# sentence this checker refuses them with.
 echo "case: a GitHub path pattern using ?, + or \\ is refused, not guessed"
 # GitHub reads `package.json?` as package.jso or package.json; picomatch as package.json plus one
 # character. The check refuses GitHub's form rather than read it either way.
@@ -352,12 +338,6 @@ callers "$root" "$all_inputs"
 sed -i "s#^        with:\$#&\n          predicate-quantifier: 'some-with-excludes'#" "$root/.github/workflows/release.yaml"
 run_check "$root"
 check "predicate-quantifier: some-with-excludes on filters with no ! pattern passes" "$(is "$status" 0)"
-
-echo "case: a paths-filter pattern keeps picomatch's ?"
-root=$(fixture called-dorny-question)
-callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.jso?'|")"
-run_check "$root"
-check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
 echo "case: a workflow_call input tested == '' is a call mode, not a path filter"
 # call_modes <root> <docker job if line> <calling job if line> [extra release.yaml on: line]:
@@ -2411,6 +2391,9 @@ for shape in 'alternation:{docker/**,.dockerignore}' 'closer:docker/}'; do
   check "  as a brace picomatch expands" "$(contains "$out" "jobs.changes filter worker_image has ${pattern//\*/\\*}, a brace picomatch expands")"
 done
 
+# That a brace is a literal rather than an expansion is workflow_paths.test.sh's rule; these two
+# assert what this checker does with one: it refuses it in a GitHub paths filter by name, and it
+# leaves the sources a .dockerignore brace does not drop owed.
 echo "case: braces in a GitHub path filter are refused, and a .dockerignore reads them literally"
 root=$(fixture github-paths-brace)
 sed -i 's|      - "docker/\*\*"|      - "{docker/**,.dockerignore}"|' "$root/.github/workflows/image.yaml"
