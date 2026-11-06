@@ -430,26 +430,83 @@ func (r *idleWakeRig) boot() {
 		base: "http://127.0.0.1:" + strconv.Itoa(r.cfg.Port), stopped: true}
 }
 
-// logFile keeps a copy of the daemon's log beside the test, which a failure names. The cleanup
-// closes it and, when the test did not fail, removes it: nothing is left to read it for. A test
-// that failed keeps its log, and the line below still names where it is.
+// logFile keeps a copy of the daemon's log beside the test, under the test's own temporary
+// directory, which Go removes when the test ends whether it passed or failed: a finished run
+// leaves no log behind. The file is still worth naming while the test runs, and the cleanup
+// closes it and, when the test failed, prints the end of it into the test's own output, which Go
+// shows for a failing test. That is where a failure's diagnosis is read now, the file itself
+// being gone by the time anyone looks.
 func (r *idleWakeRig) logFile() io.Writer {
 	r.t.Helper()
 	if r.daemonLog == nil {
-		file, err := os.CreateTemp("", "lgdaemon-*.log")
+		// TempDir registers the directory's removal the first time it is called, and cleanups run
+		// in the reverse of the order they were registered in, so the cleanup below is registered
+		// after this call: it reads the file while the directory holding it is still there.
+		file, err := os.CreateTemp(r.t.TempDir(), "lgdaemon-*.log")
 		if err != nil {
 			r.t.Fatal(err)
 		}
 		r.t.Cleanup(func() {
 			_ = file.Close()
 			if !r.t.Failed() {
-				_ = os.Remove(file.Name())
+				return
+			}
+			tail, omitted, err := idleRigLogTail(file.Name())
+			switch {
+			case err != nil:
+				r.t.Logf("the daemon's log %s could not be read back: %v", file.Name(), err)
+			case tail == "":
+				r.t.Logf("the daemon's log %s is empty: the daemon wrote nothing to it", file.Name())
+			case omitted > 0:
+				r.t.Logf("the daemon's log, its last %d bytes, %d earlier bytes left out; the rig's own diagnosis prints the last 40 lines of this same log, which are the end of what follows:\n%s",
+					len(tail), omitted, tail)
+			default:
+				r.t.Logf("the daemon's log, whole, %d bytes:\n%s", len(tail), tail)
 			}
 		})
-		r.t.Logf("the daemon's log: %s", file.Name())
+		r.t.Logf("the daemon's log: %s, a file the run removes when the test ends; a test that fails prints its last %d bytes instead",
+			file.Name(), idleRigLogTailBytes)
 		r.daemonLog = file
 	}
 	return r.daemonLog
+}
+
+// idleRigLogTailBytes is how much of the daemon's log a failing test prints. The whole log of a
+// long run is a quarter of a megabyte, which nobody reads in CI output, while the last 32 KiB is
+// the stretch the failure happened in and is still several times the 40 lines diagnose prints of
+// the same log, so the two read as a wide window and the close one inside it.
+const idleRigLogTailBytes = 32 << 10
+
+// idleRigLogTail reads the last idleRigLogTailBytes of the named file, returning them and how
+// many bytes it left out before them. It starts after the first newline in that window, so the
+// text begins with a whole log line rather than half of one, and the count it returns says how
+// much of the log the reader is not being shown.
+func idleRigLogTail(name string) (tail string, omitted int64, err error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = file.Close() }()
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return "", 0, err
+	}
+	at := size - idleRigLogTailBytes
+	if at < 0 {
+		at = 0
+	}
+	window := make([]byte, size-at)
+	if _, err := file.ReadAt(window, at); err != nil {
+		return "", 0, err
+	}
+	text := string(window)
+	if at > 0 {
+		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
+			at += int64(newline) + 1
+			text = text[newline+1:]
+		}
+	}
+	return text, at, nil
 }
 
 // stopDaemon stops the running daemon, if one runs, and waits for it.
