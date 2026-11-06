@@ -18,7 +18,7 @@ import (
 
 // createDeliveryInput is the body of POST /api/v1/messages/{id}/deliveries.
 type createDeliveryInput struct {
-	Delivery string       `json:"delivery"`
+	Delivery string       `json:"delivery" required:"true"`
 	Actor    *model.Actor `json:"actor"`
 }
 
@@ -816,7 +816,7 @@ func (s *server) renewMessageDeliveryClaim(
 // messageReplyInput is the body of POST /api/v1/messages/{id}/reply.
 type messageReplyInput struct {
 	Actor   *model.Actor `json:"actor"`
-	Attempt int          `json:"attempt"`
+	Attempt int          `json:"attempt" required:"true"`
 	Body    *string      `json:"body"`
 	Error   *string      `json:"error"`
 	// InReplyToBlock is the id of the block of message {id} the reply answers ("b2").

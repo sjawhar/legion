@@ -8,8 +8,8 @@ import (
 
 // slowWriteInput is the body of POST /api/v1/writes/_test/slow.
 type slowWriteInput struct {
-	Method  string `json:"method"`
-	Path    string `json:"path"`
+	Method  string `json:"method" required:"true"`
+	Path    string `json:"path" required:"true"`
 	DelayMS int64  `json:"delay_ms"`
 }
 

@@ -604,7 +604,7 @@ func loadCommentDelivery(ctx context.Context, q queryer, commentID, target strin
 type createCommentDeliveryInput struct {
 	Actor    *model.Actor `json:"actor"`
 	Target   *string      `json:"target"`
-	Delivery string       `json:"delivery"`
+	Delivery string       `json:"delivery" required:"true"`
 }
 
 func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
@@ -702,7 +702,7 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 type commentReplyInput struct {
 	Actor   *model.Actor `json:"actor"`
 	Target  *string      `json:"target"`
-	Attempt int          `json:"attempt"`
+	Attempt int          `json:"attempt" required:"true"`
 	Body    *string      `json:"body"`
 	Error   *string      `json:"error"`
 	// ReplyToBlock is the id of the block of comment {id} the reply answers ("b2").

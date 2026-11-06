@@ -125,9 +125,9 @@ type broadcastTarget struct {
 
 // createBroadcastInput is the body of POST /api/v1/broadcasts.
 type createBroadcastInput struct {
-	Body       string   `json:"body"`
-	Delivery   string   `json:"delivery"`
-	SessionIDs []string `json:"session_ids"`
+	Body       string   `json:"body" required:"true"`
+	Delivery   string   `json:"delivery" required:"true"`
+	SessionIDs []string `json:"session_ids" required:"true"`
 }
 
 // POST /api/v1/broadcasts. A send under an Idempotency-Key commits its broadcast as the key's

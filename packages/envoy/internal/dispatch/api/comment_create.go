@@ -31,7 +31,7 @@ type commentInput struct {
 	ReplyToBlock *string `json:"reply_to_block"`
 	AskID        *string `json:"ask_id"`
 	Mentions     []struct {
-		Target string `json:"target"`
+		Target string `json:"target" required:"true"`
 	} `json:"mentions"`
 	Delivery *string `json:"delivery"`
 	// Turn is who holds the turn after this ask reply: "agent" for a progress note

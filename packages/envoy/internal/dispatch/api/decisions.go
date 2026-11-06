@@ -723,7 +723,7 @@ func decisionKeeps(ctx context.Context, q queryer, artifactID string) (map[strin
 
 // keepDecisionInput is the body of POST /api/v1/artifacts/{id}/blocks/{block_id}/keep.
 type keepDecisionInput struct {
-	TextSHA256 string `json:"text_sha256"`
+	TextSHA256 string `json:"text_sha256" required:"true"`
 }
 
 // keepDecision is POST /api/v1/artifacts/{id}/blocks/{block_id}/keep {"text_sha256": "<sum>"}:
@@ -857,7 +857,7 @@ func (s *server) getDocumentRead(w http.ResponseWriter, r *http.Request) {
 
 // documentReadInput is the body of PUT /api/v1/me/documents/{id}/read.
 type documentReadInput struct {
-	Version *int `json:"version"`
+	Version *int `json:"version" required:"true"`
 }
 
 // putDocumentRead is PUT /api/v1/me/documents/{id}/read {"version": n}: the caller has read the

@@ -174,9 +174,13 @@ func parseReplacesAnswer(raw json.RawMessage) (*time.Time, error) {
 
 // answerAskInput is the body of POST /api/v1/asks/{id}/answer.
 type answerAskInput struct {
-	Selected         []string        `json:"selected"`
-	Text             *string         `json:"text"`
-	ExpectedEditedAt json.RawMessage `json:"expected_edited_at"`
+	Selected []string `json:"selected"`
+	Text     *string  `json:"text"`
+	// ExpectedEditedAt is required: an answer names the wording it answers, and a body without
+	// the field is refused (400 ASK_REVISION_REQUIRED, answerAsk below). Null is the
+	// precondition that the ask has never been edited, so the field is required and nullable
+	// both, which is why the handler holds the bytes unparsed (rawFieldSchemas).
+	ExpectedEditedAt json.RawMessage `json:"expected_edited_at" required:"true"`
 	ExpectedAnswerAt json.RawMessage `json:"expected_answer_at"`
 	Actor            *model.Actor    `json:"actor"`
 }
@@ -299,8 +303,8 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 
 // resolveAskInput is the body of POST /api/v1/asks/{id}/resolve.
 type resolveAskInput struct {
-	Kind   string       `json:"kind"`
-	Reason string       `json:"reason"`
+	Kind   string       `json:"kind" required:"true"`
+	Reason string       `json:"reason" required:"true"`
 	Actor  *model.Actor `json:"actor"`
 }
 

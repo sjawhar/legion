@@ -304,7 +304,7 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 
 // createArtifactReviewInput is the body of POST /api/v1/artifacts/{id}/reviews.
 type createArtifactReviewInput struct {
-	State  string  `json:"state"`
+	State  string  `json:"state" required:"true"`
 	Reason *string `json:"reason"`
 }
 
@@ -897,7 +897,7 @@ func (s *server) verificationDocumentFor(ctx context.Context, q queryer, issueKe
 // createPlanReviewInput is the body of POST /api/v1/artifacts/{id}/plan-reviews.
 type createPlanReviewInput struct {
 	Actor   *model.Actor `json:"actor"`
-	Version int          `json:"version"`
+	Version int          `json:"version" required:"true"`
 }
 
 // POST /api/v1/artifacts/{id}/plan-reviews  {version}  (any authenticated actor)

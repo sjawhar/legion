@@ -130,7 +130,7 @@ func (s *server) createAsk(w http.ResponseWriter, r *http.Request) {
 
 // createAskInput is the body of POST /api/v1/issues/{key}/asks and POST /api/v1/artifacts/{id}/asks.
 type createAskInput struct {
-	Question string             `json:"question"`
+	Question string             `json:"question" required:"true"`
 	Kind     string             `json:"kind"`
 	Options  []model.AskOption  `json:"options"`
 	Multiple *bool              `json:"multiple"`

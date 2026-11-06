@@ -20,8 +20,8 @@ import (
 
 // createDeliverySessionGroupInput is the body of POST /api/v1/delivery/session-groups.
 type createDeliverySessionGroupInput struct {
-	Name     string       `json:"name"`
-	Sessions []string     `json:"sessions"`
+	Name     string       `json:"name" required:"true"`
+	Sessions []string     `json:"sessions" required:"true"`
 	Actor    *model.Actor `json:"actor"`
 }
 

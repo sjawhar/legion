@@ -53,7 +53,10 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 
 // projectDefaultAssigneeInput is the body of PUT /api/v1/projects/{key}/default-assignee.
 type projectDefaultAssigneeInput struct {
-	Assignee json.RawMessage `json:"assignee"`
+	// Assignee is required: a body without it is refused (400 INVALID_PROJECT,
+	// putProjectDefaultAssignee below), so a PUT of `{}` cannot wipe a default. Null clears the
+	// default, which is why the handler holds the bytes unparsed (rawFieldSchemas).
+	Assignee json.RawMessage `json:"assignee" required:"true"`
 }
 
 // putProjectDefaultAssignee sets a project's default assignee, or clears it with an explicit

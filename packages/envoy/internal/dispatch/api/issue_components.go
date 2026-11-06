@@ -28,7 +28,7 @@ type componentsInput struct {
 // createIssueInput and updateIssueInput both carry as json.RawMessage, so absent and explicit
 // null stay apart (parseIssueComponents).
 type issueComponentsInput struct {
-	Mode   *string   `json:"mode"`
+	Mode   *string   `json:"mode" required:"true"`
 	IDs    *[]string `json:"ids"`
 	Reason *string   `json:"reason"`
 }

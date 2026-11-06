@@ -47,8 +47,8 @@ type issueDuplicateError struct {
 
 // createIssueInput is the body of POST /api/v1/issues.
 type createIssueInput struct {
-	Project    string          `json:"project"`
-	Title      string          `json:"title"`
+	Project    string          `json:"project" required:"true"`
+	Title      string          `json:"title" required:"true"`
 	Parent     *string         `json:"parent"`
 	BlockedBy  []string        `json:"blocked_by"`
 	External   string          `json:"external"`

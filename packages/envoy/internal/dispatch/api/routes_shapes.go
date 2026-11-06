@@ -58,6 +58,8 @@ type routeShape struct {
 	// Opaque is why this route's answer carries no schema, for a route that relays or pre-renders
 	// its bytes rather than modelling them; empty for every other route.
 	Opaque string
+	// OpaqueContentType is the media type an Opaque answer is served as; empty where Opaque is.
+	OpaqueContentType string
 }
 
 // --- the query-parameter structs -------------------------------------------------------------
@@ -343,11 +345,15 @@ type liveWritePauseQuery struct {
 // server does not model - a relay's bytes, a pre-rendered schema, an event stream, a file's
 // bytes - carries no Response and says why in Opaque.
 var routeShapes = map[string]routeShape{
-	"GET /api/v1":               {Status: http.StatusOK, Response: routeIndex{}},
-	"GET /api/v1/schema/blocks": {Status: http.StatusOK, Opaque: "the block schema is pre-rendered JSON bytes (pmdoc.SchemaJSON), written as they stand"},
-	"GET /api/v1/limits":        {Status: http.StatusOK, Response: model.DispatchLimits{}},
-	"GET /api/v1/projects":      {Status: http.StatusOK, Response: []model.Project{}},
-	"POST /api/v1/projects":     {Status: http.StatusCreated, Response: model.Project{}, Request: createProjectInput{}},
+	"GET /api/v1": {Status: http.StatusOK, Response: routeIndex{}},
+	"GET /api/v1/schema/blocks": {
+		Status:            http.StatusOK,
+		Opaque:            "the block schema is pre-rendered JSON bytes (pmdoc.SchemaJSON), written as they stand",
+		OpaqueContentType: "application/json",
+	},
+	"GET /api/v1/limits":    {Status: http.StatusOK, Response: model.DispatchLimits{}},
+	"GET /api/v1/projects":  {Status: http.StatusOK, Response: []model.Project{}},
+	"POST /api/v1/projects": {Status: http.StatusCreated, Response: model.Project{}, Request: createProjectInput{}},
 	"GET /api/v1/projects/{key}/artifacts": {
 		Status: http.StatusOK, Response: []model.Artifact{}, Params: projectArtifactsQuery{},
 	},
@@ -521,8 +527,9 @@ var routeShapes = map[string]routeShape{
 		Status: http.StatusCreated, Response: goingRequest{}, Request: createGoingRequestInput{},
 	},
 	"GET /api/v1/going/requests/{id}/stream": {
-		Status: http.StatusOK,
-		Opaque: "the run's answer is a text/event-stream of hand-written id:/event:/data: frames, not one JSON body",
+		Status:            http.StatusOK,
+		Opaque:            "the run's answer is a text/event-stream of hand-written id:/event:/data: frames, not one JSON body",
+		OpaqueContentType: "text/event-stream",
 	},
 	"GET /api/v1/going/capability": {Status: http.StatusOK, Response: goingCapability{}},
 	"GET /api/v1/agents":           {Status: http.StatusOK, Response: []agentResponse{}},
@@ -542,8 +549,9 @@ var routeShapes = map[string]routeShape{
 	},
 	"GET /api/v1/agents/{session_id}/artifacts/{slug}": {Status: http.StatusOK, Response: model.Artifact{}},
 	"GET /api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}": {
-		Status: http.StatusOK,
-		Opaque: "a conversation holds files and images alone, so a version download is that file's bytes under its own content type (serveFileVersion)",
+		Status:            http.StatusOK,
+		Opaque:            "a conversation holds files and images alone, so a version download is that file's bytes under its own content type (serveFileVersion)",
+		OpaqueContentType: "application/octet-stream",
 	},
 	"POST /api/v1/broadcasts": {
 		Status: http.StatusCreated, Response: broadcastCreated{}, Request: createBroadcastInput{},
@@ -625,7 +633,8 @@ var routeShapes = map[string]routeShape{
 	"GET /api/v1/artifacts/{id}/text": {Status: http.StatusOK, Response: artifactText{}},
 	"GET /api/v1/artifacts/{id}/versions/{number}": {
 		Status: http.StatusOK, Response: artifactVersionText{},
-		Opaque: "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		Opaque:            "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		OpaqueContentType: "application/octet-stream",
 	},
 	"POST /api/v1/artifacts/{id}/versions": {
 		Status: http.StatusCreated, Response: model.Version{}, Request: createVersionInput{},
@@ -643,7 +652,8 @@ var routeShapes = map[string]routeShape{
 	"GET /api/v1/issues/{key}/artifacts/{slug}/blocks": {Status: http.StatusOK, Response: []model.ArtifactBlock{}},
 	"GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}": {
 		Status: http.StatusOK, Response: artifactVersionText{},
-		Opaque: "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		Opaque:            "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		OpaqueContentType: "application/octet-stream",
 	},
 	"POST /api/v1/issues/{key}/artifacts/{slug}/versions": {
 		Status: http.StatusCreated, Response: model.Version{}, Request: createVersionInput{},
@@ -661,7 +671,8 @@ var routeShapes = map[string]routeShape{
 	"GET /api/v1/projects/{key}/artifacts/{slug}/text":    {Status: http.StatusOK, Response: artifactText{}},
 	"GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}": {
 		Status: http.StatusOK, Response: artifactVersionText{},
-		Opaque: "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		Opaque:            "a file version answers that file's bytes under its own content type (serveFileVersion); only a document version carries the JSON above",
+		OpaqueContentType: "application/octet-stream",
 	},
 	"GET /api/v1/projects/{key}/artifacts/{slug}/blocks": {Status: http.StatusOK, Response: []model.ArtifactBlock{}},
 	"POST /api/v1/projects/{key}/artifacts/{slug}/versions": {

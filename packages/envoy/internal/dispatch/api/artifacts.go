@@ -97,8 +97,12 @@ func (target artifactTarget) refPrefix() string {
 }
 
 type jsonArtifactUpload struct {
-	Name    string          `json:"name"`
-	Content *string         `json:"content"`
+	Name string `json:"name" required:"true"`
+	// Content is required of a JSON upload, which is always a markdown document: a body with
+	// no content, or whose content is blank, is refused (400 ARTIFACT_INPUT, uploadArtifactFor).
+	// A multipart upload sends its bytes as the `file` part instead and carries no content at
+	// all, which is a body of its own (openAPIMultipartSchema).
+	Content *string         `json:"content" required:"true"`
 	Primary json.RawMessage `json:"primary"`
 	Summary string          `json:"summary"`
 	Actor   *model.Actor    `json:"actor"`
@@ -955,7 +959,7 @@ func (s *server) commitArtifactVersionEvent(
 // createVersionInput is the body of POST /api/v1/artifacts/{id}/versions and its issue and
 // project artifact patterns.
 type createVersionInput struct {
-	Summary string       `json:"summary"`
+	Summary string       `json:"summary" required:"true"`
 	Actor   *model.Actor `json:"actor"`
 }
 

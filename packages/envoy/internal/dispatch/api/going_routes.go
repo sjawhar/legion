@@ -70,7 +70,7 @@ type Answerer interface {
 // createGoingRequestInput is one question as a caller asks it: the words, and the project they
 // are asked of. An empty project asks of every project, as search reads its own filter.
 type createGoingRequestInput struct {
-	Words   string `json:"words"`
+	Words   string `json:"words" required:"true"`
 	Project string `json:"project"`
 }
 

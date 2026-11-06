@@ -40,7 +40,7 @@ type userAskSnooze struct {
 
 // askSnoozeInput is the body of PUT /api/v1/me/asks/{id}/snooze.
 type askSnoozeInput struct {
-	SnoozedUntil *string `json:"snoozed_until"`
+	SnoozedUntil *string `json:"snoozed_until" required:"true"`
 }
 
 // PUT /api/v1/me/asks/{id}/snooze

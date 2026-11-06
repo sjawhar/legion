@@ -53,7 +53,7 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 
 // putRepoProjectInput is the body of PUT /api/v1/settings/repo-projects/{owner}/{repo}.
 type putRepoProjectInput struct {
-	Project string       `json:"project"`
+	Project string       `json:"project" required:"true"`
 	Default *bool        `json:"default"`
 	Actor   *model.Actor `json:"actor"`
 }

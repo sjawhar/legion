@@ -59,8 +59,8 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 // createProjectInput is the body of POST /api/v1/projects.
 type createProjectInput struct {
-	Key   string       `json:"key"`
-	Name  string       `json:"name"`
+	Key   string       `json:"key" required:"true"`
+	Name  string       `json:"name" required:"true"`
 	Actor *model.Actor `json:"actor"`
 }
 

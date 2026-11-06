@@ -71,14 +71,14 @@ type resolvedCheck struct {
 // checkResultInput is the body POST /api/v1/issues/{key}/results takes.
 type checkResultInput struct {
 	Actor           *model.Actor `json:"actor"`
-	Check           string       `json:"check"`
-	Role            string       `json:"role"`
+	Check           string       `json:"check" required:"true"`
+	Role            string       `json:"role" required:"true"`
 	Surface         string       `json:"surface"`
 	Run             string       `json:"run"`
 	Observed        string       `json:"observed"`
-	Commit          string       `json:"commit"`
+	Commit          string       `json:"commit" required:"true"`
 	NegativeControl string       `json:"negative_control"`
-	Verdict         string       `json:"verdict"`
+	Verdict         string       `json:"verdict" required:"true"`
 	Failed          int          `json:"failed"`
 	Skipped         int          `json:"skipped"`
 	Excluded        int          `json:"excluded"`

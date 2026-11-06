@@ -188,7 +188,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 
 // threadReadInput is the body of PUT /api/v1/me/threads/{id}/read.
 type threadReadInput struct {
-	ReadThrough *string `json:"read_through"`
+	ReadThrough *string `json:"read_through" required:"true"`
 }
 
 // putThreadRead answers PUT /api/v1/me/threads/{id}/read: it moves the caller's read mark on one

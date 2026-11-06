@@ -2435,6 +2435,9 @@ The line is one synchronous write to stderr per request, so a log pipe that bloc
 every mounted `/api/v1` route with its `method`, `path`, `auth` (`public`, `any`, `human`, or `bearer`), and `description`, sorted by path then method.
 `envoy-dispatch routes` prints the same body from the table alone, with no database or listener and never a test hook;
 the docs site's HTTP API reference is generated from it.
+`envoy-dispatch openapi` prints the OpenAPI 3.1 document of the same table with its test hooks in, each hook's operation marked `x-test-hook`, from the table, the Go types beside it (`internal/dispatch/api/routes_shapes.go`) and nothing else;
+`--out <path>` writes it to a file and `--check` compares the committed `packages/contracts/schemas/dispatch-openapi.json` with a fresh render, printing a unified diff and exiting 1 when the two differ.
+The clients' TypeScript types are rendered from that committed document, so a route added to the table reaches them with no type hand-written for it.
 The list below is a summary.
 An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell.

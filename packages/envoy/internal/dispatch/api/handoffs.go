@@ -43,7 +43,7 @@ const handoffColumns = `id::text, issue_key, phase, version, author, created_at`
 
 type createHandoffInput struct {
 	Actor *model.Actor `json:"actor"`
-	Body  *string      `json:"body"`
+	Body  *string      `json:"body" required:"true"`
 }
 
 // createHandoff records one phase handoff: POST /api/v1/issues/{key}/handoffs/{phase}. Only a

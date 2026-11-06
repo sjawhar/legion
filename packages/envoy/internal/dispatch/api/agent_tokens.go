@@ -60,7 +60,7 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 
 // createAgentTokenInput is the body of POST /api/v1/me/agent-tokens.
 type createAgentTokenInput struct {
-	Name string `json:"name"`
+	Name string `json:"name" required:"true"`
 	// Scopes is the set the new token holds. A body that names none at all leaves it to the
 	// caller's own set, which is why the field is a pointer: an empty array is a token that
 	// holds nothing, and that is a different request from one that asks for the default.
@@ -121,7 +121,7 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 
 // updateAgentTokenScopesInput is the body of PATCH /api/v1/me/agent-tokens/{id}.
 type updateAgentTokenScopesInput struct {
-	Scopes *[]string `json:"scopes"`
+	Scopes *[]string `json:"scopes" required:"true"`
 }
 
 // updateAgentTokenScopes is PATCH /api/v1/me/agent-tokens/{id}: the whole set one of the

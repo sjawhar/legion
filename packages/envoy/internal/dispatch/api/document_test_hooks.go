@@ -98,7 +98,7 @@ func (s *server) getRoomCounters(w http.ResponseWriter, r *http.Request) {
 
 // holdPersistenceInput is the body of POST /api/v1/artifacts/{id}/_test/hold-persistence.
 type holdPersistenceInput struct {
-	Duration string `json:"duration"`
+	Duration string `json:"duration" required:"true"`
 }
 
 // holdRoomPersistence takes {"duration": "<Go duration>"} and holds, for that long from now, every

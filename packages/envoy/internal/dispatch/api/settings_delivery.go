@@ -32,12 +32,12 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 
 // deliverySettingsInput is the body of PUT /api/v1/settings/delivery.
 type deliverySettingsInput struct {
-	DeployRepo              string       `json:"deploy_repo"`
-	DeployWorkflowPath      string       `json:"deploy_workflow_path"`
-	ProductionJobNames      []string     `json:"production_job_names"`
+	DeployRepo              string       `json:"deploy_repo" required:"true"`
+	DeployWorkflowPath      string       `json:"deploy_workflow_path" required:"true"`
+	ProductionJobNames      []string     `json:"production_job_names" required:"true"`
 	ProductionApplyStepName *string      `json:"production_apply_step_name"`
-	PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path"`
-	PopulationAuthors       []string     `json:"population_authors"`
+	PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path" required:"true"`
+	PopulationAuthors       []string     `json:"population_authors" required:"true"`
 	ExcludedRepos           []string     `json:"excluded_repos"`
 	StagingE2EJobName       *string      `json:"staging_e2e_job_name"`
 	StagingApplyJobName     *string      `json:"staging_apply_job_name"`
