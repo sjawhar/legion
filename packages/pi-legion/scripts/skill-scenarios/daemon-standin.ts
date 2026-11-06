@@ -78,13 +78,14 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * has no file, so it carries the two keys the reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
-  admission: { cap: 1, active: [issue], waiting: [], blocked: [] },
+  admission: { cap: 1, active: [issue], waiting: [], trees: [issue], blocked: [] },
   issues: {
     [issue]: {
       key: issue,
       generation: 1,
       phase: PHASE,
       status: "in_progress",
+      tree: issue,
       repo: "sjawhar/legion-smoke",
       defaultBranch: "main",
       workers: {},

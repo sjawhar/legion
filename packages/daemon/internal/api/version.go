@@ -543,7 +543,37 @@ package api
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 50: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
+// 51: dispatch://INFRA-980 -- the admission cap counts the issues at work rather than the trees,
+// so `api.Admission` on GET /legion/v1/state changes shape with it. `active` and `waiting` name
+// issues, a child as much as a root: a tree with three working children holds three slots, and a
+// tree whose issues only wait holds none. `trees` is new, the root of every live tree
+// (record.TreeLive), always emitted and never null, because a running tree may now hold no slot
+// and `active` alone no longer says which trees run — the controller reads it where it read
+// `active` as the running trees. Each issue record gains `tree`, the root of its tree, absent only
+// on an issue the workflow does not record, so a reader tells a child from a root and finds the
+// members of a tree that lingers. A plugin before 51 reads the state with a strict schema that
+// knows neither key and refuses the whole body for either, so the route serves `admission.trees`
+// and the issues' `tree` only to a caller whose pod records this contract, and serves a pod below
+// it the body its plugin reads (api's stateFor, withoutTrees), as it serves the memory group only
+// from 49 on; a caller the daemon cannot place in a pod — the operator's `legion state` — is
+// served both. One change no gating can carry is the meaning `active` and `waiting` lost: they
+// keep their names and name issues where they named trees, so a plugin below 51 reading a 51
+// daemon's state reads a tree's working children as that many running trees and miscounts them,
+// and its controller takes `active` for the trees at work. What protects against that is the
+// pair, not the stripping: the boot gate and `legion probe-image` refuse a daemon and a plugin
+// that declare different contracts, so no plugin below 51 is left reading a 51 daemon. The
+// stripping is for the one window that pairing leaves open — a pod of the contract before this
+// one still being replaced, whose roles go on reading the state through the plugin their image
+// was built with. This change's store migrations are
+// named for the UTC moments they were written, 20261103183833 and 20261104004500, since the
+// numbered series is closed. (This branch took 47 while sjawhar/legion#2731 held that number
+// open and unmerged; main has since reached 49 — 47 is sjawhar/legion#2539's, the idle release
+// landed as 48 and the memory group as 49 — and sjawhar/legion#2731, dispatch://INFRA-1077, has
+// since taken 50 on its own branch, so this change takes the number above them all, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+//
+// 52: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
 // and a file carrying it loads with a warning naming the removal, which boot logs and
 // `legion start --check-config` prints, rather than a refusal, so the settings block of
 // `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer
@@ -552,7 +582,7 @@ package api
 // now sends the work back to the implementer every time it stands, however many came before,
 // and the architect decides when to stop; no pull request is marked blocked and no `pr-blocked`
 // notice is published for a count. `packages/contracts/src/legion-api.ts` mirrors both
-// removals, and its reader of the settings block is loose, so a plugin before 50 reads a state
+// removals, and its reader of the settings block is loose, so a plugin before 52 reads a state
 // without `max_fix_attempts` — but its strict pull-request reader refuses one without
 // `fixAttempts`, and every worker's `read_record` parses the state through it, which is what
 // this number is for: the boot gate and `legion probe-image` hold plugin and daemon equal, so
@@ -579,7 +609,10 @@ package api
 // (`INVALID_ROLE`). The controller's `legion` tool gains `compact (issue, role)` beside
 // `fresh_session`, and `POST /legion/v1/operator/claims/{token}/compact`, which
 // `legion claims compact --claim <token>` posts, is the operator's door onto the
-// same effect. None of the three routes needs a number of its
+// same effect. The compaction reaches Oh My Pi as the shim's own `compact` frame
+// (`shimwire.Compact`, carried by `internal/stream`'s Conn.Compact and forwarded by the image's
+// `legion shim` as a prompt is), so the pod's shim is one of this number's surfaces beside the
+// three routes. None of the three routes needs a number of its
 // own: this one is the branch's, no release declares it yet, and the gate holds plugin and
 // daemon equal, so a plugin whose tool posts these routes never meets a daemon that does not
 // serve them. The rest of that half adds no route and changes no shape a plugin parses: a turn
@@ -591,8 +624,11 @@ package api
 // `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). The
 // removal ships none; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped
 // columns that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
-// (This branch took 47 and then 48 for the removal; main merged the idle-pod release at 48
-// while this branch was open, then landed INFRA-1101's memory group at 49 and released
-// pi-legion v18.9.0 declaring it without these shapes, so this branch takes the number above
-// that, as the collision note says.)
-const DaemonAPIVersion = 50
+// (This branch took 47, then 48, then 50, as main's own changes took each number before it:
+// main merged the idle-pod release at 48 while this branch was open, landed the memory group at
+// 49 and released pi-legion v18.9.0 declaring it without these shapes, and has since landed the
+// admission cap over the issues at work at 51, whose release declares 51 without them too, so
+// this branch takes the number above them all, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+const DaemonAPIVersion = 52

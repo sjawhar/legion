@@ -812,7 +812,15 @@ func TestTheOperatorsRefusedFreshSessionRetryHasAlreadyForgottenTheSession(t *te
 func TestTheOperatorsRetryOfAStoppedArchitectRelaunchesIt(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
-	token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleArchitect)
+	// The operator holds this tree, so its sub-architect is spawned through the same route: the
+	// tree's lifecycle row is the operator's, and launchIn would open a second one as the
+	// workflow (harness_test.go's launchIn).
+	sub := spawnBody()
+	sub.Issue = "LEGION-209"
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", sub); recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn the sub-architect = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	token := freshSessionToken(t, sub.Issue, sub.Role)
 	h.ready(token, "ses_sub_architect", 1)
 	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil); recorder.Code != http.StatusOK {
 		t.Fatalf("stop = %d, want 200; body %s", recorder.Code, recorder.Body)
