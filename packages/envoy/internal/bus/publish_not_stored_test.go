@@ -194,22 +194,29 @@ func TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline(t *testing.T) 
 		return true
 	}
 
-	var deadline atomic.Int64
-	deadline.Store(time.Now().Add(time.Hour).UnixNano())
-	window := client.WindowUntil(func() time.Time { return time.Unix(0, deadline.Load()) })
-	answer := window.PublishAsync(item)
-	// The first send has left; the deadline passes before its acknowledgement can come back.
-	deadline.Store(time.Now().Add(-time.Second).UnixNano())
+	// The window reads its deadline three times before it writes - as the send opens, as the pin
+	// bounds its wait, and once pinned, which is the last act before the write - and once more
+	// when an acknowledgement of a duplicate calls for the resend (async.go: window.send,
+	// pinToSend, sendJetStream). A deadline ahead for those three reads and passed for the fourth
+	// is a hold that lapsed while the first answer was on its way, with nothing here waiting on
+	// when that answer comes back.
+	const checksBeforeTheWrite = 3
+	var checks atomic.Int64
+	window := client.WindowUntil(func() time.Time {
+		if checks.Add(1) <= checksBeforeTheWrite {
+			return time.Now().Add(time.Hour)
+		}
+		return time.Now().Add(-time.Second)
+	})
 	var err error
 	select {
-	case err = <-answer:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the send was not answered within 10 s")
+	case err = <-window.PublishAsync(item):
+	case <-time.After(time.Minute):
+		t.Fatal("the send was not answered within a minute")
 	}
 	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
 		t.Fatalf("a not-stored send whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)
 	}
-	time.Sleep(500 * time.Millisecond)
 	if stored() {
 		t.Fatal("the stream holds the envelope the window resent past its deadline")
 	}

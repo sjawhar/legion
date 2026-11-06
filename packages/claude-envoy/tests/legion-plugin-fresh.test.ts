@@ -6,8 +6,8 @@ import { buildLegionPlugin, claudeAgent } from "../scripts/build"
 
 // The daemon's boot requires legion/.claude-plugin/plugin.json under LEGION_CLAUDE_PLUGIN_DIR
 // (packages/daemon/internal/daemon/tools.go), and a Claude Code pane loads the directory with
-// --plugin-dir. It is generated from the repository's skills/ and pi-legion's agents, and only main's
-// Rebuild Claude Envoy plugin workflow commits it, so the test below reads a fresh generation.
+// --plugin-dir. It is generated from the repository's skills/ and pi-legion's agents, and nothing
+// commits it, so the test below reads a fresh generation.
 test("the Legion plugin is named legion, so its skills and agents load as legion:<name>", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-legion-"))
   try {

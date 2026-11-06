@@ -857,6 +857,14 @@ func runStart(t *testing.T, start, bin, bun, cache string, plugins *runtime.Plug
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = start
 	cmd.Stdin = strings.NewReader("frame\n")
+	// This run keeps the test process's own environment, where every other fixture command of this
+	// package takes an environment of its own: the environment is the input of the code under
+	// test, not a leak into it. newSetupRig plants LEGION_ROLE, LEGION_GENERATION,
+	// LEGION_GH_OWNERS_DIR, LEGION_E2E_MARKER, POD_UID and TMPDIR with t.Setenv for the rendered
+	// script to read, and setupRig.roleEnv plants the role's GIT_CONFIG_* block, since what the
+	// script does with that block is the thing this package proves (setupRig.wantEnvironment,
+	// setupRig.environments). An Isolated here would drop all of them and leave the script nothing
+	// to be proved on.
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"BUN_INSTALL_CACHE_DIR="+cache,

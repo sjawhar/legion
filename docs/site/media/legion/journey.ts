@@ -327,8 +327,8 @@ export async function postDailyReport(
       body: [
         `Finished:\n${lines.join("\n")}`,
         "Closed without a change: none.",
-        "Running: nothing is admitted, and nothing is waiting.",
-        "Free slots: 4 of 4. Each stays free until a person hands Legion an issue.",
+        "Running: no tree is live, no issue holds a slot, and nothing is waiting.",
+        "Free slots: 4 of 4 issues. Each stays free until a person hands Legion an issue.",
       ].join("\n\n"),
     },
     CONTROLLER

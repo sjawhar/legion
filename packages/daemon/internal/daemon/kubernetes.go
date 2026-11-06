@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -499,7 +501,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
+			opts.Tokens = newImplementTokens(apps, servingOwner(owners, renames), opts.Log)
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
 			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
@@ -530,8 +532,17 @@ func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner str
 }
 
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner. It
-// is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
+// pod's workspace-fetch clones with an installation token minted for the repository's owner and
+// narrowed to reading it (contents, pull requests, Actions and metadata at read,
+// appauth.Tokens.ReadToken), which is all a clone, a fetch and a repository cache do. An
+// installation that refuses that narrowing (appauth.ErrPermissionsRefused, GitHub's 422 to a
+// request naming permissions it does not all hold) is served the owner's own installation token
+// instead, the one fallback there is, said once for that owner on the daemon's log. Every other
+// refusal — GitHub's trouble (appauth.TransientError, a 5xx or a rate-limited 422) or an App with
+// no installation on the owner (appauth.ErrNotInstalled) — is returned as it came, with no second
+// mint and nothing logged.
+//
+// It is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
 // provision, its gh credential refresh and its repository cache Secret), so the owner a
 // configured rename moved a repository away from is mapped here, once, to the owner whose
 // installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
@@ -546,15 +557,56 @@ func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner str
 type implementTokens struct {
 	apps    appauth.Tokens
 	serving func(owner string) string
+	// log receives the fallback's line; slog.Default() when nil, as the runtime's own Log is.
+	log *slog.Logger
+
+	// mu guards warned, the set of owners the fallback has already been said of.
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+// newImplementTokens is the adapter over apps, with serving as the map a mint's owner goes
+// through (servingOwner) and log as what the fallback's line is written to, slog.Default() when
+// nil.
+func newImplementTokens(apps appauth.Tokens, serving func(string) string, log *slog.Logger) *implementTokens {
+	return &implementTokens{apps: apps, serving: serving, log: log, warned: map[string]bool{}}
+}
+
+func (t *implementTokens) Token(ctx context.Context, owner string) (string, error) {
 	if t.serving != nil {
 		owner = t.serving(owner)
 	}
-	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
+	lease, err := t.apps.ReadToken(ctx, appauth.Implement, owner)
+	if err == nil {
+		return lease.Token, nil
+	}
+	if !errors.Is(err, appauth.ErrPermissionsRefused) {
+		return "", err
+	}
+	lease, err = t.apps.Token(ctx, appauth.Implement, owner)
 	if err != nil {
 		return "", err
 	}
+	t.warnOwnToken(owner)
 	return lease.Token, nil
+}
+
+// warnOwnToken writes the fallback's line the first time owner's pods are provisioned with the
+// owner's own installation token, and nothing on every mint after it, for the life of the process
+// (appauth's warnMissingActions, the same rule for a read token minted without actions).
+func (t *implementTokens) warnOwnToken(owner string) {
+	key := strings.ToLower(owner)
+	t.mu.Lock()
+	warned := t.warned[key]
+	t.warned[key] = true
+	t.mu.Unlock()
+	if warned {
+		return
+	}
+	log := t.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("daemon: this owner's installation refuses a read-only provisioning token, "+
+		"so its pods clone with the owner's own installation token rather than a reading lease", "owner", owner)
 }

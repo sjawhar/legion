@@ -433,8 +433,8 @@ test("a long comment above the reader keeps the comment they are reading where i
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
-    "the reader's place is proven in Chromium and WebKit"
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const issue = await seedIssue("A late paint above the reader");
   for (let turn = 1; turn <= 12; turn += 1) {
@@ -520,8 +520,8 @@ test("a reader who scrolls while a long body above them formats keeps where they
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
-    "the reader's place is proven in Chromium and WebKit"
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const issue = await seedIssue("A reader scrolling through a late paint");
   for (let turn = 1; turn <= 12; turn += 1) {
@@ -593,8 +593,8 @@ test("Jump to latest keeps a newest long comment under the composer when it form
   browser,
 }, testInfo) => {
   test.skip(
-    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
-    "the reader's place is proven in Chromium and WebKit"
+    testInfo.project.name !== "chromium-alone" && testInfo.project.name !== "webkit-alone",
+    "the reader's place is proven in Chromium and WebKit, which run this file as the -alone projects"
   );
   const issue = await seedIssue("A late paint at the newest turn");
   for (let turn = 1; turn <= 12; turn += 1) {

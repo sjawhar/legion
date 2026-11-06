@@ -542,4 +542,34 @@ package api
 // (20261104153554_issue_memory_carried). (This branch took 47 while main's idle-release change
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 49
+//
+// 51: dispatch://INFRA-980 -- the admission cap counts the issues at work rather than the trees,
+// so `api.Admission` on GET /legion/v1/state changes shape with it. `active` and `waiting` name
+// issues, a child as much as a root: a tree with three working children holds three slots, and a
+// tree whose issues only wait holds none. `trees` is new, the root of every live tree
+// (record.TreeLive), always emitted and never null, because a running tree may now hold no slot
+// and `active` alone no longer says which trees run — the controller reads it where it read
+// `active` as the running trees. Each issue record gains `tree`, the root of its tree, absent only
+// on an issue the workflow does not record, so a reader tells a child from a root and finds the
+// members of a tree that lingers. A plugin before 51 reads the state with a strict schema that
+// knows neither key and refuses the whole body for either, so the route serves `admission.trees`
+// and the issues' `tree` only to a caller whose pod records this contract, and serves a pod below
+// it the body its plugin reads (api's stateFor, withoutTrees), as it serves the memory group only
+// from 49 on; a caller the daemon cannot place in a pod — the operator's `legion state` — is
+// served both. One change no gating can carry is the meaning `active` and `waiting` lost: they
+// keep their names and name issues where they named trees, so a plugin below 51 reading a 51
+// daemon's state reads a tree's working children as that many running trees and miscounts them,
+// and its controller takes `active` for the trees at work. What protects against that is the
+// pair, not the stripping: the boot gate and `legion probe-image` refuse a daemon and a plugin
+// that declare different contracts, so no plugin below 51 is left reading a 51 daemon. The
+// stripping is for the one window that pairing leaves open — a pod of the contract before this
+// one still being replaced, whose roles go on reading the state through the plugin their image
+// was built with. This change's store migrations are
+// named for the UTC moments they were written, 20261103183833 and 20261104004500, since the
+// numbered series is closed. (This branch took 47 while sjawhar/legion#2731 held that number
+// open and unmerged; main has since reached 49 — 47 is sjawhar/legion#2539's, the idle release
+// landed as 48 and the memory group as 49 — and sjawhar/legion#2731, dispatch://INFRA-1077, has
+// since taken 50 on its own branch, so this change takes the number above them all, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+const DaemonAPIVersion = 51

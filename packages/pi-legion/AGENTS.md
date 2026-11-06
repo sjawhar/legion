@@ -90,7 +90,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 49's memory group (each
+number is the one `DaemonAPIVersion` declares, last bumped by contract 51's admission cap over the
+issues at work (`admission.active` and `admission.waiting` on `GET /legion/v1/state` name issues
+rather than trees, `admission.trees` is the root of every live tree, and each issue record carries
+its `tree`; a strict reader before 51 refuses a state carrying either new key, so a caller from a
+pod below 51 is served the state without them, and a controller below 51 reads `active` as the
+trees at work), after contract 49's memory group (each
 issue of `GET /legion/v1/state` carries its tree's `memoryGroup`, `memoryDrawMode` and
 `memoryDrawnAt`, which a strict reader before 49 refuses, and a caller from a pod below 49 is
 served the state without them), after contract 48's idle release (the plugin reports each
@@ -499,8 +504,9 @@ the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VER
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
 (`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),
-one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, the import's records
-included), and the one the role named for its previous phase (`HANDOFF_NOT_NEW`); for the
+one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, a record carried from
+before handoffs moved to the Dispatch issue, under the daemon's session, included), and the one the
+role named for its previous phase (`HANDOFF_NOT_NEW`); for the
 implementer's completion of implementing it reads the open pull request on `legion/<issue>` as the
 implement App, records one the webhook has not, and refuses `HANDOFF_NO_PULL_REQUEST` when there
 is none and the record holds none merged (naming a recorded pull request closed without merging,

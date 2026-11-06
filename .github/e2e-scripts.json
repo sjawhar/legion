@@ -135,10 +135,6 @@
       "needs": "a Legion pod: its own model route for both agent runtimes (LEGION_E2E_MODEL_BASE_URL, LEGION_E2E_MODEL_KEY_FILE, LEGION_E2E_MODEL_ID and LEGION_E2E_CLAUDE_MODEL), the worker image's Oh My Pi and Claude Code pin, and a loopback PostgreSQL with pgvector (ENVOY_SESSION_STATES_PG_DSN); it starts its own NATS, listeners and Dispatch"
     },
     {
-      "script": "handoff-cutover-github.sh",
-      "needs": "gh acting as an App installed on sjawhar/legion-smoke with contents and pull-request write (the implement App), and jq; it pushes branches and opens pull requests there and waits on that repository's Actions queue"
-    },
-    {
       "script": "multi-repo-acceptance.sh",
       "needs": "a live multi-repository run on the production cluster: it is the operator's acceptance observer, reads that run's daemon, Dispatch, GitHub and kubectl, and starts nothing of its own"
     },
