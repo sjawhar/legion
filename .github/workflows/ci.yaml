@@ -2853,9 +2853,11 @@ jobs:
       # behind the natslive tag, and this step is where it runs (INFRA-250). internal/bus has one
       # test of its own on that matrix, named here so the tag pulls in nothing else of that
       # package: the module links nats-server v2.10.29 in process, which refuses every update that
-      # changes a stream's MaxConsumers, so the raise of the hub's uncapped ENVOY_NOTIFICATIONS to
-      # the consumer cap this binary compiles - and the 2.10 refusal that names the field, the cap
-      # and the first server taking the change - is provable only against a real image (INFRA-1384).
+      # changes a stream's MaxConsumers and caps no stream that sets no cap, so the raise of the
+      # hub's uncapped ENVOY_NOTIFICATIONS to the consumer cap this binary compiles - and, on
+      # 2.10, both the stream with no cap the binary must leave alone and the refusal of the raise
+      # of a lower cap, naming the field, the cap and the first server taking the change - is
+      # provable only against a real image (INFRA-1384).
       - name: Test the container-backed NATS matrix (natslive)
         run: |
           go test -count=1 -tags natslive ./internal/testnats/

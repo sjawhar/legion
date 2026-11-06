@@ -74,9 +74,15 @@ func (c *Client) keep(done chan struct{}, cfg nats.StreamConfig, buckets []strin
 // keepPass is one pass of the keeper, through the client's current JetStream context. A bucket of
 // buckets that does not exist yet, one the program opens only for a feature it has not configured,
 // is skipped without a line: the program creates it at the deployment's copies when it opens it.
+// Each pass reads the live connection's server version for itself (serverDefaultsAnUnsetCap), so
+// a stream with no consumer cap, which an older server leaves unlimited and this binary
+// therefore leaves alone, is raised at the first pass after the server it is connected to has
+// been upgraded to one that caps such a stream at a default of its own. A pass with no live
+// connection reads an empty version, which is no such server, and a pass runs only while the
+// client is connected (keep).
 func (c *Client) keepPass(cfg *nats.StreamConfig, buckets []string) {
 	js := c.JS()
-	restored, err := keepStream(js, cfg)
+	restored, err := keepStream(js, cfg, serverDefaultsAnUnsetCap(c.Connection().ConnectedServerVersion()))
 	switch {
 	case err != nil && c.stopped():
 		return
@@ -118,8 +124,10 @@ func (c *Client) awaitKeeper() {
 // keepStream puts back what cfg, this binary's stream with the deployment's settings, asks of the
 // stream and a concurrent start or an operator took away. It writes keptStream: the stream as it
 // read it, with copies below cfg's count raised to it, a byte limit below cfg's, or none, raised to
-// cfg's when cfg sets one, a consumer cap below cfg's, a deployed -1 or 0 included, raised to
-// cfg's (StreamMaxConsumers), a missing StreamIDMetadataKey added, the age, the duplicate window
+// cfg's when cfg sets one, a positive consumer cap below cfg's raised to cfg's
+// (StreamMaxConsumers), a deployed -1 or 0 raised to it as well where the connected server caps
+// such a stream at a default of its own and left exactly as it is on every server before that
+// (serverDefaultsAnUnsetCap), a missing StreamIDMetadataKey added, the age, the duplicate window
 // and discard set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the
 // stream lacks added unless it overlaps a deployed subject (keptSubjects). It does not check cfg's
 // subjects for one that captures a role lane, because no subject this binary compiles captures
@@ -140,12 +148,12 @@ func (c *Client) awaitKeeper() {
 // start removed them. An update whose answer never came succeeds when the stream, read again,
 // needs nothing more, and one the server refused as overlapping the stream itself is sent again
 // until the stream needs nothing more or its sends run out (updateStream).
-func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
+func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {
 		return nil, err
 	}
-	kept := keptStream(info, cfg)
+	kept := keptStream(info, cfg, defaultsAnUnsetCap)
 	if reflect.DeepEqual(kept, info.Config) {
 		return nil, nil
 	}
@@ -153,7 +161,7 @@ func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, err
 		return nil, fmt.Errorf("the stream carries subjects that capture the role lanes, which only a start moves off it: %s", strings.Join(roleLanes, ", "))
 	}
 	if err := updateStream(js, &kept, func(again *nats.StreamInfo) bool {
-		return reflect.DeepEqual(keptStream(again, cfg), again.Config)
+		return reflect.DeepEqual(keptStream(again, cfg, defaultsAnUnsetCap), again.Config)
 	}); err != nil {
 		return nil, refusedSettings(err, &info.Config, &kept)
 	}

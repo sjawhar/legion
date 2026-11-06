@@ -265,7 +265,7 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
 		t.Fatalf("start setting %d: %v", testStreamMaxBytes, err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -503,7 +503,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	startOnCluster(t, cluster, WithReplicas(3))
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
 		t.Fatalf("ensure the stream with one server stopped: %v", err)
 	}
 	if _, err := EnsureKeyValue(clusterConn(t, cluster), counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
@@ -589,7 +589,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if _, err := EnsureKeyValue(client.Conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
@@ -634,25 +634,37 @@ func (js *countingJetStream) CreateKeyValue(cfg *nats.KeyValueConfig) (nats.KeyV
 	return js.JetStreamContext.CreateKeyValue(cfg)
 }
 
-// The reconcile owns the consumer cap as it owns the byte limit: it raises a deployed cap below
-// the one this binary compiles, a deployed -1 and a deployed 0 included, since nats-server reads
-// either as no cap at all and then applies its own default of 1000, and it leaves a deployed cap
-// above the compiled one as it is, so an operator's raise stands.
-func TestOwnedStreamRaisesTheConsumerCapAndKeepsAHigherDeployedOne(t *testing.T) {
+// The reconcile owns the consumer cap as it owns the byte limit, with one question put to the
+// server it writes to. A deployed cap that is positive and below the one this binary compiles is
+// raised on every server, since such a cap bounds the stream's consumers wherever it runs. A
+// deployed -1 or 0, a stream that carries no cap, is raised only where the server caps such a
+// stream at a default of its own (serverDefaultsAnUnsetCap, nats-server 2.15 and later): on
+// every older server that stream has no limit at all, so the raise would write a cap where the
+// deployment asked for none and the stream has nothing this binary's cap fixes. A deployed cap
+// above the compiled one is left as it is on both, so an operator's raise stands. Each row names
+// the version the connected server answers, read by serverDefaultsAnUnsetCap, so a predicate
+// that answered wrongly would fail the rows below rather than its own table alone.
+func TestOwnedStreamRaisesTheConsumerCapWhereItBindsAndKeepsAHigherDeployedOne(t *testing.T) {
 	for _, row := range []struct {
 		name     string
 		deployed int
+		version  string
 		want     int
 	}{
-		{"a stream with no cap, which the server answers as -1", -1, StreamMaxConsumers},
-		{"a stream whose cap is 0, which the server reads as none too", 0, StreamMaxConsumers},
-		{"a stream capped below the compiled cap", 1000, StreamMaxConsumers},
-		{"a stream an operator capped above it", StreamMaxConsumers + 4000, StreamMaxConsumers + 4000},
+		{"a stream with no cap, which the server answers as -1, on the hub's 2.15.1", -1, "2.15.1", StreamMaxConsumers},
+		{"the same stream on 2.10.29, which caps no stream that sets none", -1, "2.10.29", -1},
+		{"a stream whose cap is 0, which the server reads as none too, on 2.15.1", 0, "2.15.1", StreamMaxConsumers},
+		{"a stream whose cap is 0 on 2.10.29", 0, "2.10.29", 0},
+		{"a stream capped below the compiled cap on 2.15.1", 1000, "2.15.1", StreamMaxConsumers},
+		{"a stream capped below the compiled cap on 2.10.29", 1000, "2.10.29", StreamMaxConsumers},
+		{"a stream an operator capped above it on 2.15.1", StreamMaxConsumers + 4000, "2.15.1", StreamMaxConsumers + 4000},
+		{"a stream an operator capped above it on 2.10.29", StreamMaxConsumers + 4000, "2.10.29", StreamMaxConsumers + 4000},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			info := &nats.StreamInfo{Config: nats.StreamConfig{Name: Stream, MaxConsumers: row.deployed}}
-			if owned := ownedStream(info, streamCfg); owned.MaxConsumers != row.want {
-				t.Fatalf("a stream deployed at %d is owned at %d, want %d", row.deployed, owned.MaxConsumers, row.want)
+			owned := ownedStream(info, streamCfg, serverDefaultsAnUnsetCap(row.version))
+			if owned.MaxConsumers != row.want {
+				t.Fatalf("a stream deployed at %d, on nats-server %s, is owned at %d, want %d", row.deployed, row.version, owned.MaxConsumers, row.want)
 			}
 		})
 	}
@@ -754,6 +766,45 @@ func TestTheConsumerCapRefusalIsReadByTheServersOwnWordsAndNoOthers(t *testing.T
 		t.Run(row.name, func(t *testing.T) {
 			if refused := maxConsumersRefused(row.err); refused != row.refused {
 				t.Fatalf("maxConsumersRefused(%v) = %t, want %t", row.err, refused, row.refused)
+			}
+		})
+	}
+}
+
+// serverDefaultsAnUnsetCap reads the connected server's version to answer the one question a
+// deployed stream with no consumer cap raises: whether this server caps it at a default of its
+// own, which nats-server does from 2.15 and no release before it does. Only the major and the
+// minor decide, a pre-release counts as the release it leads to, and a string that carries no
+// version - the empty one a client with no live connection answers among them - is no such
+// server, so a bus that cannot read a version raises no stream that has no cap.
+func TestTheServerVersionThatDefaultsAnUnsetConsumerCapIsReadFrom215Onwards(t *testing.T) {
+	for _, row := range []struct {
+		version  string
+		defaults bool
+	}{
+		{"2.10.29", false},
+		{"2.12.5", false},
+		{"2.14.9", false},
+		{"2.15.0", true},
+		{"2.15.1", true},
+		{"3.0.0", true},
+		{"", false},
+		{"2.15", true},
+		{"2.15.0-RC.1", true},
+		{"2.14.9-RC.4", false},
+		{"v2.15.1", true},
+		{"2.9.25", false},
+		{"1.99.99", false},
+		{"2.100.0", true},
+		{"10.0.0", true},
+		{"2", false},
+		{"2.", false},
+		{"2.x", false},
+		{"nats-server", false},
+	} {
+		t.Run(fmt.Sprintf("nats-server %q", row.version), func(t *testing.T) {
+			if defaults := serverDefaultsAnUnsetCap(row.version); defaults != row.defaults {
+				t.Fatalf("serverDefaultsAnUnsetCap(%q) = %t, want %t", row.version, defaults, row.defaults)
 			}
 		})
 	}

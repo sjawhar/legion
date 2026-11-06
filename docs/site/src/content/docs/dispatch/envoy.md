@@ -481,18 +481,25 @@ or `envoy nats keeper could not raise a bucket` and is tried again 30 seconds la
 stops the program.
 
 The consumer cap is the one of these the binary carries rather than reads from a setting: 24000
-session consumers, which is what bounds how many sessions can hold a consumer of their own. A
-stream whose cap reads `-1` or `0` has no cap of its own, and the NATS server then applies its own
-default of 1000, so a start and the keeper raise either to 24000 as they raise a smaller cap.
-Setting the cap on a stream the server already holds needs nats-server v2.12.5 or later: every
-server before it refuses an update that changes `MaxConsumers` with
+session consumers, which is what bounds how many sessions can hold a consumer of their own. What
+a stream whose cap reads `-1` or `0` means is the NATS server's: from nats-server 2.15 the server
+caps such a stream at its own default of 1000, and every server before that leaves it with no
+limit at all. So a start and the keeper raise a `-1` or `0` to 24000 only on 2.15 or later, where
+that 1000 is the limit sessions run into, and leave it as it is on an older server, which has no
+such limit to fix; a cap that is already a positive number below 24000 is raised on every server.
+The keeper reads the server's version on each pass, so a stream left as it is has its cap
+written at the first pass after the server is upgraded to 2.15. Setting the cap on a stream the
+server already holds needs nats-server v2.12.5 or later: every server before it refuses an
+update that changes `MaxConsumers` with
 `nats: stream configuration update can not change MaxConsumers` (measured on v2.10.29, v2.11.0 and
 v2.12.0). That stops the listener's start with an error naming `max_consumers` and that version,
 and Dispatch's server, which keeps serving, retries the reconcile and logs
 `envoy nats reconnect hook failed; it is retried` until it passes. A create carries the cap on
 every version, and a stream already at the cap needs no change. So a deployment whose NATS is
-older and whose stream holds a cap below 24000, or none, upgrades the NATS server first, keeping
-its store, and the next listener start sets the cap.
+older than v2.12.5 and whose stream holds a positive cap below 24000 upgrades the NATS server
+first, keeping its store, and the next listener start sets the cap; a deployment whose stream
+carries no cap is refused nothing and takes the cap at the first start or pass after its server
+reaches 2.15.
 
 During a rollout with mixed settings the stream can therefore sit below the setting for up to 30
 seconds after the last start. To lower the copies, or to lower or remove the limit, change the
@@ -576,10 +583,12 @@ checkout of this repository; the images are public. The two services listen on `
 move it in `.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port
 wherever a command or the `envoy.json` below names the default.
 
-The file pins NATS 2.15.1 by digest, the image the hub runs. The listener sets the
-`ENVOY_NOTIFICATIONS` stream's consumer cap, and a NATS server older than v2.12.5 refuses an
-update that changes that cap on a stream it already holds
-(`nats: stream configuration update can not change MaxConsumers`), which stops the listener's
+The file pins NATS 2.15.1 by digest, the image the hub runs, because the consumer cap the
+listener sets replaces a limit only that version applies: from 2.15 a stream that sets no cap is
+capped by the server at its own default of 1000, where an older server leaves such a stream with
+no limit at all and the listener leaves it as it is. What an older server does refuse is a change
+of a cap the stream already holds: before v2.12.5 that update is answered
+`nats: stream configuration update can not change MaxConsumers`, which stops the listener's
 start; a server that creates the stream takes the cap at any version. A machine that ran an
 earlier version of this file has an older server and a stream in its `envoy-single-node_nats-data`
 volume: update your checkout, then

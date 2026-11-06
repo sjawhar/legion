@@ -110,19 +110,22 @@ Each item below names a task and where its code is, then notes on it.
   a bucket raise's refusal also names the bucket (`refusedSettings`, `raiseReplicas`)
 
 - **Stream consumer cap**:
-  `internal/bus/stream.go` (`StreamMaxConsumers`, `ownedStream`, `refusedSettings`), `internal/bus/keeper.go`
+  `internal/bus/stream.go` (`StreamMaxConsumers`, `serverDefaultsAnUnsetCap`, `ownedStream`, `refusedSettings`), `internal/bus/keeper.go`
 
   The `ENVOY_NOTIFICATIONS` stream's consumer cap is compiled in rather than read from a setting:
   `bus.StreamMaxConsumers`, 24000, which bounds how many sessions can hold a session consumer of their own.
-  A start and the keeper raise a smaller deployed cap to it and never lower one, as for the copies and the byte limit;
-  a deployed `-1` or `0` is raised too, because nats-server reads either as no cap and then applies its own default of 1000.
+  A start and the keeper raise a smaller deployed cap to it and never lower one, as for the copies and the byte limit.
+  A deployed `-1` or `0`, a stream that sets no cap, is raised only where the connected server is nats-server 2.15.0 or later (`serverDefaultsAnUnsetCap`, read from `ConnectedServerVersion`):
+  only from 2.15 does the server cap such a stream itself, at its own default of 1000 (`JSDefaultMaxConsumersPerStream`), and every server before that leaves it unlimited, so there the raise would write a cap no deployment asked for.
+  A deployed cap that is positive and below 24000 is raised on every server, since such a cap bounds the stream's consumers wherever it runs.
+  The keeper reads the live connection's version each pass, so a stream left with no cap is raised at the first pass after its server is upgraded to 2.15.
   Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is an operator step that needs every program's binary lowered first.
   A stream the server already holds takes a cap change only on nats-server v2.12.5 or later:
   every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
   That refusal names `max_consumers`, the value the binary asks for and the floor (`refusedSettings`).
   It stops the listener's start, while Dispatch's server, which reconciles in the background, keeps serving but neither reconciles nor keeps the stream, and logs `envoy nats reconnect hook failed; it is retried` until that becomes `envoy nats reconnect hooks have not succeeded` at ERROR;
-  so a deployment on an older server whose stream holds a cap below 24000, or none, cannot start a listener of this release.
-  A create carries the cap on every nats-server, and a stream already at the cap needs no change, so only such a deployment upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
+  so a deployment on a server before v2.12.5 whose stream holds a positive cap below 24000 cannot start a listener of this release.
+  A create carries the cap on every nats-server, a stream already at the cap needs no change, and a stream with no cap is sent none on a server before 2.15, so only such a deployment upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
 
 - **Session delivery**: `internal/session/session.go`
 
@@ -3682,19 +3685,20 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 - Every stream update the reconcile sends starts from the deployed configuration and sets only what Envoy owns (`reconciledStream`, `internal/bus/stream.go`):
   the subjects (above), the age and the duplicate window (72 hours), the replicas (the deployed count or `ENVOY_NATS_REPLICAS`, whichever is more), the byte limit (the deployed one or `ENVOY_STREAM_MAX_BYTES`, whichever is more;
   the setting on a stream with none, the deployed one when unset), the consumer cap (the deployed cap or `bus.StreamMaxConsumers`, 24000, whichever is more;
-  the compiled cap on a stream whose cap is a deployed `-1` or `0`, which nats-server reads as no cap and then answers with its own default of 1000) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
+  the compiled cap on a stream whose cap is a deployed `-1` or `0` only where the connected server is nats-server 2.15.0 or later, which caps such a stream at its own default of 1000, and the deployed `-1` or `0` left as it is on every older server, which leaves it unlimited: `serverDefaultsAnUnsetCap`) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
   The metadata and every other deployed field - `MaxMsgsPerSubject`, `MaxMsgSize`, storage, placement, compression and the rest - stay as they are, and a start that finds all of that in place sends no update.
   A start's own write never lowers the stream's copies, its byte limit or its consumer cap, so an operator's raise of any of them stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
   A create carries the consumer cap on every nats-server, but a stream the server already holds takes a cap change only on v2.12.5 or later:
   every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
   That refusal names `max_consumers`, the value the binary asks for and the floor, and stops the listener's start (`refusedSettings`), and Dispatch's server, which reconciles in the background, retries the reconcile and starts no keeper until it passes;
-  so a deployment on an older server whose stream holds a cap below 24000, or none, upgrades the nats-server first, keeping its store, and the next start then sets the cap.
+  so a deployment on a server before v2.12.5 whose stream holds a positive cap below 24000 upgrades the nats-server first, keeping its store, and the next start then sets the cap.
+  A stream with no cap is sent no cap change at all before 2.15, so such a deployment is refused nothing and the cap is written at the first start or keeper pass after the upgrade.
   JetStream's stream update has no compare-and-swap:
   a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
 
 - The keeper (`internal/bus/keeper.go`) ends that:
-  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `bus.StreamMaxConsumers` (24000), a deployed `-1` or `0` included, a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
+  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `bus.StreamMaxConsumers` (24000), a deployed `-1` or `0` included where the server caps such a stream itself (`serverDefaultsAnUnsetCap`, read from the live connection each pass), a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
   `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
   Like a start, it never lowers the copies, the byte limit or the cap (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`), and an operator who lowers the cap by hand has it raised back within one period, with `max_consumers` in that WARN line.
   Its write is the stream as it read it with that put back, so it only adds subjects and removes or replaces none:

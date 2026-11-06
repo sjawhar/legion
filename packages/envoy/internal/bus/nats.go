@@ -500,15 +500,17 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 }
 
 // install makes nc the client's connection, with the JetStream context taken from it, once it has
-// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil. Installing it is a
-// connection event (ConnectionChanged).
+// reconciled stream on nc (ensureStreamWithConfig) when stream is not nil. The reconcile is told
+// whether nc's server caps a stream that sets no consumer cap at a default of its own, read from
+// the version nc answers (serverDefaultsAnUnsetCap). Installing it is a connection event
+// (ConnectionChanged).
 func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
 		return err
 	}
 	if stream != nil {
-		if err := ensureStreamWithConfig(js, stream); err != nil {
+		if err := ensureStreamWithConfig(js, stream, serverDefaultsAnUnsetCap(nc.ConnectedServerVersion())); err != nil {
 			return err
 		}
 	}
@@ -531,14 +533,16 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 // buckets and interval (startKeeper), so no pass of it runs before the reconcile: a pass that read
 // the stream before the reconcile's write and wrote after it would put back a subject the
 // reconcile replaced, and no later reconcile would remove it. A client stopped before then never
-// starts one.
+// starts one. It reads the version off the connection nats.go hands it, which is the connection
+// c.JS()'s context was taken from, so the reconcile asks the server it writes to whether a stream
+// with no consumer cap is one that server caps (serverDefaultsAnUnsetCap).
 func (c *Client) ensureStreamOnce(stream *nats.StreamConfig, buckets []string, interval time.Duration) func(*nats.Conn) error {
 	ensured := false
-	return func(*nats.Conn) error {
+	return func(nc *nats.Conn) error {
 		if ensured {
 			return nil
 		}
-		if err := ensureStreamWithConfig(c.JS(), stream); err != nil {
+		if err := ensureStreamWithConfig(c.JS(), stream, serverDefaultsAnUnsetCap(nc.ConnectedServerVersion())); err != nil {
 			return fmt.Errorf("reconcile the %s stream: %w", Stream, err)
 		}
 		ensured = true
