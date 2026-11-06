@@ -322,6 +322,10 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
 // SLOW(>=2s): the two quiet windows below, one on the control page and one on the rotating
 // page, are what "no extra request" is counted over. A count of what a page did not do over a
 // window is that window's own real time, and the two must stay equal for the counts to compare.
+// The title's `@firefox` selects nothing today - no project's `grep` reads it, and this whole
+// spec is in the `firefox` project's `testMatch` already. It is there so the row keeps Firefox
+// when project selection moves from file names to title tags (cybermonklabs/legion#2866), and
+// is no second selection convention of its own.
 test("a rotation loses no event and makes no extra request @phone @firefox", async ({
   browser,
 }) => {

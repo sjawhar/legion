@@ -411,8 +411,11 @@ test("the freshness row shows a named reconcile failure, distinct from mere stal
   // overwrites last_error (store.go's RecordReconcileError). Hence the fake GitHub: acme/widgets
   // with Contents and Pull-requests but no Actions makes every such pass fail with exactly the
   // text seeded here (DeliveryPermissions' ErrNoActionsRead, "the installation lacks Actions:
-  // read on acme/widgets"), so a pass inside this row's window changes nothing the row reads. The
-  // SQL seed stays: the page must show the failure the instant it loads, before any pass has run.
+  // read on acme/widgets"), so a pass inside this row's window changes nothing. The SQL seed
+  // stays: the page must show the failure the instant it loads, before any pass has run.
+  // To see that for oneself, run this row with DISPATCH_TEST_DELIVERY_RECONCILE_INTERVAL=1s, which
+  // e2e/run-server.sh forwards to the lane's server: several passes then land inside the window
+  // below and the row still reads the same.
   await seedFakeGithub({
     "acme/widgets": { contents: "read", installation_id: 690, pull_requests: "read" },
   });

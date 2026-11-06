@@ -1225,14 +1225,18 @@ export function ConversationTab({
       {/* The pill floats at an edge the docked composer leaves free, out of the content column
           at every width, so it covers neither the composer's controls nor the cards it would
           otherwise sit over. Below `sm` the composer sits at the foot of the screen and grows
-          upward (a refusal's Retry or Discard draft with it), so the pill rides above whatever
-          height it publishes in `--foot-composer-inset` (`web/src/hooks/useFootInset.ts`), and
+          upward (a refusal's Retry or Discard draft with it), and the shell's status corner -
+          the pending-writes indicator and the connection pill (`app.tsx`) - floats above that
+          composer in the same corner, wider than the pill and over it. So the pill rides above
+          whatever the corner publishes in `--foot-status-inset`
+          (`web/src/hooks/useFootInset.ts`), falling back to the composer's own
+          `--foot-composer-inset` while the corner shows nothing and that property is unset, and
           never below the phone's bottom bar; from `sm` the composer sticks to the top and the
           pill keeps the foot it has there. A thread opened full-screen covers the Conversation
           the pill acts on, and its own composer sits at the foot, so the pill waits for Back. */}
       {visible && phoneThread === undefined && !follow.atTop && shown.length > 0 ? (
         <button
-          className={`fixed right-6 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-20 min-h-11 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:bottom-36 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+          className={`fixed right-6 bottom-[max(5rem,calc(var(--foot-status-inset,var(--foot-composer-inset,0px))_+_1rem))] z-20 min-h-11 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:bottom-36 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
           data-testid="jump-to-latest"
           onClick={follow.jumpToLatest}
           type="button"

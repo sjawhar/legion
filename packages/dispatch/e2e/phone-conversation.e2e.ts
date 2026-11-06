@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
+import { DWELL_MS } from "../web/src/features/shell/useDwell";
 import {
   createComment,
   createIssue,
@@ -29,10 +30,6 @@ const session = {
 /** Every fact these rows poll for lands in milliseconds: Playwright's default 100/250/500/1000
  *  ladder would first see it a quarter-second late. */
 const PROBE = { intervals: [50, 50, 100, 200, 500] };
-
-/** The reader's dwell before the Conversation's read mark is written: `DWELL_MS`,
- *  `web/src/features/shell/useDwell.ts`, which exports nothing a spec can import. */
-const DWELL_MS = 1_000;
 
 /** Spends the live socket's reconnect delay - a draw the attempt count grows
  *  (`web/src/api/live-socket.ts`) - on the page's own clock, until the pill is gone. */
@@ -730,6 +727,60 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
   }
 });
 
+// The shell's status corner floats in the same corner of the same foot of the screen as `Jump to
+// latest`: the pending-writes indicator above the connection pill (`app.tsx`), wider than the
+// pill and painted over it. So while a write of the reader's is out and the live socket is let
+// go, the corner would take the taps a reader scrolled back through the turns means for the
+// pill. The corner publishes how far up from the screen's bottom edge it reaches, as a composer
+// does (`useFootInset`), and the pill rides above that, so neither the indicator nor the
+// connection pill covers any of it.
+test("on a phone, the shell's status corner covers none of Jump to latest @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Status corner over the pill" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    // The return to the network at the end waits a reconnect delay the page draws; its own clock
+    // spends that rather than the wall clock.
+    await page.clock.install();
+    const network = await pageNetwork(page);
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const jump = page.getByTestId("jump-to-latest");
+    const pill = page.getByTestId("connection-pill");
+    const pendingWrites = page.getByRole("region", { name: "Pending changes" });
+
+    // The outage draws the pill, and a pin pressed under it is kept and never answered, so the
+    // indicator names it above the pill for as long as this row reads them.
+    await network.offline();
+    await expect(pill).toHaveText("Reconnecting…");
+    await page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li")
+      .filter({ has: page.getByText("Older turn 14", { exact: true }) })
+      .getByRole("button", { name: "Pin" })
+      .click();
+    await expect(pendingWrites).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(pill, jump);
+    await expectUncovered(pendingWrites, jump);
+
+    await network.online();
+    await reconnected(page, pill);
+  } finally {
+    await alice.close();
+  }
+});
+
 // The shell's connection pill floats at the foot of the screen, where a phone's docked composer
 // sits and grows upward with a refusal's row. While the page is offline the live socket is let go
 // and the pill reads `Reconnecting…`; it sits above the composer, on the narrowest phone and a
@@ -1040,10 +1091,7 @@ async function tapsLostAcrossBand(
         const reached = hit !== null && (control.contains(hit) || hit.contains(control));
         const lostToPill = hit !== null && pill?.contains(hit) === true;
         if (reached || (control.getAttribute("role") !== "tab" && !lostToPill)) continue;
-        const name =
-          control.getAttribute("aria-label") ??
-          (control.closest("label") ?? control).textContent?.trim() ??
-          "";
+        const name = label ?? (control.closest("label") ?? control).textContent?.trim() ?? "";
         lost.push(
           `scrolled to ${top}: ${name} at ${Math.round(x)},${Math.round(y)} reached ${hit?.outerHTML.slice(0, 80)}`
         );
