@@ -13,7 +13,14 @@ body: |-
     minute after it last wrote that claim - is resent by the delivery sweep, which runs once a
     minute in one process. A session the comment's route or an author route reaches and that a
     mention names hears the comment once, from the mention; when that mention's send fails, the
-    route or author copy skipped for it is published to it then. The comment's own event waits on a
+    route or author copy skipped for it is published to it then. A mention of `@role:<role>` whose
+    lookup went unanswered names no session until its sender pins one on the attempt row a round
+    trip later, so the outbox resolves that role's holder itself and holds the copies bound for
+    that session back until the attempt settles, for at most the minute below; a role it can name
+    no holder for - no claim stands for it when the comment is published, and one made while the
+    mention is in flight is still pinned on its row - holds every session's copy of that one
+    comment for that same wait rather than showing the session the mention reaches the comment
+    twice. The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
     skipped (migration `20261101180039`,

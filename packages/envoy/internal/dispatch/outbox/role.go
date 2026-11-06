@@ -235,10 +235,23 @@ func resolveRoles(ctx context.Context, deps Deps, names []string) map[string]rol
 // A role whose resolution names a holder holds that holder's copies back, whatever state the
 // holder is in: a claim stands until its holder is gone, and the mention is sent to the session
 // the listener resolves the role to, not to a live one. A role whose resolution names no holder
-// at all holds nothing back: no claim names a session, so the mention's own lookup finds none
-// either and no session is shown the comment twice. A resolution that failed names no holder it
-// might have had, so every copy of that comment bound for a session's own topic waits instead,
-// for the attempt's own lease and no longer (unpinnedRoleMentions.holds).
+// at all - no claim stands for it here, or the read failed - names no session this reading can
+// tell from another, so every copy of that comment bound for a session's own topic waits
+// instead, for the attempt's own lease and no longer (unpinnedRoleMentions.holds).
+//
+// That a role no claim names here holds every copy back, rather than none, is what the
+// measurement of the narrower rule showed. This resolution is a guess at the session the
+// mention's sender is about to pin, and the two are made by different readers a round trip
+// apart: the outbox reads the role bucket itself as it publishes the comment (resolveRole,
+// roles.Buckets.RoleClaim), while the sender asks the listener, which resolves the role through
+// its own registry, when it sends. So a role this read names no holder for is not a role nobody
+// holds - a claim made, or become visible to the listener, between the two is pinned on the
+// attempt row all the same - and a reading that published that session's copies meanwhile has
+// shown its host the comment twice
+// (TestACommentAnUnansweredRoleMentionWhoseHolderTheOutboxCannotNameReachesThatSessionOnce).
+// What it costs a comment whose role really is unheld is one pass: every session's copy of that
+// one comment waits until the attempt settles, which a mention that reaches no session does
+// within a round trip, and no longer than the attempt's own lease either way.
 func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mentionDeliveries) {
 	var names []string
 	seen := map[string]struct{}{}
@@ -263,13 +276,11 @@ func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mention
 			continue
 		}
 		for role := range deliveries.unpinned.roles {
-			result := resolved[role]
-			switch holder := result.resolution.Holder; {
-			case holder != "":
+			if holder := resolved[role].resolution.Holder; holder != "" {
 				deliveries.unpinned.holders[holder] = struct{}{}
-			case result.err != nil:
-				deliveries.unpinned.unresolved = true
+				continue
 			}
+			deliveries.unpinned.unresolved = true
 		}
 	}
 }

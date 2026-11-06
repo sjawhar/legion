@@ -269,11 +269,15 @@ func (o mentionOutcomes) state(key string) mentionState {
 //
 // roles are the roles such an attempt targets, read with the attempts themselves
 // (loadMentionDeliveries). holders are the sessions those roles resolved to, whose copies wait.
-// unresolved is a role whose holder the resolution could not name at all - its claim could not be
-// read - where no copy bound for a session's own topic can be told from that holder's, so every
-// one of them waits. A role that resolved to no holder at all, one no claim holds, holds nothing
-// back: the mention's own lookup finds no session there either, so no session is shown the
-// comment twice.
+// unresolved is a role whose holder the resolution could not name at all - no claim stands for
+// it there, or its claim could not be read - where no copy bound for a session's own topic can
+// be told from that holder's, so every one of them waits.
+//
+// The resolution is a guess at the session the sender is about to pin, and the two are made by
+// different readers a round trip apart - the outbox reads the role bucket itself, the sender
+// asks the listener - so a role this reading names no holder for is not a role nobody holds,
+// and its copies wait as a role whose claim could not be read does
+// (resolveUnpinnedRoleMentions, whose doc holds the measurement that showed it).
 //
 // The wait is the attempt's own lease and nothing longer (model.MentionLiveSQL,
 // model.DeliveryClaimLapse): past it the attempt reads resumed or abandoned rather than live,
