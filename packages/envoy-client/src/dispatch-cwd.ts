@@ -34,8 +34,8 @@ export const defaultExec: ExecFn = (file, args, { cwd, signal }) => {
 /** How long the repository lookup waits for jj, and then for git, to name the cwd's remotes. */
 const REMOTE_LOOKUP_MS = 5_000;
 
-/** How long dispatch waits for tmux to name the pane before it sends the call without it. */
-const TMUX_PANE_LOOKUP_MS = 1_000;
+/** How long a caller waits for tmux to name the pane before it goes on without the answer. */
+export const TMUX_PANE_LOOKUP_MS = 1_000;
 
 /** The coding-agent hosts that ship a `dispatch` tool. Each plugin asserts its own value. */
 export type DispatchHost = "omp" | "claude";
@@ -55,14 +55,21 @@ export interface DispatchOrigin {
   readonly sessionTitle?: string;
 }
 
+/** Which way a bounded call came to nothing. A caller that treats them alike reads the null and
+ *  asks for neither; one that does not — a reader whose last answer stands until tmux refuses —
+ *  cannot tell them apart from the null alone. */
+export type ExecFailure = "refused" | "timedOut";
+
 /** One bounded shell-out: its stdout, or null when it fails or has not answered within `limitMs`.
- *  At the bound the call's signal is aborted and nothing waits for an exec that ignores it. */
-async function tryExec(
+ *  At the bound the call's signal is aborted and nothing waits for an exec that ignores it.
+ *  `report` is told which of the two happened, exactly once, on a null. */
+export async function tryExec(
   exec: ExecFn,
   file: string,
   args: string[],
   cwd: string,
-  limitMs: number
+  limitMs: number,
+  report?: (failure: ExecFailure) => void
 ): Promise<string | null> {
   const controller = new AbortController();
   const expired = Promise.withResolvers<null>();
@@ -75,8 +82,13 @@ async function tryExec(
       exec(file, args, { cwd, signal: controller.signal }),
       expired.promise,
     ]);
-    return answer?.stdout ?? null;
+    if (answer === null) {
+      report?.("timedOut");
+      return null;
+    }
+    return answer.stdout;
   } catch {
+    report?.("refused");
     return null;
   } finally {
     clearTimeout(timer);

@@ -13,6 +13,7 @@ import type { RequestCredential } from "./bearer";
 import { normalizeEnvoyUrl } from "./envoy-settings";
 import { messageFor } from "./errors";
 import { machineID } from "./machine";
+import type { TmuxPlace } from "./tmux-place";
 
 /**
  * How long one replay call may take. The listener stops reading at 5 s and its HTTP server writes
@@ -108,6 +109,23 @@ const SessionWireSchema = z.object({
   // fields and for a session whose plugin predates them.
   plugin: z.string().optional(),
   plugin_version: z.string().optional(),
+  // The pane the session runs in, as its client last reported it; absent for a session outside
+  // tmux, for one whose client predates the field, and for a listener predating it.
+  tmux_place: z
+    .object({
+      socket: z.string(),
+      server_pid: z.string(),
+      session_name: z.string(),
+      window_id: z.string(),
+      window_index: z.number().int(),
+      window_name: z.string(),
+      pane_id: z.string(),
+      pane_index: z.number().int(),
+      // Absent when the window's layout string outgrew what a registration carries.
+      layout: z.string().optional(),
+      zoomed: z.boolean(),
+    })
+    .optional(),
 });
 
 const RoleWireSchema = z.object({
@@ -345,6 +363,10 @@ export type SubscribeInput = {
    * sent on every registration so the listener's session list shows which build each session
    * runs. */
   readonly plugin: { readonly name: string; readonly version: string };
+  /** Where this session's pane sits in tmux (`readTmuxPlace`), re-read on every registration so
+   * the layout follows a pane the human moved. Absent for a session outside tmux, and for one
+   * whose tmux has not answered yet, which leaves the listener's last place standing. */
+  readonly place?: TmuxPlace;
 };
 
 /**
@@ -889,6 +911,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               // subscription names, else the one it registered through; only the owner relays the
               // session's consumer, and any other listener leaves inbox messages to it silently.
               host: machineID(),
+              // The pane this session sits in (`readTmuxPlace`), beside the machine holding it,
+              // omitted when there is none to report so the listener keeps the place it has.
+              ...(input.place === undefined ? {} : { tmux_place: input.place }),
               plugin: input.plugin.name,
               plugin_version: input.plugin.version,
             },

@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
 import { basename } from "node:path"
+import { isAncestor } from "@legion/envoy-client/process-ancestry"
 import { configuredValue } from "./claude-session"
 
 export interface SessionTitleEnvironment {
@@ -48,9 +47,6 @@ const TMUX_PANE_FORMAT = [
 const TMUX_TIMEOUT_MS = 1_000
 const SHORT_ID_LENGTH = 8
 
-/** How many parents `isAncestor` follows before it stops. */
-const MAX_ANCESTORS = 64
-
 /** A terminal control sequence (a colour code: ESC [ parameters final byte). Built from the ESC
  *  code, since a control character in a regular expression literal is a lint error. */
 const CSI_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-?]*[ -/]*[@-~]`, "gu")
@@ -78,39 +74,6 @@ function visible(value: string): boolean {
       "",
     ) !== ""
   )
-}
-
-/** The parent of process `pid`, or undefined when it cannot be read. */
-function parentPid(pid: number): number | undefined {
-  try {
-    if (process.platform === "linux") {
-      // The command name, in parentheses, may hold spaces; the parent is the second field after it.
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-      const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1])
-      return Number.isInteger(parent) ? parent : undefined
-    }
-    const parent = Number(
-      execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
-        encoding: "utf8",
-        timeout: TMUX_TIMEOUT_MS,
-        killSignal: "SIGKILL",
-      }).trim(),
-    )
-    return Number.isInteger(parent) ? parent : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Whether process `candidate` is `pid` or one of its ancestors, walking up from `pid` and
- *  stopping at the first match, at init, or after `MAX_ANCESTORS` steps. */
-export function isAncestor(candidate: string, pid: number = process.pid): boolean {
-  let current: number | undefined = pid
-  for (let step = 0; current !== undefined && current > 1 && step < MAX_ANCESTORS; step++) {
-    if (String(current) === candidate) return true
-    current = parentPid(current)
-  }
-  return false
 }
 
 /**
