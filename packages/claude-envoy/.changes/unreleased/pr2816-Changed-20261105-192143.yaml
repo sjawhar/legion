@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+  This plugin is published to npm as `@sjawhar/claude-envoy`, a released package beside
+  `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, versioned and tagged as they are. The
+  `legion-plugins` marketplace entry installs it from npm by name, and its source carries the
+  range `>=1.0.0`, which leaves out the 0.0.0 placeholder that stood in for a release until this
+  one. `claude plugin marketplace update legion-plugins`, then
+  `claude plugin update claude-envoy@legion-plugins`, takes this release and each one after it.
+  The built `dist/` and `legion/` are committed nowhere any more; the release builds them and
+  packs them into the tarball it publishes. The version a session reports is the published
+  version rather than the first 12 characters of a commit.
+time: 2026-11-05T19:21:43.069206255Z
+custom:
+    Issue: pr2816
