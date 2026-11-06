@@ -731,8 +731,9 @@ check "a head commit naming the trailer in prose is no workflow-skip" "$(is "$st
 
 # The rule that picks the head commit's refusal out of a message, block by block: GitHub reads a
 # `skip-checks` trailer in the last block alone, and only two empty lines below the rest, so a
-# read of the whole message would refuse the three that follow. Each keeps to neutral text, since
-# the last case of this file reads the whole log.
+# read of the whole message would refuse the two that follow. The third locks the regex's end
+# anchor instead: its trailer is in the last block, two empty lines below the rest, and the line
+# goes on past `true`.
 echo "case: a trailer in a block of the head commit message that is not its last"
 run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" \
   "$(printf 'fix: keep the order\n\n\nskip-checks: true\n\n\nA closing paragraph of the body.\n')"
@@ -765,15 +766,29 @@ check "the head commit on the answer's second page, holding a bracket instructio
 check "that refusal names the sha the event gave" \
   "$(contains "$out" '^::error::the head commit event-head-sha holds \[skip ci\], which stops')"
 
-echo "case: a compare range that lists no commit at the sha the event names"
-# What a pull request whose head is its base's own commit answers. Nothing is refused for a head
-# message that was never read, and the guard still scans every commit the range does list.
+echo "case: a compare range that lists no commit at all"
+# What GitHub answers for a pull request whose head is its base's own commit: an empty list, with
+# a total_commits of 0 to match it, so the two counts agree and the script reaches the head read.
+# There is no head commit message to read, so nothing is refused, and the log says so.
 write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
-jq -c '.commits = [.commits[0] | .sha = "range-only-sha"]' "$work/compare" > "$work/compare.next"
-mv "$work/compare.next" "$work/compare"
+jq -nc '{total_commits: 0, commits: []}' > "$work/compare"
 run_pr_text
-check "a range listing no commit at that sha passes" "$(is "$status" 0)"
-check "the log says the range lists no commit there" \
+check "a range listing no commit passes" "$(is "$status" 0)"
+check "the log says the range lists no commit at that sha" \
+  "$(contains "$out" '^the compare range lists no commit at event-head-sha, so no head commit message is read')"
+
+echo "case: a compare range whose commits are all at other shas"
+# The same branch, reached the other way: the route answers with commits, but every sha it lists
+# is another commit's, so head_entries is 0 and no head message is read. The range itself is
+# still scanned, and a private name on one of its commits is refused.
+write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
+range_only_commit=$(pr_commit "fix: a commit of the range ($key-7)" range-only-sha)
+jq -nc --argjson only "$range_only_commit" '{total_commits: 1, commits: [$only]}' > "$work/compare"
+run_pr_text
+check "a commit of such a range is scanned, and its name refused" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'commits:1: names the private deployment repository')"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+check "the log still says the range lists no commit at that sha" \
   "$(contains "$out" '^the compare range lists no commit at event-head-sha, so no head commit message is read')"
 
 echo "case: a head commit message whose lines end with a carriage return"
