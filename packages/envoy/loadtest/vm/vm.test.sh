@@ -121,9 +121,14 @@
 # own directory -- reading the size and resetting the statistics after the reset of the
 # deployment and before the load, sampling the lock waits for the length of the load, reading
 # the end size when the load has ended, and taking the credential all of it is read with away
-# with the step; and (aa) a step stopped by SIGTERM or SIGINT takes its remote work with it: no
+# with the step; (aa) a step stopped by SIGTERM or SIGINT takes its remote work with it: no
 # loadgen run left on the load machine, no profiling tunnel, no sampler, no collector, and no
-# pid file of any of them.
+# pid file of any of them; and (bb) a reset whose database still carries the sessions its
+# stopped containers left behind waits out the ones that are going by themselves, ends the rest
+# over pg_stat_activity and drops it all the same, the seed's rename of that database does the
+# same, a drop the instance refuses even so refuses the reset by name with the sessions it saw,
+# and the same reset against the drop the series died on -- `with (force)` and nothing before
+# it -- is refused by the server with those sessions attached.
 set -euo pipefail
 # Nothing here is read from this test's own standard input, and the fake ssh reads a pipe it is
 # given as ssh does, so the suite runs with /dev/null under it: whatever the caller's standard
@@ -381,6 +386,19 @@ cat >"$bin/psql" <<'EOF'
 # ("issues 1000"). The whole argv goes to psql.argv as well, which is where the credential case
 # proves that the instance's password reached no command line: vm.sh gives psql a URL without
 # it and a passfile.
+#
+# It models what is attached to each database as well, because a drop or a rename of a database
+# the deployment's containers use is a statement the server refuses while anything is.
+# FAKE_DIR/sessions/<database> holds one line per session, "<pid> <remaining> <after signal>":
+# <remaining> is how many more statements the session stays attached for on its own ("-" for one
+# nobody closes, which is what the proxy of a container the reset stopped leaves behind), and
+# <after signal> how many more it takes to go once its backend has been signalled (0 for a
+# backend that goes before the signalling statement returns, "-" for one that never goes). Every
+# statement is one tick of that clock, counted when the call ends, so a statement sees the
+# sessions as they stood when it began. That is the difference the reset turns on: `with
+# (force)` signals and is then judged inside its own statement, as the server's own five-second
+# wait judges it, while a pg_terminate_backend pass leaves the sessions ended for the statement
+# that follows it. attach_sessions puts them there.
 set -u
 sql="" prev=""
 for a in "$@"; do
@@ -393,7 +411,47 @@ printf '%s\n' "$*" >>"$FAKE_DIR/psql.argv"
 # reads none that anyone but its owner can, so the credential case reads both back.
 printf '%s %s\n' "${PGPASSFILE:-none}" "$([ -f "${PGPASSFILE:-}" ] && stat -c %a "$PGPASSFILE" || echo none)" >>"$FAKE_DIR/psql.passfile"
 db=$FAKE_DIR/db
-mkdir -p "$db"
+sessions=$FAKE_DIR/sessions
+mkdir -p "$db" "$sessions"
+
+# tick: one statement of the clock above, run when this call ends however it ends.
+tick() {
+  local f
+  for f in "$sessions"/*; do
+    [ -f "$f" ] || continue
+    awk '{ if ($2 == "-") { print; next } if ($2 - 1 > 0) print $1, $2 - 1, $3 }' "$f" >"$f.tick"
+    mv -- "$f.tick" "$f"
+  done
+}
+trap tick EXIT
+
+# session_count DATABASE: the sessions pg_stat_activity shows on DATABASE, this call's own apart.
+session_count() {
+  local f=$sessions/$1
+  if [ -f "$f" ]; then grep -c . "$f" || true; else echo 0; fi
+}
+
+# signal_backends DATABASE: every session of DATABASE signalled, as pg_terminate_backend does
+# and as the FORCE option's own pass does: what each one has left becomes what it takes to go
+# after a signal, and a backend that goes at once leaves no line behind.
+signal_backends() {
+  local f=$sessions/$1
+  [ -f "$f" ] || return 0
+  awk '{ if ($3 == "-") { print; next } if ($3 == 0) next; print $1, $3, $3 }' "$f" >"$f.signal"
+  mv -- "$f.signal" "$f"
+}
+
+# busy DATABASE [PREFIX]: the server's own refusal of a statement that needs DATABASE to itself,
+# answered 0 when it gave one.
+busy() {
+  local n
+  n=$(session_count "$1")
+  [ "$n" != 0 ] || return 1
+  printf 'ERROR:  %sdatabase "%s" is being accessed by other users\nDETAIL:  There are %s other sessions using the database.\n' \
+    "${2:-}" "$1" "$n" >&2
+  return 0
+}
+
 # The database the call was made against, out of the URL vm.sh gives psql, and the count of one
 # relation in it. A count of a relation the database holds no line for is the error psql itself
 # gives for a table that is not there, and a count against a database that is not there is the
@@ -412,10 +470,29 @@ count_in() {
 }
 if [[ $sql =~ ^select\ 1\ from\ pg_database\ where\ datname\ =\ \'([A-Za-z0-9_]+)\'$ ]]; then
   [ -e "$db/${BASH_REMATCH[1]}" ] && printf '1\n'
-elif [[ $sql =~ ^drop\ database\ if\ exists\ ([A-Za-z0-9_]+) ]]; then
-  rm -f -- "$db/${BASH_REMATCH[1]}"
+elif [[ $sql =~ ^select\ count\(\*\)\ from\ pg_stat_activity\ where\ datname\ =\ \'([A-Za-z0-9_]+)\' ]]; then
+  session_count "${BASH_REMATCH[1]}"
+elif [[ $sql =~ ^select\ pg_terminate_backend\(pid\)\ from\ pg_stat_activity\ where\ datname\ =\ \'([A-Za-z0-9_]+)\' ]]; then
+  # One row per backend the pass signalled, as the server answers it, and a line of its own in
+  # terminate.log: the database, how many it reached and which pids. That line is how a case
+  # reads what the reset did about the sessions rather than how it spelt a statement.
+  name=${BASH_REMATCH[1]}
+  if [ -f "$sessions/$name" ]; then
+    printf '%s\t%s\t%s\n' "$name" "$(session_count "$name")" \
+      "$(awk '{ print $1 }' "$sessions/$name" | tr '\n' ' ')" >>"$FAKE_DIR/terminate.log"
+    awk '{ print "t" }' "$sessions/$name"
+    signal_backends "$name"
+  fi
+elif [[ $sql =~ ^drop\ database\ if\ exists\ ([A-Za-z0-9_]+)(\ with\ \(force\))?$ ]]; then
+  name=${BASH_REMATCH[1]}
+  [ -z "${BASH_REMATCH[2]}" ] || signal_backends "$name"
+  if busy "$name"; then exit 1; fi
+  rm -f -- "$db/$name" "$sessions/$name"
 elif [[ $sql =~ ^create\ database\ ([A-Za-z0-9_]+)\ template\ ([A-Za-z0-9_]+)$ ]]; then
   [ -e "$db/${BASH_REMATCH[2]}" ] || { echo "no template ${BASH_REMATCH[2]}" >&2; exit 1; }
+  # The template is copied, and a database is no more copied than dropped while a session is on
+  # it; the server names it the source database when it refuses.
+  if busy "${BASH_REMATCH[2]}" "source "; then exit 1; fi
   # A database made from a template holds what the template holds, which is how a step's reset
   # gives it the seed again: the file is copied and not emptied.
   cp -- "$db/${BASH_REMATCH[2]}" "$db/${BASH_REMATCH[1]}"
@@ -424,7 +501,9 @@ elif [[ $sql =~ ^create\ database\ \"([A-Za-z0-9_]+)\"$ ]]; then
   : >"$db/${BASH_REMATCH[1]}"
 elif [[ $sql =~ ^alter\ database\ ([A-Za-z0-9_]+)\ rename\ to\ ([A-Za-z0-9_]+)$ ]]; then
   [ -e "$db/${BASH_REMATCH[1]}" ] || { echo "no database ${BASH_REMATCH[1]}" >&2; exit 1; }
+  if busy "${BASH_REMATCH[1]}"; then exit 1; fi
   mv -- "$db/${BASH_REMATCH[1]}" "$db/${BASH_REMATCH[2]}"
+  rm -f -- "$sessions/${BASH_REMATCH[1]}"
 elif [[ $sql = 'select count(*) from public.loadtest_loop_ids' ]]; then
   count_in loadtest_loop_ids loop_ids
 elif [[ $sql == 'select count(*) from public.issues where project_key in ('* ]]; then
@@ -881,7 +960,7 @@ write_fixtures() {
 
 reset_fake() {
   rm -rf -- "$fake" "$tmp/root" "$remote"
-  mkdir -p "$fake/db" "$fake/nc" "$fake/pass" "$tmp/root" "$remote"
+  mkdir -p "$fake/db" "$fake/sessions" "$fake/nc" "$fake/pass" "$tmp/root" "$remote"
   : >"$fake/actions.log"
   write_fixtures
 }
@@ -1144,6 +1223,115 @@ run_vm reset --config "$config"
 ((RC != 0)) || fail "reset ran without the template database"
 grep -q 'has no template database dispatch_seed' "$tmp/out" || fail "reset's refusal does not name the template"
 pass "reset refuses an instance that holds no template database"
+
+# ---- (bb) a reset over the sessions a stopped container left behind -------------------------
+
+# What ended this issue's series at its 3x step: the reset stops the containers, the sessions
+# the Cloud SQL Auth Proxy opened for them stay attached, and PostgreSQL drops no database while
+# anything is attached to it. The fake psql models those sessions (the fakes, above), so what
+# these cases read is whether the database was dropped and the sessions ended -- not how a
+# statement is spelt.
+
+# attach_sessions DATABASE N [REMAINING [AFTER_SIGNAL]]: N sessions attached to DATABASE, as the
+# instance would show them in pg_stat_activity. REMAINING defaults to "-", a session nobody
+# closes, which is the proxy of a container the reset stopped and has not noticed the loss of;
+# AFTER_SIGNAL to 1, a backend that goes one statement after it is signalled, which the server's
+# own five-second wait inside a `with (force)` drop does not see go.
+attach_sessions() {
+  local database=$1 n=$2 remaining=${3:--} after=${4:-1} i
+  mkdir -p "$fake/sessions"
+  : >"$fake/sessions/$database"
+  for ((i = 0; i < n; i++)); do
+    printf '%s %s %s\n' "$((5000 + i))" "$remaining" "$after" >>"$fake/sessions/$database"
+  done
+}
+
+# sessions_on DATABASE: how many sessions are attached to DATABASE now.
+sessions_on() {
+  local f=$fake/sessions/$1
+  if [ -f "$f" ]; then grep -c . "$f" || true; else echo 0; fi
+}
+
+# reset_over_sessions [OVERRIDE]: one reset_deployment of this deployment, into a record of its
+# own, with OVERRIDE evaluated after vm.sh is sourced and before the reset -- which is how the
+# control below puts the drop the series died on back in db_drop's place and runs this same case
+# against it. The waits are given seconds rather than the minute a subcommand gives them, as
+# every other bound run_fn sets is.
+reset_over_sessions() {
+  : >"$fake/terminate.log"
+  run_fn DB_FREE_SECONDS=6 DB_FREE_POLL_SECONDS=2 DB_TERMINATED_SECONDS=4 eval "${1:-}
+reset_deployment $fn_run_dir/reset-sessions.json"
+}
+
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the attached-sessions case"
+seeded_run
+
+attach_sessions dispatch 274
+reset_over_sessions
+((RC == 0)) || fail "the reset was refused over a database 274 sessions are attached to: $(cat "$tmp/out")"
+[ "$(sessions_on dispatch)" = 0 ] ||
+  fail "the reset left $(sessions_on dispatch) sessions attached to the database it was to drop"
+[ -e "$fake/db/dispatch" ] || fail "the reset dropped the database and made none from the template"
+[ "$(cut -f1,2 "$fake/terminate.log")" = "$(printf 'dispatch\t274')" ] ||
+  fail "the reset did not end the 274 sessions over pg_stat_activity: $(cat "$fake/terminate.log")"
+grep -q '274 sessions are still attached to the database dispatch' "$tmp/out" ||
+  fail "the reset says nothing of the sessions it had to end: $(cat "$tmp/out")"
+pass "a reset whose database still carries the sessions of its stopped containers ends them over pg_stat_activity and drops it"
+
+# The control: the same case against the drop that was on this script when the series died --
+# `with (force)` and nothing before it. The server signals the attached backends, waits its own
+# five seconds for them inside the statement, and refuses the whole drop; the reset dies there,
+# halfway through a step, which is what this case has to catch.
+attach_sessions dispatch 274
+reset_over_sessions 'db_drop() {
+  psql_at postgres "drop database if exists $1 with (force)" >/dev/null || die "drop database $1 failed"
+}'
+((RC != 0)) || fail "the case above passes against the drop the series died on, so it proves nothing"
+[ ! -s "$fake/terminate.log" ] ||
+  fail "the control ended sessions of its own, so it is not the drop the series died on: $(cat "$fake/terminate.log")"
+grep -q 'is being accessed by other users' "$tmp/out" ||
+  fail "the control did not meet the server's own refusal: $(cat "$tmp/out")"
+grep -q 'drop database dispatch failed' "$tmp/out" ||
+  fail "the control's reset did not die on its drop: $(cat "$tmp/out")"
+[ -e "$fake/db/dispatch" ] || fail "the control's drop took the database with it"
+pass "the same reset against the drop the series died on is refused by the server with those sessions attached"
+
+# Sessions that are going by themselves are waited for and not killed: the proxy closes them a
+# moment after the container it opened them for was stopped, and a session that ends that way
+# ends tidily.
+attach_sessions dispatch 9 3
+reset_over_sessions
+((RC == 0)) || fail "the reset was refused over sessions that were going by themselves: $(cat "$tmp/out")"
+[ ! -s "$fake/terminate.log" ] ||
+  fail "the reset killed backends it had only to wait for: $(cat "$fake/terminate.log")"
+[ -e "$fake/db/dispatch" ] || fail "the reset made no database from the template"
+pass "a reset waits out the sessions that are going by themselves and ends none of them"
+
+# A drop the instance refuses all the same -- sessions that never go, signalled or not -- ends
+# the reset by name and with the count it read, rather than leaving a series to die halfway
+# through its grid with nothing but the server's own line to go on.
+attach_sessions dispatch 9 - -
+reset_over_sessions
+((RC != 0)) || fail "the reset dropped a database nine sessions were still attached to"
+grep -q 'drop database dispatch failed: 9 sessions were attached to it' "$tmp/out" ||
+  fail "the refusal names neither the database nor the sessions it saw: $(cat "$tmp/out")"
+pass "a drop the instance refuses even so refuses the reset by name, with the sessions it saw"
+
+# The seed's rename of that same database runs into the same sessions, and clears them the same
+# way: it is the database the containers were attached to, renamed to the template.
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the seed's rename case"
+attach_sessions dispatch 31
+: >"$fake/terminate.log"
+run_fn DB_FREE_SECONDS=6 DB_FREE_POLL_SECONDS=2 DB_TERMINATED_SECONDS=4 eval 'seed_template dispatch_seed'
+((RC == 0)) || fail "the seed's rename was refused over a database 31 sessions are attached to: $(cat "$tmp/out")"
+[ -e "$fake/db/dispatch_seed" ] || fail "the seed's rename left no template database"
+[ "$(cut -f1,2 "$fake/terminate.log")" = "$(printf 'dispatch\t31')" ] ||
+  fail "the seed's rename did not end the sessions attached to the database it renamed: $(cat "$fake/terminate.log")"
+pass "the seed's rename of the database to the template ends the sessions its stopped containers left behind too"
 
 # ---- (g) and (h) step -----------------------------------------------------------------------------
 

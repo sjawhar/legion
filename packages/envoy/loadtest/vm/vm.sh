@@ -270,6 +270,12 @@ MAX_RUN_DURATION=259200
 # How long a wait on Dispatch's /healthz may take, and how long between two polls of it.
 HEALTHZ_SECONDS=900
 HEALTHZ_POLL_SECONDS=5
+# The bounds of db_free, which clears the way for a statement that needs a database to itself:
+# how long the sessions attached to it are given to go, how long between two reads of
+# pg_stat_activity, and how long the ones a terminate pass had to signal are given after it.
+DB_FREE_SECONDS=60
+DB_FREE_POLL_SECONDS=2
+DB_TERMINATED_SECONDS=15
 # How long one ssh may take: a docker call, a file copy, a read. The load itself is bounded by
 # the step's own deadline, not by this.
 SSH_SECONDS=300
@@ -335,7 +341,8 @@ CONTAINERS=(
 # the last and the driver session takes the last (run.go -loop-listeners).
 LOAD_LISTENERS=(load-listener-1 load-listener-2 load-listener-3 load-listener-4)
 # Everything that holds a connection to the database, in the order it is stopped: the reset and
-# the template rename both stop all of it first, so nothing holds a connection or a consumer.
+# the template rename both stop all of it first. Stopping it is not the whole of detaching it,
+# though: the sessions those containers opened outlive them, which is db_free's work.
 DB_HOLDERS=(dispatch dispatch-listener "${LOAD_LISTENERS[@]}" hub-listener)
 # Dispatch's ephemeral storage limit, the setting that exists because Autopilot's 1Gi default
 # evicted production's Dispatch (agent-infra dispatch/Pulumi.prod.yaml appEphemeralStorage, 8Gi).
@@ -1126,6 +1133,107 @@ db_exists() {
   [ "$got" = 1 ]
 }
 
+# Why a database of this deployment still has sessions attached once its containers are stopped,
+# and what the reset's drop and the seed's rename do about it.
+#
+# PostgreSQL refuses to drop or to rename a database while any session is attached to it --
+# `database "<name>" is being accessed by other users`, with the count in the detail line -- and
+# stopping the containers does not detach them. Dispatch and the listeners reach the instance
+# through the Cloud SQL Auth Proxy container on their own machine, and no reset stops that one:
+# it holds none of the deployment's state, and this pod's own psql does not go through it.
+# `docker rm -f` takes its container's sockets with it and sends the server no Terminate, so
+# every session the proxy opened for that container stays attached, idle, until the proxy
+# notices that its client has gone -- a pool of them for Dispatch, and more for each of the five
+# listeners. That is what ended the 3x step of this issue's series: the reset stopped the seven
+# containers, dropped the database a moment later and was refused with 274 sessions still
+# attached, and the series died there with its grid half run (dispatch://INFRA-988).
+#
+# `with (force)` alone is not the answer, and it was already on that drop when the series died:
+# FORCE signals the attached backends and then waits five seconds of the server's own for them
+# to go, and a drop whose sessions outlast those five seconds is refused with that same message,
+# the whole statement rolled back. The other two remedies are partial in their own way -- a wait
+# alone is at the mercy of a proxy that may not notice for minutes, and a terminate pass alone
+# races a session that attaches behind it -- so all three are used, each making the next rarer:
+#
+#   1. a bounded wait (DB_FREE_SECONDS) for the sessions to go by themselves, because a session
+#      the proxy closes ends tidily and needs no backend killed. On a database nothing is
+#      attached to, the wait costs one read of pg_stat_activity, which is what every reset of a
+#      deployment that has not yet run a step pays;
+#   2. a pg_terminate_backend pass over pg_stat_activity for that database, for whatever
+#      outlasts the wait. Unlike FORCE's own pass it is not judged inside the statement that
+#      needs the database to itself: the backends are signalled, the statement returns, and what
+#      the wait after it (DB_TERMINATED_SECONDS) reads is the count rather than an assumption;
+#   3. the drop or the rename itself, the drop still `with (force)`, for a session that attached
+#      between the pass and the statement.
+#
+# A statement the server refuses all the same refuses this script by name, with the number of
+# sessions the instance gave for that database at that moment, so a series that stops here says
+# what stopped it rather than ending halfway through its grid.
+
+# db_sessions DATABASE: how many sessions other than this one are attached to DATABASE, from
+# pg_stat_activity, into DB_SESSIONS_SEEN. A read that failed, or that answered something which
+# is not a number, leaves "an unknown number of" there and answers 1: a refusal has to say what
+# it saw even when the instance would not say.
+DB_SESSIONS_SEEN=""
+db_sessions() {
+  local got
+  got=$(psql_at postgres "select count(*) from pg_stat_activity where datname = '$1' and pid <> pg_backend_pid()") || got=""
+  if [[ $got =~ ^[0-9]+$ ]]; then
+    DB_SESSIONS_SEEN=$got
+    return 0
+  fi
+  DB_SESSIONS_SEEN="an unknown number of"
+  return 1
+}
+
+# db_wait_free DATABASE SECONDS: wait up to SECONDS for every session but this one to leave
+# DATABASE, reading pg_stat_activity every DB_FREE_POLL_SECONDS. 0 when none is left, 1 when the
+# bound passed or a read failed; either way DB_SESSIONS_SEEN holds the last reading.
+db_wait_free() {
+  local database=$1 bound=$2 waited=0
+  while :; do
+    db_sessions "$database" || return 1
+    if [ "$DB_SESSIONS_SEEN" = 0 ]; then return 0; fi
+    ((waited < bound)) || return 1
+    sleep "$DB_FREE_POLL_SECONDS"
+    waited=$((waited + DB_FREE_POLL_SECONDS))
+  done
+}
+
+# db_free DATABASE: the way cleared for a statement that needs DATABASE to itself, in the three
+# steps above. It answers 0 whatever it found, because the statement that follows is what says
+# whether the way is clear, and that statement's own refusal is the one worth reading.
+db_free() {
+  local database=$1
+  if db_wait_free "$database" "$DB_FREE_SECONDS"; then return 0; fi
+  note "$DB_SESSIONS_SEEN sessions are still attached to the database $database after $DB_FREE_SECONDS s, which is what the proxy of a stopped container leaves behind; ending them"
+  psql_at postgres "select pg_terminate_backend(pid) from pg_stat_activity where datname = '$database' and pid <> pg_backend_pid()" >/dev/null ||
+    note "ending the sessions attached to the database $database failed; what follows is left to the server's own with (force)"
+  db_wait_free "$database" "$DB_TERMINATED_SECONDS" ||
+    note "$DB_SESSIONS_SEEN sessions are still attached to the database $database after they were ended"
+  return 0
+}
+
+# db_drop DATABASE: DATABASE dropped, whatever a stopped container left attached to it.
+db_drop() {
+  local database=$1
+  db_free "$database"
+  psql_at postgres "drop database if exists $database with (force)" >/dev/null || {
+    db_sessions "$database" || true
+    die "drop database $database failed: $DB_SESSIONS_SEEN sessions were attached to it when the server refused, and its own error is above"
+  }
+}
+
+# db_rename FROM TO: FROM renamed to TO, whatever a stopped container left attached to it.
+db_rename() {
+  local database=$1 template=$2
+  db_free "$database"
+  psql_at postgres "alter database $database rename to $template" >/dev/null || {
+    db_sessions "$database" || true
+    die "renaming the database $database to $template failed: $DB_SESSIONS_SEEN sessions were attached to $database when the server refused, and its own error is above"
+  }
+}
+
 # ---- Dispatch -----------------------------------------------------------------------------------
 
 # wait_healthz: poll Dispatch's /healthz until it answers ok, within HEALTHZ_SECONDS. A container
@@ -1611,14 +1719,14 @@ cmd_seed() {
 }
 
 # seed_template TEMPLATE: the seeded database renamed to TEMPLATE, with everything that holds a
-# connection to it stopped first.
+# connection to it stopped first and whatever that stop left attached to it ended (db_rename).
 seed_template() {
-  local role
+  local role database
+  database=$(cfg .cloudsql.database dispatch)
   for role in "${DB_HOLDERS[@]}"; do
     container_stop "$role"
   done
-  psql_at postgres "alter database $(cfg .cloudsql.database dispatch) rename to $1" >/dev/null ||
-    die "renaming the seeded database to $1 failed"
+  db_rename "$database" "$1"
 }
 
 # seed_production WORK WORKERS: the baseline population's seed -- `loadgen seed`: 4 projects,
@@ -1777,9 +1885,12 @@ reset_deployment() {
     container_stop "$role"
     steps+=("stop $role")
   done
-  # 2. and 3. the database dropped and made again from the template.
-  psql_at postgres "drop database if exists $database with (force)" >/dev/null ||
-    die "drop database $database failed"
+  # 2. and 3. the database dropped and made again from the template. The drop clears the sessions
+  # the stopped containers left behind first (db_drop). The template needs no such clearing
+  # before it is copied: no container of the deployment is ever given its name, so the only
+  # sessions it ever has are this script's own reads of it (seed_proof), each one statement long
+  # and ended before the next one begins.
+  db_drop "$database"
   steps+=("drop database $database")
   psql_at postgres "create database $database template $template" >/dev/null ||
     die "create database $database from $template failed"

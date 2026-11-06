@@ -3208,6 +3208,28 @@ NATS and listener restart is part of it because the listener keeps interests, se
 claims in NATS KV, and every unit session leaves a durable consumer with a 72-hour inactivity
 threshold: without it, step N+1 would start with step N's consumers.
 
+Stopping those containers does not detach what they left on the instance. Dispatch and the
+listeners reach it through the Cloud SQL Auth Proxy container on their own machine, which the
+reset leaves running, and `docker rm -f` takes a container's sockets with it without sending the
+server a Terminate, so every session the proxy opened for that container stays attached, idle,
+until the proxy notices that its client has gone. PostgreSQL drops and renames no database while
+a session is attached to it (`database "dispatch" is being accessed by other users`), and `with
+(force)` is no answer to that on its own: it signals the attached backends and then waits five
+seconds of the server's own, and refuses the whole statement when they outlast those seconds.
+That is what ended this issue's series at its 3x step, with 274 sessions still attached
+(dispatch://INFRA-988).
+
+So the reset's drop, and the seed's rename of that same database to the template, clear the way
+before the statement: up to `DB_FREE_SECONDS` (60 s) for the sessions to go by themselves, read
+from `pg_stat_activity` every 2 s, since a session the proxy closes ends tidily; then a
+`pg_terminate_backend` pass over that database for whatever outlasted the wait, and
+`DB_TERMINATED_SECONDS` (15 s) for the backends it signalled to go; then the statement itself,
+the drop still `with (force)` for a session that attached behind the pass. A drop or a rename
+the instance refuses even then refuses the command by name, with the number of sessions it read
+for that database at that moment, rather than leaving a series to die halfway through its grid.
+The template needs none of this before a step's database is copied from it: no container of the
+deployment is ever given its name.
+
 The store is the NATS container's to write and the driver's to clear: that container makes
 `jetstream/` inside it as root at mode 700, which the ssh user cannot descend into, so `reset`
 removes the store with `sudo` and makes it again as the ssh user at the mode `up` leaves it at
