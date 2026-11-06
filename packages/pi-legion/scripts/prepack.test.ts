@@ -42,13 +42,13 @@ describe("omp.skills / prepack manifest contract", () => {
 
     test("are exactly this plugin's partition: the skills a Legion pane's prompts load", () => {
       expect(readdirSync(staged).sort()).toEqual([
-        "ce-simplify-code",
         "leading-a-work-stream",
         "legion-architect",
         "legion-controller",
         "legion-oracle",
         "legion-retro",
         "legion-worker",
+        "simplify-settled-diff",
         "thermonuclear-code-quality",
         "thermonuclear-deep-review",
       ]);

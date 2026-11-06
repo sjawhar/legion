@@ -17,13 +17,13 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 - A direct Dispatch message that decides scope, priority or an owner is a ruling: after you answer it, run the weekly-plan reconciliation (`skill://legion-controller/references/backlog-stewardship.md`), because the plan must record the rule.
 - Handle one wake per turn, then end the turn. Never poll or wait for an event, because the daemon wakes you again (`tick` at least every `controller_wake_interval_seconds`).
 - Before any side effect, read `read_state` and the Dispatch issue, because a wake can be stale or sent twice.
-- Read a session's state from the Envoy registry, never from its absence from a list: a session is `live`, `unresponsive` or `gone`. An `unresponsive` session is past the live window and inside the gone horizon; it is working, it keeps its role claim and its issue claim, and messages wait for it. Only a `gone` session is stopped. Start no replacement for an `unresponsive` session, take nothing from it, and never report it as gone.
+- Read a session's state from the Envoy registry, never from its absence from a list (`skill://envoy`). Start no replacement for an `unresponsive` session, take nothing from it, and never report it as gone, because it is working and keeps its claims.
 - Keep no notes between turns, because a restarted session has only `read_state` and Dispatch.
 - Reach the daemon only through the `legion` tool: `read_state`, and `set_status` to `todo`, `backlog` or `icebox`. Run no `legion` from bash, because the tool holds the controller grant.
 - Never edit a repository, push a commit or call `handoff_complete`, and never forward a raw event to an architect, because the daemon runs the phases and raw events only fill the architect's context.
 - Never open a design gate, because only a person's approval of the root's spec in Dispatch opens it.
 - When a `dispatch` command fails, or a `curl` read of Dispatch fails or prints no JSON array, act on nothing it would decide and name its first line in your summary (the turn's last message), because an empty read is no evidence. A Slack read answers a JSON object, and `skill://legion-controller/references/slack-mentions.md` holds its own success test.
-- Before you say that a service or an API is out of reach, run the call through the secrets broker's client with the secret your instructions name (`skill://agent-secrets`), and report it unreachable only with the command you ran and its output.
+- Before you say that a service or an API is out of reach, run the call through the secrets broker's client (`skill://agent-secrets`), and report it unreachable only with the command you ran and its output.
 - Write every Dispatch comment, message and ask as `skill://dispatch-writing-specs`'s "Rules for the text" say.
 
 Launch, `gh`, pull requests, takeover: `skill://legion-controller/references/session.md`.

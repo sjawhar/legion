@@ -1,6 +1,6 @@
 ---
 name: plain-words
-description: "Use before you send or publish any text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. It removes empty verb phrases and replaces each with the literal thing. Use it after you write and before you send."
+description: "Use before you send or publish any text a person reads: an ask, a spec, a Dispatch comment, a message to a colleague, a pull-request body, a commit message, a report, a status update. Also use before you answer a question a person asked, and before a draft goes to a reviewer. It removes empty verb phrases and replaces each with the literal thing."
 ---
 
 # Say the literal thing
@@ -10,59 +10,51 @@ thing instead.
 
 Run this over your text before you send it. It takes a minute and it is not optional.
 
+## Answering a question
+
+1. Answer the exact question, only it, in the order it was asked, because anything else reads as
+   evasion and the question comes again.
+2. Start from what happens, not from a setting, a flag or a name: the reader can reach the setting
+   from the behaviour, not the reverse.
+3. Define each term where you first use it, in literal words. No analogy: the reader cannot tell
+   which part of one is true.
+
+## Before you send
+
+A fresh session that has only what the reader has removes what the reader does not need, and lists
+every term it cannot define. Fix each listed term. A reviewer that reads only to approve has not
+done this step, and an instruction alone did not make it happen, so the two lists are what show it
+ran. The check runs on the text going to the reader, never on the instructions you give that
+session or on what it sends back, which would never end.
+
 ## The test
 
 Take the verb phrase out and ask: **what literally happens?** Write that. If you cannot say what
 happens, you did not know, and the phrase hid it from you as well as from the reader.
 
-## The phrases, in the order agents actually use them
+## The phrases, commonest first
 
-Counted on 2026-10-30, in one day's 198,898 assistant messages across one fleet of agents:
+| Never | What to write |
+|---|---|
+| land the change, land the PR | merge it, release it, deploy it, apply it — whichever one it is |
+| unblock the work | X can start once Y merges |
+| name the problem, name the owner, name a date | say the problem; who owns it is X; it is due on <date> |
+| it pays for itself, that pays | it costs $16,306 and returns $60,379 a month |
+| carry it to X, carry the finding | tell X; send it to X; put it on the issue |
+| this shows the gap, the number shows | the gap is 12 of 30; the number is 1.17 |
 
-| Never | Used that day | What to write |
-|---|---:|---|
-| land the change, land the PR | **1,053** | merge it, release it, deploy it, apply it — whichever one it is |
-| unblock the work | 151 | X can start once Y merges |
-| name the problem, name the owner, name a date | 23 | say the problem; who owns it is X; it is due on 11-02 |
-| it pays for itself, that pays | 13 | it costs $16,306 and returns $60,379 a month |
-| carry it to X, carry the finding | 11 | tell X; send it to X; put it on the issue |
-| this shows the gap, the number shows | 5 | the gap is 12 of 30; the number is 1.17 |
+The rows are in the order agents write them, so look for the first row first: you reach for "land"
+when you cannot say whether the thing merged, released or deployed. If you can say which, say it.
+If you cannot, that is the sentence — "it is approved and not merged" — and it is more useful than
+any verb.
 
-**The trigger for the commonest one:** you reach for "land" when you cannot say whether it merged,
-released or deployed. If you can say which, say it. If you cannot, that is the sentence — "it is
-approved and not merged" — and it is more useful than any verb.
-
-**"name the X" is the one an instruction does not fix.** It survived at the same rate with this
-skill and without it (11 drafts against 10, over 72). Use the test rather than the row: if deleting
-"name" leaves a sentence that says what happens, delete it; if it does not, you were about to write
-a verb for an action you had not decided on.
-
-Three phrases were cut from this table because the same count found zero uses of them in a day:
-"move the needle", "drive it to zero", "surface the issue". A rule against a phrase nobody writes
-costs a reader attention and buys nothing.
-
-## Untested, and here because the fault is the same
-
-These were measured at 0 of 72 drafts in both arms, so this skill has no evidence that naming them
-changes anything. They stay as examples, not as rules:
-
-- **A verb with no actor.** "The fix is being prioritised." Who is doing it, and when?
-- **A noun that should be a number.** "Significant improvement." From what to what?
-- **A promise with no object.** "We will follow up." On what, with whom, by when?
-- **A hedge that costs the reader a second read.** "It may be worth considering whether we should."
-  Either recommend it or do not raise it.
-
-**Where this skill helps, measured:** over 72 drafts of six real status messages, when the writer
-works from notes it went from 16 of 18 clean to 18 of 18. When the task was already prose, both arms
-were 18 of 18. So it earns its place where an agent writes up its own work, which is where these
-phrases live.
+On the "name the X" row an instruction alone does not work, so use the test: delete "name". If the
+sentence then says what happens, keep it that way; if it says nothing, you had not decided the
+action, so decide it and write it.
 
 ## Do not shout
 
-The operator, on an ask written in capitalised headers: why do you keep writing your asks in this
-obnoxious format with all caps headers and stuff?
-
-No capitalised headers. No capitalised phrases for emphasis. Bold only where a number, a name or a
+No ALL-CAPS headings. No ALL-CAPS phrases for emphasis. Bold only where a number, a name or a
 choice needs to be found again.
 
 The reason it appears: an agent writes a long passage, cannot find its point, and puts a handle on
@@ -86,3 +78,7 @@ collector collects, a sweep sweeps.
 English. This skill removes verb phrases that carry no fact. Neither removes AI writing tells, so
 where your session has a pass for those it is a third one. Run them all on an outside message
 (`skill://outside-message`); run this one on everything.
+
+One kind of text may also have a form skill of its own — a comment to another project's
+maintainers, a document a buyer reads — where the operator ships one; your stream's brief names
+it. This skill holds for all text either way.

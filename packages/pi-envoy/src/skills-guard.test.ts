@@ -86,10 +86,13 @@ test("the injected dispatch-first context holds the blocker and accepted-request
 // each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
 // whitespace-separated tokens.
 //
-// The budget does not move: a rule that must go in is paid for by cutting the lines that duplicate
-// another skill or say what the new rule says (2026-11-03, "The conversation", which the three
-// skills made room for at 1,998 words).
-test("the three Dispatch skills total fewer than 2,000 words", () => {
+// The budget moves only when rules arrive from a skill that stops holding them: a rule that must
+// go in otherwise is paid for by cutting the lines that duplicate another skill or say what the
+// new rule says (2026-11-03, "The conversation", which the three skills made room for at 1,998
+// words). It was raised to 2,300 when the skill consolidation moved the six ask-quality gates of
+// an operator's own proxy skill into `dispatch-writing-specs` and the research-before-you-ask
+// test into `dispatch-first`, which took those rules out of two other skills.
+test("the three Dispatch skills total fewer than 2,300 words", () => {
   const words = ["dispatch", "dispatch-first", "dispatch-writing-specs"]
     .flatMap((skill) => files(path.join(staged, skill)))
     .map(
@@ -99,7 +102,7 @@ test("the three Dispatch skills total fewer than 2,000 words", () => {
           .filter((token) => token !== "").length
     )
     .reduce((total, count) => total + count, 0);
-  expect(words).toBeLessThan(2_000);
+  expect(words).toBeLessThan(2_300);
 });
 
 test("the staged decisions rule separates material choices from spec details", () => {

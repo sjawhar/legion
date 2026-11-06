@@ -279,7 +279,7 @@ reads, to `dispatch-writing-specs`, which the session loads by name.
 
 `envoy`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `asd-ste100`, `outside-message`, `plain-words` and `agent-secrets` are the eight a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
-skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
+skills, and the phase workers' `legion-worker` and `simplify-settled-diff`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
 generated `legion/` plugin (below). Link another root skill here only when a standalone Claude
 Code session needs it.

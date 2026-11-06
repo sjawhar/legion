@@ -15,14 +15,12 @@ another role has open.
 
 ## Verdict
 
-The first line of the report is the verdict, in exactly this form, because a PR gate reads only that line:
+The first line of the report is the verdict, in exactly this form, because a PR gate reads only that line. `<sha>` is the short sha of the head you reviewed, or the sha your brief names when you have no shell:
 
 - `Verdict: CHANGES at <sha>` when the report has a Medium or High finding.
 - `Verdict: APPROVE at <sha>` when it has none. Minor findings do not block.
 
 Priority: trace each finding end to end first. Minor changes no behavior, hides no error and breaks no gate; any other finding is Medium, or High when the report holds its trace, because developers who get false High findings stop listening.
-
-`<sha>`: `git rev-parse --short=8 HEAD` at the head you reviewed, or the sha your brief names when you have no shell.
 
 ## Scope
 
@@ -78,3 +76,13 @@ Only after your own audit, so others' findings do not steer it, and only with a 
 1. Read the PR/MR's comments and review comments, bots' included, with `gh` or `glab`.
 2. Check their findings in the code: a comment is not evidence. Include the valid ones you missed; for one you share, add their evidence if yours lacks it.
 3. Mark each finding that came from that discussion, so readers can tell it from yours.
+
+## A reviewer rates, a lead decides
+
+- Rate each finding; the lead disposes of it. Put on the must-fix list only a finding that has to
+  be fixed before this change ships, because a list that mixes those with the rest gets filtered
+  by nobody.
+- The four dispositions the lead gives a finding are act on, consider, noted and dismissed. Write
+  each finding so the lead can place it: the trace, the consumer it breaks, and what it depends on.
+- Do not review a diff you wrote. A reviewer that grades its own work reports no finding against
+  it, so hand the diff to a session that did not write it.

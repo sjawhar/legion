@@ -392,7 +392,7 @@ It ships these with Legion's other skills in its `dist/skills`:
 
 - the pair's rubrics
 
-- `ce-simplify-code`
+- `simplify-settled-diff`
 
 The Envoy plugin ships these skills in its `dist/skills`:
 

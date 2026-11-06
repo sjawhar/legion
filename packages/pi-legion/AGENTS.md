@@ -3,7 +3,7 @@
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
 the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
+`legion-worker`, `leading-a-work-stream`, `simplify-settled-diff`, `thermonuclear-code-quality`,
 `thermonuclear-deep-review`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and

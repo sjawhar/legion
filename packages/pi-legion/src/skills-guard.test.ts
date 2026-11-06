@@ -300,19 +300,19 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
     expect(silent).toEqual([]);
     expect(dispatching.sort()).toEqual([
       "skills/AGENTS.md",
-      "skills/ce-simplify-code/SKILL.md",
       "skills/dispatch-writing-specs/SKILL.md",
       "skills/legion-architect/references/decomposition.md",
       "skills/legion-architect/references/design-gate.md",
       "skills/legion-oracle/SKILL.md",
       "skills/legion-retro/SKILL.md",
       "skills/legion-worker/references/merge-gate.md",
-      "the fresh Claude plugin's skills/ce-simplify-code/SKILL.md",
+      "skills/simplify-settled-diff/SKILL.md",
       "the fresh Claude plugin's skills/legion-architect/references/decomposition.md",
       "the fresh Claude plugin's skills/legion-architect/references/design-gate.md",
       "the fresh Claude plugin's skills/legion-oracle/SKILL.md",
       "the fresh Claude plugin's skills/legion-retro/SKILL.md",
       "the fresh Claude plugin's skills/legion-worker/references/merge-gate.md",
+      "the fresh Claude plugin's skills/simplify-settled-diff/SKILL.md",
     ]);
   } finally {
     rmSync(path.dirname(out), { recursive: true, force: true });
@@ -347,7 +347,7 @@ function countedOncePerFile(rule: string, relativePaths: string[]) {
 // R1: the simplify pass covers every file of the diff, docs-only diffs included, and a defect it
 // sees is reported rather than dropped as out of scope (dispatch://INFRA-198).
 test("the simplify pass reads every file of its scope and reports the defects it sees", () => {
-  const simplify = collapsed(path.join(staged, "ce-simplify-code", "SKILL.md"));
+  const simplify = collapsed(path.join(staged, "simplify-settled-diff", "SKILL.md"));
   expect(simplify).toContain(
     "Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs."
   );
