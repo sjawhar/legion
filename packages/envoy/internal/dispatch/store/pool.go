@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"runtime"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,15 +133,18 @@ type Pool struct {
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu         sync.Mutex
-	rooms      *pgxpool.Pool
-	health     *pgxpool.Pool
-	listen     *pgxpool.Pool
-	leases     *pgxpool.Pool
-	outbox     *pgxpool.Pool
-	compaction *pgxpool.Pool
-	horizon    *pgxpool.Pool
-	closed     bool
+	mu     sync.Mutex
+	rooms  *pgxpool.Pool
+	health *pgxpool.Pool
+	listen *pgxpool.Pool
+	leases *pgxpool.Pool
+	// leaseCallers is the registry Leases hands out, holding the reservations of the lease
+	// pool above: one registry per pool, so every caller's reservation is counted together.
+	leaseCallers *LeaseCallers
+	outbox       *pgxpool.Pool
+	compaction   *pgxpool.Pool
+	horizon      *pgxpool.Pool
+	closed       bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -308,17 +313,92 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // compaction, and the shared pool's sharedPoolSize connections are what every request reads
 // through. The document compaction holds only its lease here: each document it compacts reads and
 // writes on the compaction pool (Pool.Compaction).
+//
+// Nothing counts the callers by hand. Each of them reserves one of these connections by name
+// while the server wires itself, whether or not this configuration runs its loop (LeaseCallers.For,
+// cmd/dispatch/main.go), and the server refuses to serve unless the reservations are exactly
+// leasePoolSize (LeaseCallers.Complete). So a leased loop or a hold added without a connection
+// here, and a connection added here without a caller, stops the process at its start rather than
+// leaving a renewal to wait behind a pass that runs for minutes.
 const leasePoolSize = 18
 
-// Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
-// only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
-// it lives on one connection for the length of the pass and dies with it; a connection of the
-// shared pool held that long would be one fewer for every request, and a pass that then read
-// through the shared pool - which is what a pass does - would be a caller holding two of its
-// connections (ErrNestedAcquire). The delivery intakes take and renew their holds here too
-// (duty.Hold), so a renewal never waits behind a request for a shared connection.
-func (p *Pool) Leases() (*pgxpool.Pool, error) {
-	return p.separate(&p.leases, leasePoolSize, "loop leases")
+// Leases is the registry of the lease pool's callers. A periodic maintenance loop takes the
+// connection it holds its lease on here, so that only one process runs each pass
+// (duty.Exclusive): the lease is a session-level advisory lock, so it lives on one connection for
+// the length of the pass and dies with it; a connection of the shared pool held that long would
+// be one fewer for every request, and a pass that then read through the shared pool - which is
+// what a pass does - would be a caller holding two of its connections (ErrNestedAcquire). The
+// delivery intakes take and renew their holds here too (duty.Hold), so a renewal never waits
+// behind a request for a shared connection.
+//
+// The pool itself is not handed out: a caller reaches a connection only through the reservation
+// it takes by name (For), which is what ties leasePoolSize to the callers the process really
+// wires. Every call returns the one registry this pool keeps, so every caller counts in the same
+// place.
+func (p *Pool) Leases() (*LeaseCallers, error) {
+	leases, err := p.separate(&p.leases, leasePoolSize, "loop leases")
+	if err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, ErrPoolClosed
+	}
+	if p.leaseCallers == nil {
+		p.leaseCallers = &LeaseCallers{pool: leases}
+	}
+	return p.leaseCallers, nil
+}
+
+// LeaseCallers is the lease pool handed out as reservations, one per caller that can be inside a
+// lease or a hold statement at the same moment. leasePoolSize is one connection per such caller,
+// and a reservation is how a caller says it is one of them.
+type LeaseCallers struct {
+	pool *pgxpool.Pool
+	// mu guards the reserved names: the server takes them one at a time from the goroutine
+	// that wires it, and a caller reserving from a goroutine of its own must not be lost from
+	// the count.
+	mu       sync.Mutex
+	reserved []string
+}
+
+// For reserves a connection of the lease pool for the caller named name and returns the pool it
+// takes that connection from: a *pgxpool.Pool is the duty.Leases a lease is taken on and the
+// duty.Holds a hold's statements run on. Every caller that can be inside a lease or a hold
+// statement while another is reserves a name of its own - one intake's hold is two callers, its
+// renewal goroutine and the intake's own - and a name reserved already is refused, since two
+// callers cannot share one connection.
+func (c *LeaseCallers) For(name string) (*pgxpool.Pool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if slices.Contains(c.reserved, name) {
+		return nil, fmt.Errorf("%q has reserved a connection of the lease pool already: each caller that can hold one while another does reserves a name of its own", name)
+	}
+	c.reserved = append(c.reserved, name)
+	return c.pool, nil
+}
+
+// Reserved is the names that have reserved a connection, in the order they took it.
+func (c *LeaseCallers) Reserved() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.reserved)
+}
+
+// Complete answers whether the callers reserved are exactly the connections the lease pool has,
+// and names them when they are not. The server calls it once its wiring has made every
+// reservation and refuses to serve on its error: a caller short of a connection waits for one for
+// as long as the longest pass, which is minutes for the compaction, and a connection short of a
+// caller is one the process opens and nothing uses.
+func (c *LeaseCallers) Complete() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.reserved) == leasePoolSize {
+		return nil
+	}
+	return fmt.Errorf("%d callers reserved a connection of the lease pool and it has %d: it holds one connection per caller that can be inside a lease or a hold statement at the same moment, so a caller added here is a connection added in store.leasePoolSize; reserved: %s",
+		len(c.reserved), leasePoolSize, strings.Join(c.reserved, ", "))
 }
 
 // outboxPoolSize bounds the pool the events outbox reads and records events through, and takes
@@ -439,6 +519,9 @@ func (p *Pool) Close() {
 	p.closed = true
 	rooms, health, listen, leases, outbox, compaction, horizon := p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction, p.horizon
 	p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction, p.horizon = nil, nil, nil, nil, nil, nil, nil
+	// The registry goes with the pool its reservations were on: a caller after the close is
+	// told the pool is closed rather than handed a reservation on a pool nothing serves.
+	p.leaseCallers = nil
 	p.mu.Unlock()
 	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, compaction, horizon} {
 		if separate != nil {

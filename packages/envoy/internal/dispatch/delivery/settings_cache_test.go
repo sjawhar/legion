@@ -99,7 +99,7 @@ func TestTheIntakesReadNoSettingsWhileNothingChanges(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	stop, err := StartIntakes(runCtx, func(name string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL}, bus.WithName(name))
-	}, counted, newFakeGitHub(t).newTestClient(), events.NewBroker(), wake)
+	}, counted, deliveryTestIntakeLeases(t, counted), newFakeGitHub(t).newTestClient(), events.NewBroker(), wake)
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)

@@ -21,11 +21,7 @@ func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 // leasesOf is the pool Exclusive takes its lease connections from, the one the server gives it.
 func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
 	t.Helper()
-	leases, err := database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
-	return leases
+	return storetest.Leases(t, database.Pool)
 }
 
 // Two processes on one database are two callers here, and the second must skip rather than queue:

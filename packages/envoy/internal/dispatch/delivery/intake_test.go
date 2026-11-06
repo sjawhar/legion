@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -71,9 +72,20 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 // from another.
 func deliveryTestLeases(t *testing.T, pool *store.Pool) *pgxpool.Pool {
 	t.Helper()
-	leases, err := pool.Leases()
+	return storetest.Leases(t, pool)
+}
+
+// deliveryTestIntakeLeases is the reservation StartIntakes takes in the server, made here on the
+// test's own pool (ReserveIntakeLeases).
+func deliveryTestIntakeLeases(t *testing.T, pool *store.Pool) IntakeLeases {
+	t.Helper()
+	callers, err := pool.Leases()
 	if err != nil {
 		t.Fatalf("open the leases pool: %v", err)
+	}
+	leases, err := ReserveIntakeLeases(callers)
+	if err != nil {
+		t.Fatalf("reserve the intakes' callers of the lease pool: %v", err)
 	}
 	return leases
 }

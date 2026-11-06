@@ -247,10 +247,7 @@ func TestPruneRemovesRowsOlderThanTenMinutesAndKeepsNewerOnes(t *testing.T) {
 	setInterval(t, &HeartbeatInterval, time.Hour)
 	setInterval(t, &PruneInterval, 200*time.Millisecond)
 	database := storetest.Open(t)
-	leases, err := database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
+	leases := storetest.Leases(t, database.Pool)
 	old := mustRegister(t, database, "c1", "K0")
 	recent := mustRegister(t, database, "c1", "K0")
 	live := mustRegister(t, database, "c1", "K0")

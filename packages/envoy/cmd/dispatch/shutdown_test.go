@@ -659,6 +659,21 @@ func TestShutdownWaitsForTheOutboxToReleaseThePublisherHold(t *testing.T) {
 	}
 }
 
+// intakeLeasesOf reserves the intakes' callers of pool's lease pool, as main does while it wires
+// the server (delivery.ReserveIntakeLeases).
+func intakeLeasesOf(t *testing.T, pool *store.Pool) delivery.IntakeLeases {
+	t.Helper()
+	callers, err := pool.Leases()
+	if err != nil {
+		t.Fatalf("open the lease pool: %v", err)
+	}
+	leases, err := delivery.ReserveIntakeLeases(callers)
+	if err != nil {
+		t.Fatalf("reserve the intakes' callers of the lease pool: %v", err)
+	}
+	return leases
+}
+
 // githubAnswersAfterSignal is how long into the stop the fake GitHub of
 // TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool holds a merged pull request's fetch.
 const githubAnswersAfterSignal = 3 * time.Second
@@ -731,7 +746,7 @@ func TestShutdownWaitsForAnIntakeHandlerBeforeClosingThePool(t *testing.T) {
 
 	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL}, bus.WithName(name))
-	}, database.Pool, app, events.NewBroker(), nil)
+	}, database.Pool, intakeLeasesOf(t, database.Pool), app, events.NewBroker(), nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
@@ -847,7 +862,7 @@ func TestAPanicAfterTheIntakesStartEndsTheProcess(t *testing.T) {
 	defer cancel()
 	stopIntakes, err := delivery.StartIntakes(ctx, func(name string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL}, bus.WithName(name))
-	}, database.Pool, testGitHubApp(t, githubServer.URL), events.NewBroker(), nil)
+	}, database.Pool, intakeLeasesOf(t, database.Pool), testGitHubApp(t, githubServer.URL), events.NewBroker(), nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}

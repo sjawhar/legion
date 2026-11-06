@@ -31,11 +31,7 @@ const (
 // sweepLeases is the pool a leased loop takes its lease on, the one cmd/dispatch gives it.
 func sweepLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
 	t.Helper()
-	leases, err := database.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
-	return leases
+	return storetest.Leases(t, database.Pool)
 }
 
 // countLeaseLines counts the lease lines carrying message for lease.

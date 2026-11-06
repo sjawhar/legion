@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
@@ -58,11 +59,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1 or starts_with(lease, $1 || '/')`, webhookRedeliveryLease); err != nil {
 		t.Fatalf("clear an earlier run's recorded sweep: %v", err)
 	}
-	leases, err := pool.Leases()
-	if err != nil {
-		t.Fatalf("open the leases pool: %v", err)
-	}
-	return leases
+	return storetest.Leases(t, pool)
 }
 
 // captureDefaultLogs collects what the lease itself logs, which goes to the default logger rather

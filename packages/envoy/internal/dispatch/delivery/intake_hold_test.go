@@ -202,10 +202,7 @@ func (p *intakeProcess) fetches(number int) int {
 func startIntakeProcess(t *testing.T, pool *store.Pool, natsURL string, block func(number int) bool) *intakeProcess {
 	t.Helper()
 	second := storetest.SecondProcess(t, &store.Store{Pool: pool})
-	leasePool, err := second.Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the process's lease pool: %v", err)
-	}
+	leasePool := storetest.Leases(t, second.Pool)
 	client, err := bus.Connect([]string{natsURL}, bus.WithName(intakeConnectionName))
 	if err != nil {
 		t.Fatalf("connect the process's intake: %v", err)
@@ -526,10 +523,7 @@ func TestAStandbyOfAnOlderGenerationLeavesANewerConsumerAlone(t *testing.T) {
 		t.Fatalf("connect the newer build's process: %v", err)
 	}
 	t.Cleanup(newerBuild.Close)
-	newerLeases, err := storetest.SecondProcess(t, &store.Store{Pool: pool}).Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the newer build's lease pool: %v", err)
-	}
+	newerLeases := storetest.Leases(t, storetest.SecondProcess(t, &store.Store{Pool: pool}).Pool)
 	hold, err := duty.TryHold(ctx, newerLeases, intakeHold, uuid.New(),
 		duty.HoldOptions{TTL: 15 * time.Second, Renew: 5 * time.Second, Margin: 2 * time.Second, Token: newer.DeliverSubject})
 	if err != nil || hold == nil {
@@ -840,10 +834,7 @@ func TestATakeOverWhoseCreateFailsLeavesTheFloorToTheNextHolder(t *testing.T) {
 // that found the durable there.
 func previousBuildReconciler(t *testing.T, pool *store.Pool, natsURL string, interval time.Duration) (created, present *atomic.Int32) {
 	t.Helper()
-	leases, err := storetest.SecondProcess(t, &store.Store{Pool: pool}).Pool.Leases()
-	if err != nil {
-		t.Fatalf("open the previous build's lease pool: %v", err)
-	}
+	leases := storetest.Leases(t, storetest.SecondProcess(t, &store.Store{Pool: pool}).Pool)
 	client, err := bus.Connect([]string{natsURL})
 	if err != nil {
 		t.Fatalf("connect the previous build's process: %v", err)
