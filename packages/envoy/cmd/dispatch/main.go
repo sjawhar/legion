@@ -559,10 +559,16 @@ func main() {
 		os.Exit(1)
 	}
 	// reserve takes the lease pool's connection for one caller, by a name that says which caller
-	// it is, and ends the process if that name has reserved one already. Every caller below
-	// reserves while this wiring runs and whether or not this configuration runs its loop, so
-	// every configuration reserves the same callers; once they all have, leaseCallers.Complete
-	// checks them against the pool's size before this process serves anything.
+	// it is, and ends the process if that name has reserved one already. Every caller reserves
+	// just below, before any loop starts and whether or not this configuration runs its loop, so
+	// every configuration reserves the same callers; leaseCallers.Complete then checks them
+	// against the pool's size while nothing of this process is yet at work.
+	//
+	// The check sees only callers that reserve. For hands every name the same pool, so a
+	// goroutine added inside a caller that has reserved already, or one reservation variable
+	// passed to a second consumer, takes a connection nothing counted, and the count still
+	// matches. Each caller that can hold a connection while another does needs a reserve of its
+	// own here.
 	reserve := func(name string) duty.Leases {
 		leases, err := leaseCallers.For(name)
 		if err != nil {
@@ -570,6 +576,44 @@ func main() {
 			os.Exit(1)
 		}
 		return leases
+	}
+
+	// Every caller's connection, taken here, before the first loop below starts. Each
+	// reservation goes to the one consumer named after it.
+	settlementResumptionLeases := reserve("settlement resumption")
+	searchTermStatsLeases := reserve("search term statistics")
+	referenceExcerptLeases := reserve("reference excerpts")
+	documentCompactionLeases := reserve("document compaction")
+	editNoticesLeases := reserve("edit notices")
+	blockIndexLeases := reserve("block index")
+	issueAskRepairLeases := reserve("issue ask repair")
+	// The webhook redelivery sweep's and the CI reconcile pass's, reserved whether or not this
+	// configuration runs them, as every caller's here is: the count the pool is sized for is the
+	// same in every configuration.
+	redeliverLeases := reserve("webhook redelivery")
+	ciReconcileLeases := reserve("CI reconcile")
+	architectureImportLeases := reserve("architecture import")
+	deliveryReconcileLeases := reserve("delivery reconcile")
+	maintenanceSweepLeases := reserve("maintenance sweep")
+	// The registry's prune (processes.RunPrune), which the registration below starts: reserved
+	// here so that this process's count is the same whether or not the registry admits it.
+	registryPruneLeases := reserve("process registry prune")
+	// The intakes' six callers - a consumer lease, a hold and the hold's renewal per durable -
+	// whether or not this configuration starts them (delivery.ReserveIntakeLeases).
+	intakeLeases, err := delivery.ReserveIntakeLeases(leaseCallers)
+	if err != nil {
+		slog.Error("dispatch delivery: reserve the lease pool for the intakes", "error", err)
+		os.Exit(1)
+	}
+	// Every caller of the lease pool has reserved its connection now, so the count is this
+	// process's real one: a caller short of a connection would wait for one for as long as the
+	// longest pass - minutes, for the compaction - with an intake's hold reported lost
+	// meanwhile, and a connection short of a caller is one the process opens and nothing uses.
+	// Either is a wiring mistake, so the process refuses to serve rather than run short. Nothing
+	// has started yet - no loop, no intake, no listener - so this exit has nothing to stop.
+	if err := leaseCallers.Complete(); err != nil {
+		slog.Error("dispatch: the lease pool's callers are not its connections", "error", err)
+		os.Exit(1)
 	}
 
 	// The outbox runs only with NATS, so a process with NATS disabled never publishes
@@ -668,7 +712,7 @@ func main() {
 	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder, Wake: embeddingsWake})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
-	go documentService.RunSettlementResumption(ctx, reserve("settlement resumption"))
+	go documentService.RunSettlementResumption(ctx, settlementResumptionLeases)
 	// The document rooms' room sync, registered on the hub above and run beside it: a document
 	// written by another process is announced over Postgres, and the room this process holds for
 	// it catches up from the stored updates within that round trip, so its browsers see the write
@@ -687,7 +731,7 @@ func main() {
 	go documentService.RunSchemaAdmission(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
-	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, reserve("search term statistics"))
+	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, searchTermStatsLeases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again once at start, so their progress shows without anyone editing them
@@ -697,29 +741,26 @@ func main() {
 	// The references route serves each document mention's stored excerpt; this fills the ones no
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
-	go documentService.RunReferenceExcerptReconciliation(ctx, reserve("reference excerpts"), excerptsWake)
+	go documentService.RunReferenceExcerptReconciliation(ctx, referenceExcerptLeases, excerptsWake)
 	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
 	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
 	// (INFRA-593).
-	go documentService.RunCompactionSweep(ctx, reserve("document compaction"))
+	go documentService.RunCompactionSweep(ctx, documentCompactionLeases)
 	// Each document's edit notice goes once its quiet window after a person's last
 	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
 	// still pending when this process stops is sent by the next sweep of either process. The sweep
 	// is woken by the trigger that announces each notice given a due time, and waits for the
 	// earliest one.
-	go documentService.RunEditNotices(ctx, reserve("edit notices"), editNoticesWake)
+	go documentService.RunEditNotices(ctx, editNoticesLeases, editNoticesWake)
 	// The block index: each document version no block-aware write indexed - every document at
 	// migration 0121, each version a build without the block index writes during a roll, and each
 	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
 	// a build indexed without the block grammar.
-	go documentService.RunBlockIndexReconciliation(ctx, reserve("block index"))
+	go documentService.RunBlockIndexReconciliation(ctx, blockIndexLeases)
 	// The asks a process older than the withdrawal leaves on an issue it closes or
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
-	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, reserve("issue ask repair"))
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, issueAskRepairLeases)
 
-	// The sweep's connection is reserved whether or not this configuration runs the sweep, as
-	// every caller's here is: the count the pool is sized for is the same in every one.
-	redeliverLeases := reserve("webhook redelivery")
 	sweeper, err := webhookSweeper(natsClient, database, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
@@ -737,8 +778,6 @@ func main() {
 	// from GitHub and records the completed checks Envoy's record of that head lacks. It is a
 	// timer that stays, as the webhook redelivery sweep and the delivery reconcile beside it are:
 	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on.
-	// Reserved outside the condition below, like the redelivery sweep's above.
-	ciReconcileLeases := reserve("CI reconcile")
 	reconciler, err := ciReconciler(natsClient, database, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
 	if err != nil {
 		slog.Error("dispatch: open the CI reconcile pass", "error", err)
@@ -761,7 +800,7 @@ func main() {
 		slog.Info("dispatch: CI reconcile off: it needs NATS and the GitHub App private key")
 	}
 
-	go architecture.Run(ctx, appCtx.Architecture(), reserve("architecture import"))
+	go architecture.Run(ctx, appCtx.Architecture(), architectureImportLeases)
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
@@ -771,15 +810,7 @@ func main() {
 	if boot.ReconcileAtStart {
 		reconcile.FirstPassAtStart()
 	}
-	go reconcile.Run(ctx, reserve("delivery reconcile"))
-	// The intakes' six callers - a consumer lease, a hold and the hold's renewal per durable -
-	// are reserved here, outside the condition below, whether or not this configuration starts
-	// them (delivery.ReserveIntakeLeases).
-	intakeLeases, err := delivery.ReserveIntakeLeases(leaseCallers)
-	if err != nil {
-		slog.Error("dispatch delivery: reserve the lease pool for the intakes", "error", err)
-		os.Exit(1)
-	}
+	go reconcile.Run(ctx, deliveryReconcileLeases)
 	// waitIntakes waits for both intakes to stop once ctx is cancelled; StartIntakes returns it as
 	// a sync.OnceFunc, so a second call returns once the first has. The shutdown runs it before it
 	// closes the database pool: an intake releases its duty.Hold through that pool as it stops,
@@ -847,20 +878,7 @@ func main() {
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because
 	// it resumes those deliveries through the API server built just above.
-	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, reserve("maintenance sweep"), background.ResumeDeliveries)
-	// The registry's prune (processes.RunPrune), which the registration below starts: its
-	// connection is reserved here, with every other caller's, so that this process's count is
-	// the same whether or not the registry admits it.
-	registryPruneLeases := reserve("process registry prune")
-	// Every caller of the lease pool has reserved its connection by now, so the count is this
-	// process's real one: a caller short of a connection would wait for one for as long as the
-	// longest pass - minutes, for the compaction - with an intake's hold reported lost
-	// meanwhile, and a connection short of a caller is one the process opens and nothing uses.
-	// Either is a wiring mistake, so the process refuses to serve rather than run short.
-	if err := leaseCallers.Complete(); err != nil {
-		slog.Error("dispatch: the lease pool's callers are not its connections", "error", err)
-		exitAfterIntakes()
-	}
+	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, maintenanceSweepLeases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and

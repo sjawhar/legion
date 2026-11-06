@@ -7,7 +7,10 @@ body: |-
     pool's size and the reserved names - unless the reservations are exactly the pool's size. A
     leased loop added without a connection, or a connection added without a caller, now fails at
     the server's start instead of leaving a caller to wait for a connection for as long as the
-    longest pass. The pool's size and the connections a process opens are unchanged.
+    longest pass. The check sees only callers that reserve a name: a goroutine added inside a
+    caller that has reserved already, or one reservation handed to a second consumer, takes a
+    connection nothing counted, and the count still matches. The pool's size and the connections
+    a process opens are unchanged.
 time: 2026-11-06T09:15:00.000000000Z
 custom:
     Issue: pr2461

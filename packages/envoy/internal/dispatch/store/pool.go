@@ -358,11 +358,17 @@ func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn
 // writes on the compaction pool (Pool.Compaction).
 //
 // Nothing counts the callers by hand. Each of them reserves one of these connections by name
-// while the server wires itself, whether or not this configuration runs its loop (LeaseCallers.For,
-// cmd/dispatch/main.go), and the server refuses to serve unless the reservations are exactly
-// leasePoolSize (LeaseCallers.Complete). So a leased loop or a hold added without a connection
-// here, and a connection added here without a caller, stops the process at its start rather than
-// leaving a renewal to wait behind a pass that runs for minutes.
+// before the server starts any of its loops, whether or not this configuration runs that loop
+// (LeaseCallers.For, cmd/dispatch/main.go), and the server refuses to serve unless the
+// reservations are exactly leasePoolSize (LeaseCallers.Complete). So a leased loop or a hold
+// added without a connection here, and a connection added here without a caller, stops the
+// process at its start rather than leaving a renewal to wait behind a pass that runs for
+// minutes.
+//
+// The check sees only callers that reserve a name. For hands every name the same pool, so a
+// goroutine added inside a caller that has reserved already, and one reservation passed to a
+// second consumer, take a connection nothing counted, and the count still matches: each caller
+// that can hold a connection while another does needs a reservation of its own.
 const leasePoolSize = 19
 
 // Leases is the registry of the lease pool's callers. A periodic maintenance loop takes the
@@ -397,6 +403,11 @@ func (p *Pool) Leases() (*LeaseCallers, error) {
 // LeaseCallers is the lease pool handed out as reservations, one per caller that can be inside a
 // lease or a hold statement at the same moment. leasePoolSize is one connection per such caller,
 // and a reservation is how a caller says it is one of them.
+//
+// What it counts is the reservations taken, not the goroutines that use them: For hands every
+// name the same pool, so a caller that reserves once and then runs a second goroutine on the
+// reservation, and a reservation passed to a second consumer, are both outside what Complete can
+// see.
 type LeaseCallers struct {
 	pool *pgxpool.Pool
 	// mu guards the reserved names: the server takes them one at a time from the goroutine
@@ -430,10 +441,10 @@ func (c *LeaseCallers) Reserved() []string {
 }
 
 // Complete answers whether the callers reserved are exactly the connections the lease pool has,
-// and names them when they are not. The server calls it once its wiring has made every
-// reservation and refuses to serve on its error: a caller short of a connection waits for one for
-// as long as the longest pass, which is minutes for the compaction, and a connection short of a
-// caller is one the process opens and nothing uses.
+// and names them when they are not. The server calls it once every reservation is taken and
+// before it starts any loop, and refuses to serve on its error: a caller short of a connection
+// waits for one for as long as the longest pass, which is minutes for the compaction, and a
+// connection short of a caller is one the process opens and nothing uses.
 func (c *LeaseCallers) Complete() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

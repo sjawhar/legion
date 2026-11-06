@@ -14,8 +14,9 @@ module: packages/envoy/internal/dispatch/store
 
 - When you add a Dispatch maintenance loop that takes a lease through `duty.Exclusive`, add one to
   `leasePoolSize` in `packages/envoy/internal/dispatch/store/pool.go`, add the loop's name to the
-  list in that constant's comment, and reserve the loop's connection where `cmd/dispatch/main.go`
-  wires it (`reserve("<the caller>")`, `store.LeaseCallers.For`).
+  list in that constant's comment, and add a `reserve("<the caller>")` to the block of
+  reservations `cmd/dispatch/main.go` takes before it starts any loop
+  (`store.LeaseCallers.For`), holding it in a variable the loop alone takes.
 - Count callers, not lease names.
   A caller that can be inside `Exclusive` at the same moment as another needs its own connection.
   Each delivery durable's intake is its own caller,
@@ -28,6 +29,12 @@ module: packages/envoy/internal/dispatch/store
   So a merge that brings in a caller without a connection, or a connection without a caller,
   fails at the server's start rather than leaving the extra caller to wait for a connection for
   as long as the longest pass, which can be minutes for the compaction.
+- The check sees only callers that reserve a name.
+  `store.LeaseCallers.For` hands every name the same pool,
+  so a goroutine added inside a caller that has reserved already,
+  or one reservation variable passed to a second consumer,
+  takes a connection nothing counted, and the count still matches.
+  Give each caller that can hold a connection while another does its own `reserve`.
 
 ## Evidence
 
