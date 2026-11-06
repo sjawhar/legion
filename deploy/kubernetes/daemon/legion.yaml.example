@@ -25,7 +25,7 @@ state_dir: ./state                     # the daemon's local state
 bind: 0.0.0.0
 advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
-admission_cap: 4                       # trees running at once
+admission_cap: 4                       # issues running at once, roots and children alike
 pod_update_max_open_rounds: 2          # issues holding an open pod-update round at once; a round asks every
                                        # worker of its issue to push and wait. Leave the key out for no limit
 pod_update_rounds_per_minute: 1        # pod-update rounds one sweep of the daemon opens; a sweep within 50

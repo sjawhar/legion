@@ -572,12 +572,14 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // `updateRound` and `updateHead` to the claim views, is served the state without them
 // (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
-// three fields (withoutMemory); and a caller below gatedStepsContract, the contract that added
-// the issues' gated steps, is served it without that field (withoutGatedSteps). The three
-// compose: each is applied when the state carries something of its own, so a caller below all
-// three — a pod below supervise.PodUpdateContract — is served a body without any of them. Any
-// other caller — a pod at this contract, the operator's `legion state`, a tmux pane — is served
-// the state as this contract writes it.
+// three fields (withoutMemory); a caller below treeContract, the contract that named the live
+// trees beside the issues holding a slot, is served it without `admission.trees` and without the
+// issues' `tree` (withoutTrees); and a caller below gatedStepsContract, the contract that added
+// the issues' gated steps, is served it without that field (withoutGatedSteps). The four
+// compose: each is applied when the state carries something of its own, so a caller below all of
+// them — a pod below supervise.PodUpdateContract — is served a body with none of the eight keys.
+// Every later reader takes all eight as optional. Any other caller — a pod at this contract, the
+// operator's `legion state`, a tmux pane — is served the state as this contract writes it.
 //
 // The claims are the snapshot's own because the body is: a claim and the state it was projected
 // into cannot come from two moments (store.ClaimsTx). A state whose claims the source could not
@@ -590,14 +592,6 @@ func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim
 	if s.callerPod == nil {
 		return state
 	}
-	// A state with no update round on any claim view, no memory group on any issue and no gated
-	// step on any root is the body every contract reads, so it is served as it is with no scan of
-	// the claims: that is every request of a deployment whose design gate is off and whose
-	// project draws no memory.
-	rounds, memory, steps := carriesUpdateRounds(state), carriesMemory(state), carriesGatedSteps(state)
-	if !rounds && !memory && !steps {
-		return state
-	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return state
@@ -606,17 +600,27 @@ func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim
 	if !inPod {
 		return state
 	}
+	// Before treeContract, a state with no update round on any claim view and no memory group on
+	// any issue was the body every contract reads, and was served without looking at the claims
+	// at all. There is no such body since: the admission block writes `trees` on every one of
+	// them (carriesTrees), so a caller in a pod has its contract read for every state request.
+	// What a downgrade would strip is looked for only once the contract that needs it is known,
+	// so a caller at this contract — every caller, outside the window in which a pod of the
+	// contract before it is still being replaced — costs no scan of the issues.
 	contract := podContract(claims, pod)
 	if contract == 0 {
 		return state
 	}
-	if rounds && contract < supervise.PodUpdateContract {
+	if contract < supervise.PodUpdateContract && carriesUpdateRounds(state) {
 		state = withoutUpdateRounds(state)
 	}
-	if memory && contract < memoryContract {
+	if contract < memoryContract && carriesMemory(state) {
 		state = withoutMemory(state)
 	}
-	if steps && contract < gatedStepsContract {
+	if contract < treeContract && carriesTrees(state) {
+		state = withoutTrees(state)
+	}
+	if contract < gatedStepsContract && carriesGatedSteps(state) {
 		state = withoutGatedSteps(state)
 	}
 	return state
@@ -627,10 +631,16 @@ func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim
 // `memoryGroup`, `memoryDrawMode` and `memoryDrawnAt` and refuses the whole body for one of them.
 const memoryContract = 49
 
+// treeContract is the daemon contract that made the admission cap count the issues at work rather
+// than the trees (version.go's 51), which added `admission.trees`, the root of every live tree,
+// and each issue's `tree`, its own tree's root: a plugin before it reads the state with a strict
+// schema that knows neither key and refuses the whole body for one of them.
+const treeContract = 51
+
 // gatedStepsContract is the daemon contract that added the issues' gated steps to the state
-// (version.go's 50): a plugin before it reads the state with a strict schema that knows no
+// (version.go's 52): a plugin before it reads the state with a strict schema that knows no
 // `gatedSteps` and refuses the whole body for it.
-const gatedStepsContract = 50
+const gatedStepsContract = 52
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -657,6 +667,15 @@ func carriesMemory(state State) bool {
 	}
 	return false
 }
+
+// carriesTrees is whether state carries either key treeContract added: `admission.trees` or an
+// issue's `tree`. It carries `admission.trees` whatever the daemon holds, since the admission
+// block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
+// strict reader before the contract refuses the empty key as surely as one naming a tree. So this
+// is true of every state the route writes; it is asked beside carriesUpdateRounds and
+// carriesMemory all the same, because stateFor puts the same question to each and because a
+// later contract that stops writing `trees` on every body answers it here.
+func carriesTrees(State) bool { return true }
 
 // carriesGatedSteps is whether any issue of state carries the deployment's gated steps.
 func carriesGatedSteps(state State) bool {
@@ -731,6 +750,23 @@ func withoutMemory(state State) State {
 	issues := make(map[string]Issue, len(state.Issues))
 	for key, issue := range state.Issues {
 		issue.MemoryGroup, issue.MemoryDrawMode, issue.MemoryDrawnAt = "", "", nil
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
+
+// withoutTrees is state with no `admission.trees` and no issue carrying `tree`, the two keys
+// treeContract added to the state. Nothing else of that contract is a key of its own: `active`
+// and `waiting` keep their names and count issues rather than trees, which no downgrade can
+// carry, and which the boot gate and `legion probe-image` keep a plugin of the contract before
+// this one from reading (version.go's 51). The admission block is a value of the state's own and
+// the issue map is copied, so the state the source answered is left as it was.
+func withoutTrees(state State) State {
+	state.Admission.Trees, state.Admission.treesHidden = nil, true
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.Tree = ""
 		issues[key] = issue
 	}
 	state.Issues = issues

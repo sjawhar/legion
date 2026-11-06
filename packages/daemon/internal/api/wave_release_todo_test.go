@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -41,7 +42,7 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{engine}, Dispatch: statuses,
+		Handlers: []intake.Handler{engine, admit.New(records, engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: statuses,
 	}).Handler
 	root, child := "LEGION-208", "LEGION-209"
 	approved := 1
@@ -54,6 +55,7 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
+	h.openTree(t, testProject, root)
 	statuses.issues = map[string]dispatch.Issue{
 		root:  {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
 		child: {Key: child, ResolvedRepo: "acme/widgets", Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
@@ -112,7 +114,7 @@ func TestWaveReleaseNamesTheRepositoryReadThatFailed(t *testing.T) {
 				Steps:      config.DesignGateRootIssues.Steps(),
 				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 				Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-				Handlers: []intake.Handler{engine}, Dispatch: statuses,
+				Handlers: []intake.Handler{engine, admit.New(records, engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: statuses,
 				PrepareRepository: func(_ context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
 					return issue, tc.failure
 				},
@@ -124,6 +126,7 @@ func TestWaveReleaseNamesTheRepositoryReadThatFailed(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("seed the live tree: %v", err)
 			}
+			h.openTree(t, testProject, root)
 			statuses.issues = map[string]dispatch.Issue{
 				root:  {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
 				child: {Key: child, ResolvedRepo: "acme/widgets", Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
@@ -183,7 +186,7 @@ func newUnreadRelease(t *testing.T, issues ...dispatch.Issue) *unreadRelease {
 		Steps:      config.DesignGateOff.Steps(),
 		Supervisor: u.h.supervisor, BootTokens: u.h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: u.h.store, Grants: credential.New(nil), Pool: u.h.store.Pool(), Record: u.records,
-		Handlers: []intake.Handler{u.engine}, Dispatch: u.statuses,
+		Handlers: []intake.Handler{u.engine, admit.New(u.records, u.engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: u.statuses,
 		RepositoryUnread: func(resolved string) bool { return resolved == "zeta/tools" && u.unread.Load() },
 		AwaitRecovery: func(repo, tree, child, _ string) {
 			u.awaited = append(u.awaited, repo+" "+tree+" "+child)
@@ -195,6 +198,7 @@ func newUnreadRelease(t *testing.T, issues ...dispatch.Issue) *unreadRelease {
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
+	u.h.openTree(t, testProject, unreadRoot)
 	u.statuses.issues = map[string]dispatch.Issue{unreadRoot: {Key: unreadRoot, ResolvedRepo: "acme/widgets", Status: "in_progress"}}
 	for _, issue := range issues {
 		u.statuses.issues[issue.Key] = issue
@@ -415,7 +419,7 @@ func TestWaveReleaseRecordsATodoChildOfAChildTheSameWaveReleases(t *testing.T) {
 				Steps:      config.DesignGateRootIssues.Steps(),
 				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 				Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-				Handlers: []intake.Handler{engine}, Dispatch: statuses,
+				Handlers: []intake.Handler{engine, admit.New(records, engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: statuses,
 			}).Handler
 			h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
@@ -423,6 +427,7 @@ func TestWaveReleaseRecordsATodoChildOfAChildTheSameWaveReleases(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("seed the live tree: %v", err)
 			}
+			h.openTree(t, testProject, root)
 			statuses.issues = map[string]dispatch.Issue{
 				root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
 				parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
@@ -459,7 +464,7 @@ func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testi
 		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{engine}, Dispatch: statuses,
+		Handlers: []intake.Handler{engine, admit.New(records, engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: statuses,
 	}).Handler
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
 	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})

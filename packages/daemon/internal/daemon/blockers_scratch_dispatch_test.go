@@ -78,8 +78,13 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	cfg.Project = "B" + randomSuffix(t)[:9]
 	cfg.Projects = map[string]config.Project{cfg.Project: {}}
 	cfg.PostgresDSN = blockersDatabase(t)
-	// Three slots for three roots, so the slot the blocked root does not take stands visibly free.
-	cfg.AdmissionCap = 3
+	// The cap counts the issues at work, not the trees (dispatch://INFRA-980), and this run puts
+	// ten issues of one project through the workflow, a tree's children among them. It is set
+	// above every count this run reaches so that no step here is ever the cap's doing: the slot
+	// the blocked root of step 1 does not take stands free because its link holds it, and the
+	// child of step 4 starts at its release because it reaches the front of a line nothing is
+	// waiting in. Each step that needs a free slot says so against the cap itself.
+	cfg.AdmissionCap = 16
 	// The controller tick admits a root whose blocker is done whatever the event did, so it must
 	// not be what step 6 sees: an hour before the runtime's first tick (o.controllerFirstWake,
 	// below) and an hour between ticks mean this run applies no tick at all.
@@ -617,7 +622,7 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 	notices = childStatusNotices(t, pool, unlinked)
 	t.Logf("the child-status notices the daemon queued on %s for its tree's architect: %q", unlinked, notices)
-	wantNotice = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", unlinked, free)
+	wantNotice = fmt.Sprintf("%s starts planning under %s: it reached the front of the waiting line and took an admission slot", unlinked, free)
 	if !slices.Equal(notices, []string{wantNotice}) {
 		t.Fatalf("Legion started the held child %s once a person took its links off and queued its tree's architect the child-status "+
 			"notices %q; want the one reading %q: a start nobody hears of is the silence the hold's report exists to remove\nstate %s",

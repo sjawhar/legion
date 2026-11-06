@@ -28,7 +28,7 @@ func (e *Engine) relayParkedDecision(ctx context.Context, tx pgx.Tx, key, ask st
 	if err != nil || root == nil {
 		return err
 	}
-	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "")
+	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "", e.cfg.Steps)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, ste
 		if root == nil {
 			continue
 		}
-		hears, err := ArchitectHears(ctx, tx, store, *root)
+		hears, err := ArchitectHears(ctx, tx, store, *root, steps)
 		if err != nil {
 			return err
 		}
@@ -232,15 +232,16 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, ste
 
 // ArchitectHears says whether root has an architect to hear a person's decision now: it is its
 // tree's root, it does not linger, it has not left the workflow, and it does not wait in `todo`
-// for an admission slot (record.WaitsForSlot). It is the one reading of that question the daemon
+// for an admission slot (record.WaitsForSlot, read with steps, the design-gate steps the
+// deployment gates). It is the one reading of that question the daemon
 // has, so the hand-over of what a row named (HandOverKept) and the hold of a root architect's task
 // that names decisions (supervise's Deps.RootHears, the daemon's rootHears) never drift: a root
 // that hears is told at once, and one that does not keeps what it is owed until it runs again.
-func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root record.Issue) (bool, error) {
+func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root record.Issue, steps []record.DesignStep) (bool, error) {
 	if !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return false, nil
 	}
-	waits, err := record.WaitsForSlot(ctx, tx, store, root)
+	waits, err := record.WaitsForSlot(ctx, tx, store, root, steps)
 	return !waits, err
 }
 

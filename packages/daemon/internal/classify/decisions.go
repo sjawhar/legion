@@ -1348,25 +1348,21 @@ func ApprovalFollows(gate record.DesignGate, version int, mark record.EventMark)
 	return approved > version || approved == version && !mark.After(gate.ApprovedMark)
 }
 
-// DesignGateOpen reports whether a human approved the gate's current document version. It answers
-// one step's question; the deployment's whole list is DesignGatesOpen.
+// DesignGateOpen reports whether a human approved the gate's current document version. It
+// answers one step's question; the deployment's whole list is DesignGatesOpen. It is
+// record.GateOpen, where the rule lives because the record package needs it too and may not read
+// this one, and it keeps its name here because every decision in this file is named this way.
 func DesignGateOpen(gate record.DesignGate) bool {
-	return gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
+	return record.GateOpen(gate)
 }
 
 // RequiredSteps is the steps a root must hold an open gate at before its tree works: the steps
 // the deployment gates, in the order it names them, or the single step spec when it gates none.
-//
-// The empty list keeps its own hold. A deployment that gates no step asks no person to approve
-// anything, and its registration opens the gate at once; but the registration itself is still
-// what says the architect has written the spec, and a rule reading "every gated step is open"
-// would be true of a tree whose architect had registered nothing and would start it. So the
-// empty list requires the spec step's record, which the registration writes and opens in one act.
+// It is record.RequiredSteps, where the rule lives because the record package needs it too and
+// may not read this one, and it keeps its name here because every reader of a step list in this
+// file reads it through this name.
 func RequiredSteps(configured []record.DesignStep) []record.DesignStep {
-	if len(configured) == 0 {
-		return []record.DesignStep{record.DesignStepSpec}
-	}
-	return configured
+	return record.RequiredSteps(configured)
 }
 
 // DesignGatesOpen reports whether gates, every design gate an issue holds by its step, lets the

@@ -441,8 +441,11 @@ func TestAHandedOverChildsMemoryDoesNotTurnOnWhichRootIsPromotedFirst(t *testing
 // handOverChild records child in root's tree, signs root off, and hands child to Legion as a tree
 // of its own at at, the hour of the hand-over, which is where every test of a hand-over above
 // starts. The child is recorded carrying no memory of its own, as every child of a tree is, since
-// only a tree's root carries the group; the record the hand-over leaves says which tree it left
-// (record.Issue.HandedOverFrom) and carries whatever that hand-over settled, which this returns.
+// only a tree's root carries the group; the record the hand-over leaves is a tree of its own
+// carrying whatever that hand-over settled, which this returns. It is checked on the tree alone:
+// the hand-over writes the tree it left (record.Issue.HandedOverFrom), and the promotion that
+// opens the new root's own tree clears that mark in the same pass, so what the mark holds here
+// turns on whether a slot was free for the child, which is no part of what a carry settles.
 func handOverChild(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler,
 	root, child, rank string, at time.Time) record.Issue {
 	t.Helper()
@@ -458,7 +461,7 @@ func handOverChild(t *testing.T, pool *pgxpool.Pool, admission *Admission, engin
 	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
 		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: rank, HandedOver: handed}, engine)
 	handedOver := issue(t, pool, child)
-	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
+	if handedOver.Tree != child {
 		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
 	}
 	return handedOver

@@ -528,7 +528,7 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 			hears = err == nil
 			return err
 		}
-		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root)
+		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root, w.gatedSteps)
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)

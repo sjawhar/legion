@@ -49,13 +49,16 @@ The tree's work starts when every step the sentence names is open, so run the ar
 once for each of them, each on that step's own document. Under `Design gate steps: none.` write
 the spec and register it with `register_gate` at its current version, with no `step` and no
 approval step: do not request approval and do not wait for `design-approved`; the gate opens at
-registration.
+registration. File every child of your decomposition before that registration, since the gate's
+opening starts the root's own first phase unless Dispatch shows an open child under it.
 
 ## The armed gate
 
-Run this exact sequence for each gated step, before the tree's work starts. One approval request
-covers the `criteria` and the `spec` step together (step 4), and each of them is registered on its
-own document (step 5); the `decisions` step is a request of its own.
+Run this exact sequence for each gated step, before the tree's work starts, with every child of
+your decomposition filed before step 4, since the gate's opening starts the root's own first
+phase unless Dispatch shows an open child under it. One approval request covers the `criteria`
+and the `spec` step together (step 4), and each of them is registered on its own document
+(step 5); the `decisions` step is a request of its own.
 
 1. Extend the primary document in place:
 
@@ -164,19 +167,20 @@ review was of: `gatedSteps` carries one entry for each gated step, with its `art
 `changes_requested`) and the `changesReason` of a step whose reviewer asked for changes. That
 list, and not the notice, says which steps are open and which still hold the tree's work.
 
-Then end your turn. The registrations hand those documents to the human: when nothing else holds
-the slot, the root returns its admission slot and waits on its design gate (`awaiting_person`), as
-a root question handed to the human does ("Every turn" in `skill://legion-architect/SKILL.md`).
-Stay live to read the human's comments and replies. Their approval or changes request delivers
-your next task, and so does a newer spec version once Dispatch shows the request back on your
-turn. While the root waits on a question instead, the human's approval or changes request of the
-spec answers that wait too, and the task says how the spec stands. Release no wave until every
-gated step is open: a delivered wake shows `design-approved` on the root, or a task says its
-design gate is open, and under more than one step `gatedSteps` in your record shows each one
-`approved`. The daemon sends a root waiting on a person no `design-approved` notice, and
-"this resume is your design-approved wake" is that wake. On `design-changes-requested`: revise the
-document that step records as the human's reason asks, run step 3's two reviews on the new
-version, resolve every finding, request approval again and end your turn. A
+Then end your turn. The registrations hand those documents to the human: when nothing else of the
+tree is at work, the root returns its admission slot and waits on its design gate
+(`awaiting_person`), as a root question handed to the human does ("Every turn" in
+`skill://legion-architect/SKILL.md`). Stay live to read the human's comments and replies. Their
+approval or changes request delivers your next task, and so does a newer spec version once
+Dispatch shows the request back on your turn. While the root waits on a question instead, the
+human's approval or changes request of the spec answers that wait too, and the task says how the
+spec stands. Release no wave until every gated step is open: a delivered wake shows
+`design-approved` on the root, or a task says its design gate is open, and under more than one
+step `gatedSteps` in your record shows each one `approved`. The daemon sends a root waiting on a
+person no `design-approved` notice, and "this resume is your design-approved wake" is that wake.
+On `design-changes-requested`: revise the document that step records as the human's reason asks,
+run step 3's two reviews on the new version, resolve every finding, request approval again and
+end your turn. A
 `design-changes-requested` may name a version below the latest, or arrive after another for the
 same version: it is a request the human made that reached the daemon late, and no approval came
 after it. Each request arrives once. The gate is as the newest review left it; still read the

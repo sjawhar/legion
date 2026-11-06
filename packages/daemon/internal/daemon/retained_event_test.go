@@ -103,7 +103,13 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 				if err := records.PutIssue(ctx, tx, root); err != nil {
 					return err
 				}
-				return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()})
+				if err := records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()}); err != nil {
+					return err
+				}
+				// The tree runs, which its open lifecycle is what says (record.TreeLive): without
+				// it admission would find a root at a running status with no tree of it running
+				// and take it out (admit's unslotted), which is not the fence this test is about.
+				return openTreeTx(ctx, tx, "LEGION", root.Tree)
 			}); err != nil {
 				t.Fatal(err)
 			}

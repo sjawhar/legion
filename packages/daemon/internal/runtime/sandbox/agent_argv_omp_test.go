@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
@@ -49,6 +50,7 @@ func TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands(t *testing.
 	testbin.OMPHome(t, omp, home)
 	initialise := exec.Command("git", "init", "--quiet", repo)
 	initialise.Dir = repo
+	initialise.Env = fixtureenv.Isolated(home)
 	if out, err := initialise.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
