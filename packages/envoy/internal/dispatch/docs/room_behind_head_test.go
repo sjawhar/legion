@@ -1,0 +1,2140 @@
+package docs
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
+	"github.com/reearth/ygo/provider/websocket"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
+)
+
+// Two envoy-dispatch processes serve one Postgres, and a room resident in one of them takes the
+// updates the other appends only through its catch-up (catchUpRoom, room_catch_up_test.go), so
+// between that append and its catch-up the room stands behind the durable head. Everything a
+// process renders from such a room - a settlement's version and its ask reconciliation, an
+// upload's replacement, an agent's edit - would be written over text that process has not seen,
+// so every derived write is refused while the room's cursor is not the durable head
+// (ErrRoomBehindHead, appendDerived): a settlement catches the room up under its lock first, and a
+// write that can be made on the stored document instead is (coldFork). A browser's own delta is
+// admitted from such a room (appendBrowser). A room whose stored history was replaced under it is
+// closed and reloaded. The tests here drive each of those paths through two services on one
+// database, as production's two tasks are; none of them runs room sync, so a room catches up only
+// where a test or a settlement makes it.
+
+// roomBehind reports whether service's room for artifactID stands behind the document's head.
+func roomBehind(t *testing.T, service *Service, artifactID string) bool {
+	t.Helper()
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("no room is resident")
+	}
+	cursor := service.cursorOf(live)
+	if cursor == nil {
+		t.Fatal("the resident room lists no cursor")
+	}
+	return cursor.heldThrough() != storedHead(t, service.store, artifactID)
+}
+
+// storedHead is the document's durable head, the version its stored history stands at.
+func storedHead(t *testing.T, database *store.Store, artifactID string) int64 {
+	t.Helper()
+	var head int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
+	`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the document's head: %v", err)
+	}
+	return head
+}
+
+// storedMarkdown is the stored document's rendering, the one every reload of it reads.
+func storedMarkdown(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	markdown, err := renderTree(persistedProofTree(t, database, artifactID))
+	if err != nil {
+		t.Fatalf("render the stored document: %v", err)
+	}
+	return markdown
+}
+
+// latestVersionOf is the document's latest version: its markdown and the update cursor it records,
+// past which a later settlement looks for content changes (contentChangedSinceVersion).
+func latestVersionOf(t *testing.T, database *store.Store, artifactID string) (markdown string, cursor int64) {
+	t.Helper()
+	if err := database.Pool.QueryRow(context.Background(), `
+		select markdown, doc_update_version from artifact_versions
+		where artifact_id = $1 order by number desc limit 1
+	`, artifactID).Scan(&markdown, &cursor); err != nil {
+		t.Fatalf("read the latest version: %v", err)
+	}
+	return markdown, cursor
+}
+
+// requireRoomStillWrites fails unless service's room can still make a durable write: a browser's
+// edit on it reaches the store. The gate refuses the append of a room whose stored history was
+// replaced, so this shows a room left unable to write. A room that stood at the head before the
+// edit must stand there after it too: an append its cursor missed leaves the room behind, refusing
+// its every derived write, until a catch-up reads back from the store an update the room already
+// holds.
+func requireRoomStillWrites(t *testing.T, service *Service, artifactID string, connection uint64) {
+	t.Helper()
+	text := fmt.Sprintf("Writing again as peer %d.", connection)
+	before := storedHead(t, service.store, artifactID)
+	atHead := service.srv.GetDoc(artifactID) != nil && !roomBehind(t, service, artifactID)
+	editAsConnectedPeer(t, service, artifactID, connection,
+		model.Actor{Kind: "user", ID: fmt.Sprintf("peer-%d", connection)}, appendBlocks(t, text+"\n"))
+	deadline := time.Now().Add(roomWait(t))
+	for time.Now().Before(deadline) {
+		if strings.Contains(storedMarkdown(t, service.store, artifactID), text) {
+			if head := storedHead(t, service.store, artifactID); head <= before {
+				t.Fatalf("the room's edit is stored at head %d, want one past %d", head, before)
+			}
+			waitForLandedAppends(t, service, artifactID)
+			if atHead && roomBehind(t, service, artifactID) {
+				t.Fatal("the room stood at the head before its edit and behind it after: its cursor missed its own append")
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the room's edit %q never reached the store (room failure: %v): its append was refused",
+		text, service.roomFailure(artifactID))
+}
+
+// A settlement from a room behind the head catches that room up under the document's lock it
+// holds, and the room stays: the same instance, not failed, at the head. The rows it applied are a
+// content change, which arms the settlement again, so this one writes no version and clears no
+// pending settlement, and the one it armed versions every update, this process's and the other's,
+// at the head, crediting the other process's author. Without the gate task A's settlement would
+// version its own room's text alone, record doc_update_version at a head that includes task B's
+// update, and delete the doc_settlements_pending row that says the work is still owed: task B's
+// words would then be past no cursor any later settlement looks behind (corruptions 1 and 2 of the
+// two-process audit). Without the catch-up the refusal could only close the room, or count
+// failures against it until it failed.
+func TestASettlementFromARoomBehindTheHeadCatchesItUpAndTheNextSettlesBoth(t *testing.T) {
+	pair := newProcessPair(t)
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	// Task A's room has an unversioned change of its own, so a settlement of it writes a version;
+	// then task B's edit leaves it behind the head.
+	editAsConnectedPeer(t, pair.taskA, pair.artifactID, 1, alice, appendBlocks(t, "Alice's paragraph.\n"))
+	waitForLandedAppends(t, pair.taskA, pair.artifactID)
+	pair.leaveTaskABehind(t, 2, bob, "Bob's paragraph.\n")
+	versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+		t.Fatalf("the settlement failed task A's room: %v", err)
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("the settlement replaced task A's room rather than catching it up")
+	}
+	if roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("task A's room is still behind the head after its settlement")
+	}
+	if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+		markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+		t.Fatalf("the settlement that caught its room up wrote version %d: %q at cursor %d", now, markdown, cursor)
+	}
+	if owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID); err != nil || !owed {
+		t.Fatalf("the document owes a settlement = %v (%v), want true", owed, err)
+	}
+
+	pair.taskA.settle = 20 * time.Millisecond
+	pair.taskA.scheduleSettle(pair.artifactID)
+	waitFor(t, 30*time.Second, "the settlement the catch-up armed to settle the document", func() bool {
+		owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+		return err == nil && !owed
+	})
+	if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions+1 {
+		t.Fatalf("latest version = %d after the armed settlement, want %d", now, versions+1)
+	}
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Alice's paragraph.", "Bob's paragraph."} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("the settled version = %q, want it to hold %q", markdown, want)
+		}
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+		t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+	}
+	if authors := latestVersionAuthors(t, pair.taskA, pair.artifactID); !slices.Contains(authors, bob) || !slices.Contains(authors, alice) {
+		t.Fatalf("the settled version lists %+v, want %s and %s", authors, alice.ID, bob.ID)
+	}
+	if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+		t.Fatalf("task A's room failed: %v", err)
+	}
+}
+
+// A settlement from a room behind the head keeps its room, catches it up and writes no version
+// while this process still has work in flight on it - an open live write, which arms the
+// settlement when it ends, or an append the room's persistence has not stored, whose settlement is
+// armed again - and once the work is done the document settles both processes' text at the head.
+// A shutdown's settlement catches its room up and settles it then and there, since nothing about
+// the room is left for the next process.
+func TestASettlementFromARoomBehindTheHeadKeepsItsRoomWithWorkInFlightOnIt(t *testing.T) {
+	for _, inFlight := range []struct {
+		name string
+		// hold puts the work in flight before the settlement and returns what ends it, nil for
+		// work that leaves the settlement to version the document itself.
+		hold func(t *testing.T, pair processPair) (end func())
+	}{
+		{"an open live write", func(t *testing.T, pair processPair) func() {
+			write, err := pair.taskA.openLiveWrite(context.Background(), &Ledger{}, pair.artifactID)
+			if err != nil {
+				t.Fatalf("open a live write on task A's room: %v", err)
+			}
+			return func() { pair.taskA.finishLiveWrite(write) }
+		}},
+		{"an append its persistence has not stored", func(t *testing.T, pair processPair) func() {
+			// After the settlement's own wait for durable appends, before its gate: an append
+			// that starts there is the one this branch is for.
+			var once sync.Once
+			var state *roomState
+			pair.taskA.afterSettleLock = func(room string) {
+				once.Do(func() {
+					state = pair.taskA.room(room)
+					state.durableAppends.Add(1)
+				})
+			}
+			return func() {
+				if state == nil {
+					t.Fatal("the settlement never reached its gate, so no append was put in flight")
+				}
+				state.durableAppends.Add(-1)
+			}
+		}},
+		{"a shutdown", func(t *testing.T, pair processPair) func() {
+			pair.taskA.shutdownRooms.Store(pair.artifactID, struct{}{})
+			t.Cleanup(func() { pair.taskA.shutdownRooms.Delete(pair.artifactID) })
+			return nil
+		}},
+	} {
+		t.Run(inFlight.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+			pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+			versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+			room := pair.taskA.srv.GetDoc(pair.artifactID)
+			pair.taskA.settle = 20 * time.Millisecond
+			end := inFlight.hold(t, pair)
+
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+			if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+				t.Fatal("the settlement closed task A's room")
+			}
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("the settlement failed task A's room: %v", err)
+			}
+			if roomBehind(t, pair.taskA, pair.artifactID) {
+				t.Fatal("task A's room is still behind the head after its settlement")
+			}
+			if end != nil {
+				if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+					t.Fatalf("task A's settlement wrote version %d with work in flight on its room", now)
+				}
+				end()
+			}
+			waitFor(t, 30*time.Second, "the document to settle", func() bool {
+				owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+				return err == nil && !owed
+			})
+			if markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID); !strings.Contains(markdown, "Bob's paragraph.") ||
+				cursor != storedHead(t, pair.database, pair.artifactID) {
+				t.Fatalf("the settled version = %q at cursor %d, want Bob's paragraph at the head %d",
+					markdown, cursor, storedHead(t, pair.database, pair.artifactID))
+			}
+		})
+	}
+}
+
+// A close of a room whose stored history was replaced - a settlement's, or the catch-up's - refuses
+// a write that would open on that room between the check that found no write in flight and the
+// close: the close forgets the room's state, so the write would be forgotten with it, and the room
+// that replaces it would load knowing nothing of the write while the write's commit moved that
+// room's cursor past its update, so a version read from it would record text missing the write
+// at a cursor claiming to hold it. The write answers 503, and once the room has reloaded the same
+// write is made and stored.
+func TestAWriteOpeningWhileAReplacedRoomClosesIsRefused(t *testing.T) {
+	for _, closer := range []struct {
+		name  string
+		close func(t *testing.T, pair processPair)
+	}{
+		{"a settlement", func(t *testing.T, pair processPair) {
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+		}},
+		{"the catch-up", func(t *testing.T, pair processPair) {
+			pair.taskA.catchUps.catchUp(context.Background(), pair.artifactID)
+		}},
+	} {
+		t.Run(closer.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.replaceTaskAsHistory(t)
+			agent := model.Actor{Kind: "session", ID: "agent-session"}
+			insert := []model.EditOp{{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."}}
+			var windowErr error
+			var reached atomic.Bool
+			pair.taskA.afterRoomCloseReserved = func(room string) {
+				if room == pair.artifactID && reached.CompareAndSwap(false, true) {
+					_, windowErr = joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil)
+				}
+			}
+
+			closer.close(t, pair)
+			if !reached.Load() {
+				t.Fatal("the close never reserved task A's room")
+			}
+			if !errors.Is(windowErr, errRoomReloading) {
+				t.Fatalf("a write opened as the room closed = %v, want errRoomReloading", windowErr)
+			}
+			if strings.Contains(storedMarkdown(t, pair.database, pair.artifactID), "Agent's paragraph.") {
+				t.Fatal("the refused write reached the store")
+			}
+			if _, err := joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil); err != nil {
+				t.Fatalf("the write once the room has reloaded: %v", err)
+			}
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("task A's room failed: %v", err)
+			}
+			commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "versioner-a"})
+			markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+			for _, want := range []string{"Bob's paragraph.", "Agent's paragraph."} {
+				if !strings.Contains(markdown, want) {
+					t.Fatalf("the version after the reload = %q, want it to hold %q", markdown, want)
+				}
+			}
+			if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+				t.Fatalf("the version after the reload records update cursor %d, want the head %d", cursor, head)
+			}
+		})
+	}
+}
+
+// The close of a replaced history closes the room instance it found on that history and no other:
+// once that instance has been replaced - a settlement's own reload, or any other close and load -
+// the room the document holds loaded at the head, and closing it by name would drop its browsers
+// for nothing and take a write opening on it with it.
+func TestACloseOfAReplacedHistoryClosesOnlyTheRoomItChecked(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.replaceTaskAsHistory(t)
+	stale := pair.taskA.srv.GetDoc(pair.artifactID)
+	if err := pair.taskA.Evict(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("evict task A's room: %v", err)
+	}
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("reload task A's room: %v", err)
+	}
+	replacement := pair.taskA.srv.GetDoc(pair.artifactID)
+
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
+	if err != nil || closed {
+		t.Fatalf("close the replaced room = %v, %v, want false and no error", closed, err)
+	}
+	if live := pair.taskA.srv.GetDoc(pair.artifactID); live != replacement {
+		t.Fatal("the close of the replaced instance closed the room that replaced it")
+	}
+	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+}
+
+// A close of a room whose stored history was replaced - a settlement's, or the catch-up's - closes
+// the instance it checked and no other, however that instance goes before the close reaches it.
+// ygo's idle sweep retires a room without the close gate, so the room can be retired, and a
+// browser's or a read's load can replace it at the head, after the close checked it and before
+// ygo looks the room up by name: ygo's CloseRoom then closed the replacement, dropping its
+// browsers, and the reservation stayed on the state the replacement loaded onto, refusing every
+// write on it as reloading. The replacement stays open and writable, and the document settles.
+func TestACloseOfAReplacedRoomLeavesTheRoomThatReplacedIt(t *testing.T) {
+	for _, closer := range []struct {
+		name  string
+		close func(t *testing.T, pair processPair)
+	}{
+		{"a settlement", func(t *testing.T, pair processPair) {
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+		}},
+		{"the catch-up", func(t *testing.T, pair processPair) {
+			pair.taskA.catchUps.catchUp(context.Background(), pair.artifactID)
+			// The room no longer holds the instance the close checked, and what replaced it loaded
+			// at the head after that check, so the catch-up has its answer and arms no retry.
+			if wake := pair.taskA.catchUps.wakeIn(); wake != 0 {
+				t.Fatalf("the close of a replaced room left a retry armed (wakeIn = %s) for a room at the head", wake)
+			}
+		}},
+	} {
+		t.Run(closer.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.replaceTaskAsHistory(t)
+			pair.taskA.settle = 20 * time.Millisecond
+			var replacement *crdt.Doc
+			var reached atomic.Bool
+			pair.taskA.afterRoomCloseReserved = func(room string) {
+				if room != pair.artifactID || !reached.CompareAndSwap(false, true) {
+					return
+				}
+				// ygo's idle sweep, which takes no close gate, retires the room, and a load brings
+				// the document back at the head.
+				if err := pair.taskA.srv.Server.CloseRoom(room, true); err != nil {
+					t.Errorf("retire task A's room as the idle sweep does: %v", err)
+					return
+				}
+				if err := pair.taskA.warmLiveDocument(context.Background(), room); err != nil {
+					t.Errorf("load the room that replaces it: %v", err)
+					return
+				}
+				replacement = pair.taskA.srv.GetDoc(room)
+			}
+
+			closer.close(t, pair)
+			if !reached.Load() {
+				t.Fatal("the close never reserved task A's room")
+			}
+			if replacement == nil {
+				t.Fatal("no room replaced the one the sweep retired")
+			}
+			if live := pair.taskA.srv.GetDoc(pair.artifactID); live != replacement {
+				t.Fatal("the close of the retired room closed the room that replaced it")
+			}
+			agent := model.Actor{Kind: "session", ID: "agent-session"}
+			insert := []model.EditOp{{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."}}
+			if _, err := joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil); err != nil {
+				t.Fatalf("a write on the room that replaced the closed one: %v", err)
+			}
+			waitFor(t, 30*time.Second, "the document to settle on the room that replaced the closed one", func() bool {
+				owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+				return err == nil && !owed
+			})
+			markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+			for _, want := range []string{"Bob's paragraph.", "Agent's paragraph."} {
+				if !strings.Contains(markdown, want) {
+					t.Fatalf("the settled version = %q, want it to hold %q", markdown, want)
+				}
+			}
+			if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+				t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+			}
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("task A's room failed: %v", err)
+			}
+			requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+		})
+	}
+}
+
+// The close of a room whose stored history was replaced is the service's own, so a closed issue
+// does not refuse it. The close runs inside a Server.Apply, and an injection a browser or an agent
+// makes is refused once the document's issue is closed (allowInject): without the service's own
+// mark on that context (withOwnerVerified), the close of a room whose issue closed between its load
+// and the notification was refused ErrIssueClosed, and the room stayed resident with text the
+// store no longer holds until its idle minute ran out. The issue closes in the database alone
+// here, as a room this process holds sees an issue the other process closed.
+func TestACloseOfAReplacedRoomIsNotRefusedByItsClosedIssue(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.replaceTaskAsHistory(t)
+	stale := pair.taskA.srv.GetDoc(pair.artifactID)
+	if _, err := pair.database.Pool.Exec(context.Background(),
+		`update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close the document's issue: %v", err)
+	}
+
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
+	if err != nil {
+		t.Fatalf("close the closed issue's replaced room: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the closed issue's replaced room closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// A close that fails lifts the reservation it took. The reservation refuses every transaction the
+// room's writer slot (openLiveWrite, errRoomReloading), so a close that returned without lifting
+// it would leave a resident room answering 503 to every write until it unloaded - and a connected
+// browser keeps it resident, so that is an outage a person sees rather than one access. The close
+// is made to fail here as a rebuild makes it fail: a rebuild holds the document and refuses every
+// injection into its room, the one refusal the close's own mark does not pass (refuseIfRebuilding).
+func TestACloseOfAReplacedRoomThatFailsLiftsItsReservation(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.replaceTaskAsHistory(t)
+	stale := pair.taskA.srv.GetDoc(pair.artifactID)
+	var reserved atomic.Bool
+	pair.taskA.afterRoomCloseReserved = func(room string) {
+		if room == pair.artifactID && reserved.CompareAndSwap(false, true) {
+			pair.taskA.rebuilding.Store(room, struct{}{})
+		}
+	}
+
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
+	pair.taskA.rebuilding.Delete(pair.artifactID)
+	if !reserved.Load() {
+		t.Fatal("the close never reserved task A's room")
+	}
+	if closed {
+		t.Fatal("the refused close reports that it closed the room")
+	}
+	if err == nil {
+		t.Fatal("the refused close reports no error")
+	}
+
+	// The room is the one the close failed to close, and its writer slot is open again: the
+	// reservation was lifted. The room's cursor is not the head, so the write takes the cold path
+	// rather than the room's, which is what a write on a reserved room is refused before reaching
+	// (errRoomReloading).
+	if live := pair.taskA.srv.GetDoc(pair.artifactID); live != stale {
+		t.Fatal("the refused close left another room behind")
+	}
+	state := pair.taskA.lockState(pair.artifactID)
+	reloading := state.reloading
+	pair.taskA.unlockState(pair.artifactID, state)
+	if reloading {
+		t.Fatal("the refused close left its reservation on the room, which refuses every write")
+	}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	insert := []model.EditOp{{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."}}
+	if _, err := joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil); err != nil {
+		t.Fatalf("a write after the refused close: %v", err)
+	}
+}
+
+// An open live write that starts after the catch-up found the history replaced, and before the
+// close takes the room's state lock, leaves the room open. The close reads it under the lock that
+// admits a writer (closeRoomBehindHead): without that read the close would retire the room under
+// a write whose commit still advances the replacement room's cursor, which is the stale-text-at-a-
+// head-cursor corruption the reservation exists to prevent. The room is left as it was found, and
+// the catch-up arms a retry of its own for it.
+func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.replaceTaskAsHistory(t)
+	live := pair.taskA.srv.GetDoc(pair.artifactID)
+	var opened atomic.Bool
+	pair.taskA.beforeCloseBehindHeadLock = func(room string) {
+		if room != pair.artifactID || !opened.CompareAndSwap(false, true) {
+			return
+		}
+		state := pair.taskA.lockState(room)
+		state.liveWriter = &liveWrite{}
+		pair.taskA.unlockState(room, state)
+	}
+
+	pair.taskA.catchUps.catchUp(context.Background(), pair.artifactID)
+	if !opened.Load() {
+		t.Fatal("the close never reached its state lock, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+		t.Fatal("the room was closed under the write in flight on it")
+	}
+	if wake := pair.taskA.catchUps.wakeIn(); wake <= 0 {
+		t.Fatalf("the attempt that found a write in flight armed no retry (wakeIn = %s)", wake)
+	}
+
+	// The write ends, and the same close closes the room: nothing else held it open.
+	state := pair.taskA.lockState(pair.artifactID)
+	state.liveWriter = nil
+	pair.taskA.unlockState(pair.artifactID, state)
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room once its write has ended: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the room whose write has ended closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// ygo closes no room another caller is inside: a browser's join, or an Apply - a write's publish,
+// a read loading the room. The close of a room whose stored history was replaced meets one as it
+// meets an open write: it closes nothing, arms a retry of the catch-up's own, lifts its
+// reservation, so the caller inside keeps the room it is in and a write after it is not refused,
+// and warns of nothing, since a browser joining the room is no fault. Once the caller has left,
+// the same close closes the room.
+func TestARoomOnAReplacedHistoryAnotherCallerIsInsideIsClosedOnceItLeaves(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.replaceTaskAsHistory(t)
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	live := pair.taskA.srv.GetDoc(pair.artifactID)
+	inside, leave := make(chan struct{}), make(chan struct{})
+	applied := make(chan error, 1)
+	go func() {
+		applied <- pair.taskA.srv.Apply(withOwnerVerified(context.Background()), pair.artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+			close(inside)
+			<-leave
+		})
+	}()
+	<-inside
+	leaveRoom := sync.OnceFunc(func() {
+		close(leave)
+		if err := <-applied; err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Errorf("the Apply inside the room: %v", err)
+		}
+	})
+	t.Cleanup(leaveRoom)
+
+	pair.taskA.catchUps.catchUp(context.Background(), pair.artifactID)
+	if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+		t.Fatal("the room was closed under the caller inside it")
+	}
+	if wake := pair.taskA.catchUps.wakeIn(); wake <= 0 {
+		t.Fatalf("the attempt that found a caller inside the room armed no retry (wakeIn = %s)", wake)
+	}
+	state := pair.taskA.lockState(pair.artifactID)
+	reloading := state.reloading
+	pair.taskA.unlockState(pair.artifactID, state)
+	if reloading {
+		t.Fatal("the close held off by a caller inside the room left its reservation, which refuses every write")
+	}
+	if warned := logs.String(); warned != "" {
+		t.Errorf("the close held off by a caller inside the room warned:\n%s", warned)
+	}
+
+	leaveRoom()
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room once the caller has left it: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the room the caller left closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// A replaced room that is already another close's is an answer for the catch-up, not an attempt to
+// try again: one that failed is closed and reloaded by its own eviction (evictFailed), and one a
+// settlement has reserved is closed by that close or has the settlement armed again on it
+// (reloadReplacedRoom). Either answers for the room, so the catch-up arms no retry for it.
+func TestAReplacedRoomThatIsAnotherClosesIsAnAnswerForTheCatchUp(t *testing.T) {
+	for _, other := range []struct {
+		name string
+		take func(t *testing.T, pair processPair, live *crdt.Doc) (finish func())
+	}{
+		{"its failure's own eviction", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			hold := make(chan struct{})
+			release := sync.OnceFunc(func() { close(hold) })
+			t.Cleanup(release)
+			pair.taskA.beforeFailedEviction = func(room string) {
+				if room == pair.artifactID {
+					<-hold
+				}
+			}
+			pair.taskA.failRoom(pair.artifactID, errors.New("test: the room failed"))
+			state := pair.taskA.lockExistingState(pair.artifactID)
+			done := state.failedDone
+			pair.taskA.unlockState(pair.artifactID, state)
+			return func() {
+				release()
+				select {
+				case <-done:
+				case <-time.After(roomWait(t)):
+					t.Fatal("the failed room's eviction never finished")
+				}
+			}
+		}},
+		{"a settlement's reservation", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			state := pair.taskA.lockState(pair.artifactID)
+			reservation, reserved := pair.taskA.reserveRoomCloseLocked(pair.artifactID, state, live)
+			pair.taskA.unlockState(pair.artifactID, state)
+			if !reserved {
+				t.Fatal("the room could not be reserved, so nothing here is tested")
+			}
+			return func() {
+				if _, err := pair.taskA.closeReservedRoom(context.Background(), reservation); err != nil {
+					t.Fatalf("make the reserved close: %v", err)
+				}
+			}
+		}},
+		{"its failure while the catch-up's close runs", func(t *testing.T, pair processPair, live *crdt.Doc) func() {
+			// The failure lands after the catch-up's close reserved the room and before its
+			// Apply, which the failure refuses (allowInject). That refusal is no fault of the
+			// close's: the failure's own eviction closes the room.
+			hold := make(chan struct{})
+			release := sync.OnceFunc(func() { close(hold) })
+			t.Cleanup(release)
+			pair.taskA.beforeFailedEviction = func(room string) {
+				if room == pair.artifactID {
+					<-hold
+				}
+			}
+			var done chan struct{}
+			var failed atomic.Bool
+			pair.taskA.afterRoomCloseReserved = func(room string) {
+				if room != pair.artifactID || !failed.CompareAndSwap(false, true) {
+					return
+				}
+				pair.taskA.failRoom(room, errors.New("test: the room failed under the catch-up's close"))
+				state := pair.taskA.lockExistingState(room)
+				done = state.failedDone
+				pair.taskA.unlockState(room, state)
+			}
+			return func() {
+				if !failed.Load() {
+					t.Fatal("the catch-up's close never reserved the room, so nothing here is tested")
+				}
+				release()
+				select {
+				case <-done:
+				case <-time.After(roomWait(t)):
+					t.Fatal("the failed room's eviction never finished")
+				}
+			}
+		}},
+	} {
+		t.Run(other.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.replaceTaskAsHistory(t)
+			live := pair.taskA.srv.GetDoc(pair.artifactID)
+			finish := other.take(t, pair, live)
+
+			pair.taskA.catchUps.catchUp(context.Background(), pair.artifactID)
+			if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+				t.Fatal("the room was closed before the other close ran, so nothing here is tested")
+			}
+			if wake := pair.taskA.catchUps.wakeIn(); wake != 0 {
+				t.Fatalf("the catch-up armed a retry (wakeIn = %s) for a room another close answers for", wake)
+			}
+
+			finish()
+			waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+		})
+	}
+}
+
+// A close reserved for one instance of a room does not answer for the instance that replaced it.
+// A settlement's close reserves the room and holds the reservation until its close returns; ygo
+// can retire the instance it checked meanwhile, and a browser's reconnect loads a replacement onto
+// the same record, whose writer slot that reservation refuses. When the other process then
+// replaces the stored history under the replacement too, the catch-up finds the record reserved.
+// Taken as an answer, that left the replacement to a settlement the reservation's close re-arms,
+// which does nothing once the document's issue has closed, and so to its reader leaving and the
+// idle minute. The catch-up tries it again instead, and closes it once that close returns.
+func TestARoomReservedForTheInstanceItReplacedIsTriedAgain(t *testing.T) {
+	pair := newProcessPair(t)
+	ctx := context.Background()
+	catchUps := pair.taskA.catchUps
+	now := time.Now()
+	catchUps.now = func() time.Time { return now }
+	pair.replaceTaskAsHistory(t)
+	first := pair.taskA.srv.GetDoc(pair.artifactID)
+	// A browser that stays connected, as the reconnecting one does, holds the record across the
+	// first instance's close.
+	pair.taskA.addConnection(pair.artifactID, 99, model.Actor{Kind: "user", ID: "reader"})
+
+	state := pair.taskA.lockState(pair.artifactID)
+	reservation, reserved := pair.taskA.reserveRoomCloseLocked(pair.artifactID, state, first)
+	pair.taskA.unlockState(pair.artifactID, state)
+	if !reserved {
+		t.Fatal("the first instance could not be reserved, so nothing here is tested")
+	}
+	if err := pair.taskA.Evict(ctx, pair.artifactID); err != nil {
+		t.Fatalf("retire the first instance: %v", err)
+	}
+	if err := pair.taskA.warmLiveDocument(ctx, pair.artifactID); err != nil {
+		t.Fatalf("load the replacement: %v", err)
+	}
+	replacement := pair.taskA.srv.GetDoc(pair.artifactID)
+	if replacement == nil || replacement == first {
+		t.Fatal("no replacement loaded, so nothing here is tested")
+	}
+	replaceStoredHistory(t, pair.database, pair.artifactID, "First.\n\nSecond.\n\nBob types again.\n")
+
+	catchUps.catchUp(ctx, pair.artifactID)
+	if pair.taskA.srv.GetDoc(pair.artifactID) != replacement {
+		t.Fatal("the replacement was closed under the reservation for the instance before it")
+	}
+	if wake := catchUps.wakeIn(); wake <= 0 {
+		t.Fatalf("the catch-up took the reservation for the instance before as an answer (wakeIn = %s)", wake)
+	}
+
+	// The reserving close returns, having closed nothing of its own, and the retry the catch-up
+	// armed closes the replacement.
+	if closed, err := pair.taskA.closeReservedRoom(ctx, reservation); err != nil || closed {
+		t.Fatalf("the close reserved for the first instance = %v, %v, want false and no error", closed, err)
+	}
+	now = now.Add(catchUps.wakeIn())
+	catchUps.woke(ctx)
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+	if wake := catchUps.wakeIn(); wake != 0 {
+		t.Fatalf("the catch-up left a retry armed (wakeIn = %s) once it closed the replacement", wake)
+	}
+}
+
+// The close of a replaced room holds the room it checked against ygo's idle sweep until it
+// has closed it: the sweep retires a room no peer is in once it has been idle for the room idle
+// timeout, and it takes no close gate, so a check of the instance ahead of the close would not
+// hold the instance ygo then looks up by name. The close runs inside a Server.Apply, which the
+// sweep never retires. A browser keeps the room resident until the close holds it, so nothing can
+// retire it sooner; inside the hold the browser leaves, which stamps the room idle, and a second
+// document's room is loaded and left idle after it. Once the sweep has retired that sentinel, a
+// sweep pass has run with the held room idle for longer than the timeout as well, and it is still
+// the room the document holds when the close closes it.
+func TestACloseOfAReplacedRoomHoldsItAgainstTheIdleSweep(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	// ygo's sweeper reads the timeout when the first room starts it, so it is set before any room:
+	// a room idle for a second is retired at the next sweep, which then runs every second.
+	service.srv.RoomIdleTimeout = time.Second
+	seedServiceText(t, service, artifactID, "before")
+	sentinel := createDocument(t, service.store, "Sentinel.")
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+	browser := connectPeer(t, server.URL, artifactID, "alice")
+	connected := func() int {
+		state := service.room(artifactID)
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return len(state.connected)
+	}
+	waitFor(t, 10*time.Second, "the browser to join the document's room", func() bool {
+		return connected() == 1 && service.srv.GetDoc(artifactID) != nil
+	})
+	live := service.srv.GetDoc(artifactID)
+
+	const sweepBudget = 30 * time.Second
+	var holdErr error
+	var heldThrough bool
+	service.afterRoomClosePinned = func(room string) {
+		browser.Close()
+		// The service forgets the browser once ygo's teardown of it has returned, which is after
+		// that teardown stamped the room idle.
+		for deadline := time.Now().Add(10 * time.Second); connected() != 0; time.Sleep(10 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				holdErr = errors.New("the browser's leaving was never torn down")
+				return
+			}
+		}
+		if err := service.warmLiveDocument(context.Background(), sentinel); err != nil {
+			holdErr = fmt.Errorf("load the sentinel document's room: %w", err)
+			return
+		}
+		for deadline := time.Now().Add(sweepBudget); service.srv.GetDoc(sentinel) != nil; time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				holdErr = fmt.Errorf("the idle sweep did not retire the sentinel room within %v", sweepBudget)
+				return
+			}
+		}
+		heldThrough = service.srv.GetDoc(room) == live
+	}
+	closed, err := service.closeRoomInstance(context.Background(), artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room: %v", err)
+	}
+	if holdErr != nil {
+		t.Fatal(holdErr)
+	}
+	if !heldThrough {
+		t.Fatal("the idle sweep retired the room while the close held it")
+	}
+	if !closed {
+		t.Fatal("the close of the room it held closed nothing")
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+}
+
+// A write that opens while a settlement runs moves the room's generation, which ends that
+// settlement, so the write takes it over and arms it when the write ends - also when the write
+// changed nothing, which publishes no update whose observer would arm one. Here the settlement
+// meets the write at its gate, on a room behind the head that it catches up there: a settlement
+// that handed itself to such a write only when it found the write still open left nothing armed
+// for one that had ended, and the document stayed owed until the minute-old resumption came back
+// for it. The first row is the control, a write still open; the second is the take-over of a
+// settlement already running (settling).
+func TestAWriteOpenedWhileASettlementRunsArmsItWhenItEnds(t *testing.T) {
+	for _, writer := range []struct {
+		name string
+		// open runs inside the settlement, after it read its generation and before its gate, and
+		// returns what ends the write, or nil for a write that has ended already.
+		open func(t *testing.T, pair processPair) (end func())
+	}{
+		{"still open at the gate (control)", func(t *testing.T, pair processPair) func() {
+			write, err := pair.taskA.openLiveWrite(context.Background(), &Ledger{}, pair.artifactID)
+			if err != nil {
+				t.Errorf("open a live write on task A's room: %v", err)
+				return nil
+			}
+			return func() { pair.taskA.finishLiveWrite(write) }
+		}},
+		{"ended having changed nothing before the gate", func(t *testing.T, pair processPair) func() {
+			write, err := pair.taskA.openLiveWrite(context.Background(), &Ledger{}, pair.artifactID)
+			if err != nil {
+				t.Errorf("open a live write on task A's room: %v", err)
+				return nil
+			}
+			pair.taskA.finishLiveWrite(write)
+			return nil
+		}},
+	} {
+		t.Run(writer.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
+			versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+			stale := pair.taskA.srv.GetDoc(pair.artifactID)
+			pair.taskA.settle = 20 * time.Millisecond
+			var once sync.Once
+			var end func()
+			pair.taskA.afterSettleLock = func(room string) {
+				if room == pair.artifactID {
+					once.Do(func() { end = writer.open(t, pair) })
+				}
+			}
+
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+			if end != nil {
+				if live := pair.taskA.srv.GetDoc(pair.artifactID); live != stale {
+					t.Fatal("the settlement closed task A's room with a write open on it")
+				}
+				if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+					t.Fatalf("task A's settlement wrote version %d with a write open on its room", now)
+				}
+				end()
+			}
+			waitFor(t, 30*time.Second, "the settlement the write took over to settle the document", func() bool {
+				owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+				return err == nil && !owed
+			})
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("task A's room failed: %v", err)
+			}
+			markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+			if !strings.Contains(markdown, "Bob's paragraph.") || cursor != storedHead(t, pair.database, pair.artifactID) {
+				t.Fatalf("the settled version = %q at cursor %d, want Bob's paragraph at the head %d",
+					markdown, cursor, storedHead(t, pair.database, pair.artifactID))
+			}
+		})
+	}
+}
+
+// A write that opens as a settlement starts - its timer fired and its callback not yet past the
+// generation it compares, or the last browser leaving and settleLastPeer having taken the timer -
+// ends that settlement too, and takes it over though no timer is left to stop: a fired timer is
+// still registered until its callback returns, and settleLastPeer counts its settlement running
+// from the moment it takes the timer. Taking over only the timer it stopped, the write that changed
+// nothing armed nothing, and the document stayed owed until the minute-old resumption.
+func TestAWriteOpenedAsASettlementStartsArmsItWhenItEnds(t *testing.T) {
+	for _, start := range []struct {
+		name string
+		// fire starts the settlement the write meets, its timer armed an hour out.
+		fire func(t *testing.T, service *Service, artifactID string, browser *docstest.Peer)
+	}{
+		{"its timer fired", func(t *testing.T, service *Service, artifactID string, _ *docstest.Peer) {
+			service.scheduleSettle(artifactID)
+		}},
+		{"the last browser left", func(t *testing.T, _ *Service, _ string, browser *docstest.Peer) {
+			browser.Close()
+		}},
+	} {
+		t.Run(start.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(server.Close)
+			browser := connectPeer(t, server.URL, artifactID, "alice")
+			waitFor(t, 10*time.Second, "the browser to join the document's room", func() bool {
+				return service.srv.GetDoc(artifactID) != nil
+			})
+			editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+			waitForLandedAppends(t, service, artifactID)
+			if owed, err := settlementPending(context.Background(), service.store.Pool, artifactID); err != nil || !owed {
+				t.Fatalf("the document owes a settlement = %v (%v), want true", owed, err)
+			}
+			versions := latestVersionNumber(t, service, artifactID)
+
+			// From here every settlement runs within 20 ms of being armed; the one armed now is
+			// the hour-long timer the edit armed. The hook opens a write as the settlement starts.
+			// The state lock the timer check takes orders the delay's write and the hook's before
+			// the settlement's goroutines read them: settleLastPeer takes that lock before it
+			// settles, and a timer armed after it runs after it, while a browser's leaving reaches
+			// the server only through its socket, which orders nothing.
+			var once sync.Once
+			service.beforeSettleStart = func(room string) {
+				if room != artifactID {
+					return
+				}
+				once.Do(func() {
+					write, err := service.openLiveWrite(context.Background(), &Ledger{}, artifactID)
+					if err != nil {
+						t.Errorf("open a live write as the settlement starts: %v", err)
+						return
+					}
+					service.finishLiveWrite(write)
+				})
+			}
+			service.settle = 20 * time.Millisecond
+			state := service.room(artifactID)
+			state.mu.Lock()
+			armed := service.isSettleTimerArmed(state.settle)
+			state.mu.Unlock()
+			if !armed {
+				t.Fatal("the edit armed no settlement, so no settlement starts for a write to take over")
+			}
+
+			start.fire(t, service, artifactID, browser)
+			waitFor(t, 10*time.Second, "the settlement the write took over to settle the document", func() bool {
+				owed, err := settlementPending(context.Background(), service.store.Pool, artifactID)
+				return err == nil && !owed
+			})
+			if now := latestVersionNumber(t, service, artifactID); now != versions+1 {
+				t.Fatalf("the document's latest version is %d, want %d: one settlement of the edit", now, versions+1)
+			}
+		})
+	}
+}
+
+// A named version on a process whose room stands behind the head records the stored document,
+// which holds the other process's paragraph, at the head it records. Rendered from the room it
+// recorded text missing Bob's paragraph at a cursor saying it held it, so no later settlement saw
+// those words past that cursor (INFRA-218; corruption 1 of INFRA-66, on the version path).
+func TestANamedVersionFromARoomBehindTheHeadRecordsTheStoredDocument(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	versioner := model.Actor{Kind: "session", ID: "versioner-a"}
+	version := commitNamedVersion(t, pair.taskA, pair.artifactID, versioner)
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	if stored := storedMarkdown(t, pair.database, pair.artifactID); markdown != stored {
+		t.Fatalf("task A's named version = %q, want the stored document %q", markdown, stored)
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+		t.Fatalf("task A's named version records update cursor %d, want the head %d", cursor, head)
+	}
+	if !slices.Equal(version.Authors, []model.Actor{versioner, bob}) {
+		t.Fatalf("task A's named version lists %+v, want %+v and %+v", version.Authors, versioner, bob)
+	}
+}
+
+// A browser edit a room behind the head takes is not listed on a version that room's process names
+// while the edit is in flight: the version is rendered from the stored document, which does not
+// hold the edit, so it lists none of the room's in-flight credits, and the edit's append, which
+// the gate admits from the room behind the head, records its author for the next version. Listed
+// from the room's in-flight credits, alice was listed on that version and again on the one holding
+// her stored edit.
+func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	peer, update := peerEdit(t, room, appendBlocks(t, "Alice's paragraph.\n"))
+	pair.taskA.addConnection(pair.artifactID, 2, alice)
+	release := holdObserver(t, pair.taskA, pair.artifactID, &pair.taskA.afterCreditUpdate, func() error {
+		return crdt.ApplyUpdateV1(room, update, "peer")
+	})
+	inFlight := commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "versioner-a"})
+	release()
+	pair.taskA.removeConnection(pair.artifactID, 2)
+	if slices.Contains(inFlight.Authors, alice) {
+		t.Fatalf("the version named while alice's edit was in flight lists %+v, want no alice: the version does not hold her edit", inFlight.Authors)
+	}
+	if markdown, _ := latestVersionOf(t, pair.database, pair.artifactID); !strings.Contains(markdown, "Bob's paragraph.") || strings.Contains(markdown, "Alice's paragraph.") {
+		t.Fatalf("the version named while alice's edit was in flight = %q, want Bob's paragraph and not Alice's", markdown)
+	}
+
+	resendUntilStored(t, pair.taskA, pair.artifactID, 2, alice, peer)
+	commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "sweeper-a"})
+	for _, author := range []model.Actor{alice, bob} {
+		if listed := countVersionAuthor(t, pair.database, pair.artifactID, author); listed != 1 {
+			t.Errorf("%s is listed on %d versions, want exactly one", author.ID, listed)
+		}
+	}
+	if owed := pendingAuthorRows(t, pair.database, pair.artifactID); len(owed) != 0 {
+		t.Errorf("pending authors after the last version = %+v, want none", owed)
+	}
+}
+
+// A transaction whose own write takes the cold path because its room is behind the head lists none
+// of that room's in-flight credits on the version it writes: the version is rendered from the
+// stored document and the transaction's write, neither of which holds the in-flight edit, and that
+// edit's append, admitted from the room behind the head, records its author for the next version.
+// Listed from the room's in-flight credits, alice was listed on the transaction's version and again
+// on the one holding her stored edit.
+func TestAColdWritesVersionListsNoneOfItsRoomsEditsInFlight(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	peer, update := peerEdit(t, room, appendBlocks(t, "Alice's paragraph.\n"))
+	pair.taskA.addConnection(pair.artifactID, 2, alice)
+	release := holdObserver(t, pair.taskA, pair.artifactID, &pair.taskA.afterCreditUpdate, func() error {
+		return crdt.ApplyUpdateV1(room, update, "peer")
+	})
+	writeThroughLedger(t, pair.taskA, pair.artifactID, agent, "Agent's paragraph.\n", withNamedVersion)
+	release()
+	pair.taskA.removeConnection(pair.artifactID, 2)
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	if !strings.Contains(markdown, "Bob's paragraph.") || !strings.Contains(markdown, "Agent's paragraph.") || strings.Contains(markdown, "Alice's paragraph.") {
+		t.Fatalf("the cold write's version = %q, want Bob's and the agent's paragraphs and not Alice's", markdown)
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor > head {
+		t.Fatalf("the cold write's version records update cursor %d, past the head %d", cursor, head)
+	}
+	if authors := latestVersionAuthors(t, pair.taskA, pair.artifactID); slices.Contains(authors, alice) || !slices.Contains(authors, agent) || !slices.Contains(authors, bob) {
+		t.Fatalf("the cold write's version lists %+v, want %s and %s and no %s", authors, agent.ID, bob.ID, alice.ID)
+	}
+
+	resendUntilStored(t, pair.taskA, pair.artifactID, 2, alice, peer)
+	commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "sweeper-a"})
+	for _, author := range []model.Actor{alice, bob} {
+		if listed := countVersionAuthor(t, pair.database, pair.artifactID, author); listed != 1 {
+			t.Errorf("%s is listed on %d versions, want exactly one", author.ID, listed)
+		}
+	}
+	if owed := pendingAuthorRows(t, pair.database, pair.artifactID); len(owed) != 0 {
+		t.Errorf("pending authors after the last version = %+v, want none", owed)
+	}
+}
+
+// An open ask whose block only the other process's room held when its settlement began is not
+// retracted: the settlement catches its room up before it reconciles anything, so the tree it
+// reconciles on holds the block. Without the gate task A's stale tree holds no such block, and
+// reconcileAskBlocks retracts the ask and publishes its `ask.resolved` event, over a question
+// nobody answered (corruption 3 of the two-process audit).
+func TestAnOpenAskIsNotRetractedByASettlementFromARoomBehindTheHead(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 1, bob,
+		appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	settleCurrentGeneration(t, pair.taskB, pair.artifactID)
+	if state := askState(t, pair.database, pair.artifactID, "bob-ask"); state != "open" {
+		t.Fatalf("the ask task B settled is %q, want open", state)
+	}
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
+		t.Fatal("task A's room stands at the head after task B's ask block, so nothing here is tested")
+	}
+
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if state := askState(t, pair.database, pair.artifactID, "bob-ask"); state != "open" {
+		t.Fatalf("the ask is %q after task A's settlement, want open", state)
+	}
+	if markdown := liveMarkdownOf(t, pair.taskA, pair.artifactID); !strings.Contains(markdown, "Which transport?") {
+		t.Fatalf("task A's room renders %q after its settlement, want the ask block it caught up", markdown)
+	}
+}
+
+// askState is the state of the ask anchored to blockID of artifactID.
+func askState(t *testing.T, database *store.Store, artifactID, blockID string) string {
+	t.Helper()
+	var state string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select state from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&state); err != nil {
+		t.Fatalf("read the ask anchored to %s: %v", blockID, err)
+	}
+	return state
+}
+
+// An upload from a room behind the head is rendered from the stored document, so the document it
+// leaves is the one its version records. Without the gate the replacement is computed on the stale
+// fork, which never held task B's paragraph: the replacement deletes what the fork held and the
+// paragraph survives the merge, so the stored document holds text the version does not
+// (corruption 6 of INFRA-66).
+func TestAnUploadFromARoomBehindTheHeadReplacesTheStoredDocument(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
+	uploadOn(t, pair.taskA, pair.artifactID, uploaded, model.Actor{Kind: "session", ID: "uploader-on-task-a"})
+	markdown, _ := latestVersionOf(t, pair.database, pair.artifactID)
+	if markdown != uploaded {
+		t.Fatalf("the upload's version = %q, want %q", markdown, uploaded)
+	}
+	if stored := storedMarkdown(t, pair.database, pair.artifactID); stored != uploaded {
+		t.Fatalf("the stored document after the upload = %q, want %q: the upload replaced a document it had not read", stored, uploaded)
+	}
+}
+
+// An agent's edit whose room is behind the head is made on the stored document and succeeds: the
+// cold path is what keeps the gate from answering 503 for a write this process can still make
+// correctly. The edit lands beside task B's paragraph, which the room it would otherwise have
+// forked never held (corruption 7 of INFRA-66: a write made over text its writer never saw).
+func TestAnEditFromARoomBehindTheHeadTakesTheColdPathAndSucceeds(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	if _, err := joinedApplyOps(pair.taskA, pair.artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit on a room behind the head: %v", err)
+	}
+	stored := storedMarkdown(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Bob's paragraph.", "Agent's paragraph."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document after the edit = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// The load is where a room's cursor starts: the head its load read (keepInstance), including the
+// update the other process appended before it. A load that recorded anything else would leave
+// this room behind, refusing its derived writes until a catch-up.
+func TestARoomLoadedAfterAnotherProcessesAppendStandsAtTheHead(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	// The room the seed left on task A would be the one behind the head; this test is about the
+	// load that replaces it.
+	if err := pair.taskA.Evict(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("evict the room task A seeded: %v", err)
+	}
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room after task B's append: %v", err)
+	}
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); behind {
+		t.Fatal("the loaded room stands behind the head it was loaded at")
+	}
+	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+}
+
+// A browser append takes in the version it stored, so the room still stands at the head after it
+// and its next edit is stored too. Without that advance the room's cursor falls behind its own
+// appends, and its derived writes are refused until a catch-up reads them back.
+func TestARoomWritesAgainAfterItsOwnBrowserAppend(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"}, appendBlocks(t, "Alice's paragraph.\n"))
+	waitForLandedAppends(t, service, artifactID)
+	requireRoomStillWrites(t, service, artifactID, 2)
+}
+
+// A committed live write is appended outside the room and published into it, so the publish is
+// what takes its version in (publishLiveUpdate). Without that advance a room left behind by its
+// own process's write refuses its derived writes until a catch-up reads that write back.
+func TestARoomWritesAgainAfterACommittedWritePublishesIntoIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit into the resident room: %v", err)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands behind the head after its own process's committed write was published into it")
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// A settlement that stamps block ids writes that repair into its own room and appends it in its
+// transaction, so the room takes the version it is stored at there (settleRoomWithin). Without
+// that advance every settlement that repairs anything would leave its own room behind the head.
+func TestARoomWritesAgainAfterItsSettlementAppendsARepair(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "A paragraph with no block id."))
+	before := storedHead(t, service.store, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	if head := storedHead(t, service.store, artifactID); head <= before {
+		t.Fatalf("the document's head is %d after the settlement, want one past %d: it stamped no block id, so no repair was appended", head, before)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands behind the head after its own settlement's repair")
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// A settlement superseded after it wrote its repair commits that repair alone, on its own path,
+// and the room takes that version in there too.
+func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "A paragraph with no block id."))
+	// The settlement is superseded between its read and its supersession check, as a write
+	// opening on the room supersedes it: it then commits the repair it has already written into
+	// the room and writes no version.
+	superseded := false
+	service.afterSettleRead = func(room string) {
+		if room != artifactID || superseded {
+			return
+		}
+		superseded = true
+		state := service.lockState(room)
+		state.roomGeneration = service.nextRoomGeneration()
+		service.unlockState(room, state)
+	}
+	versions := latestVersionNumber(t, service, artifactID)
+	before := storedHead(t, service.store, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	service.afterSettleRead = nil
+	if !superseded {
+		t.Fatal("the settlement never reached the window its supersession was arranged in")
+	}
+	if head := storedHead(t, service.store, artifactID); head <= before {
+		t.Fatalf("the document's head is %d after the superseded settlement, want one past %d: it appended no repair", head, before)
+	}
+	if now := latestVersionNumber(t, service, artifactID); now != versions {
+		t.Fatalf("the superseded settlement wrote version %d, want none past %d", now, versions)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands behind the head after its own superseded settlement's repair")
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// A cold write is outside the gate: it holds no room, so nothing says the document it was made
+// on is behind the head. A browser that opens the document behind the write's store read and
+// types reaches a room the write did not read; the browser's append waits on the advisory lock the
+// write holds from its read, so the head cannot move under the write, and the write's own append
+// lands, then the browser's - its update is a Yjs update, which commutes with the browser's, and
+// the room that holds the document after the publish holds both edits. Gated on that room, the
+// write would answer 503 for a conflict Yjs resolves (coldFork, appendingCursor).
+func TestAColdWriteAppendsUnderABrowserThatOpenedBehindItsRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	closeDocumentRoom(t, service, artifactID)
+	read := storedHead(t, service.store, artifactID)
+
+	// The browser opens the document behind the write's store read and types; its append queues
+	// behind the write's lock.
+	opened := false
+	service.afterForkRead = func(room string) {
+		if room != artifactID || opened || service.srv.GetDoc(artifactID) != nil {
+			return
+		}
+		opened = true
+		editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"},
+			appendBlocks(t, "Alice's paragraph.\n"))
+	}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("a cold write under a browser that opened behind its read: %v", err)
+	}
+	if !opened {
+		t.Fatal("the write never read the store, so no browser opened behind it")
+	}
+	waitForLandedAppends(t, service, artifactID)
+	if head := storedHead(t, service.store, artifactID); head <= read+1 {
+		t.Fatalf("the document's head is %d, want it past %d: the write's append and the browser's", head, read+1)
+	}
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Alice's paragraph.", "Agent's paragraph."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document after the cold write = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// A browser's append waits on the document's advisory lock while a transaction of this process
+// writes the same document, and takes that lock the instant the commit drops it. The commit
+// records its versions on the room's cursor before it commits (takeRoomCursors), so the append
+// finds a cursor at the head that commit wrote, is stored, and leaves the room at the head.
+// Recorded after the commit instead, they left the room one version behind the head it reads under
+// that lock, and the room's derived writes were refused until something took that version in.
+func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	appended := false
+	service.afterLiveCommit = func(room string) {
+		if room != artifactID || appended {
+			return
+		}
+		appended = true
+		// The lock's next holder, in the window it takes it in: the write's version is durable
+		// and its publish has not run.
+		requireRoomStillWrites(t, service, artifactID, 1)
+	}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit into the resident room: %v", err)
+	}
+	if !appended {
+		t.Fatal("nothing appended between the write's commit and its publish, so nothing here is tested")
+	}
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Agent's paragraph.", "Writing again as peer 1."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// A browser's append raises the document's head when it commits and takes that version into its
+// room's cursor a moment later, both inside the document's advisory lock
+// (PgVersioned.appendUpdate). A write that reads the cursor and the head without that lock lands
+// between the two and reads a healthy room as one another process left behind, so it forks from
+// the stored document rather than from the room (forkLive). The store of a room still writing
+// holds less than that room - what its persistence worker has not appended yet - and takes what
+// it does hold in the order the room's update observers fired, not the order the room applied
+// them (consumeUpdateClass), so a write that forks it can read a state the document never held:
+// an update whose deletes landed without the inserts they replaced leaves a tree with no block in
+// it at all, which every write starting from it refuses (ErrDocOutsideSchema). That is the
+// intermittent failure of TestTheUpdateObserverNeverRendersAWriteHalfWay. Here the room holds a
+// second browser edit the store has not taken, so a fork of the store is one the write can see is
+// not the whole document.
+func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which holds no window between a commit and its cursor", service.persistence)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	var opened, closed sync.Once
+	releaseWindow := func() { closed.Do(func() { close(release) }) }
+	// Before the service's own cleanup, which cannot shut down while an append is held here.
+	t.Cleanup(releaseWindow)
+	appends.afterAppendCommit = func(room string, _ persistence.Version) {
+		held := false
+		if room == artifactID {
+			opened.Do(func() { held = true })
+		}
+		if !held {
+			return
+		}
+		close(committed)
+		<-release
+	}
+
+	// The browser's first edit commits its append and holds the window open from inside it. Its
+	// second reaches the room while that append is still there, so the room holds a paragraph the
+	// store has not taken.
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Alpha paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's first edit: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the browser's append never committed, so no window opened")
+	}
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Bravo paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's second edit: %v", err)
+	}
+
+	var cold bool
+	var forked string
+	written := make(chan error, 1)
+	go func() {
+		written <- joinedWrite(service, func(ctx context.Context) error {
+			if err := service.ProjectMark(ctx, artifactID, "mark-in-the-window", MarkRecord{
+				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+			}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
+				return err
+			}
+			write := joinedLiveWrite(ctx, artifactID)
+			cold = write.cold
+			tree, err := treeOf(write.fork)
+			if err != nil {
+				return err
+			}
+			forked, err = documentMarkdown(tree)
+			return err
+		})
+	}()
+	// The write has made its fork's decision once it waits on the document's advisory lock: for
+	// the confirmation that decision needs, or, having taken it without one, for its own append.
+	waitForLockWait(t, context.Background(), service.store, "%pg_advisory_xact_lock%", written)
+	releaseWindow()
+	if err := <-written; err != nil {
+		t.Fatalf("a mark projection made inside the window: %v", err)
+	}
+	if cold {
+		t.Error("the write forked the stored document while its room held every update the store did")
+	}
+	if !strings.Contains(forked, "Bravo paragraph.") {
+		t.Errorf("the write forked %q, want it to hold the paragraph only its room held", forked)
+	}
+}
+
+// A read made inside an append's cursor window answers with the room's own text, which the stored
+// document at that head does not hold. The window is the same one a write must not fork the store
+// in (the test above): a browser's append raises the head when it commits and takes that version
+// into its room's cursor a moment later, and a read compares the head it reads without the
+// document's lock against that cursor (heldTree, docTree), so inside the window it finds a healthy
+// room one version behind the head. The store at that head holds less than the room - the
+// keystroke the room took while the append was committing has not been appended yet - so a read
+// that took the stored document alone would answer without text the room has already sent the
+// browser that typed it. That is how TestDeleteColumnWithAListedColumnRemovesThatCell (package
+// api) read a document holding only its intro paragraph after a browser peer had added a table
+// the room answered its sync with (CI run 41548117572). The read merges what only the room holds
+// into the stored document instead (storedWithUpdates), so it holds both, and once the room's
+// appends have landed the stored document holds both by itself.
+func TestAReadInsideAnAppendsCursorWindowHoldsTheRoomsKeystroke(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which holds no window between a commit and its cursor", service.persistence)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	var opened, closed sync.Once
+	releaseWindow := func() { closed.Do(func() { close(release) }) }
+	// Before the service's own cleanup, which cannot shut down while an append is held here.
+	t.Cleanup(releaseWindow)
+	appends.afterAppendCommit = func(room string, _ persistence.Version) {
+		held := false
+		if room == artifactID {
+			opened.Do(func() { held = true })
+		}
+		if !held {
+			return
+		}
+		close(committed)
+		<-release
+	}
+
+	// The browser's first edit commits its append and holds the window open from inside it. Its
+	// second reaches the room while that append is still there, so the room holds a paragraph the
+	// store has not taken.
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Alpha paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's first edit: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the browser's append never committed, so no window opened")
+	}
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Bravo paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's second edit: %v", err)
+	}
+	if !roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands at the head inside its own append's cursor window, so nothing here is tested")
+	}
+	if stored := storedMarkdown(t, service.store, artifactID); strings.Contains(stored, "Bravo paragraph.") {
+		t.Fatalf("the stored document = %q, want it without the keystroke the room took inside the window", stored)
+	}
+
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("a read inside the window: %v", err)
+	}
+	for _, want := range []string{"Alpha paragraph.", "Bravo paragraph."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("a read inside the window = %q, want the room's own %q", text, want)
+		}
+	}
+	if _, err := service.BlockForQuote(context.Background(), artifactID, "Bravo paragraph."); err != nil {
+		t.Fatalf("docTree inside the window: %v; want the block the room holds", err)
+	}
+
+	releaseWindow()
+	waitForLandedAppends(t, service, artifactID)
+	if text, err := service.Text(context.Background(), artifactID); err != nil || !strings.Contains(text, "Bravo paragraph.") {
+		t.Fatalf("a read once the room's appends landed = %q, %v; want both paragraphs", text, err)
+	}
+}
+
+// recordedClasses holds what a service's room update observer recorded for each update its rooms
+// applied (documentUpdateClass), read in the moment between that observer and ygo's persistence
+// observer, which takes the record (consumeUpdateClass). An observer registered in
+// OnLoadDocument after the service's own runs there: ygo fires a transaction's update observers in
+// the order they were registered, and the room registers its persistence observer after
+// OnLoadDocument returns. Only rooms loaded after recordClasses installs it are read.
+type recordedClasses struct {
+	mu      sync.Mutex
+	classes []recordedClass
+}
+
+// recordedClass is what the room recorded for one update, kept as the six facts its readers
+// decide on: origin, a label for the origin the room applied the update with -
+// publishedWriteClass for a *liveWriteOrigin, the string itself for a string origin, and the
+// origin's type otherwise; marginOnly, that *liveWriteOrigin's own tag (false for every other
+// origin); found, false when the room recorded no class for the update; and contentChanged,
+// durable and credited (class.credit != nil) from the class it recorded.
+//
+// The record keeps no pointer into the write or the room. An origin kept would keep the write's
+// forked document (liveWriteOrigin.shadow.doc), and a documentUpdateClass kept would keep two
+// *UpdateCredit values, each of which holds a *Service, along with a cursor and the update's
+// bytes. The slice grows for the whole life of each side's flows, so every pointer in it is
+// memory the test binary never gives back (dispatch://INFRA-1085).
+type recordedClass struct {
+	origin         string
+	marginOnly     bool
+	found          bool
+	contentChanged bool
+	durable        bool
+	credited       bool
+}
+
+// publishedWriteClass is the label recordedClass.origin carries for a *liveWriteOrigin, written
+// by the recorder and read by every matcher that asks for a published write, so a rewording moves
+// all of them at once. It is this wording rather than describeOrigin's "live write"
+// (nil_origin_credit_test.go) because margin_equivalence_compare_test.go builds each class's text
+// from recordedClass.origin, and that text is compared against fixtures this change leaves byte
+// for byte unchanged.
+const publishedWriteClass = "a published write"
+
+// recordClasses installs the recorder on service and reloads artifactID's room, which a seed may
+// have loaded before the recorder was there, so the room it returns is read.
+func recordClasses(t *testing.T, service *Service, artifactID string) (*recordedClasses, *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
+	recorded := &recordedClasses{}
+	load := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if err := load(ctx, room, doc); err != nil {
+			return err
+		}
+		doc.OnUpdate(func(update []byte, origin any) {
+			var read recordedClass
+			switch published := origin.(type) {
+			case *liveWriteOrigin:
+				read.origin, read.marginOnly = publishedWriteClass, published.marginOnly
+			case string:
+				read.origin = published
+			default:
+				read.origin = fmt.Sprintf("%T", origin)
+			}
+			if state := service.lockExistingState(room); state != nil {
+				for _, class := range state.updateClasses {
+					if bytes.Equal(class.update, update) {
+						read.found = true
+						read.contentChanged = class.contentChanged
+						read.durable = class.durable
+						read.credited = class.credit != nil
+						break
+					}
+				}
+				service.unlockState(room, state)
+			}
+			recorded.mu.Lock()
+			recorded.classes = append(recorded.classes, read)
+			recorded.mu.Unlock()
+		})
+		return nil
+	}
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room loaded before the recorder: %v", err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the recorded room: %v", err)
+	}
+	return recorded, service.srv.GetDoc(artifactID)
+}
+
+// latest is the record the room left for the latest update it applied that matches accepts,
+// failing the test when it applied none or recorded no class for it.
+func (r *recordedClasses) latest(t *testing.T, what string, matches func(recordedClass) bool) recordedClass {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index := len(r.classes) - 1; index >= 0; index-- {
+		if !matches(r.classes[index]) {
+			continue
+		}
+		if !r.classes[index].found {
+			t.Fatalf("the room recorded no class for %s", what)
+		}
+		return r.classes[index]
+	}
+	t.Fatalf("the room never applied %s", what)
+	return recordedClass{}
+}
+
+// keptAndFreshRendering is the markdown the resident room's rendered replica keeps for the room's
+// latest commit - what the update observer measures the next update against
+// (updateChangesMarkdown) - and a fresh render of the room's document as of the same moment.
+func keptAndFreshRendering(t *testing.T, service *Service, artifactID string) (kept, fresh string) {
+	t.Helper()
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("no room is resident")
+	}
+	copied, err := snapshotDocument(live)
+	if err != nil {
+		t.Fatalf("copy the room's document: %v", err)
+	}
+	if fresh, _, _, err = renderDocumentForUpdate(copied.GetXmlFragment(fragmentName)); err != nil {
+		t.Fatalf("render the room's document: %v", err)
+	}
+	_, listed := listedReplica(t, service, artifactID)
+	replica := listed.Value()
+	if replica == nil {
+		t.Fatal("the resident room's rendered replica is gone")
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if pending := replica.log.Pending(); pending > 0 {
+		t.Fatalf("the replica has %d committed updates it has not taken", pending)
+	}
+	if replica.rendering == nil {
+		t.Fatal("the replica keeps no rendering")
+	}
+	return replica.rendering.markdown, fresh
+}
+
+// A comment's margin write changes only the marks map, and the update it publishes carries only
+// what its own transaction did: ygo encodes a transaction's update with that transaction's own
+// deletions (reearth/ygo#350), as Yjs does, not with every deletion the fork holds. Here task A's
+// room stands behind the head because task B, the other process, appended a browser's deletion of
+// "Second." that the room never took, so the margin write - ProjectMark in a joined transaction, as
+// a reply, a resolve, a reopen and a comment edit run it - forks the stored document (coldFork),
+// which holds that deletion, and publishes into a room that does not. The publish brings the
+// margin record and nothing of the fork's text: the room keeps "Second." until the catch-up or its
+// settlement loads it again at the head. A cold fork carries no rendering of the room, so the
+// room's update observer renders the publish as it renders any other update: it records no
+// content change, and the rendering the replica keeps is the room's own. An observer that took
+// the fork's rendering, which lacks "Second.", for the room's would record the publish as a
+// content change and then measure the next browser update against that rendering: a browser's
+// margin note alone would count as a content change, credited to that browser's person and settled
+// as their edit.
+func TestAMarginWriteFromAColdForkIsRenderedByTheRoomItIsPublishedInto(t *testing.T) {
+	pair := newProcessPair(t)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehindWith(t, 1, bob, withoutTopLevelBlock("Second."))
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	var cold bool
+	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
+			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
+		}, alice); err != nil {
+			return err
+		}
+		cold = joinedLiveWrite(ctx, pair.artifactID).cold
+		return nil
+	}); err != nil {
+		t.Fatalf("a margin write on a room behind the head: %v", err)
+	}
+	if !cold {
+		t.Fatal("the margin write forked task A's room rather than the stored document, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("task A's room was replaced, so the publish did not reach the room this test arranged")
+	}
+
+	published := classes.latest(t, "the published margin write", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass
+	})
+	if published.contentChanged {
+		t.Error("the room recorded the margin write's publish as a content change, though it changed no text in the room")
+	}
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
+	if !strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publish = %q, want it to keep \"Second.\": the margin write's update carries only its own transaction", fresh)
+	}
+	if kept != fresh {
+		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
+	}
+
+	// A browser's margin note, made on a copy synced from the room as a browser's provider holds
+	// it, changes no text.
+	browser := crdt.New()
+	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(room, nil), nil); err != nil {
+		t.Fatalf("sync the browser from the room: %v", err)
+	}
+	marks := browser.GetMap(marksMapName)
+	note := docstest.Transact(browser, func(txn *crdt.Transaction) {
+		marks.Set(txn, "browser-note", map[string]any{"kind": "comment", "text": "a browser's note"})
+	})
+	if note == nil {
+		t.Fatal("the browser's margin note made no update")
+	}
+	if err := crdt.ApplyUpdateV1(room, note, "peer"); err != nil {
+		t.Fatalf("apply the browser's margin note to the room: %v", err)
+	}
+	if class := classes.latest(t, "the browser's margin note", func(c recordedClass) bool { return c.origin == "peer" }); class.contentChanged {
+		t.Error("the room recorded a browser's margin note as a content change: it measured the note against a rendering that was not the room's")
+	}
+}
+
+// A margin write a transaction makes after its own text edit, on a fork warm-built from the room,
+// is published into that room right after the edit, and only the margin write's publish may keep
+// the rendering the replica has. The edit's update carries its deletion of "Second." and the margin
+// write's carries only its own transaction, the marks map, so the margin update changes no text
+// there (liveWriteOrigin.marginOnly). The edit's publish is a content change the observer has to
+// render: one that kept the rendering for it too - a tag on every update of a warm-forked
+// transaction rather than on its margin writes - would record the edit as no change and keep
+// "Second." in the rendering every later browser update is measured against.
+func TestAMarginWriteFromAWarmForkKeepsTheRenderingOfTheRoomItWasForkedFrom(t *testing.T) {
+	pair := newProcessPair(t)
+	classes, room := recordClasses(t, pair.taskA, pair.artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	const goneAsk = "ask-block-the-document-does-not-hold"
+	state := pair.taskA.lockState(pair.artifactID)
+	if state.askAuthors == nil {
+		state.askAuthors = make(map[string]model.Actor)
+	}
+	state.askAuthors[goneAsk] = alice
+	pair.taskA.unlockState(pair.artifactID, state)
+	var cold bool
+	if err := joinedWrite(pair.taskA, func(ctx context.Context) error {
+		if _, err := pair.taskA.ReplaceText(ctx, pair.artifactID, "First.\n", alice); err != nil {
+			return err
+		}
+		if err := pair.taskA.ProjectMark(ctx, pair.artifactID, "comment-on-task-a", MarkRecord{
+			Kind: "comment", By: "user:alice-on-task-a", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "a reply",
+		}, alice); err != nil {
+			return err
+		}
+		cold = joinedLiveWrite(ctx, pair.artifactID).cold
+		return nil
+	}); err != nil {
+		t.Fatalf("a text edit and a margin write in one transaction: %v", err)
+	}
+	if cold {
+		t.Fatal("the transaction forked the stored document rather than task A's room, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("task A's room was replaced, so the publishes did not reach the room the fork was built from")
+	}
+
+	kept, fresh := keptAndFreshRendering(t, pair.taskA, pair.artifactID)
+	if strings.Contains(fresh, "Second.") {
+		t.Fatalf("the room after the publishes = %q, want the text edit's deletion of \"Second.\"", fresh)
+	}
+	state = pair.taskA.lockState(pair.artifactID)
+	_, remembered := state.askAuthors[goneAsk]
+	pair.taskA.unlockState(pair.artifactID, state)
+	if remembered {
+		t.Error("the ask-block observer retained an author for a block absent from the edited room")
+	}
+	if kept != fresh {
+		t.Errorf("the replica keeps the rendering %q, want the room's %q", kept, fresh)
+	}
+	margin := classes.latest(t, "the margin write's publish", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass && c.marginOnly
+	})
+	if margin.contentChanged {
+		t.Error("the room recorded the margin write's publish as a content change")
+	}
+	edit := classes.latest(t, "the text edit's publish", func(c recordedClass) bool {
+		return c.origin == publishedWriteClass && !c.marginOnly
+	})
+	if !edit.contentChanged {
+		t.Error("the room recorded the text edit's publish, which deleted \"Second.\", as no content change")
+	}
+}
+
+// A room that loads while this process's own write commits is not born behind the head. ygo
+// publishes no document for a room that is still loading (Server.GetDoc), so the commit finds no
+// cursor of that room to record its version on and the publish that would is behind the load: the
+// version goes to the record the load leaves its instance (roomLoad, tookResidentVersion), and the
+// room the load starts stands at the head. Born one behind, that room's derived writes would be
+// refused until a catch-up read back from the store an update the room was about to receive.
+func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	closeDocumentRoom(t, service, artifactID)
+
+	// The load is held where the window is: ygo's LoadDoc has read the store and the head it
+	// stands at, and the hook that starts the room's instance has not run.
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	load := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if room == artifactID {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+		return load(ctx, room, doc)
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
+	select {
+	case <-entered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room's load never reached the window it is held in")
+	}
+
+	read := storedHead(t, service.store, artifactID)
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the write's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock document owner: %v", err)
+	}
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("apply the write while the room loads: %v", err)
+	}
+	if write := joinedLiveWrite(joined, artifactID); write == nil || !write.cold {
+		t.Fatal("the write forked the loading room, so nothing here is tested")
+	}
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the write while the room loads: %v", err)
+	}
+	if head := storedHead(t, service.store, artifactID); head != read+1 {
+		t.Fatalf("the document's head is %d after the write, want %d: the load read %d", head, read+1, read)
+	}
+
+	close(release)
+	if err := <-loaded; err != nil {
+		t.Fatalf("load the room while the write committed: %v", err)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room that loaded while this process's write committed stands behind the head")
+	}
+	ledger.publish()
+	// The browser's own append on that room, which is what standing at the head is for.
+	requireRoomStillWrites(t, service, artifactID, 1)
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Agent's paragraph.", "Writing again as peer 1."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// A room that fails under a repair of this process's is not evicted and reloaded while that
+// repair commits. A repair - the block-id backfill's stamp here, settlement's on the same
+// shape - is written into one room instance before it is appended (applySuppressed), and nothing
+// replays it into a room that loaded since but that room's own catch-up: such a room would hold
+// none of the repair, stand behind the head, and have to be refused its derived writes, since
+// crediting it with the version (tookResidentVersion, which a live write's commit does call
+// because its publish then applies the update to the room it reaches) would let its catch-up skip
+// the repair and this process version text it never saw.
+//
+// What keeps this process out of that case is the lock: the writer holds the document's advisory
+// lock from before it reads the room's queue until it commits (backfillBlockIDs, settleRoomWithin),
+// and a failed room's eviction compacts under that same lock (Compact), so the eviction stands
+// there until the repair has committed and allowInject holds every loader behind that eviction.
+// The room that loads next therefore reads the repair from the store and is born at the head.
+//
+// A room of the OTHER process does stand behind the head across such an append, and recovers
+// through its catch-up: TestARoomBehindTheHeadKeepsWritingAndCatchesUp pins that case.
+func TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	// failingBrowserAppendStore fails nothing here; it is the hook that runs just before the
+	// backfill's append, inside the transaction that holds the document's advisory lock.
+	appends := &failingBrowserAppendStore{VersionedStore: NewPgVersioned(database)}
+	service := New(Deps{Store: database, Persistence: appends, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	var read int64
+	recovered := make(chan error, 1)
+	// The room the backfill stamped fails while the stamp's transaction holds the document's
+	// lock. Its eviction cannot finish there: the compaction it ends with queues on that lock.
+	failUnderTheStamp := func() {
+		read = storedHead(t, service.store, artifactID)
+		service.failRoom(artifactID, errors.New("test: the stamped room failed under the backfill"))
+		go func() { recovered <- service.awaitRoomRecovery(context.Background(), artifactID) }()
+		queued := false
+		for deadline := time.Now().Add(roomWait(t)); !queued && time.Now().Before(deadline); {
+			waits, err := storetest.CountLockWaits(context.Background(), service.store, "%pg_advisory_lock(hashtext%")
+			if err != nil {
+				t.Errorf("inspect the document's lock waits: %v", err)
+				return
+			}
+			queued = waits > 0
+			if !queued {
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
+		if !queued {
+			t.Error("the failed room's eviction never queued on the document's advisory lock")
+			return
+		}
+		select {
+		case err := <-recovered:
+			t.Errorf("the failed room was evicted while the stamp's transaction held the document's lock: %v", err)
+		default:
+		}
+	}
+	appends.beforeTx.Store(&failUnderTheStamp)
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill the document's block ids: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Err != nil || reports[0].Stamped != 1 {
+		t.Fatalf("backfill reports = %#v, want the one document, stamping one block", reports)
+	}
+
+	// The commit drops the lock, and the eviction the stamp held up finishes.
+	select {
+	case err := <-recovered:
+		if err != nil {
+			t.Fatalf("evict the room the backfill stamped: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the failed room was never evicted once the stamp had committed")
+	}
+	head := storedHead(t, service.store, artifactID)
+	if head != read+1 {
+		t.Fatalf("the document's head is %d after the stamp, want %d: the stamped room read %d", head, read+1, read)
+	}
+
+	// The room that replaces the failed one reads the stamp from the store, so it is born at the
+	// head and writes again with nothing refused.
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("reload the room the stamp's commit released: %v", err)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs != 0 {
+		t.Fatalf("the reloaded room holds %d unstamped block(s), want the stamp the backfill stored", repairs)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room that loaded once the stamp had committed stands behind the head")
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "Writing again as peer 1.") {
+		t.Fatalf("the stored document = %q, want it to hold the reloaded room's edit", stored)
+	}
+}
+
+// A room that does stand behind the head - the other process appended what this one's room has
+// not caught up - keeps writing: its browser's append is stored at the head, the room is not
+// failed or replaced, and once its catch-up takes the other process's row in it stands at the head
+// with both edits. Recovery from behind used to be a refusal, a failure and a reload, and a room
+// refused, failed, reloaded and refused again was the loop the two-process reproduction fell into.
+func TestARoomBehindTheHeadKeepsWritingAndCatchesUp(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	editAsBrowserPeer(t, pair.taskA, pair.artifactID, 2, model.Actor{Kind: "user", ID: "alice"},
+		appendBlocks(t, "Alice types on the room behind the head.\n"))
+	if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+		t.Fatalf("the room behind the head failed on its browser's edit: %v", err)
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != room {
+		t.Fatal("the room behind the head was replaced")
+	}
+	stored := storedMarkdown(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Bob writes on the other process.", "Alice types on the room behind the head."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
+		}
+	}
+	if outcome, err := pair.taskA.catchUpRoom(context.Background(), pair.database.Pool, pair.artifactID, room); err != nil || outcome != catchUpApplied {
+		t.Fatalf("catch task A's room up = %v, %v, want catchUpApplied", outcome, err)
+	}
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); behind {
+		t.Fatal("task A's room stands behind the head after its catch-up")
+	}
+	if markdown := liveMarkdownOf(t, pair.taskA, pair.artifactID); markdown != stored {
+		t.Fatalf("task A's room renders %q after its catch-up, want the stored document %q", markdown, stored)
+	}
+	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 3)
+}
+
+// A browser's append admitted on a history a compaction folded past its room's cursor
+// (storedHistoryHolds) lands at the head, past a gap the cursor can never fill: no row at or below
+// it is left for a catch-up to read. Left open, the room would send every later keystroke down that
+// path again - the whole stored document decoded under the document's lock for each - until a
+// notification or a settlement found the history replaced and closed it, which can take tens of
+// seconds while the listener redials. So the room is closed once that append is stored, with no
+// room sync running here, and the browser's next keystroke reaches a room loaded at the head.
+func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newTestServiceInstance(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which has no seam for the folded-history path", service.persistence)
+	}
+	var held atomic.Int32
+	appends.storedHistoryHeld = func(room string) {
+		if room == artifactID {
+			held.Add(1)
+		}
+	}
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	// The connect stores nothing: alice's copy holds nothing the room lacks, and a transaction
+	// that changes nothing commits no update (ygo calls no update observer for one,
+	// reearth/ygo#350), so her first keystroke is the only append the fold below can meet.
+	head := storedHead(t, database, artifactID)
+	room := service.srv.GetDoc(artifactID)
+
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds the document's lock: %v", err)
+	}
+	defer holder.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
+		t.Fatalf("hold the document's lock: %v", err)
+	}
+	typeOver(t, alice, "before", "first keystroke")
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
+		t.Fatal("alice's append never came to wait on the document's lock")
+	}
+	foldHistoryPastRoom(t, holder, artifactID, head)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the document's lock: %v", err)
+	}
+	waitFor(t, roomWait(t), "alice's first keystroke to be stored", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), "first keystroke")
+	})
+	if got := held.Load(); got != 1 {
+		t.Fatalf("%d appends were admitted on the folded history, want alice's first keystroke's alone", got)
+	}
+
+	waitFor(t, roomWait(t), "the room whose history was folded under it to be closed", func() bool {
+		return service.srv.GetDoc(artifactID) != room
+	})
+	requireEnds(t, alice, "the room whose history was folded under it left alice's browser connected")
+	alice = connectWithScope(t, server.URL, artifactID, "alice", "read-write", "first keystroke\n")
+	// The reload reads the folded history whole, so the room stands at the head it loaded, and
+	// this browser's connect stores nothing to move that head on: the two meet. A room left on
+	// the folded history would never meet the head: no stored row at or below its cursor
+	// remains for a catch-up to read.
+	waitFor(t, roomWait(t), "the reloaded room to stand at the document's stored head", func() bool {
+		return !roomBehind(t, service, artifactID)
+	})
+	typeOver(t, alice, "first keystroke", "second keystroke")
+	waitFor(t, roomWait(t), "alice's second keystroke to be stored", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), "second keystroke")
+	})
+	if got := held.Load(); got != 1 {
+		t.Fatalf("%d appends were admitted on the folded history, want alice's first keystroke's alone: the second went that way too", got)
+	}
+}

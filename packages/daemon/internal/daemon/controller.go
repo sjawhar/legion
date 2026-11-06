@@ -240,7 +240,7 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 	launched := cfg.ControllerLaunch == config.ControllerLaunchDaemon
 	log = log.With("mode", string(cfg.ControllerLaunch))
 	prober := controller.NewProber(controller.ProberOptions{
-		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
+		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, Log: log,
 	})
 	ticker := time.NewTicker(p.orphanSweep)
 	defer ticker.Stop()
@@ -258,7 +258,7 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 			liveness = prober.Probe(ctx, record.Session)
 		}
 		switch liveness {
-		case controller.Alive:
+		case controller.Live:
 			logged = time.Time{}
 		case controller.Gone:
 			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {

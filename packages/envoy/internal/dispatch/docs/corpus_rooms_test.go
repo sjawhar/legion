@@ -25,11 +25,12 @@ type corpusRoom struct {
 
 // driveCorpusRooms drives one room per corpus document - every in-repo document, loaded as a room
 // with the replica its update observer keeps (keepReplica) - and calls compare on each: before the
-// room's first transaction, when the replica holds no state and a read takes its copy from the
-// room itself, and after each of a series of browser edits, half of them classified by the update
-// observer and half by the read that follows them, the two drainers of the room's log. It fails
-// the test where the replica does not hold what the position says it holds, and returns how many
-// comparisons it made and how many documents the corpus holds.
+// room's first transaction, when the replica holds no state and the first read of the comparison
+// takes its copy from the room itself and starts the replica from it (renderedReplica.atPoint),
+// and after each of a series of browser edits, half of them classified by the update observer and
+// half by the read that follows them, the two drainers of the room's log. It fails the test where
+// the replica does not hold what the position says it holds, and returns how many comparisons it
+// made and how many documents the corpus holds.
 func driveCorpusRooms(t *testing.T, compare func(at corpusRoom)) (comparisons, documents int) {
 	t.Helper()
 	paths, err := filepath.Glob("../pmdoc/testdata/corpus/*.md")
@@ -60,8 +61,8 @@ func driveCorpusRooms(t *testing.T, compare func(at corpusRoom)) (comparisons, d
 
 		compare(corpusRoom{service, replica, name, live, name + ": a room with no transaction"})
 		comparisons++
-		if replica.doc != nil {
-			t.Fatalf("%s: the replica of a room with no transaction holds state, so no read took its copy from the room", name)
+		if replica.doc == nil {
+			t.Fatalf("%s: the replica of a room with no transaction holds no state after the comparison, so no read took its copy from the room and started it from that copy", name)
 		}
 
 		for index, edit := range []struct {

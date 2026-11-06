@@ -80,19 +80,19 @@ func TestASavedBlockPointerIsALinkNamedByItsAttribute(t *testing.T) {
 }
 
 // A pointer and a prose citation of one target are separate edges, each from the block holding
-// it: the claim's serves and answers edges from the claim, and the mention from the claim's
+// it: the claim's serves and supports edges from the claim, and the mention from the claim's
 // paragraph. Dropping the prose keeps the pointer's edge as it was first written.
 func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(pmdoc.BlockAttributes{
 		{Name: "serves", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList, Targets: []string{"requirement"}}},
-		{Name: "answers", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList}},
+		{Name: "supports", BlockAttributeSchema: pmdoc.BlockAttributeSchema{Kind: pmdoc.BlockAttributeBlockList}},
 	}))
 	handler, database := blockIndexHandler(t)
 	issue, _ := pointerSpec(t, handler)
 	r1 := "dispatch://" + issue.Key + "/spec#b-r1"
 	c1 := issue.Key + "/checks-md#c1"
 	claim := func(body string) string {
-		return ":::claim{#c1 answers=\"" + r1 + "\" serves=\"" + r1 + "\"}\n" + body + "\n:::\n"
+		return ":::claim{#c1 supports=\"" + r1 + "\" serves=\"" + r1 + "\"}\n" + body + "\n:::\n"
 	}
 	prose := "It holds, per " + r1 + "."
 	if response := uploadChecks(t, handler, issue.Key, claim(prose)); response.Code != http.StatusCreated {
@@ -104,7 +104,7 @@ func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 		t.Fatalf("GET …/blocks of checks.md lists no block for %q", prose)
 	}
 	requireEdgeSources(t, "links to r1", graphEdges(t, handler, url.Values{"to": {r1}}).Edges,
-		"serves block "+c1, "answers block "+c1, "mentions block "+issue.Key+"/checks-md#"+paragraph)
+		"serves block "+c1, "supports block "+c1, "mentions block "+issue.Key+"/checks-md#"+paragraph)
 	servesVersion := func() int {
 		t.Helper()
 		for _, row := range readBlockRefs(t, database, checks) {
@@ -123,7 +123,7 @@ func TestAPointerAndAProseCitationOfOneTargetAreTwoEdges(t *testing.T) {
 		t.Fatalf("upload the claim without its prose citation: status=%d body=%s", response.Code, response.Body.String())
 	}
 	requireEdgeSources(t, "links to r1 without the prose citation", graphEdges(t, handler, url.Values{"to": {r1}}).Edges,
-		"serves block "+c1, "answers block "+c1)
+		"serves block "+c1, "supports block "+c1)
 	if version := servesVersion(); version != 1 {
 		t.Fatalf("the serves edge was created at version %d after the prose went, want still 1", version)
 	}

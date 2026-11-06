@@ -28,9 +28,8 @@ export function BulkSnoozeBar({
   pending,
   refusal,
 }: {
-  /** The bar's own element. The Inbox renders it in two places - beside the bands, and in the
-   *  empty state a pick can leave behind - so the keymap reaches it through this rather than by
-   *  searching the list, which the empty state is not inside. */
+  /** The bar's own element, which the keymap reaches through this: Escape from the picker
+   *  focuses the bar itself when a pick has left no row to return to. */
   barRef: RefObject<HTMLFieldSetElement | null>;
   /** How many asks a pick would write: the marked rows this view has on the page. */
   count: number;

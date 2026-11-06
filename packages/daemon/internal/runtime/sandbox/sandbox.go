@@ -97,6 +97,7 @@ type Runtime struct {
 	controllerSlackChannels        []string
 	agent                          []string
 	setup                          []string
+	skills                         ghrepo.Repository
 	testPostgres                   bool
 	bootTimeout                    time.Duration
 	registrationIntervals          int
@@ -358,8 +359,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
-		testPostgres: opts.TestPostgres,
-		tokens:       opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
+		testPostgres: opts.TestPostgres, skills: opts.SkillsRepository,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, gitHubOwners: opts.GitHubOwners,
 		store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,

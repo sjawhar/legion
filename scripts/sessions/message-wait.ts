@@ -1,16 +1,24 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { SQL } from "bun";
+import { SQL, type TransactionSQL } from "bun";
 
 /**
  * Measures how long every Envoy message waited, in the role session it
  * reached, for that session's next assistant message, and which tool call was open when it
- * arrived. The source is the project's Oh My Pi session store, whose connection URL the file
- * `OMP_SESSION_SQL_DSN_FILE` names; each session is its `omp_session_files.content` row followed
+ * arrived. The source is the project's Oh My Pi session store, a shared database, so it is read
+ * through the deployment's read-only login: the connection URL comes from the file
+ * `SESSION_READER_DSN_FILE` names, or from `--dsn-file`. The session URL the file
+ * `OMP_SESSION_SQL_DSN_FILE` names is never a route for a read: it is what the role's own agent
+ * writes its transcript with. Each session is its `omp_session_files.content` row followed
  * by its `omp_session_files_parts` rows in `start_offset` order, which is the shape
  * `packages/daemon/internal/ompsessions/ompsessions.go` defines and reads back, and every read is
  * scoped by `path`, the primary key of both tables, since a scan of the parts table takes
  * minutes.
+ *
+ * Every read runs in one transaction begun read-only, which this script confirms from the server
+ * before it reads and which ends with that transaction. A store behind a pool in transaction mode
+ * keeps a read-only setting made for a whole session or a whole connection on the backend the
+ * connection goes back to, and the pool's next client's writes then fail.
  *
  * Nothing it prints carries the connection URL, a credential or an exception's text: its lines
  * hold a role name, a session id, a tool name, an instant and a count, and a failure is a fixed
@@ -62,8 +70,9 @@ Options:
                           default only the role sessions themselves are measured: the session
                           file the daemon launches, named for its launch.
   --path-contains <text>  Measure only the sessions whose path holds this text, e.g. infra-338.
-  --dsn-file <path>       The file holding the store's connection URL. Defaults to the file
-                          OMP_SESSION_SQL_DSN_FILE names, which every Legion pod has.
+  --dsn-file <path>       The explicit route: the file holding the store's connection URL.
+                          Without it the URL comes from the file SESSION_READER_DSN_FILE names,
+                          the deployment's read-only login, and there is no other route.
   --help                  Print this.
 
 Prints one line per wait of at least the threshold, longest first, in two groups: the waits a
@@ -426,22 +435,50 @@ interface LiveStore extends SessionStore {
   close(): Promise<void>;
 }
 
-/** The live store. Both statements are scoped by `path`, and neither scans the parts table. */
+/** A read the store refused to run, because the transaction it was to run in was not read-only. */
+class NotReadOnlyError extends Error {}
+
+/** The transaction options every read is begun with, so the server holds it read-only. */
+const READ_ONLY = "read only";
+
+/**
+ * Runs `read` in one transaction begun read-only, after confirming from the server, inside that
+ * transaction and before anything is read in it, that the begin took. A deployment can point this
+ * script at a server or a route that dropped it, and reading on a write-capable connection is what
+ * the shared store's pool cannot take. Every read of the store goes through here, so a read added
+ * later cannot be the one that skips the confirmation.
+ */
+async function readOnly<T>(sql: SQL, read: (tx: TransactionSQL) => Promise<T>): Promise<T> {
+  return await sql.begin(READ_ONLY, async (tx) => {
+    const rows: { transaction_read_only: string }[] = await tx`show transaction_read_only`;
+    if (rows[0]?.transaction_read_only !== "on") throw new NotReadOnlyError();
+    return await read(tx);
+  });
+}
+
+/**
+ * The live store. Each read is one read-only transaction, which drops that state when it commits;
+ * both statements are scoped by `path`, and neither scans the parts table.
+ */
 function liveStore(dsn: string): LiveStore {
   const sql = new SQL(dsn);
   return {
     async paths() {
-      const rows: { path: string }[] = await sql`select path from omp_session_files order by path`;
-      return rows.map((row) => row.path);
+      return await readOnly(sql, async (tx) => {
+        const rows: { path: string }[] = await tx`select path from omp_session_files order by path`;
+        return rows.map((row) => row.path);
+      });
     },
     async text(path) {
-      const rows: { text: string | null }[] = await sql`
-        select f.content || coalesce(
-          (select string_agg(p.content, '' order by p.start_offset)
-             from omp_session_files_parts p where p.path = f.path), '') as text
-        from omp_session_files f where f.path = ${path}
-      `;
-      return rows[0]?.text ?? "";
+      return await readOnly(sql, async (tx) => {
+        const rows: { text: string | null }[] = await tx`
+          select f.content || coalesce(
+            (select string_agg(p.content, '' order by p.start_offset)
+               from omp_session_files_parts p where p.path = f.path), '') as text
+          from omp_session_files f where f.path = ${path}
+        `;
+        return rows[0]?.text ?? "";
+      });
     },
     async close() {
       await sql.close().catch(() => undefined);
@@ -469,9 +506,13 @@ async function main(argv: readonly string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  const dsnFile = options.dsnFile ?? process.env.OMP_SESSION_SQL_DSN_FILE;
+  const dsnFile = options.dsnFile ?? process.env.SESSION_READER_DSN_FILE;
   if (dsnFile === undefined || dsnFile === "") {
-    console.error("unavailable: no session store; OMP_SESSION_SQL_DSN_FILE names no file");
+    console.error(
+      "unavailable: SESSION_READER_DSN_FILE names no file, so this deployment gives no read " +
+        "route to the session store, which is a fault of the deployment to report; --dsn-file " +
+        "names the file holding the URL of a read-only login where you have one"
+    );
     return 2;
   }
   let dsn: string;
@@ -492,6 +533,12 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     return 0;
   } catch (error) {
+    if (error instanceof NotReadOnlyError) {
+      console.error(
+        "unavailable: that transaction is not read-only, so the run stopped and reported nothing"
+      );
+      return 2;
+    }
     console.error(`unavailable: the session store could not be read${errorCode(error)}`);
     return 2;
   } finally {
