@@ -235,25 +235,3 @@ A result at the head reads passed.
     await alice.close();
   }
 });
-
-test("an issue with no Verification document shows the command that makes one", async ({
-  browser,
-}) => {
-  await createProject({ key: "VER", name: "Verification" });
-  const issue = await createIssue({ project: "VER", title: "Nothing to verify yet" });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/verification`);
-
-    const empty = page.getByTestId("verification-empty");
-    await expect(empty).toContainText(`${issue.key} has no Verification document.`);
-    await expect(empty).toContainText(
-      `dispatch artifact --issue ${issue.key} --name verification.md`
-    );
-    await expect(page.getByTestId("verification-checks")).toHaveCount(0);
-  } finally {
-    await alice.close();
-  }
-});

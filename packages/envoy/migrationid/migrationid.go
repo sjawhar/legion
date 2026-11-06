@@ -37,10 +37,10 @@ import (
 // timestampLayout is how an identifier past the numbered series reads as a UTC instant.
 const timestampLayout = "20060102150405"
 
-// narrowerThanATimestamp is the first identifier too wide to be one of a set's numbers: a
+// NarrowerThanATimestamp is the first identifier too wide to be one of a set's numbers: a
 // timestamp is 14 digits, so everything below 10^13 is a number and everything from it up is read
 // as a timestamp.
-const narrowerThanATimestamp = 10_000_000_000_000
+const NarrowerThanATimestamp = 10_000_000_000_000
 
 // closings records, once per runner, the file its numbered series ended at and that file's
 // number. Each runner and each file appears once; TestEachSeriesClosesOnce holds it to that.
@@ -115,7 +115,7 @@ func CheckClosedAt(versions map[int]string, closedAt int) error {
 	numbers := make([]int, 0, len(versions))
 	timestamps := make([]int, 0, len(versions))
 	for version := range versions {
-		if version < narrowerThanATimestamp {
+		if version < NarrowerThanATimestamp {
 			numbers = append(numbers, version)
 			continue
 		}

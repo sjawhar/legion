@@ -13,14 +13,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// seedAttributionIssues writes project ATTR and one issue per key (ATTR-<n>), and each
-// links[key] URL as that issue's external link. Idempotent, so tests sharing the database can
-// seed the same keys.
+// seedAttributionIssues writes one issue per key (ATTR-<n>) in the project that owns
+// acme/widgets (seedDeliveryProject), since an attribution holds an issue to the repository the
+// pull request is in, and each links[key] URL as that issue's external link. Idempotent, so
+// tests sharing the database can seed the same keys.
 func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, keys []string, links map[string][]string) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, `insert into projects (key, name) values ('ATTR', 'Attribution') on conflict do nothing`); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
+	seedDeliveryProject(t, ctx, pool)
 	for _, key := range keys {
 		number, err := strconv.Atoi(strings.TrimPrefix(key, "ATTR-"))
 		if err != nil {
@@ -28,8 +27,8 @@ func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, 
 		}
 		if _, err := pool.Exec(ctx, `
 			insert into issues (key, project_key, number, title, status, created_by, rank)
-			values ($1, 'ATTR', $2, $1, 'todo', '{"kind":"system","id":"test"}', $1)
-			on conflict do nothing`, key, number); err != nil {
+			values ($1, $2, $3, $1, 'todo', '{"kind":"system","id":"test"}', $1)
+			on conflict do nothing`, key, deliveryProject, attributionIssueBand+number); err != nil {
 			t.Fatalf("seed issue %s: %v", key, err)
 		}
 		for _, url := range links[key] {
@@ -44,14 +43,30 @@ func seedAttributionIssues(t *testing.T, ctx context.Context, pool *store.Pool, 
 
 func resolvedKey(t *testing.T, ctx context.Context, pool *store.Pool, facts attributionFacts) (string, attributionSource) {
 	t.Helper()
-	key, source, err := resolveIssueKey(ctx, pool, facts)
+	key, source, err := resolveStoredIssueKey(ctx, pool, facts.Repo, facts.URL, attributionInputsFrom(facts))
 	if err != nil {
-		t.Fatalf("resolveIssueKey(%+v): %v", facts, err)
+		t.Fatalf("resolveStoredIssueKey(%+v): %v", facts, err)
 	}
 	if key == nil {
 		return "", source
 	}
 	return *key, source
+}
+
+// storedIssueKey is the issue delivery_pull_requests credits one stored pull request to, as a
+// failure message names it: "none" where the row credits nobody, which AttributePullRequests
+// writes as a null issue_key.
+func storedIssueKey(t *testing.T, ctx context.Context, pool *store.Pool, repo string, number int) string {
+	t.Helper()
+	var issue *string
+	if err := pool.QueryRow(ctx,
+		`select issue_key from delivery_pull_requests where repo = $1 and number = $2`, repo, number).Scan(&issue); err != nil {
+		t.Fatalf("read the stored pull request %s#%d: %v", repo, number, err)
+	}
+	if issue == nil {
+		return "none"
+	}
+	return *issue
 }
 
 // TestAttributionFallsBackToAnExternalLinkNamingThePullRequest: source (a), an issue whose

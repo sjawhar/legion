@@ -16,7 +16,8 @@ and an earlier one with `--version <n>`. The child's Conversation lists every ve
 Release every adopted child at once with
 `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. The daemon runs nothing on
 a child until it is released. Once it is released, the daemon moves it to `todo` and, while the
-root's design gate is open, starts its phases itself. It starts no sub-architect, and you start no
+root's design gate is open, starts its first phase itself at the child's own admission slot, and
+not while Dispatch shows an open child under that child. It starts no sub-architect, and you start no
 worker. A release is accepted whole whatever the `--blocked-by` links say: its answer names
 `started` and `held` (each held child with the issues it waits on) beside `released`, and a held
 child waits in your tree until Legion starts it.
@@ -73,11 +74,16 @@ EOF
 - `--project` is the issue key's prefix before `-<n>` (`LEGSMOKE-3` → `LEGSMOKE`).
 - In a root session `$LEGION_ISSUE` is the root (it equals `$LEGION_TREE`): pass it as `--parent`.
   The daemon makes the sub-issue link from `--parent`.
+- File every child before you request the root spec's approval, and before `register_gate` under
+  `gates.design: off`: the gate's opening starts the root's own first phase unless Dispatch shows
+  an open child under it, so a child filed after that leaves the root working beside its children.
 - Give a child `--blocked-by` only for an issue outside this tree's own repositories, or one whose
   deploy another child builds on, then release every child at once with `release_children`:
   Legion holds a released child until its last blocker closes, and a child is inert only until it
   is released. No child waits on a sibling's merge in a repository this tree already has a pull
   request in; that work is written into the spec of the issue whose pull request carries it.
+  Each issue of the tree whose worker has work holds an admission slot of its own, so a wave of
+  four working children takes four of the deployment's cap.
 - Never release a child `--blocked-by` its own parent: the parent now merges last, so that child
   would wait forever.
 - Do not pass `--assignee`, because the default keeps the tree's questions in one Inbox: under the

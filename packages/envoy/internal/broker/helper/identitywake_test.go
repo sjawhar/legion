@@ -80,7 +80,9 @@ func TestADroppedCredentialInIdentityModeIsTradedAgainAtOnce(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("projected.service.account.token"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	identity, err := brokerclient.New(brokerclient.Config{
+	// machine, not identity: identity is the type one reading of a session's broker identity
+	// has (Session.identity), which this test's enrol below names.
+	machine, err := brokerclient.New(brokerclient.Config{
 		BrokerURL: f.srv.URL, Key: key, HTTP: f.srv.Client(),
 		Subject: brokerclient.NewProjectedToken(tokenFile),
 	})
@@ -88,7 +90,7 @@ func TestADroppedCredentialInIdentityModeIsTradedAgainAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &Broker{
-		URL: f.srv.URL, Identity: identity, HTTP: f.srv.Client(),
+		URL: f.srv.URL, Identity: machine, HTTP: f.srv.Client(),
 		OperatorFile: filepath.Join(t.TempDir(), "no-operator-here"),
 	}
 	t.Cleanup(b.Close)
@@ -105,7 +107,9 @@ func TestADroppedCredentialInIdentityModeIsTradedAgainAtOnce(t *testing.T) {
 	f.mu.Lock()
 	f.enrolRefusals, f.enrolStatus, f.enrolCode = 1, http.StatusUnauthorized, "LAUNCHER_INVALID"
 	f.mu.Unlock()
-	if _, _, err := b.Enroll(ctx, &Session{RuntimeID: "this-box", Thumbprint: sessionThumbprint(t)}); err == nil {
+	// A Session's identity fields are its own to replace (Session.rename), so a caller that
+	// holds no session enrols one reading of an identity instead (Broker.EnrollIdentity).
+	if _, _, err := b.EnrollIdentity(ctx, identity{RuntimeID: "this-box", Thumbprint: sessionThumbprint(t)}); err == nil {
 		t.Fatal("the refused enrolment answered no error")
 	}
 

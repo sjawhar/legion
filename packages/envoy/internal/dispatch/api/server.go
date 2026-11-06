@@ -85,6 +85,11 @@ type Deps struct {
 	// embedder, and search answers keyword-only on every request, always setting
 	// SearchResponse.Degraded.
 	Embedder embed.Embedder
+	// Answerer answers one question from what Dispatch holds (INFRA-1279), for the three going
+	// routes; nil means the deployment configured no model, where a run is still recorded and
+	// its stream carries the error frame contracts.GoingErrorNoModelConfigured, and the
+	// capability route says no model is configured.
+	Answerer Answerer
 	Envoy    *envoy.Client
 	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
@@ -174,6 +179,9 @@ type DepsInput struct {
 	Docs         docs.API
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
+	// Answerer answers a going request's question (INFRA-1279); nil means no model is
+	// configured. See Deps.Answerer; cmd/dispatch builds it (newAnswerer).
+	Answerer Answerer
 	Events   *events.Broker
 
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -265,6 +273,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,
+		Answerer:               input.Answerer,
 		Envoy:                  envoyClient,
 		Events:                 input.Events,
 		GitHub:                 github,
@@ -422,6 +431,13 @@ type server struct {
 	// on every result.recorded does not spend one GET /repos/{owner}/{repo} apiece. The policy
 	// is delivery's; the server holds the one cache the process shares.
 	defaultBranches delivery.DefaultBranches
+	// commitPulls is the moment before which the results read will not read GitHub again for the
+	// pull requests of a commit it could answer for no other way (delivery.CommitPullReads,
+	// currencyReader.readThroughHead), held across requests so one commit costs at most one such
+	// read per delivery.CommitPullReadStaleAfter however often the tab refetches, and one per
+	// delivery.CommitPullSettledFor once GitHub has put that pull request's head elsewhere. The
+	// policy is delivery's; the server holds the one cache the process shares.
+	commitPulls delivery.CommitPullReads
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of

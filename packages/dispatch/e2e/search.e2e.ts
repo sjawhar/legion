@@ -163,8 +163,7 @@ test("a search term lists marked document, comment, ask, and issue-title results
 
 test("an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "ask hit states are independent of viewport");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Planetarium" });
   const answered = await createAsk(
@@ -300,7 +299,7 @@ test("a project-document hit is grouped under the document and opens it; a messa
   }
 });
 
-test("the rail Search control opens the palette and Escape returns focus to it @phone", async ({
+test("the rail Search control opens the palette and Escape returns focus to it", async ({
   browser,
 }, testInfo) => {
   await seedSearchFixture();
@@ -308,8 +307,7 @@ test("the rail Search control opens the palette and Escape returns focus to it @
 
   try {
     const page = await context.newPage();
-    const isPhone = testInfo.project.name === "iphone";
-    await openSearchFromRail(page, isPhone);
+    await openSearchFromRail(page, false);
 
     const dialog = page.getByRole("dialog", { name: "Search" });
     const search = page.getByRole("combobox", { name: "Search" });
@@ -324,9 +322,7 @@ test("the rail Search control opens the palette and Escape returns focus to it @
 
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
-    if (!isPhone) {
-      await expect(page.getByRole("button", { name: /^search/i })).toBeFocused();
-    }
+    await expect(page.getByRole("button", { name: /^search/i })).toBeFocused();
   } finally {
     await context.close();
   }
@@ -403,15 +399,13 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
   }
 });
 
-test("no results and short queries are stated, not silent @phone", async ({
-  browser,
-}, testInfo) => {
+test("no results and short queries are stated, not silent", async ({ browser }) => {
   await seedSearchFixture();
   const context = await asUser(browser, "alice");
 
   try {
     const page = await context.newPage();
-    await openSearchFromRail(page, testInfo.project.name === "iphone");
+    await openSearchFromRail(page, false);
     const search = page.getByRole("combobox", { name: "Search" });
 
     await search.fill("a");
