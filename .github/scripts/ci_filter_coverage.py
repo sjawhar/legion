@@ -106,6 +106,22 @@ def gate_runs(g: Gate) -> list:
     return list(g.runs) + [r for e in g.exact for r in e.runs]
 
 
+@dataclass(frozen=True)
+class TagRun:
+    """A step of ci.yaml that runs a package under a build tag and selects with `-run` only the
+    tests the tag adds, paired with the job that runs that package's untagged tests: `filter`,
+    `job` and `step` are the tag step's gate, job and step name, `untagged_filter` and
+    `untagged_job` the other job's filter and name, and `why` names the step that runs the
+    untagged tests - the judgement check_tag_runs cannot derive and this table records."""
+
+    filter: str
+    job: str
+    step: str
+    untagged_filter: str
+    untagged_job: str
+    why: str
+
+
 # Every workflow step a why cites through at(), checked to exist so a renamed step fails here.
 # Each entry is (the workflow file that holds the step, the job, the step).
 CITED: list = []
@@ -228,10 +244,18 @@ def embed_reads(dir_rel: str, patterns, why: str) -> list:
     return reads
 
 
+def go_skips_dir(parent: Path, name: str) -> bool:
+    """Whether the go command passes over a directory of a `<root>/...` pattern: testdata, a name
+    starting with `.` or `_`, node_modules, and a nested module. ci_job_reads.py walks the race
+    lane's `/...` packages by this rule too, so the two walks cannot drift."""
+    return (name == "testdata" or name.startswith((".", "_")) or name == "node_modules"
+            or (parent / name / "go.mod").is_file())
+
+
 def pattern_dirs(run_: Run) -> list:
     """A `<root>/...` pattern reads every directory under root that holds .go files, to evaluate
-    their build constraints, the packages it then excludes included; testdata, `_` and `.`
-    directories, node_modules and nested modules are skipped, as the go command skips them."""
+    their build constraints, the packages it then excludes included; go_skips_dir says which are
+    passed over."""
     reads = []
     for pattern in run_.pkgs:
         if not pattern.endswith("..."):
@@ -239,8 +263,7 @@ def pattern_dirs(run_: Run) -> list:
         root = (REPO / run_.workdir / pattern.removesuffix("...").rstrip("/")).resolve()
         for current, subdirs, names in os.walk(root):
             here = Path(current)
-            subdirs[:] = [s for s in subdirs if not (s == "testdata" or s.startswith((".", "_")) or s == "node_modules"
-                                                     or (here / s / "go.mod").is_file())]
+            subdirs[:] = [s for s in subdirs if not go_skips_dir(here, s)]
             if any(n.endswith(".go") for n in names):
                 reads.append(Read(f"{rel(current)}/*", f"{run_.why} (the pattern {pattern} reads the directory's .go files)"))
     return reads
@@ -877,6 +900,87 @@ def check_push_workflows(data, filters: dict, problems: list) -> list:
     return report
 
 
+# A line of a run: script that runs `go test` passing both -tags and -run: it runs only the tests
+# its tag adds to the package, so another job must run that package's untagged tests. A `go vet`
+# or `go build` line is no such step, and `-runtime` or `-tagsomething` is not the flag.
+TAG_RUN_TEST = re.compile(r"\bgo\s+(?:-C\s+\S+\s+)?test\b")
+TAG_RUN_FLAGS = (re.compile(r"(?<![\w-])-tags\b"), re.compile(r"(?<![\w-])-run\b"))
+
+
+def tag_run_steps(jobs: dict) -> list:
+    """Every run: step of `jobs` whose script holds a line running `go test` with both -tags and
+    -run, as (the job, the step). Read with script_lines, so a comment is no trigger and both
+    flags must be on the go test line itself, as every such step of ci.yaml writes them."""
+    found = []
+    for name, job in jobs.items():
+        for step in (job or {}).get("steps") or []:
+            if any(TAG_RUN_TEST.search(line) and all(flag.search(line) for flag in TAG_RUN_FLAGS)
+                   for line in script_lines(str(step.get("run", "")))):
+                found.append((name, step))
+    return found
+
+
+def check_tag_runs(document: dict, data, filters: dict, quantifiers: dict, files: list, problems: list) -> list:
+    """A step that runs a package under a build tag and passes `-run` runs only the tests the tag
+    adds, so the package's untagged tests must run elsewhere in every run that step runs. The job
+    that runs them is declared (TAG_RUNS), and its filter must cover every file the tag step's
+    filter covers; otherwise a change to a file only the tag step's filter matches runs the tagged
+    tests alone and the untagged ones nowhere. The table is no entry's to opt into: a `go test`
+    step of ci.yaml passing both -tags and -run that no entry names is a failure of its own, and
+    so is a stale entry - one naming a filter the changes job does not have, a job ci.yaml does
+    not have, a step that job does not have, or a step whose run: holds no -run. Returns the
+    report lines."""
+    report = []
+    jobs = document.get("jobs") or {}
+    for entry in data.TAG_RUNS:
+        where = f'{entry.job} step "{entry.step}"'
+        gone_filters = [name for name in (entry.filter, entry.untagged_filter) if name not in filters]
+        for name in gone_filters:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names filter {name} for {where}, "
+                            f"which the changes job does not have")
+        gone_jobs = [name for name in (entry.job, entry.untagged_job) if name not in jobs]
+        for name in gone_jobs:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names job {name}, which "
+                            f"{WORKFLOW} does not have")
+        if gone_filters or gone_jobs:
+            continue
+        job = jobs[entry.job] or {}
+        steps = [s for s in job.get("steps") or [] if "run" in s and step_matches(s, entry.step)]
+        if len(steps) != 1:
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names step \"{entry.step}\" of "
+                            f"job {entry.job}, which is not one run: step of it; update or remove the entry")
+            continue
+        if "-run" not in str(steps[0]["run"]):
+            problems.append(f"::error file=.github/scripts/ci_job_reads.py::TAG_RUNS names {where}, which passes no "
+                            f"-run, so it runs the package's untagged tests itself; drop the entry")
+            continue
+        tagged = PathsFilter(filters[entry.filter], quantifiers[entry.filter])
+        untagged = PathsFilter(filters[entry.untagged_filter], quantifiers[entry.untagged_filter])
+        selected = [f for f in files if tagged.covers(f)]
+        uncovered = [f for f in selected if not untagged.covers(f)]
+        report.append(f"{where}: {len(selected)} files selected by filter {entry.filter}, {len(uncovered)} "
+                      f"uncovered by {entry.untagged_job} (filter {entry.untagged_filter})")
+        if uncovered:
+            more = f", and {len(uncovered) - SHOWN} more" if len(uncovered) > SHOWN else ""
+            problems.append(f"::error file={WORKFLOW}::{where} runs only what its tag adds (-run), so {entry.untagged_job} "
+                            f"must run that package's untagged tests in every run it runs ({entry.why}), but filter "
+                            f"{entry.untagged_filter} does not match {' '.join(uncovered[:SHOWN])}{more}, which filter "
+                            f"{entry.filter} matches: a change to one of them runs the tagged tests alone and the "
+                            f"untagged ones nowhere")
+    # The other side of the rule: an entry holds the step it names, and this holds every step no
+    # entry names - a step added without one, or an entry deleted while its step stayed. A step
+    # whose entry is itself stale is named all the same, so it keeps the refusal above rather
+    # than drawing a second, confusing one.
+    for name, step in tag_run_steps(jobs):
+        if any(entry.job == name and step_matches(step, entry.step) for entry in data.TAG_RUNS):
+            continue
+        problems.append(f"::error file={WORKFLOW}::{name} step \"{step_label(step)}\" runs only what its tag adds "
+                        f"(-run), but no TAG_RUNS entry of .github/scripts/ci_job_reads.py names it: the job that "
+                        f"runs that package's untagged tests must be declared there, so the check holds it to "
+                        f"running in every run this step runs")
+    return report
+
+
 def declared_reads(data) -> list:
     """Every read pattern ci_job_reads.py declares, each with where it is: a gate's reads, or a
     RULES row's (a row's Runs declare go commands, not patterns)."""
@@ -968,6 +1072,7 @@ def main() -> int:
             problems += held
     problems += session.problems
     report += check_push_workflows(data, filters, problems)
+    report += check_tag_runs(document, data, filters, quantifiers, files, problems)
     for line in report:
         print(line)
     problems = list(dict.fromkeys(problems))

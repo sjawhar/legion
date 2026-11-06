@@ -1,5 +1,14 @@
 # Changelog
 
+This file is history: every entry after the last section below is in the package's GitHub
+releases, one per `claude-envoy-v*` tag.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Changed
+
+- A retro learning cites a file and a symbol, or text quoted from the file at the head it commits, instead of a line number, and the claim rule in the shared role-prompt core asks for the same.
+
 ## [main@c5c94dbd542d] - 2026-11-05
 
 ### Added

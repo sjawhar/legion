@@ -113,6 +113,6 @@ driver as the `envoy-e2e-local` job of `.github/workflows/ci.yaml`.
 The authoritative event contract lives in `packages/contracts/`.
 Run `bun run gen:go` in that package before validating or releasing `packages/envoy`.
 
-`.github/workflows/changelog-fold.yaml` folds this package's changelog fragments
-(`.changes/unreleased/`) into `CHANGELOG.md` under the `legion-envoy-v` release that first carried
-each one.
+Each `legion-envoy-v` release publishes the changelog entries its own tag first shipped: this
+package's fragment files (`.changes/unreleased/`) are rendered into that GitHub release's notes.
+`CHANGELOG.md` is the history before that and stops where the fragments begin.
