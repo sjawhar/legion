@@ -86,6 +86,20 @@ run_lister demo "$root"
 check "exits 0" "$(is "$status" 0)"
 check "the entry point is gone, the test is not" "$(is "$out" '^(TestMainlineStaysIn)$')"
 
+echo "case: go's own rule for what the name after Test may start with"
+# go runs a TestXxx whose Xxx does not start with a lower-case letter, so Testify is an ordinary
+# function and naming it in a -run would be a dead alternative.
+root=$(fixture namerule)
+gofile "$root/name_rule_test.go" demo \
+  'func Test(t *testing.T) {}' \
+  'func Test_one(t *testing.T) {}' \
+  'func Testify(t *testing.T) {}' \
+  'func TestifyHelper(t *testing.T) {}'
+run_lister demo "$root"
+check "exits 0" "$(is "$status" 0)"
+check "the bare name and the underscore one are tests, the lower-case ones are not" \
+  "$(is "$out" '^(Test|Test_one)$')"
+
 echo "case: a fuzz target and an example of a tagged file"
 root=$(fixture fuzz)
 gofile "$root/fuzz_test.go" demo \

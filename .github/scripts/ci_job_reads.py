@@ -36,11 +36,12 @@ they are complete.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import NamedTuple
 
-from ci_filter_coverage import Read, at, exact, gate, run
+from ci_filter_coverage import Read, at, exact, gate, go_skips_dir, run
 
 ENVOY = "packages/envoy"
 DAEMON = "packages/daemon"
@@ -454,8 +455,9 @@ def race_pkgs(job):
 
 def race_step(job):
     """The one go command of a race job's step, pinned to the text this declaration builds."""
-    text = f"go test -race -timeout {job.timeout} " + " ".join(race_pkgs(job))
-    return step_run(job.job, job.step, text, ENVOY, race_pkgs(job), race=True)
+    pkgs = race_pkgs(job)
+    text = f"go test -race -timeout {job.timeout} " + " ".join(pkgs)
+    return step_run(job.job, job.step, text, ENVOY, pkgs, race=True)
 
 
 # The unit step runs the module less two things: the lane's packages, which the three race jobs
@@ -516,6 +518,13 @@ def race_impossible_tests_of(path: Path) -> set:
     if constraint not in ("", "race", "!race") and re.search(r"\brace\b", constraint):
         raise ValueError(f"{path}: `//go:build {constraint}` names race in a form ci_job_reads.py does not read; "
                          "teach race_impossible_tests_of() the form, or the plain step loses the file's tests")
+    # A file the race build compiles and that nowhere writes raceEnabled, in code or in a comment,
+    # names no test here and refuses nothing, so it never reaches the blanking pass below. That is
+    # almost every file of the lane: 610 of them, 10.9 MB, which this guard takes from 3.0 s to
+    # 0.56 s on each import of this module, one per check-ci-filters.sh run and five more per run
+    # of its test.
+    if constraint != "!race" and not RACE_ENABLED.search(text):
+        return set()
     code = go_code_only(text)
     # A file the race build alone compiles has no test a plain run can name, so every raceEnabled
     # of it but the declaration is unattributable, as the empty list below makes it.
@@ -540,9 +549,9 @@ def race_impossible_tests_of(path: Path) -> set:
 
 def race_lane_packages(root) -> list:
     """Every package directory the lane's steps run, in the order its steps name them: a package
-    alone for an exact entry, and for a tree its directory and every directory with .go files under
-    it (go's own exclusions: testdata, and a name starting with . or _). Each is (the path under
-    `root`, the directory)."""
+    alone for an exact entry, and for a tree its directory and every directory with .go files
+    under it, passing over what go passes over (go_skips_dir, the rule pattern_dirs walks a
+    `/...` pattern by). Each is (the path under `root`, the directory)."""
     root, seen, found = Path(root), set(), []
     for job in ENVOY_RACE_LANE:
         for package in job.packages:
@@ -551,9 +560,11 @@ def race_lane_packages(root) -> list:
                 raise ValueError(f"the race lane names {package.name}, which is no directory under {root}")
             directories = [base]
             if package.tree:
-                directories += [d for d in sorted(base.rglob("*"))
-                                if d.is_dir() and any(d.glob("*.go"))
-                                and not any(part == "testdata" or part[0] in "._" for part in d.relative_to(base).parts)]
+                for current, subdirs, names in os.walk(base):
+                    here = Path(current)
+                    subdirs[:] = sorted(s for s in subdirs if not go_skips_dir(here, s))
+                    if here != base and any(n.endswith(".go") for n in names):
+                        directories.append(here)
             for directory in directories:
                 under = directory.relative_to(root).as_posix()
                 if under not in seen:

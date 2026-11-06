@@ -228,10 +228,18 @@ def embed_reads(dir_rel: str, patterns, why: str) -> list:
     return reads
 
 
+def go_skips_dir(parent: Path, name: str) -> bool:
+    """Whether the go command passes over a directory of a `<root>/...` pattern: testdata, a name
+    starting with `.` or `_`, node_modules, and a nested module. ci_job_reads.py walks the race
+    lane's `/...` packages by this rule too, so the two walks cannot drift."""
+    return (name == "testdata" or name.startswith((".", "_")) or name == "node_modules"
+            or (parent / name / "go.mod").is_file())
+
+
 def pattern_dirs(run_: Run) -> list:
     """A `<root>/...` pattern reads every directory under root that holds .go files, to evaluate
-    their build constraints, the packages it then excludes included; testdata, `_` and `.`
-    directories, node_modules and nested modules are skipped, as the go command skips them."""
+    their build constraints, the packages it then excludes included; go_skips_dir says which are
+    passed over."""
     reads = []
     for pattern in run_.pkgs:
         if not pattern.endswith("..."):
@@ -239,8 +247,7 @@ def pattern_dirs(run_: Run) -> list:
         root = (REPO / run_.workdir / pattern.removesuffix("...").rstrip("/")).resolve()
         for current, subdirs, names in os.walk(root):
             here = Path(current)
-            subdirs[:] = [s for s in subdirs if not (s == "testdata" or s.startswith((".", "_")) or s == "node_modules"
-                                                     or (here / s / "go.mod").is_file())]
+            subdirs[:] = [s for s in subdirs if not go_skips_dir(here, s)]
             if any(n.endswith(".go") for n in names):
                 reads.append(Read(f"{rel(current)}/*", f"{run_.why} (the pattern {pattern} reads the directory's .go files)"))
     return reads

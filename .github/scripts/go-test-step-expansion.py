@@ -37,13 +37,16 @@ merge base in a clone under a temporary directory:
     diff "$TMPDIR/base.pairs" "$TMPDIR/head.pairs"   # empty: the change loses no test
 
 It reads the repository root off its own path, so the copy under the temporary directory checks
-itself and not the workspace it was copied from. Keep `GOMODCACHE` and `GOCACHE` the same for both
-runs: the second run then reuses the first run's compile.
+itself and not the workspace it was copied from, and it reads a step's directory and its
+comment-free lines with `ci_filter_coverage`'s own helpers, which sit beside it in both trees.
+Keep `GOMODCACHE` and `GOCACHE` the same for both runs: the second run then reuses the first
+run's compile.
 
 How it reads a step:
 
   * the working directory is the step's own `working-directory`, else the job's, else the
-    workflow's `defaults.run.working-directory`, else the repository root, as GitHub reads it;
+    workflow's `defaults.run.working-directory`, else the repository root, as GitHub reads it and
+    as check-ci-filters.sh reads it (`ci_filter_coverage.step_workdir`);
   * a `go vet`, `go build`, `go list` or `go install` line runs no test and is skipped; a line it
     cannot read stops the run, since silently skipping a `go test` would hide a duplicate;
   * `-run "$pattern"` assigned from a `$(…)` call of `.github/scripts/go-tagged-tests.sh` is run,
@@ -70,6 +73,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+from ci_filter_coverage import script_lines, step_workdir
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/ci.yaml"
@@ -213,36 +217,25 @@ def expand(text: str, variables: dict[str, str]) -> str:
     return SHELL_VAR.sub(one, text)
 
 
-def workdirs(workflow: dict) -> dict[str, str]:
-    """The working directory each job's steps default to, the workflow's default behind it."""
-    default = workflow.get("defaults", {}).get("run", {}).get("working-directory", "")
-    out = {}
-    for job, body in workflow.get("jobs", {}).items():
-        out[job] = body.get("defaults", {}).get("run", {}).get("working-directory", default)
-    return out
-
-
 def steps_of(workflow: dict) -> list[Step]:
-    """Every step whose run: holds a `go test` and whose directory is one of the two modules."""
-    job_dirs = workdirs(workflow)
+    """Every step whose run: holds a `go test` and whose directory is one of the two modules. The
+    directory and the comment-free lines are read with check-ci-filters.sh's own helpers
+    (ci_filter_coverage.step_workdir, script_lines), so this tool and the gate agree on what a
+    step runs and where."""
     found = []
     for job, body in workflow.get("jobs", {}).items():
         for index, step in enumerate(body.get("steps", []) or []):
             script = step.get("run")
             if not script:
                 continue
-            workdir = step.get("working-directory", job_dirs[job]).strip("/")
+            workdir = step_workdir(workflow, body, step)
             if workdir not in MODULE_DIRS:
                 continue
-            if not re.search(r"\bgo\s+test\b", strip_comments(script)):
+            if not re.search(r"\bgo\s+test\b", "\n".join(script_lines(script))):
                 continue
             name = step.get("name") or f"step {index + 1}"
             found.append(Step(job=job, name=name, workdir=workdir, script=script))
     return found
-
-
-def strip_comments(script: str) -> str:
-    return "\n".join(line for line in script.splitlines() if not line.strip().startswith("#"))
 
 
 def commands_of(step: Step) -> list[GoTest]:

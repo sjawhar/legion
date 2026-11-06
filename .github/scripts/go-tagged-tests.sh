@@ -42,7 +42,7 @@
 #      output and fails under `bash -e`, instead of running `-run ""`, which matches every test —
 #      the very thing this script exists to stop.
 #
-# POSIX tools and shell only (grep, sed, awk): it runs on a GitHub runner with no extra tooling.
+# Bash and what a GitHub runner already has (awk, sort): no extra tooling.
 #
 # Run from anywhere: .github/scripts/go-tagged-tests.sh <tag> <dir>, the directory as your shell
 # reads it, relative to your working directory.
@@ -111,9 +111,11 @@ if [ ${#tagged[@]} -eq 0 ]; then
 fi
 
 # $2 of a `func Name(…)` line, less the arguments: a top-level test, never a method, since a
-# method's `func` is followed by its receiver's `(`.
+# method's `func` is followed by its receiver's `(`. go runs a `func TestXxx(` whose Xxx does not
+# start with a lower-case letter, so `func Test(` and `func Test_one(` are tests and
+# `func Testify(` is an ordinary function; naming one in a -run would be a dead alternative.
 names=$(awk '
-  /^func[[:space:]]+(Test|Fuzz|Example)[A-Za-z0-9_]*[[:space:]]*\(/ {
+  /^func[[:space:]]+(Test|Fuzz|Example)([^a-z][A-Za-z0-9_]*)?[[:space:]]*\(/ {
     name = $0
     sub(/^func[[:space:]]+/, "", name)
     sub(/[[:space:]]*\(.*$/, "", name)
