@@ -576,6 +576,9 @@ jobs:
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/envoy-client/src/**'
+              # tests/envoy-channel-stall.test.ts:5-11 imports test/envoy-stack, stall-proxy and
+              # stall-scenario.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
@@ -603,7 +606,7 @@ jobs:
               - *listener_command
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
-              # checker sources them).
+              # checker sources them); workflow_paths.test.sh runs that path model itself.
               - '.github/scripts/*'
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
@@ -750,6 +753,8 @@ jobs:
               - *biome
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
+              # src/handoff-record.test.ts:7 imports @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/contracts/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -775,6 +780,9 @@ jobs:
               # src/skills-guard.test.ts:23, scripts/prepack.test.ts:6).
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # extensions/envoy.test.ts:45-51 imports test/envoy-stack, stall-proxy and
+              # stall-scenario; extensions/askgate/decision-record.test.ts:9 its fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
@@ -854,6 +862,9 @@ jobs:
               - 'packages/contracts/fixtures/decision-blocks/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
+              # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
+              # import @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -1839,6 +1850,9 @@ jobs:
 
       - name: Test the gh version check
         run: .github/scripts/check-gh-version.test.sh
+
+      - name: Test the workflow path model the path checks import
+        run: .github/scripts/workflow_paths.test.sh
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
