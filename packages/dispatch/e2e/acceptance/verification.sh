@@ -12,16 +12,21 @@
 # exists; the gap an approval request names and the covered spec that earns none; `dispatch
 # plan-approve`, refused on a spec, and `dispatch request-approval`, refused on a plan; and the one
 # request that names a spec and its Verification document together; a person's review and the CLI
-# pin the fetched version's UTF-8 bytes, even after the latest version changes.
+# pin the fetched version's UTF-8 bytes, even after the latest version changes; and, with a
+# repository mapped, the newest result of a check read whole — all forty characters of its commit,
+# so a commit that only reads like the head is told apart from it — beside a result at a commit
+# that repository does not hold refused.
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally FAKE_GITHUB_PORT (the
 # harness's fake GitHub, packages/dispatch/e2e/fake-github.ts, which the server reads as
 # DISPATCH_GITHUB_API_BASE: the currency section seeds it with one repository holding one pull
-# request, replacing every repository it served, maps that repository as PROJECT's default and
-# removes the mapping again, so a result recorded at that pull request's head reads `current`;
-# unset, or with PROJECT already naming a default repository, one `SKIP: currency …` line stands in
-# for the section) and DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
+# request and one commit beside its head, replacing every repository it served, maps that
+# repository as PROJECT's default and removes the mapping again, so a result recorded at that pull
+# request's head reads `current`, one at a commit the repository holds is stored, and one at a
+# commit it does not hold is refused `400 RESULT_COMMIT_UNKNOWN`; unset, or with PROJECT already
+# naming a default repository, one `SKIP: currency …` line stands in for the section) and
+# DEV_SIGNIN_LOGIN (a login the server's dev sign-in route, /auth/_dev/signin,
 # signs in: the local harness has it, a deployed server does not). Recording a review is a person's
 # write alone, so the two review sections sign that person in with a cookie jar; with
 # DEV_SIGNIN_LOGIN unset each prints one `SKIP: … POST /api/v1/artifacts/{id}/reviews needs a
@@ -318,15 +323,24 @@ record() {
 }
 
 # refused_result SECTION WHAT ISSUE JSON CODE STATUS: POST …/results is refused STATUS CODE.
+# The wanted status is held under any name but `status`: that one holds the answer's own status,
+# which `request` writes and `want_status` reads, and a local of that name here would take both
+# writes and leave every status check comparing a value with itself.
 refused_result() {
-  local want_code="$5" status="$6"
+  local want_code="$5" want_status_code="$6"
   send POST "/api/v1/issues/$3/results" "$4"
-  want_status "$status" "$1" "$2 is refused $status"
+  want_status "$want_status_code" "$1" "$2 is refused $want_status_code"
   expect "$1" "$2 is refused $want_code" "\"$want_code\"" '.code'
 }
 
 readonly commit_one=1111111111111111111111111111111111111111
 readonly commit_two=2222222222222222222222222222222222222222
+# The shape of the incident this rule came of: a commit whose first twelve characters are the
+# head's, so a line printing twelve reads exactly like the head, and whose other twenty-eight are
+# not. The repository holds it, so the result at it is stored rather than refused.
+readonly commit_lookalike=2222222222223333333333333333333333333333
+# A commit no repository holds, which the record route must refuse.
+readonly commit_unknown=4444444444444444444444444444444444444444
 
 # --- setup ---------------------------------------------------------------------------------------
 
@@ -734,7 +748,7 @@ else
     '[]' '[.[] | [.state, .kind, .version]]'
 fi
 
-# --- currency: a result at the head of the issue's pull request reads current --------------------
+# --- currency: the newest result, printed whole, and a commit the repository does not hold ------
 
 currency_repo="acme/verification-$$"
 if [[ -z "$fake_github_port" ]]; then
@@ -750,13 +764,14 @@ else
   else
     curl -sS -o /dev/null -X PUT -H 'Content-Type: application/json' --data-binary "$(
       jq -cn --arg r "$currency_repo" --arg k "$root" --arg sha "$commit_two" \
+        --arg look "$commit_lookalike" \
         '{($r): {contents: "read", pull_requests: "read", installation_id: 256,
-                 commit_pulls: {($sha): [7]},
+                 commit_pulls: {($sha): [7]}, commits: [$look],
                  pulls: {"7": {head_sha: $sha, state: "open", title: "\($k) the verification check"}}}}'
     )" "http://127.0.0.1:$fake_github_port/__fixture/repos" 2>"$work/curl" ||
       fail currency "seed the fake GitHub" "$(<"$work/curl")"
     seeded_github=1
-    pass currency "seeded the fake GitHub with $currency_repo and its pull request 7"
+    pass currency "seeded the fake GitHub with $currency_repo, its pull request 7 and $commit_lookalike"
 
     send PUT "/api/v1/settings/repo-projects/$currency_repo" \
       "$(jq -cn --arg s "$session" --arg p "$project" \
@@ -765,12 +780,31 @@ else
     mapped="$currency_repo"
     pass currency "mapped $currency_repo as $project's default repository"
 
+    # The incident, driven: a result at a commit that reads like the head, and then the head's
+    # own results, the last of which is the one the read must name.
+    record currency "record a pass at the commit that reads like the head" "$root" --check c1 \
+      --role tester --verdict pass --commit "$commit_lookalike" --surface cli \
+      --run "bash e2e/acceptance/verification.sh"
     record currency "record a pass at the pull request's head" "$root" --check c1 --role tester \
       --verdict pass --commit "$commit_two" --surface cli --run "bash e2e/acceptance/verification.sh"
+    record currency "record the newest pass at the pull request's head" "$root" --check c1 \
+      --role tester --verdict pass --commit "$commit_two" --surface cli \
+      --run "bash e2e/acceptance/verification.sh" --observed "the last of the three results"
     run currency "read the results of $root" results --issue "$root"
     grep -qE "^- c1 \(before_merge\): pass at ${commit_two} by tester, current\." "$work/out" ||
       fail currency "the newest result reads current" "$(<"$work/out")"
-    pass currency "the result at the pull request's head reads current"
+    pass currency "the last result recorded, at the pull request's head, reads current"
+    grep -qE "^- c1 \(before_merge\): pass at [0-9a-f]{40} by tester, " "$work/out" ||
+      fail currency "the result line prints the commit's forty characters" "$(<"$work/out")"
+    pass currency "the result line prints the whole commit, not its first twelve characters"
+    grep -qE "at [0-9a-f]{12}${commit_lookalike:12} by " "$work/out" &&
+      fail currency "the look-alike's characters stand where the head's should" "$(<"$work/out")"
+    pass currency "the line carries the head's own last twenty-eight characters"
+
+    refused_result currency "a result at a commit $currency_repo does not hold" "$root" \
+      "$(jq -cn --arg s "$session" --arg c "$commit_unknown" \
+        '{actor: {kind: "session", id: $s}, check: "c1", role: "tester", verdict: "pass", commit: $c}')" \
+      RESULT_COMMIT_UNKNOWN 400
   fi
 fi
 

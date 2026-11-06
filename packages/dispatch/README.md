@@ -325,15 +325,20 @@ cleared by a check of the issue and by a check of a child, back when that check 
 the missing plan task named only once the issue has a plan document; the gap an approval request's
 answer names and the covered spec that earns none; `dispatch plan-approve`, refused `409
 NOT_PLAN_DOCUMENT` on a spec, and `dispatch request-approval`, refused `409
-PLAN_APPROVED_BY_REVIEW` on a plan; and the one request that names a spec and its Verification
-document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two optional ones:
+PLAN_APPROVED_BY_REVIEW` on a plan; the one request that names a spec and its Verification
+document together; and, in the currency section, the newest result of a check printed with all
+forty characters of its commit, beside a result at a commit that repository does not hold refused
+`400 RESULT_COMMIT_UNKNOWN`. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two
+optional ones:
 
 - `FAKE_GITHUB_PORT`, the harness's fake GitHub, which the server reads as
   `DISPATCH_GITHUB_API_BASE`. The currency section seeds it with one repository holding one pull
-  request whose title names the issue, replacing every repository the fake served, maps that
-  repository as `PROJECT`'s default and removes the mapping on exit, so a result recorded at that
-  pull request's head reads `current`. Unset, or with `PROJECT` already naming a default
-  repository, one `SKIP: currency …` line stands in for the section.
+  request whose title names the issue and one further commit beside that pull request's head,
+  replacing every repository the fake served, maps that repository as `PROJECT`'s default and
+  removes the mapping on exit, so a result recorded at that pull request's head reads `current`, a
+  result at the further commit — whose first twelve characters are the head's — is stored, and a
+  result at a commit the repository holds neither of is refused. Unset, or with `PROJECT` already
+  naming a default repository, one `SKIP: currency …` line stands in for the section.
 - `DEV_SIGNIN_LOGIN`, as `block-graph.sh` takes it. Recording a review is a person's write alone,
   so the two review sections sign that person in with a cookie jar and answer the approval requests
   the script opened; unset, each prints one
@@ -342,7 +347,8 @@ document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two
 
 One rule governs every result the script records, beside the refusals above.
 A result at a 40-character commit the repository of the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
-Only GitHub's `422 No commit found for SHA` refuses, so the script's own results are stored as before: its fake GitHub serves no commits route, and a repository Dispatch cannot read, which is what that bare `404` says, never refuses.
+Only GitHub's `422 No commit found for SHA` refuses, and only the currency section maps a repository at all: every result recorded outside it is stored because the check's issue resolves to no repository, which is never asked about.
+Inside it, each stored result names a commit the section seeded its fake GitHub with, and the one commit it seeds nothing with is the refusal it drives.
 
 It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a
 child of it, a sibling in another tree and one more whose spec and Verification document are
