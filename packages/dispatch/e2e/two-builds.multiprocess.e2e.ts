@@ -86,9 +86,16 @@ function readBuild(dist: string): Build {
 let builds: Record<DispatchProcess, Build>;
 
 /** Scripts and stylesheets of a build that no route can load, each with the reason and the
- *  source that makes it so. None today: every chunk either build emits is loaded by a route or
- *  a lazy piece the walk opens. */
-const unreachable: readonly { readonly file: RegExp; readonly reason: string }[] = [];
+ *  source that makes it so. */
+const unreachable: readonly { readonly file: RegExp; readonly reason: string }[] = [
+  {
+    file: /^mermaid-chunk-/,
+    reason:
+      "Mermaid is code-split into sixty chunks inside the diagram worker's bundle " +
+      "(web/vite.config.ts names them), and each one is fetched only by a source of the " +
+      "diagram types it draws: a page can draw at most a handful, so no walk can pull them all.",
+  },
+];
 
 // Two identical builds would pass every row below on a server that cannot serve the other
 // build's assets at all, since each process would hold every file asked for.

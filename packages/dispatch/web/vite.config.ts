@@ -97,8 +97,17 @@ export default defineConfig({
   root: "web",
   plugins: [react(), tailwindcss(), notices.page],
   // The Mermaid worker (features/refs/mermaid-render.worker.ts) is created with
-  // `{ type: "module" }`, so it is bundled as an ES module.
-  worker: { format: "es", plugins: () => [notices.worker()] },
+  // `{ type: "module" }`, so it is bundled as an ES module. Its entry file keeps Vite's own
+  // name (`assets/mermaid-render.worker-<hash>.js`); the chunks Mermaid is code-split into are
+  // named `assets/mermaid-chunk-<rollup name>-<hash>.js`, because two browser rows must say
+  // whether a page fetched one and Rollup would otherwise call them `elk`, `mermaid.core`,
+  // `cytoscape.esm`, `katex` and so on, names that move with the dependency tree. The path is
+  // flat: `two-builds.multiprocess.e2e.ts`'s `readBuild` lists `dist/assets` without recursing.
+  worker: {
+    format: "es",
+    plugins: () => [notices.worker()],
+    rollupOptions: { output: { chunkFileNames: "assets/mermaid-chunk-[name]-[hash].js" } },
+  },
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
     // DISPATCH_BUILD wins over GITHUB_SHA, which CI sets on every step, so one job can build two
