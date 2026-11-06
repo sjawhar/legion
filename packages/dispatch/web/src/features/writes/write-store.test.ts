@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
-import { type KeptTab, keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
+import { type KeptTab, keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
   ApiError,
@@ -121,13 +121,6 @@ function storeOf(tab = keptTab(), login = "alice", files = memoryFiles()) {
 
 /** The write `writes` holds now, at `index` in press order. */
 const row = (writes: Writes, index = 0): Write | undefined => writes.rows()[index];
-
-/** A v7 key minted at `at`, as `newSendKey` mints one: its first twelve hex digits are that
- *  millisecond, which `keyExpired` reads back. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
 
 /** A page that has just resumed one status pick on CORE-1, kept in `tab` under `key` as it stood
  *  (`state`) when the page that pressed it went away. */

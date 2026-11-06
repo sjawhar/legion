@@ -190,8 +190,7 @@ export async function dropFirstAnswer(
  *  Playwright's network events and the row's `watchWrites` list it as any other. */
 export async function cutFirstAnswerBody(page: Page, method: string, path: string): Promise<void> {
   await page.addInitScript(
-    (watched: string[]) => {
-      const [watchedMethod, watchedPath] = watched;
+    ({ method, path }) => {
       const sent = window.fetch;
       let cut = false;
       // Every name of the page's own is read off `window`: this module's `Request` and
@@ -200,13 +199,14 @@ export async function cutFirstAnswerBody(page: Page, method: string, path: strin
         input: Parameters<typeof window.fetch>[0],
         init?: Parameters<typeof window.fetch>[1]
       ) => {
+        if (cut) return sent(input, init);
         const asked = input instanceof window.Request ? input.url : String(input);
         const sentMethod = (
           init?.method ?? (input instanceof window.Request ? input.method : "GET")
         ).toUpperCase();
         const response = await sent(input, init);
-        if (cut || sentMethod !== watchedMethod) return response;
-        if (new URL(asked, window.location.href).pathname !== watchedPath) return response;
+        if (cut || sentMethod !== method) return response;
+        if (new URL(asked, window.location.href).pathname !== path) return response;
         cut = true;
         return new window.Response(
           new ReadableStream<Uint8Array>({ start: (body) => body.error(new TypeError("cut")) }),
@@ -215,7 +215,7 @@ export async function cutFirstAnswerBody(page: Page, method: string, path: strin
       };
       window.fetch = cutting as typeof window.fetch;
     },
-    [method, path]
+    { method, path }
   );
 }
 

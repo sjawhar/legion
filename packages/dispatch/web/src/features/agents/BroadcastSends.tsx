@@ -110,6 +110,21 @@ function agentCount(count: number): string {
   return `${count} ${count === 1 ? "agent" : "agents"}`;
 }
 
+/** Why sending to `count` ended, in the reader's words. Both named refusals extend
+ *  `SendStoppedError`, so each is read before it. */
+function endedReason(error: Error, count: string): string {
+  if (error instanceof SendInterruptedError) {
+    return error.message;
+  }
+  if (error instanceof SendExpiredError) {
+    return `Sending to ${count} ended: ${error.message}`;
+  }
+  if (error instanceof SendStoppedError) {
+    return `Stopped sending to ${count}: ${error.message}`;
+  }
+  return `Could not send to ${count}: ${error.message}`;
+}
+
 /**
  * The page's sends, one row each, newest press first so the send just pressed is in view: held
  * while the sender's sign-out in another tab is out, saying so; queued, on the wire, still being
@@ -169,15 +184,7 @@ export function BroadcastSends({
                 ) : row.status === "late" ? (
                   `Still sending to ${count} — Dispatch has not confirmed it yet. It keeps trying, and the broadcast is made once.`
                 ) : row.status === "failed" ? (
-                  row.error instanceof SendInterruptedError ? (
-                    row.error.message
-                  ) : row.error instanceof SendExpiredError ? (
-                    `Sending to ${count} ended: ${row.error.message}`
-                  ) : row.error instanceof SendStoppedError ? (
-                    `Stopped sending to ${count}: ${row.error.message}`
-                  ) : (
-                    `Could not send to ${count}: ${row.error.message}`
-                  )
+                  endedReason(row.error, count)
                 ) : (
                   <SentBroadcast created={row.created} />
                 )}

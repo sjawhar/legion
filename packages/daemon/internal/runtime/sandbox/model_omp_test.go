@@ -23,81 +23,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
-// ompFrame is the part of an Oh My Pi RPC frame these tests read: the answer to a `get_state`
-// request names the session's model under `data`, and an assistant message names the model that
-// answered it under `message`.
-type ompFrame struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	ID      string `json:"id"`
-	Data    struct {
-		Model struct {
-			ID       string `json:"id"`
-			Provider string `json:"provider"`
-		} `json:"model"`
-	} `json:"data"`
-	Message struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-		Content  []struct {
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"message"`
-}
-
-// writeOmpProfile writes the `legion` profile a real-binary test runs Oh My Pi under — models.yml
-// and config.yml, the two files the operator's ConfigMap holds in a pod
-// (deploy/kubernetes/operator-route) — and returns that profile's agent directory.
-func writeOmpProfile(t *testing.T, home, models, config string) string {
-	t.Helper()
-	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
-	if err := os.MkdirAll(agent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range map[string]string{"models.yml": models, "config.yml": config} {
-		if err := os.WriteFile(filepath.Join(agent, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return agent
-}
-
-// ompEnviron is the whole environment a real-binary test's Oh My Pi runs under: the test's own
-// home and profile and nothing of the machine's, so neither a PI_CONFIG_FILES an operator's pod
-// exports nor any credential it carries reaches the measurement.
-func ompEnviron(home string) []string {
-	return []string{"HOME=" + home, "OMP_PROFILE=legion", "PATH=/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED=true"}
-}
-
-// anthropicAnswer writes one short streaming answer in the shape an `anthropic-messages` provider
-// gives: the model it answers as, and one text block.
-func anthropicAnswer(w http.ResponseWriter, model, text string) {
-	w.Header().Set("content-type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	for _, event := range []map[string]any{
-		{"type": "message_start", "message": map[string]any{
-			"id": "msg_1", "type": "message", "role": "assistant", "model": model, "content": []any{},
-			"stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]any{"input_tokens": 1, "output_tokens": 1},
-		}},
-		{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}},
-		{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": text}},
-		{"type": "content_block_stop", "index": 0},
-		{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-			"usage": map[string]any{"output_tokens": 1}},
-		{"type": "message_stop"},
-	} {
-		body, err := json.Marshal(event)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], body)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}
-}
-
 // runOmp runs one Oh My Pi command to its end on the frames given, and returns what it wrote. The
 // child is told nothing but environ: a pod's own PI_CONFIG_FILES would otherwise outrank the
 // profile the measurement is of.
@@ -111,40 +36,6 @@ func runOmp(t *testing.T, argv []string, dir string, environ []string, stdin str
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err = cmd.Run()
 	return out.String(), errOut.String(), err
-}
-
-// stateModel is the model the answer to one `get_state` request names, as `<provider>/<id>`.
-func stateModel(t *testing.T, stdout string) string {
-	t.Helper()
-	for _, line := range strings.Split(stdout, "\n") {
-		var frame ompFrame
-		if json.Unmarshal([]byte(line), &frame) != nil || frame.Type != "response" || frame.Command != "get_state" {
-			continue
-		}
-		return frame.Data.Model.Provider + "/" + frame.Data.Model.ID
-	}
-	t.Fatalf("no answer to get_state in:\n%s", stdout)
-	return ""
-}
-
-// sessionFiles are the session files under a profile's sessions directory, which Oh My Pi keeps
-// in a directory named for the working directory the session ran in.
-func sessionFiles(t *testing.T, sessions string) []string {
-	t.Helper()
-	var files []string
-	if err := filepath.WalkDir(sessions, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !entry.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	slices.Sort(files)
-	return files
 }
 
 // A pod's agent resumes the session its claim recorded and runs the model the pod's overlay puts
@@ -166,15 +57,15 @@ func TestTheResumedAgentRunsTheConfiguredModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		anthropicAnswer(w, "saved", "ok")
+		testbin.AnthropicAnswer(w, "saved", "ok")
 	}))
 	defer server.Close()
 	testbin.OMPHome(t, omp, home)
-	agent := writeOmpProfile(t, home,
+	agent := testbin.WriteOMPProfile(t, home,
 		"providers:\n  operator:\n    baseUrl: "+server.URL+"\n    auth: apiKey\n    api: anthropic-messages\n"+
 			"    apiKey: unused\n    models:\n      - id: saved\n        name: Saved\n      - id: configured\n        name: Configured\n",
 		"modelRoles:\n  default: operator/saved\n")
-	environ := ompEnviron(home)
+	environ := testbin.OMPEnviron(home)
 
 	// A session of the profile's own, saved on operator/saved: print mode answers one short turn
 	// through the test's provider and writes the file the resume below names. The launch argv is
@@ -183,7 +74,7 @@ func TestTheResumedAgentRunsTheConfiguredModel(t *testing.T) {
 		t.Fatalf("saving a session: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	}
 	sessions := filepath.Join(agent, "sessions")
-	saved := sessionFiles(t, sessions)
+	saved := testbin.SessionFiles(t, sessions)
 	if len(saved) != 1 {
 		t.Fatalf("the profile holds %q after one print-mode turn, want one session file", saved)
 	}
@@ -205,7 +96,7 @@ func TestTheResumedAgentRunsTheConfiguredModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("omp %s: %v\nstdout: %s\nstderr: %s", strings.Join(argv[1:], " "), err, stdout, stderr)
 	}
-	if got := stateModel(t, stdout); got != "operator/configured" {
+	if got := testbin.StateModel(t, stdout); got != "operator/configured" {
 		t.Errorf("the resumed agent runs %s, want the profile's operator/configured\nstderr: %s", got, stderr)
 	}
 
@@ -215,7 +106,7 @@ func TestTheResumedAgentRunsTheConfiguredModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("omp %s: %v\nstdout: %s\nstderr: %s", strings.Join(without[1:], " "), err, plain, stderr)
 	}
-	if got := stateModel(t, plain); got != "operator/saved" {
+	if got := testbin.StateModel(t, plain); got != "operator/saved" {
 		t.Errorf("without the flag the resumed agent runs %s, want the session's own operator/saved", got)
 	}
 
@@ -226,7 +117,7 @@ func TestTheResumedAgentRunsTheConfiguredModel(t *testing.T) {
 	if !bytes.HasPrefix(after, before) {
 		t.Errorf("the resumed session's earlier bytes changed:\nbefore: %s\nafter:  %s", before, after)
 	}
-	if files := sessionFiles(t, sessions); !slices.Equal(files, saved) {
+	if files := testbin.SessionFiles(t, sessions); !slices.Equal(files, saved) {
 		t.Errorf("the profile holds %q after the resumes, want the one session file %q", files, saved)
 	}
 }
@@ -263,11 +154,11 @@ func TestAFallbackChainStillWalksUnderAnExplicitModel(t *testing.T) {
 			fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)
 			return
 		}
-		anthropicAnswer(w, "second-model", "second-model answered")
+		testbin.AnthropicAnswer(w, "second-model", "second-model answered")
 	}))
 	defer server.Close()
 	testbin.OMPHome(t, omp, home)
-	writeOmpProfile(t, home,
+	testbin.WriteOMPProfile(t, home,
 		"providers:\n  first:\n    baseUrl: "+server.URL+"/first\n    auth: apiKey\n    api: anthropic-messages\n"+
 			"    apiKey: unused\n    models:\n      - id: first-model\n        name: First\n"+
 			"  second:\n    baseUrl: "+server.URL+"/second\n    auth: apiKey\n    api: anthropic-messages\n"+
@@ -276,7 +167,7 @@ func TestAFallbackChainStillWalksUnderAnExplicitModel(t *testing.T) {
 			"retry:\n  modelFallback: true\n  maxDelayMs: 1000\n  fallbackChains:\n    first/first-model:\n      - second/second-model\n")
 
 	argv := launch{prompt: "The test's system prompt."}.agentArgv([]string{omp})
-	frames, stderr := promptOnce(t, argv, work, ompEnviron(home), "Reply ok.")
+	frames, stderr := promptOnce(t, argv, work, testbin.OMPEnviron(home), "Reply ok.")
 	answered := ""
 	for _, frame := range frames {
 		if frame.Type == "message_end" {
@@ -308,17 +199,17 @@ func TestMeasuredNoDefaultRoleLaunchesOnABuiltInModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	testbin.OMPHome(t, omp, home)
-	writeOmpProfile(t, home,
+	testbin.WriteOMPProfile(t, home,
 		"providers:\n  operator:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n"+
 			"    apiKey: unused\n    models:\n      - id: configured\n        name: Configured\n",
 		"enabledModels:\n  - operator/configured\n")
 
 	argv := launch{prompt: "The test's system prompt."}.agentArgv([]string{omp})
-	stdout, stderr, err := runOmp(t, argv, work, ompEnviron(home), `{"type":"get_state","id":"1"}`+"\n")
+	stdout, stderr, err := runOmp(t, argv, work, testbin.OMPEnviron(home), `{"type":"get_state","id":"1"}`+"\n")
 	if err != nil {
 		t.Fatalf("omp %s: %v, want a launch\nstdout: %s\nstderr: %s", strings.Join(argv[1:], " "), err, stdout, stderr)
 	}
-	got := stateModel(t, stdout)
+	got := testbin.StateModel(t, stdout)
 	if strings.HasPrefix(got, "operator/") {
 		t.Errorf("with no modelRoles.default the launch runs %s, want a model that is not the profile's", got)
 	}
@@ -328,7 +219,7 @@ func TestMeasuredNoDefaultRoleLaunchesOnABuiltInModel(t *testing.T) {
 // promptOnce runs argv, sends it one prompt, and returns every frame it wrote up to the end of
 // that prompt. Oh My Pi exits when its standard input closes, so the input is held open until the
 // turn is answered.
-func promptOnce(t *testing.T, argv []string, dir string, environ []string, message string) ([]ompFrame, string) {
+func promptOnce(t *testing.T, argv []string, dir string, environ []string, message string) ([]testbin.OMPFrame, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -350,19 +241,19 @@ func promptOnce(t *testing.T, argv []string, dir string, environ []string, messa
 	if _, err := io.WriteString(stdin, `{"type":"prompt","id":"r2","message":`+strconv.Quote(message)+"}\n"); err != nil {
 		t.Fatal(err)
 	}
-	var frames []ompFrame
-	closed, answered := false, false
+	var frames []testbin.OMPFrame
+	closed := false
 	lines := bufio.NewScanner(stdout)
 	// A frame is up to Oh My Pi's maxFrameBytes, which its ready frame reports as 1 MiB.
 	lines.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for lines.Scan() {
-		var frame ompFrame
+		var frame testbin.OMPFrame
 		if json.Unmarshal(lines.Bytes(), &frame) != nil {
 			continue
 		}
 		frames = append(frames, frame)
 		if frame.Type == "prompt_result" && frame.ID == "r2" && !closed {
-			closed, answered = true, true
+			closed = true
 			if err := stdin.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -376,7 +267,7 @@ func promptOnce(t *testing.T, argv []string, dir string, environ []string, messa
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("omp %s: %v\nstderr: %s", strings.Join(argv[1:], " "), err, errOut.String())
 	}
-	if !answered {
+	if !closed {
 		t.Fatalf("omp %s never answered the prompt\nstderr: %s", strings.Join(argv[1:], " "), errOut.String())
 	}
 	return frames, errOut.String()

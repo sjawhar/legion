@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 
-import { keptTab } from "../../__tests__/kept-sends-harness";
+import { keptTab, keyMinted } from "../../__tests__/kept-sends-harness";
 import { ApiError } from "../../api/client";
 import { SendExpiredError, SendInterruptedError, SendStoppedError } from "./keyed-write";
 import {
@@ -15,14 +15,7 @@ import {
   WriteStorage,
 } from "./write-storage";
 
-/** A v7 key minted at `at`, as `newSendKey` mints one: its first twelve hex digits are that
- *  millisecond. `PRESSED_AT` is when this file's writes were pressed, and `KEY` the key of one
- *  pressed then. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
-
+/** `PRESSED_AT` is when this file's writes were pressed, and `KEY` the key of one pressed then. */
 const PRESSED_AT = 1_700_000_000_000;
 const KEY = keyMinted(PRESSED_AT);
 

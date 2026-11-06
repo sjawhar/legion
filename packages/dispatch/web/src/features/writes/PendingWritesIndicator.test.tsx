@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { keptTab } from "../../__tests__/kept-sends-harness";
+import { keptTab, keyMinted } from "../../__tests__/kept-sends-harness";
 import { answerSends } from "../../__tests__/send-answers";
 import { ApiError, api, type WriteBounds } from "../../api/client";
 import { expiredRetryNote, SEND_DEADLINE_MS } from "./keyed-write";
@@ -252,12 +252,6 @@ test("an upload in progress reads Uploading… N% until an attempt fails", async
     jest.useRealTimers();
   }
 });
-
-/** A key as `newSendKey` mints one, its first six bytes the millisecond `at`. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
 
 // A write whose key Dispatch has forgotten is never asked again under it: the indicator says the
 // key ran out and what a Retry of it would do - save the change a second time if the first one

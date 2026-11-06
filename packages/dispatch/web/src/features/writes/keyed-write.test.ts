@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 
+import { keyMinted } from "../../__tests__/kept-sends-harness";
 import {
   keyExpired,
   retriesUnderItsKey,
@@ -12,12 +13,6 @@ import {
 /** A v7 key minted at `MINTED_AT`: its first twelve hex digits are that millisecond. */
 const MINTED_AT = 1_700_000_000_000;
 const V7_KEY = "018bcfe5-6800-7abc-9def-0123456789ab";
-
-/** A key of that same shape minted at `at`, for a test whose clock is the real one. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
 
 test("a key is spent once Dispatch's whole key lifetime has passed since it was minted", () => {
   expect(keyExpired(V7_KEY, MINTED_AT + IDEMPOTENCY_KEY_TTL_MS)).toBe(true);

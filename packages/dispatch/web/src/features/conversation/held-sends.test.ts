@@ -12,6 +12,7 @@ import { createElement, type ReactNode } from "react";
 import {
   type KeptTab,
   keptTab,
+  keyMinted,
   memoryFiles,
   UnloadTarget,
 } from "../../__tests__/kept-sends-harness";
@@ -579,12 +580,6 @@ test("a send held for a sign-out in another tab says so, and goes on once releas
     }
   });
 });
-
-/** A key as `newSendKey` mints one, its first six bytes the millisecond `at`. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
 
 // A message under a key Dispatch has forgotten is never sent under it: its pending turn says so
 // in the refusal's own words - a Retry of it is a new message, which can be delivered a second

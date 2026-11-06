@@ -10,7 +10,6 @@ import {
   KEYED_SEND_ATTEMPT_MS,
   retriesUnderItsKey,
   SEND_DEADLINE_MS,
-  SendInterruptedError,
   SendStoppedError,
   WriteDiscardedError,
   writeUnderKey,

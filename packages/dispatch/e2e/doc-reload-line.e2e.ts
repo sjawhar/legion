@@ -1,9 +1,8 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import type { Actor } from "../web/src/api/types";
 import { createIssue, createProject, patchIssue } from "./api";
-import { connectedDot, countDocumentSockets, documentEditor } from "./editor";
+import { connectedDot, countDocumentSockets, documentEditor, reconnectedSockets } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -23,23 +22,6 @@ const reopener = {
   actor: { id: "e2e-doc-reload", kind: "session" } as Actor,
   as: "agent" as const,
 };
-
-/** Every fact this file polls for lands in milliseconds: Playwright's default 100/250/500/1000
- *  ladder would first see it a quarter-second late. */
-const PROBE = { intervals: [50, 50, 100, 200, 500] };
-
-/** Spends the document socket's reconnect draw - a uniform [0, RECONNECT_SPREAD_MS) set at the
- *  previous open (`web/src/features/doc/connection.ts`) - on the page's own clock, until the page
- *  holds `count` document sockets. What armed the draw may not have reached the page when the
- *  first jump lands, so the jump repeats. */
-async function reconnectedSockets(page: Page, sockets: () => number, count: number): Promise<void> {
-  await expect
-    .poll(async () => {
-      await page.clock.fastForward(RECONNECT_SPREAD_MS);
-      return sockets();
-    }, PROBE)
-    .toBe(count);
-}
 
 // SLOW(>=2s): the property is what one page holds across three admissions, so the row pays one
 // issue page load with its document editor and its socket, then a close, a reopen made behind

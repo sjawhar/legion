@@ -5,7 +5,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
+import { keptTab, keyMinted, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { ApiError, api } from "../../api/client";
 import type {
   BroadcastCreated,
@@ -284,12 +284,6 @@ test("a broadcast held for a sign-out in another tab says so, and goes on once r
     createBroadcast.mockRestore();
   }
 });
-
-/** A key as `newSendKey` mints one, its first six bytes the millisecond `at`. */
-function keyMinted(at: number): string {
-  const hex = at.toString(16).padStart(12, "0");
-  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
-}
 
 // A broadcast whose key Dispatch has forgotten is never asked under it: the row says the sending
 // ended and, in the refusal's own words, that a Retry is a new broadcast which can be delivered a
