@@ -160,7 +160,8 @@ test.beforeEach(async () => {
 // SLOW(>=2s): one socket for every live view is read over three live views, so the row loads and
 // draws all three in the one tab - the project's board, the session's live thread and the
 // delivery timeline - and each is a page's worth of rendering the claim cannot do without.
-test("a tab holds one live socket for every live view", async ({ browser }) => {
+// @webkit @firefox: the one-socket invariant, which must hold in every engine people read in.
+test("a tab holds one live socket for every live view @webkit @firefox", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();

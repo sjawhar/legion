@@ -310,7 +310,9 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
   }
 });
 
-test("a document link followed while the page before it is still downloading its document opens the link", async ({
+// @webkit @firefox: the engine's cancellation of a chunk the navigation away from it left
+// downloading.
+test("a document link followed while the page before it is still downloading its document opens the link @webkit @firefox", async ({
   browser,
 }) => {
   const { issue } = await seedIssue();
@@ -457,7 +459,9 @@ test("a composer opened from the document is in the margin's view after a commen
 // proves - the transport held so the editor reports no layout, the asks held so their group
 // relays the margin out after the press - and each half ends in a settle measured in the
 // engine's own still frames, not in wall-clock time.
-test("a press in the document while a comment link is still landing does not end the hold", async ({
+// @webkit @firefox: the margin hold's frame order, where the press races the landing's own
+// frames.
+test("a press in the document while a comment link is still landing does not end the hold @webkit @firefox", async ({
   browser,
 }) => {
   const { comment, issue, markId } = await seedLongDocument();
@@ -620,7 +624,8 @@ for (const journey of hiddenEditorJourneys) {
   // SLOW(>=2s): the journey is the property. A long document's landing, a tab switch or a
   // version switch that hides the editor, and the return are each a real editor mount and a real
   // smooth-scroll landing; there is no step here that is not the thing being proved.
-  test(journey.name, async ({ browser }) => {
+  // @webkit @firefox: the margin hold's frame order, read with the page's animation frames held.
+  test(`${journey.name} @webkit @firefox`, async ({ browser }) => {
     const { comment, issue, markId } = await seedLongDocument();
     if (journey.namedVersion) {
       await createNamedVersion(issue.primary_artifact_id, "Initial long document");
@@ -688,7 +693,8 @@ const MAX_SCROLL_FALL_PX = 64;
 // The past version's first landing with no diagram at all, so nothing runs it again: when every
 // render of the page rebuilt the version's editor, the last scroll could run before the last
 // editor had laid out and leave the reader at the top of the page.
-test("a past version's comment link lands on its quote in a document with no diagram", async ({
+// @webkit @firefox: the margin hold's scroll order, read at every frame of the landing.
+test("a past version's comment link lands on its quote in a document with no diagram @webkit @firefox", async ({
   browser,
 }) => {
   const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
@@ -872,7 +878,10 @@ async function placementAfterArrival(
 
 // SLOW(>=2s): two real anchored arrivals, each re-measuring the whole margin column, are the two
 // measurements the row compares; cutting one leaves nothing to compare.
-test("a linked card's placement ignores the margin's own scroll", async ({ browser }) => {
+// @webkit @firefox: the margin hold's scroll order, which the margin's own scroll must not move.
+test("a linked card's placement ignores the margin's own scroll @webkit @firefox", async ({
+  browser,
+}) => {
   // Only the desktop margin places cards by mark, so this row is not tagged `@phone`.
   // The compact sheet stacks its cards from the top of its column rather than tracking marks -
   // measured here, the linked card sits at 102 px and an arrival above it moves it to 204 px,

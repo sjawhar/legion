@@ -16,8 +16,8 @@ import { asUser } from "./users";
  * step taken while held survives the switch's end, so `Enter` afterwards switches to it.
  *
  * The rule holds only because every engine dispatches a closed select's `change` inside the key's
- * own task, so the file runs in WebKit and Firefox as well as in Chromium. What a switch sends is
- * read back from the fake Envoy.
+ * own task, so every row of this file carries `@webkit @firefox`, the tags those two projects
+ * select by (`playwright.config.ts`). What a switch sends is read back from the fake Envoy.
  *
  * The frames are spelt here as the wire carries them, and the file imports nothing the change
  * added, so it runs unchanged against the commit before the change and each row fails there on
@@ -182,7 +182,8 @@ test.beforeEach(async () => {
 // it passes on the way.
 // SLOW(>=2s): two switches through the fake Envoy and back, each read from the server, in every
 // engine the rule has to hold in.
-test("the arrows move a header picker's choice without switching the session, and Enter switches it once", async ({
+// @webkit @firefox: a closed select's `change` dispatched inside the key's own task.
+test("the arrows move a header picker's choice without switching the session, and Enter switches it once @webkit @firefox", async ({
   browser,
 }) => {
   const session = liveSession(11);
@@ -240,7 +241,9 @@ for (const [row, way, leave] of [
     (page: Page) => page.getByTestId("agent-thread-empty").click(),
   ],
 ] as const) {
-  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model`, async ({
+  // @webkit @firefox: a closed select's `change` dispatched inside the key's own task, left
+  // without Enter the way this engine takes focus out of a select.
+  test(`a header picker's step left by ${way} sends nothing and puts the picker back on the reported model @webkit @firefox`, async ({
     browser,
   }) => {
     const session = liveSession(row);
@@ -286,7 +289,8 @@ for (const [row, way, leave] of [
 // Decision 6a: type-ahead is a step as the arrows are. A letter moves the choice to the next
 // option it starts, here `o` to openai/model-c past both anthropic models, and sends nothing;
 // Enter switches to it.
-test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once", async ({
+// @webkit @firefox: a closed select's `change` dispatched inside the key's own task.
+test("type-ahead on a header picker moves its choice without switching the session, and Enter switches it once @webkit @firefox", async ({
   browser,
 }) => {
   const session = liveSession(14);
@@ -327,7 +331,9 @@ test("type-ahead on a header picker moves its choice without switching the sessi
 // Enter afterwards switches to it.
 // SLOW(>=2s): a replay seed and two switch round trips through the fake listener, in Firefox and
 // WebKit, each of which lays out the live view's header afresh.
-test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step", async ({
+// @webkit @firefox: a closed select's `change` dispatched inside the key's own task, here while
+// the picker is held.
+test("a held header picker keeps focus and steps its choice but Enter sends nothing until the switch ends, and Enter then switches to that step @webkit @firefox", async ({
   browser,
 }) => {
   const session = liveSession(15);

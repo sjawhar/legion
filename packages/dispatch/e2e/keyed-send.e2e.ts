@@ -165,7 +165,9 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
 // to leave: it accepts the prompt, reloads while the first attempt's answer is still out, and the
 // reloaded page sends the message again under the same key, which Dispatch answers with the
 // message the first attempt made.
-test("a send held through a reload is resumed under its key, and delivered once", async ({
+// @webkit @firefox: the keyed write path's storage of an unconfirmed send across a reload, and
+// the ask before the tab unloads, which this row accepts.
+test("a send held through a reload is resumed under its key, and delivered once @webkit @firefox", async ({
   browser,
 }) => {
   await seedAgents();
@@ -313,7 +315,9 @@ test("a broadcast held through a reload is resumed under its key, and each agent
 // its own key, and the writes to one session go out in the order they were pressed. Two presses
 // while the network is down are both held, Send stays pressable, and once the network is back the
 // session hears the first and then the second, each once.
-test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout", async ({
+// @webkit @firefox: the keyed write path's request failure, here two presses failing at the
+// connection and going out in press order once it is back.
+test("two live-view sends pressed during an outage go out in press order, each once, with Send pressable throughout @webkit @firefox", async ({
   browser,
 }) => {
   await seedAgents();

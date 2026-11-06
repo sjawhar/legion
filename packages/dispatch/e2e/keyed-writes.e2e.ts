@@ -114,7 +114,11 @@ async function queueBehindAHeldStatus(page: Page, issue: string, label: string):
   await expect(pendingWrites(page)).toContainText(`Labels of ${issue} — Waiting to send`);
 }
 
-test("a comment whose answer is lost lands once, under one key", async ({ browser }) => {
+// @webkit @firefox: the keyed write path's request failure, which each engine hands the page its
+// own way.
+test("a comment whose answer is lost lands once, under one key @webkit @firefox", async ({
+  browser,
+}) => {
   await createProject({ key: "KW", name: "Keyed writes" });
   const issue = await createIssue({ project: "KW", title: "A comment once" });
   const path = `/api/v1/issues/${issue.key}/comments`;
@@ -154,7 +158,9 @@ test("a comment whose answer is lost lands once, under one key", async ({ browse
 // tab's storage, asks before the tab is left, and the reloaded page sends it again under the same
 // key. The shell's pending-writes indicator names it while it is out and clears once Dispatch
 // answers it.
-test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears", async ({
+// @webkit @firefox: the keyed write path's storage of a tab's unconfirmed write across a reload,
+// and the ask before the tab unloads.
+test("a status change whose answer is lost survives a reload, lands once, and the pending-writes indicator shows and clears @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -322,7 +328,9 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
 // SLOW(>=2s): Dispatch's own delay is real time on the server (`writes/_test/slow`); only the
 // page's 15 s give-up is driven by `page.clock`. 4 s is the shortest hold that still has the key
 // claimed when the repeat arrives.
-test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first", async ({
+// @webkit @firefox: the keyed write path's abort of an attempt gone silent, which the engine must
+// not take for the server's answer.
+test("a comment Dispatch takes 20 s to make lands once from the page, every repeat waiting on the first @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
@@ -478,7 +486,9 @@ test("an upload throttled to take 30 s is one attempt and lands once", async ({
 // Dispatch's 409 would no longer be written while the body is still arriving, which is the drain
 // this row proves. Three real uploads of it, plus a 5 s server hold the page's give-up must
 // outlast, are the real time left.
-test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once", async ({
+// @webkit @firefox: the keyed write path's abort, where the engine sends a whole upload before it
+// reads the answer and would otherwise hand the page a reset connection.
+test("a 20 MB upload repeated while its first request runs is answered 409 KEY_IN_FLIGHT, never a failed connection, and lands once @webkit @firefox", async ({
   browser,
   browserName,
 }) => {
@@ -861,7 +871,9 @@ test("a pin on a turn pressed during an outage survives a reload and lands once 
 // page loads, the browser's own "leave this page?" prompt between them, and the resumed write's
 // round trip after it - in Firefox, one of the engines this spec runs in because each keeps a
 // tab's storage and asks before it unloads its own way.
-test("the issue header's pin pressed during an outage survives a reload and lands once the network is back", async ({
+// @webkit @firefox: the keyed write path's storage of a tab's unconfirmed write across a reload,
+// and the ask before the tab unloads.
+test("the issue header's pin pressed during an outage survives a reload and lands once the network is back @webkit @firefox", async ({
   browser,
 }) => {
   await createProject({ key: "KW", name: "Keyed writes" });
