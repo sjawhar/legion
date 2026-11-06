@@ -662,8 +662,10 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 
 // ApplyDecision decides a pending agent_secret record by login, the login of the person deciding
 // it on the broker's own approval page (approval.Page.decide, its one caller). approve=true mints
-// the grant while the requesting enrollment may still take one — live, or dormant and holding
-// what the session's next box will adopt (mayGrant below) — and otherwise the request is denied.
+// the grant while the requesting enrollment may still take one — live, dormant and holding what
+// the session's next box will adopt, or lapsed with no end written against it yet, where the end
+// the sweep is about to write would leave it dormant (mayGrant below) — and otherwise the
+// request is denied.
 // It re-reads the record body, recomputes its id, refuses any login but the record's own approver
 // (record.ErrNotApprover) whatever the record's state, and an approval by any login the current
 // policy would not have approve one of the request's names (currentPolicyAdmits). A denial

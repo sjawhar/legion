@@ -609,16 +609,23 @@ func carryPrincipal(cred Credential, in Enrollment) *string {
 }
 
 // holdsForItsSession is the one SQL text for "enrollment e still holds something for its
-// session": a live grant, or a request nobody has answered yet. Two statements read it, and they
-// must read it identically — endEnrollment's probe, which decides whether an end leaves the row
-// dormant instead of revoking what it holds, and adopt's predecessor query, which decides which
-// ended rows the next enrolment of the name takes a grant or a request from. Were one wider than
-// the other, an end could leave a row dormant that no successor ever adopts (its grants standing
-// until the carry sweep finds them) or adopt could take from a row an end revoked under it. Both
-// splice it in with e as the enrollment, and both read the whole pair beside it: the probe tests
-// that the row names a session and records a principal, and adopt matches on both. adopt adds the
-// withheld names outside this text, because a withhold follows the session too but is no part of
-// what makes an end carry: it outlives an end of either kind (adopt's second part).
+// session": a live grant, or a request nobody has answered yet. Three statements read it, and
+// they must read it identically — endEnrollment's probe, which decides whether an end leaves the
+// row dormant instead of revoking what it holds, adopt's predecessor query, which decides which
+// ended rows the next enrolment of the name takes a grant or a request from, and
+// requests.enrollmentWouldGoDormant, the requests package's copy of endEnrollment's probe
+// character for character, which decides whether an approval on a lapsed row the sweep has not
+// ended yet mints a grant. Were one wider than another, an end could leave a row dormant that no
+// successor ever adopts (its grants standing until the carry sweep finds them), adopt could take
+// from a row an end revoked under it, or an approval could be granted onto a row the sweep then
+// revokes. What holds this text and that copy together is
+// requests.TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes, which runs the copy and
+// Service.EndLapsed over every shape of row and compares their answers, so an edit here that
+// leaves the copy behind fails that test. All three splice it in with e as the enrollment, and
+// each reads the whole pair beside it: the two probes test that the row names a session and
+// records a principal, and adopt matches on both. adopt adds the withheld names outside this
+// text, because a withhold follows the session too but is no part of what makes an end carry: it
+// outlives an end of either kind (adopt's second part).
 const holdsForItsSession = `exists (select 1 from grants g where g.enrollment_id=e.id and g.revoked_at is null and (g.expires_at is null or g.expires_at > now()))
 				or exists (select 1 from requests r where r.enrollment_id=e.id and r.state='pending')`
 
@@ -876,6 +883,13 @@ type endedEnrollment struct {
 // daemon pod enrollment, which does carry a session_id
 // (packages/daemon/internal/supervise/secrets.go). Each of those ends once, as it always did,
 // and the enrolments that replace them record a principal and carry.
+//
+// The probe below is copied character for character into the requests package as
+// requests.enrollmentWouldGoDormant, where an approval on a lapsed row no end has reached yet
+// reads it to decide whether that approval mints a grant, so an edit to the probe has to be made
+// there too. requests.TestTheLapsedRowGrantRuleAnswersWhatTheEndThatFollowsDoes runs that copy
+// and Service.EndLapsed over every shape of row and compares their answers, and is what fails
+// when the two drift.
 //
 // A dormant enrollment proves nothing from the moment it goes dormant, because its key died with
 // its box: revoked_at is set, and Lookup, Get, Renew, SessionID, recoverConflict, liveCredentials
