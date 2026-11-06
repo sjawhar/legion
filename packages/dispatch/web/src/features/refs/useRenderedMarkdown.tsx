@@ -23,6 +23,7 @@ import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
   type ReferenceAnchor,
+  type ReferenceLinking,
   RefLink,
 } from "./RefLink";
 
@@ -206,6 +207,9 @@ export interface RenderedMarkdownOptions {
   /** `paint`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed;
    *  without one such a body is painted in one go, as every other body is. */
   paintInSlices?: PaintMarkdownInSlices;
+  /** What the link pass may link in the painted text (`ReferenceLinking`): what the surface's
+   *  own reading of its source cites and what is known about it (`useTextReferences`). */
+  references: ReferenceLinking;
 }
 
 /** Every anchor a paint leaves for a portal: the reference anchors the link pass found, as
@@ -219,9 +223,10 @@ interface PortalAnchors {
  *  order, and answers what the portals mount into. */
 function portalAnchors(
   element: HTMLElement,
-  decorate: DecorateMarkdown | undefined
+  decorate: DecorateMarkdown | undefined,
+  references: ReferenceLinking
 ): PortalAnchors {
-  linkifyDispatchRefs(element);
+  linkifyDispatchRefs(element, references);
   const found = collectReferenceAnchors(element);
   const anchors = decorate === undefined ? found : decorate(element, found);
   const placeholders = collectPictureAnchors(element);
@@ -402,8 +407,9 @@ export function useRenderedMarkdown(
     decorate,
     onRendered,
     paintInSlices,
+    references,
     softBreaks = "space",
-  }: RenderedMarkdownOptions = {}
+  }: RenderedMarkdownOptions
 ): RenderedMarkdown {
   const onRenderedRef = useRef(onRendered);
   onRenderedRef.current = onRendered;
@@ -479,8 +485,12 @@ export function useRenderedMarkdown(
           }
           element.replaceChildren(document.createTextNode(markdown));
           setAskHosts(NO_ASK_HOSTS);
-          const { pictures: placeholders, references } = portalAnchors(element, decorate);
-          setReferenceAnchors(references);
+          const { pictures: placeholders, references: anchors } = portalAnchors(
+            element,
+            decorate,
+            references
+          );
+          setReferenceAnchors(anchors);
           setPictureAnchors(placeholders);
           return;
         }
@@ -519,8 +529,12 @@ export function useRenderedMarkdown(
             hosts = collectAskHosts(element, parsed);
           }
           setAskHosts(hosts);
-          const { pictures: placeholders, references } = portalAnchors(element, decorate);
-          setReferenceAnchors(references);
+          const { pictures: placeholders, references: anchors } = portalAnchors(
+            element,
+            decorate,
+            references
+          );
+          setReferenceAnchors(anchors);
           setPictureAnchors(placeholders);
           if (engine !== undefined && parsed !== undefined) {
             drawing.current = drawMermaidDiagrams(
@@ -608,14 +622,14 @@ export function useRenderedMarkdown(
       { keepAPostedParse: true }
     );
     return cancelRender;
-  }, [Card, decorate, markdown, paint, paintInSlices, root, softBreaks]);
+  }, [Card, decorate, markdown, paint, paintInSlices, references, root, softBreaks]);
 
   return {
     isFallback,
     isPending,
     portals: [
-      ...referenceAnchors.map(({ anchor, key, route }) =>
-        createPortal(<RefLink anchor={anchor} route={route} />, anchor, key)
+      ...referenceAnchors.map(({ anchor, key, route, text }) =>
+        createPortal(<RefLink anchor={anchor} route={route} text={text} />, anchor, key)
       ),
       ...pictureAnchors.map(({ anchor, caption, key, route }) =>
         createPortal(

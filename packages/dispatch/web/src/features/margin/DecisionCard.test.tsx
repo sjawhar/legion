@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { renderWithQueries as render } from "../../__tests__/query-provider";
 import type { Decision } from "../../api/types";
 import { DecisionCard } from "./DecisionCard";
 import type { DecisionMarginItem } from "./useMarginItems";
