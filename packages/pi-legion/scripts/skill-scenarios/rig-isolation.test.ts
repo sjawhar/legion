@@ -194,15 +194,37 @@ const env = {
 };
 mkdirSync(env.HOME);
 
+/** Runs the rig, in a process group of its own, and returns its exit status and its stderr.
+ *
+ * The rig stops its own tree before it exits (stop_tree, scripts/e2e/lib/rig.sh), and a stop
+ * inside an orphaned process group — one no member's parent watches from another group of the
+ * same session — has the kernel send SIGHUP and SIGCONT to every member of that group. Where a
+ * Legion worker runs this suite each shell command is a session leader, so bun's own group is
+ * orphaned: a rig sharing it hangs the test runner up with its first SIGSTOP, and `bun test` dies
+ * of that SIGHUP (status 129) before printing any totals.
+ *
+ * So the rig gets a session of its own (setsid, util-linux's, on PATH here and on the ubuntu-24.04
+ * runner of ci.yaml's pi-legion job), and inside it a group of its own under a shell that stays to
+ * wait for it: `set -m` makes that shell put the job it starts in a group of its own, and the
+ * shell, the session's leader, is the parent in the session that keeps the group from being
+ * orphaned in turn. A session alone is not enough — the rig would lead the session's own orphaned
+ * group and hang itself up. `wait` and setsid's `--wait` pass the rig's exit status back: setsid
+ * forks when its caller already leads a group (a child of Bun.spawn does not), and such a fork
+ * reports 0 for every run without it. Monitor mode is not inherited, so the rig's own shell runs
+ * with job control off, as it did before. */
+async function runRig(args: string[], vars: Record<string, string> = {}) {
+  const child = Bun.spawn(
+    ["setsid", "--wait", "bash", "-c", 'set -m; "$@" & wait "$!"', "rig", "bash", rig, ...args],
+    { env: { ...env, ...vars }, stdout: "pipe", stderr: "pipe" }
+  );
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  return { code, stderr };
+}
+
 const start = String(Math.floor(Date.now() / 1000));
 const runs = await Promise.all(
   [1, 2].map(async (n) => {
-    const child = Bun.spawn(["bash", rig, "run", "askgate", "on", String(n), String(n), start], {
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    const { code, stderr } = await runRig(["run", "askgate", "on", String(n), String(n), start]);
     return { n, code, stderr, dir: path.join(work, "runs", `askgate-facts-on-${n}`) };
   })
 );
@@ -284,12 +306,7 @@ test("each run stops its Dispatch server when it ends", () => {
 // AskGate's review would time out under Oh My Pi's default handler limit, so a run whose profile
 // leaves the limit there scores the timeout rather than the rule: the rig refuses it, starting nothing.
 test("a run on a profile whose settings leave the handler limit at its default is refused, naming the key", async () => {
-  const child = Bun.spawn(["bash", rig, "run", "askgate", "stale", "1", "3", start], {
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  const { code, stderr } = await runRig(["run", "askgate", "stale", "1", "3", start]);
   expect(code).toBe(1);
   expect(stderr).toContain("extensionHandlers.toolCallTimeoutMs to 120000 or more");
   expect(existsSync(path.join(work, "runs", "askgate-facts-stale-1"))).toBe(false);
@@ -300,12 +317,9 @@ test("a run on a profile whose settings leave the handler limit at its default i
 // claim about what we run today): the run's working directory must hold that file, with the line
 // the prompt quotes.
 test("a link run's working directory holds the crontab its prompt cites, with the line it quotes", async () => {
-  const child = Bun.spawn(["bash", rig, "run", "askgate", "on", "1", "4", start], {
-    env: { ...env, SKILL_SCENARIOS_ASKGATE_CASE: "link" },
-    stdout: "pipe",
-    stderr: "pipe",
+  const { code, stderr } = await runRig(["run", "askgate", "on", "1", "4", start], {
+    SKILL_SCENARIOS_ASKGATE_CASE: "link",
   });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
   const dir = path.join(work, "runs", "askgate-link-on-1");
   const prompt = readFileSync(path.join(dir, "prompt.txt"), "utf8");
