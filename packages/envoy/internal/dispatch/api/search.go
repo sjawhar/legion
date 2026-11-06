@@ -686,21 +686,36 @@ totals as (
 }
 
 // searchParameters is one validated search: the words, the filters every leg of it is narrowed
-// by, and the page. ownKeys is what runSearch resolves the words to when they name an issue
-// (searchOwnIssueKeys) and empty otherwise. broaden is empty for the query as typed, which is
-// what every search runs first and what nearly every search runs alone; it holds the rarest
-// words of a query that matched nothing (searchRarestWords) on the one second run such a query
-// is given, and the statement then searches for those words alone (searchQOpener).
+// by, the project a bare issue number is read in, and the page. numberProject is the project the
+// page a person searched from names, which narrows nothing at all (numberScope). ownKeys is what
+// runSearch resolves the words to when they name an issue (searchOwnIssueKeys) and empty
+// otherwise. broaden is empty for the query as typed, which is what every search runs first and
+// what nearly every search runs alone; it holds the rarest words of a query that matched nothing
+// (searchRarestWords) on the one second run such a query is given, and the statement then
+// searches for those words alone (searchQOpener).
 type searchParameters struct {
-	text    string
-	project string
-	status  string
-	author  string
-	since   *time.Time
-	limit   int
-	offset  int
-	ownKeys []string
-	broaden []string
+	text          string
+	project       string
+	numberProject string
+	status        string
+	author        string
+	since         *time.Time
+	limit         int
+	offset        int
+	ownKeys       []string
+	broaden       []string
+}
+
+// numberScope is the project a bare issue number names: the project filter when the request
+// narrows by one, since an issue that filter leaves out cannot be on the page whatever context a
+// request carries, and otherwise the project of the page the search was made from
+// (number_project). Empty for a request naming neither, and then a bare number names the issue of
+// that number in every project (searchOwnIssueKeys).
+func (p searchParameters) numberScope() string {
+	if p.project != "" {
+		return p.project
+	}
+	return p.numberProject
 }
 
 // searchReading is a query read as the words a person wrote and the operators they wrote around
@@ -777,7 +792,7 @@ var (
 	// is (INFRA 1042), which is what a person typing fast writes.
 	searchIssueKeyPattern = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9]{1,9})[-\s]+([0-9]{1,9})$`)
 	// searchIssueNumberPattern is an issue number alone (1042), which names the issue of that
-	// number in the project a filter names, or in every project at once.
+	// number in the project the request reads it in (numberScope), or in every project at once.
 	searchIssueNumberPattern = regexp.MustCompile(`^([0-9]{1,9})$`)
 	// searchAuthorPattern is the shape of the author filter's value: one actor id, which holds no
 	// whitespace and is never blank.
@@ -814,9 +829,10 @@ func searchKeyForms(q string) (key string, number int) {
 // (searchOwnKeyLead). A key form names one issue and needs no read of its own: the issue arm
 // matches the key it is given, and matches nothing when no issue holds it. A number alone names
 // the issue of that number in each project, which only this one read can answer, and only a
-// query that is a bare number ever pays for it; with a project named it names that project's
-// issue alone, and without one every matching issue, in project order.
-func (s *server) searchOwnIssueKeys(ctx context.Context, q, project string) ([]string, error) {
+// query that is a bare number ever pays for it; scope is the project it is read in
+// (numberScope), which names that project's issue alone, and without one every matching issue,
+// in project order.
+func (s *server) searchOwnIssueKeys(ctx context.Context, q, scope string) ([]string, error) {
 	key, number := searchKeyForms(q)
 	if key != "" {
 		return []string{key}, nil
@@ -826,7 +842,7 @@ func (s *server) searchOwnIssueKeys(ctx context.Context, q, project string) ([]s
 		return keys, nil
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx,
-		`select key from issues where number = $1 and ($2 = '' or project_key = $2) order by project_key`, number, project)
+		`select key from issues where number = $1 and ($2 = '' or project_key = $2) order by project_key`, number, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -1003,6 +1019,16 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, projectKeyProblem("project", project))
 		return
 	}
+	// number_project is the project of the page the search was made from, which a bare issue
+	// number is read in and which nothing else reads: it is no filter, and a search carrying it
+	// answers every project's rows as a search carrying nothing does. It is a key or empty, as
+	// project is, and is refused under a code of its own.
+	numberProject := strings.TrimSpace(query.Get("number_project"))
+	if numberProject != "" && !projectKeyPattern.MatchString(numberProject) {
+		writeError(w, "INVALID_NUMBER_PROJECT", http.StatusBadRequest,
+			projectKeyProblem("number_project", numberProject))
+		return
+	}
 	status, author, since, ok := parseSearchFilters(w, query)
 	if !ok {
 		return
@@ -1025,8 +1051,8 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		offset = parsed
 	}
 
-	parameters := searchParameters{text: searchText, project: project, status: status, author: author,
-		since: since, limit: limit, offset: offset}
+	parameters := searchParameters{text: searchText, project: project, numberProject: numberProject,
+		status: status, author: author, since: since, limit: limit, offset: offset}
 	response, err := s.runSearch(r.Context(), parameters)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -1072,7 +1098,7 @@ func (s *server) runSearch(ctx context.Context, parameters searchParameters) (mo
 		"select numnode(websearch_to_tsquery('english', $1))", parameters.text).Scan(&nodes); err != nil {
 		return model.SearchResponse{}, err
 	}
-	keys, err := s.searchOwnIssueKeys(ctx, parameters.text, parameters.project)
+	keys, err := s.searchOwnIssueKeys(ctx, parameters.text, parameters.numberScope())
 	if err != nil {
 		return model.SearchResponse{}, err
 	}

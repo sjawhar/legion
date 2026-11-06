@@ -10,11 +10,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
-import type { Project, SearchResult, SearchResultKind } from "../../api/types";
+import type { Project, SearchOperator, SearchResult, SearchResultKind } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   backdrop50,
@@ -39,15 +39,24 @@ import { statusText } from "../project/board-model";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { searchSnippetMarkdown } from "../refs/markdown-fragment";
 import { referenceTriggerProps } from "../refs/RefPreview";
-import { buildProjectPath, type DispatchReferenceRoute, nodeRouteFromHref } from "../refs/routes";
+import {
+  buildProjectPath,
+  type DispatchReferenceRoute,
+  nodeRouteFromHref,
+  routeProjectOf,
+} from "../refs/routes";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { AskHitStatus } from "./AskHitStatus";
+import { SearchFilterBar } from "./SearchFilterBar";
+import { SearchOperators } from "./SearchOperators";
+import { type SearchBarFilters, searchRequest } from "./search-filters";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
 const emptyResults: SearchResult[] = [];
 const emptyProjects: Project[] = [];
+const emptyOperators: SearchOperator[] = [];
 const ACTIONS_GROUP_ID = "search-group-actions";
 const MORE_ACTIONS_GROUP_ID = "search-group-more-actions";
 const PROJECTS_GROUP_ID = "search-group-projects";
@@ -384,6 +393,14 @@ function PaletteDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+  const location = useLocation();
+  // The project of the page this open was made from (its own page, or an issue of it), decided
+  // on the first render as the action rows are, so a hit the reader opens cannot change it
+  // before the palette closes. It narrows nothing: a search from a project page searches
+  // everything, as a search from anywhere does. The route reads it to tell which issue a query
+  // that is a bare number names, and a reader who wants this project alone adds its chip.
+  const [pageProject] = useState(() => routeProjectOf(location.pathname));
+  const [filters, setFilters] = useState<SearchBarFilters>({});
   // The rows this open offers, decided on its first render, while focus is still on whatever
   // opened the palette, since `useDialog` moves it into the input after that commit. Read any
   // later and a `when()` that asks what is focused would answer "the palette", withdrawing every
@@ -414,13 +431,23 @@ function PaletteDialog({
     return () => window.clearTimeout(timeout);
   }, [searchText]);
 
+  // The chips narrow every leg of the search, so they belong to the request and to the key the
+  // answer is kept under: a chip added or dropped is another search, not another reading of
+  // this one. The page's project rides with them, under the parameter that narrows nothing.
+  const request = searchRequest(filters, pageProject);
   const search = useQuery({
     enabled: searching && debouncedQuery.length >= 2 && debouncedQuery.length <= SEARCH_QUERY_MAX,
-    queryFn: () => api.search(debouncedQuery),
-    queryKey: ["search", debouncedQuery],
+    queryFn: () => api.search(debouncedQuery, request),
+    queryKey: ["search", debouncedQuery, request],
   });
-  const projects = useQuery({ ...projectsQuery(), enabled: mode === "projects" });
+  // The project chip's own list, which every open of a searching palette offers.
+  const projects = useQuery(projectsQuery());
   const results = search.data?.results ?? emptyResults;
+  // What search made of the words, read from its own answer rather than parsed a second time
+  // here, and whether meaning search ran at all. A Dispatch that predates either field answers
+  // neither, so the bar marks no operator and says nothing about meaning search.
+  const operators = search.data?.query?.operators ?? emptyOperators;
+  const degraded = search.data?.degraded !== undefined;
   const groups = groupResults(results);
   // An action whose label the query starts (every action, while the query is empty) is the one
   // the reader is typing, and it heads the list. One that holds the query further in (`issue` in
@@ -613,6 +640,29 @@ function PaletteDialog({
               value={query}
             />
           </div>
+          {/* What narrows the search and what the words themselves can do, between the box and
+              the hits: the chips the reader has added with the controls for the rest, the three
+              operator forms, and, where meaning search did not run, the one line saying so. */}
+          {searching ? (
+            <div className={`shrink-0 border-b ${borderDefault}`}>
+              <SearchFilterBar
+                filters={filters}
+                onFilters={setFilters}
+                projects={projects.data ?? emptyProjects}
+              />
+              <SearchOperators inUse={operators} />
+              {degraded ? (
+                <p
+                  className={`px-3 pb-2 text-xs ${textMutedOnSurface}`}
+                  data-testid="search-degraded"
+                  role="status"
+                >
+                  Searching words only: meaning search is not running, so a hit that uses other
+                  words may be missing.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {rows.length === 0 ? null : (
             <div
               className="max-h-[60vh] min-h-20 flex-1 overflow-y-auto"

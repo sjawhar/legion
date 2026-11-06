@@ -1,4 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
+import {
+  SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
+  SEARCH_OPERATOR_EXCLUDE,
+  SEARCH_OPERATOR_PHRASE,
+} from "@legion/contracts";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -68,10 +73,13 @@ function RouteChanger(): ReactNode {
   );
 }
 
-function renderPalette(onClose = () => {}): { queryClient: QueryClient; unmount: () => void } {
+function renderPalette(
+  onClose = () => {},
+  page = "/"
+): { queryClient: QueryClient; unmount: () => void } {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[page]}>
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <CurrentRoute />
@@ -362,7 +370,7 @@ test("names the limit instead of querying over it, and queries at it", async () 
     expect(search).not.toHaveBeenCalled();
 
     fireEvent.change(input, { target: { value: "x".repeat(SEARCH_QUERY_MAX) } });
-    await waitFor(() => expect(search).toHaveBeenCalledWith("x".repeat(SEARCH_QUERY_MAX)));
+    await waitFor(() => expect(search).toHaveBeenCalledWith("x".repeat(SEARCH_QUERY_MAX), {}));
   } finally {
     search.mockRestore();
     view.unmount();
@@ -472,7 +480,7 @@ test("a background refresh that fails keeps the hits the query has, and the high
     search.mockRejectedValue(new Error("503"));
     await view.queryClient.refetchQueries();
     await waitFor(() =>
-      expect(view.queryClient.getQueryState(["search", "astrolabe"])?.status).toBe("error")
+      expect(view.queryClient.getQueryState(["search", "astrolabe", {}])?.status).toBe("error")
     );
     expect(screen.getAllByRole("option")).toHaveLength(2);
     expect(screen.queryByText("Search failed.")).toBeNull();
@@ -704,7 +712,7 @@ test("a refetch behind a stale cached answer is still out, so Down and Enter rea
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
   // The reader searched `issue` earlier and found nothing; that answer is stale now.
-  view.queryClient.setQueryData(["search", "issue"], searchAnswer([]));
+  view.queryClient.setQueryData(["search", "issue", {}], searchAnswer([]));
 
   try {
     const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
@@ -899,6 +907,105 @@ test("shows a retryable failure when the search request fails", async () => {
     });
     expect((await screen.findByRole("alert")).textContent).toContain("Search failed.");
     expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// The three forms are offered whatever the query holds; which of them this query was read as
+// using is the answer's own reading of it, so the bar and the search never disagree.
+test("the operator forms are offered, and the answer says which the query uses", async () => {
+  const search = spyOn(api, "search").mockResolvedValue({
+    ...searchAnswer(results),
+    query: { broadened: false, operators: [SEARCH_OPERATOR_PHRASE, SEARCH_OPERATOR_EXCLUDE] },
+  });
+  const view = renderPalette();
+
+  try {
+    await searchFor('"brass astrolabe" -steel');
+    const forms = screen.getByRole("list", { name: "What the words can do" });
+    const inUse = (name: string) =>
+      forms.querySelector(`[data-operator="${name}"]`)?.getAttribute("data-in-use");
+
+    expect(forms.textContent).toContain('"two words"');
+    expect(forms.textContent).toContain("this OR that");
+    expect(forms.textContent).toContain("-word");
+    await waitFor(() => expect(inUse("phrase")).toBe("true"));
+    expect(inUse("exclude")).toBe("true");
+    expect(inUse("or")).toBe("false");
+    expect(screen.queryByTestId("search-degraded")).toBeNull();
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("says meaning search is not running, and still shows the hits", async () => {
+  const search = spyOn(api, "search").mockResolvedValue({
+    ...searchAnswer(results),
+    degraded: SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
+  });
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+    const line = await screen.findByTestId("search-degraded");
+
+    expect(line.textContent).toBe(
+      "Searching words only: meaning search is not running, so a hit that uses other words may be missing."
+    );
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("a chip narrows the search, reads back in the person's words, and comes off again", async () => {
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer(results));
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+    expect(search).toHaveBeenLastCalledWith("astrolabe", {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Status" }));
+    fireEvent.click(screen.getByRole("button", { name: "In progress" }));
+    await waitFor(() =>
+      expect(search).toHaveBeenLastCalledWith("astrolabe", { status: "in_progress" })
+    );
+
+    const chip = screen.getByRole("button", { name: "Remove Status In progress" });
+    expect(chip.textContent).toContain("Status In progress");
+    expect(chip.textContent).not.toContain("status:in_progress");
+
+    fireEvent.click(chip);
+    await waitFor(() => expect(screen.queryByText("Status In progress")).toBeNull());
+    expect(screen.getByRole("button", { name: "Status" })).not.toBeNull();
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// A search made from an issue or a project page searches everything, as a search made from
+// anywhere does. The page's project rides under `number_project`, which the route reads a bare
+// issue number in and narrows nothing by, so the bar shows no chip claiming a narrowing.
+test("the page's project is the search's context, not a chip narrowing it", async () => {
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer(results));
+  const view = renderPalette(() => {}, "/issues/LEGION-2/spec");
+
+  try {
+    await searchFor("astrolabe");
+
+    expect(search).toHaveBeenLastCalledWith("astrolabe", { number_project: "LEGION" });
+    expect(screen.queryByRole("button", { name: /^Remove Project/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Project" })).not.toBeNull();
   } finally {
     search.mockRestore();
     view.unmount();

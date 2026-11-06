@@ -95,6 +95,89 @@ func TestSearchLeadsWithTheIssueTheQueryNamesInEveryForm(t *testing.T) {
 	})
 }
 
+// The page a person searches from names a project, and that project is what a bare issue number
+// means there - but searching from a project page searches everything, as searching from
+// anywhere does. number_project carries that page's project as the context the number is read
+// in, and narrows nothing: the project filter beside it is what narrows. A request naming both
+// reads the number in the project it filters by, since a row that filter leaves out could not be
+// on the page whatever the context says.
+func TestSearchReadsABareNumberInThePageProjectWithoutNarrowingToIt(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	for _, project := range []string{"SRCH", "OTHER"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project + " project",
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	// Both projects are moved to the same four-digit number, as the key-forms row above moves
+	// them: an issue's number is its project's next, and a one-digit query is below the route's
+	// own two-character minimum.
+	if _, err := database.Pool.Exec(ctx,
+		"update projects set next_number = 1042 where key in ('SRCH', 'OTHER')"); err != nil {
+		t.Fatalf("move both projects to number 1042: %v", err)
+	}
+	named := createSearchIssue(t, handler, "SRCH", "Navigation instruments", "")
+	twin := createSearchIssue(t, handler, "OTHER", "Harbour logbook", "")
+	if named != "SRCH-1042" || twin != "OTHER-1042" {
+		t.Fatalf("seeded issues are %q and %q, want SRCH-1042 and OTHER-1042", named, twin)
+	}
+	// A row of the other project that the number matches by its words alone: it is on the page
+	// of a search that narrows by nothing, and off the page of one narrowed to SRCH, which is
+	// the whole difference between the context and the filter.
+	elsewhere := createSearchIssue(t, handler, "OTHER", "Dock inventory", "")
+	comment := searchComment(t, handler, elsewhere, "alice", "Budget line 1042 is closed.")
+
+	t.Run("the context leads with its project's issue and keeps every other project's rows", func(t *testing.T) {
+		body := searchResponse(t, handler, url.Values{"q": {"1042"}, "number_project": {"SRCH"}}.Encode())
+		if len(body.Results) == 0 || body.Results[0].ID != named {
+			t.Fatalf("results = %#v, want %s first: the page's project is what the number names", body.Results, named)
+		}
+		if searchResultOf(body, "comment", comment) == nil {
+			t.Fatalf("results = %#v, want %s's comment %s too: the context narrows nothing", body.Results, elsewhere, comment)
+		}
+		if body.Filters != (model.SearchFilters{}) {
+			t.Fatalf("filters = %#v, want none: the context is no narrowing to tell a person about", body.Filters)
+		}
+	})
+
+	t.Run("the project filter beside it is what leaves the other project out", func(t *testing.T) {
+		body := searchResponse(t, handler, url.Values{"q": {"1042"}, "project": {"SRCH"}}.Encode())
+		if len(body.Results) == 0 || body.Results[0].ID != named {
+			t.Fatalf("results = %#v, want %s first", body.Results, named)
+		}
+		if searchResultOf(body, "comment", comment) != nil {
+			t.Fatalf("results = %#v, want nothing of %s, which another project holds", body.Results, elsewhere)
+		}
+	})
+
+	t.Run("naming both reads the number in the project the search is narrowed to", func(t *testing.T) {
+		body := searchResponse(t, handler, url.Values{
+			"q": {"1042"}, "project": {"OTHER"}, "number_project": {"SRCH"},
+		}.Encode())
+		if len(body.Results) == 0 || body.Results[0].ID != twin {
+			t.Fatalf("results = %#v, want %s first: the filter decides which issue the number names", body.Results, twin)
+		}
+		if searchResultOf(body, "issue", named) != nil {
+			t.Fatalf("results = %#v, want nothing of %s, which the filter leaves out", body.Results, named)
+		}
+	})
+
+	t.Run("a context that is no project key is refused as the project is", func(t *testing.T) {
+		response := searchRequest(t, handler, url.Values{"q": {"1042"}, "number_project": {"not a key"}}.Encode())
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("search with an unreadable context: status=%d body=%s", response.Code, response.Body.String())
+		}
+		body := decodeBody[struct {
+			Code string `json:"code"`
+		}](t, response)
+		if body.Code != "INVALID_NUMBER_PROJECT" {
+			t.Fatalf("code = %q, want INVALID_NUMBER_PROJECT", body.Code)
+		}
+	})
+}
+
 // An ask searched for by its own words is the answer to that search, whatever else the corpus
 // says about those words and however many of them there are. Broadening every long query ORed an
 // ask's own thirty words, which every neighbouring ask holding most of them matched and outranked

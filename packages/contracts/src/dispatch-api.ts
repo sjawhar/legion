@@ -2202,7 +2202,9 @@ export interface SearchQueryReading {
  *  `project`, the issue `status` a row belongs to (a row with no issue belongs to none and is
  *  left out), the `author` of the item a row names as an actor id (a person's login or a session
  *  id), and `updated_since`, the RFC 3339 time at or after which that item was last written. Each
- *  is absent when the request named it not at all. Mirrors `model.SearchFilters`. */
+ *  is absent when the request named it not at all. The route's `number_project` is no narrowing
+ *  and is never echoed here: it is the project of the page a search was made from, read only to
+ *  tell which issue a query that is a bare issue number names. Mirrors `model.SearchFilters`. */
 export interface SearchFilters {
   readonly project?: string;
   readonly status?: string;

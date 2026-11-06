@@ -212,6 +212,7 @@ export type {
   RequirementCoverage,
   SearchArtifactRef,
   SearchAsk,
+  SearchOperator,
   SearchOwner,
   SearchResponse,
   SearchResult,
