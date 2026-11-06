@@ -20,9 +20,9 @@ because a deferral reads like documentation and so is easiest to read past.
 
 One line per item: the goal first, then each requirement in the spec's order.
 
-- **met** — the file and symbol, or the proof line that shows it.
-- **unmet** — what is missing, and where you looked: a requirement is in the approved spec or it
-  is not one, so nothing outside it makes an unmet one anything else.
+- **met** — the file and symbol that shows it. One delivered with a defect in it is met, and
+  the defect is a finding beside it.
+- **unmet** — nothing delivers it: quote the spec line and what you read at the head.
 
 You advise the reviewer, which decides.
 
