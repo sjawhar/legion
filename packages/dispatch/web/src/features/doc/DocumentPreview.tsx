@@ -33,11 +33,12 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
 }
 
 /**
- * Takes the blocks the editor's latest batch has just built off the document's own draw, named
- * by the `data-block-id` each of them carries (dispatch://INFRA-341, R11).
+ * Takes the blocks each batch of the editor's build has just built off the document's own
+ * draw, named by the `data-block-id` each of them carries (dispatch://INFRA-341, R11).
+ * Returns the take, which the host calls once per batch.
  *
  * The editor builds the document's top-level blocks from the top, a batch at a time, and shows
- * each batch as it lands; this runs in that same task, so the frame the browser draws next
+ * each batch as it lands; the take runs in that same task, so the frame the browser draws next
  * holds each of those blocks once - the editor's copy - and every block after them still here.
  *
  * Two things name the same block. A block the markdown itself identified carries the document's
@@ -46,16 +47,28 @@ export function documentPreview(within: HTMLElement | null): HTMLElement | null 
  * it stands. Every other block this draw parsed was given an id of its own, so it is matched by
  * its place: the two draw the same document's top-level blocks in the same order and the same
  * number of them, which is the rule the server's renderer and this draw are held to and the one
- * the reader's place already rests on (`ProofDocument`'s `readersBlock`).
+ * the reader's place already rests on (`ProofDocument`'s `readersBlock`). A block the draw
+ * holds twice under one id - a repaired duplicate - leaves with its twin, as it did when every
+ * child was read each time.
+ *
+ * An index of the draw by those ids, made once and removed from by reference, was tried in
+ * place of the per-batch scan below and reverted: the scan costs 547 ms of a build over 986
+ * drawn blocks against 13 ms over one holding a screenful, which is half a percent of either
+ * build, and the index left a frame holding something other than the document's blocks
+ * (`e2e/large-documents.e2e.ts`, "every block of a document is on the screen exactly once as
+ * its editor is built"). The scan reads the draw as it now stands, which is what keeps that
+ * count right whatever else has left it.
  */
-export function takeTheBuiltBlocks(preview: HTMLElement, built: readonly string[]): void {
-  const theirs = new Set(built);
-  const drawn = Array.from(preview.children);
-  for (let at = 0; at < drawn.length; at += 1) {
-    const block = drawn[at];
-    const id = block.getAttribute(BLOCK_ID_ATTRIBUTE);
-    if (at < built.length || (id !== null && theirs.has(id))) block.remove();
-  }
+export function takesTheBuiltBlocks(preview: HTMLElement): (built: readonly string[]) => void {
+  return (built) => {
+    const theirs = new Set(built);
+    const drawn = Array.from(preview.children);
+    for (let at = 0; at < drawn.length; at += 1) {
+      const block = drawn[at];
+      const id = block.getAttribute(BLOCK_ID_ATTRIBUTE);
+      if (at < built.length || (id !== null && theirs.has(id))) block.remove();
+    }
+  };
 }
 
 /**

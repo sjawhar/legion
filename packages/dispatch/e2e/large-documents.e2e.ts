@@ -22,7 +22,7 @@
 // here as well: the document on the screen before its editor exists, and the editor opening
 // where its reader had got to. None of them carries throttling: what they prove is what the
 // page does, not how long it takes.
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { subscribeSession } from "./agents";
 import {
@@ -68,6 +68,7 @@ import {
   printMeasurement,
   readTheReads,
   throttleTheCpu,
+  watchTheDocument,
   watchTheReads,
 } from "./large-documents-page";
 import { openCommentThread, settledScrollTop, withoutScrollAnchoring } from "./mermaid-helpers";
@@ -97,6 +98,35 @@ interface DrawnInATask {
   readonly cards: number;
 }
 
+/** What one task the page handed the browser while the editor was being built cost it: when
+ *  the browser was given it, and how long it then waited before it ran. `whatTheBuildServes`
+ *  records one of these per timer and per socket message, and the row below reads them. */
+interface ServedLate {
+  /** `performance.now()` when the browser was given the task: when `setTimeout` was called
+   *  for a timer, and the message event's own `timeStamp` - the moment the browser made the
+   *  event, which is when it queued the task that delivers it - for a socket message. */
+  readonly handedAt: number;
+  /** How many top-level blocks the editor held when it was handed over, for a timer the probe
+   *  below hands over; `undefined` for a socket message, which arrives when it arrives. */
+  readonly builtThen?: number;
+  /** How long it waited from then until it ran. */
+  readonly waitedMs: number;
+}
+
+/** The build's own window on the page's clock, as `whatTheBuildServes` sees it: the frame its
+ *  first batch was found in, and the frame the finished editor was named in. */
+interface TheBuildRan {
+  firstBatchMs?: number;
+  openedMs?: number;
+}
+
+/** Where the editor was when another person's word first showed up in its first block: how
+ *  many blocks it held, and whether its build was over by then. */
+interface TheirWordLanded {
+  readonly blocks: number;
+  readonly open: boolean;
+}
+
 declare global {
   interface Window {
     /** How many of the document's blocks the editor's root held at each animation frame, which
@@ -117,6 +147,15 @@ declare global {
      *  which is what makes the row's answer mean anything. `started` is false where the row
      *  never found its heading. */
     __readersPlace?: { grew: boolean; moved: number; started: boolean };
+    /** What `whatTheBuildServes` recorded: how long each timer the page handed the browser
+     *  and each message the document's socket received waited to be run, and the build's own
+     *  window, which says which of them were handed over while it ran. */
+    __servedTimers?: ServedLate[];
+    __servedMessages?: ServedLate[];
+    __theBuildRan?: TheBuildRan;
+    /** Where the editor was when another person's word reached its first block
+     *  (`whenTheirWordLands`). */
+    __theirWord?: TheirWordLanded;
   }
 }
 
@@ -478,13 +517,12 @@ function blocksBuilt(page: Page): Promise<number> {
  * Records, every animation frame until the editor is named, how many of the document's blocks
  * the editor's root holds, and answers what was recorded.
  *
- * The reading is the page's own rather than a poll from here, because a poll cannot see a build
- * in progress: the batches resume through `scheduler.yield()`, whose continuations outrank the
- * task a `page.evaluate` needs, so the first count a poll is answered with is the whole
- * document. The browser's own rendering runs between those batches, so a frame can read what a
- * poll cannot - and a frame that reads part of a document is also the proof a reader wants,
- * since a build that froze the page would have drawn no frame at all. Install before the
- * navigation; read once the editor is open.
+ * The reading is the page's own rather than a poll from here, because a poll reads the build
+ * from outside it: a `page.evaluate` is one task among the page's own, and the count it comes
+ * back with is whatever the batches had reached by the time that task ran, never the frame a
+ * reader was shown. A frame is the reading a reader gets, and a frame that holds part of a
+ * document is the proof this row wants, since a build that froze the page would have drawn no
+ * frame at all. Install before the navigation; read once the editor is open.
  */
 async function framesOfTheBuild(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -507,7 +545,7 @@ async function framesOfTheBuild(page: Page): Promise<void> {
 test(`the editor opens ${documentNames.large} with every block of it in the DOM @phone`, async ({
   browser,
 }) => {
-  test.setTimeout(600_000);
+  test.setTimeout(900_000);
   const { artifactId, path } = await seedDocument("specs-large.md", largeDocument);
   const blocks = await getArtifactBlocks(artifactId);
   expect(blocks.length).toBeGreaterThan(100);
@@ -527,7 +565,18 @@ test(`the editor opens ${documentNames.large} with every block of it in the DOM 
     expect(await blocksBuilt(page)).toBe(0);
 
     await transport.release();
-    await expect(documentEditor(page)).toBeVisible({ timeout: 240_000 });
+    // The same 900 s the other rows that read a build of this document carry, in place of the
+    // 240 s that stood here, because most of what this row waits for is its own reading of
+    // the build. Measured on this pod at 4x CPU throttling, with the socket released at the
+    // draw's first block as above: the build itself - the editor's root going live until the
+    // finished editor is named - is 34 s on `iphone` and 73 s on `chromium`; the per-frame
+    // count of `framesOfTheBuild`, which scans the editor's 7,036 block elements in every
+    // frame the build lets the browser draw, and this wait, whose role selector Playwright
+    // runs over that same document again on every mutation the batches make, take the whole
+    // to 100 s and 173 s. The 240 s had room for neither, and before the build's frontier was
+    // fixed (`packages/proof-editor/src/progressive-build.ts`) it had room for nothing at
+    // all: the same two numbers were 173 s and 281 s then.
+    await expect(documentEditor(page)).toBeVisible({ timeout: 900_000 });
 
     // Every block the server indexed the document under is in the editor's DOM, under the id a
     // `#b-<id>` link lands on, rather than only counted: two different blocks satisfy a count.
@@ -852,12 +901,13 @@ interface EditMade {
  * and holds every block they name. Install before the navigation; read what it made with
  * `editsMade` once the build is over.
  *
- * A reader's own edits cannot be driven from here while their editor is being built. The
- * batches resume through `scheduler.yield()`, whose continuations outrank the task a
- * `page.evaluate` or a locator's poll needs, so nothing this side asks is answered until the
- * last batch has landed - which `framesOfTheBuild` says of counting blocks and this row found
- * of typing. The browser's own rendering does run between those batches, so a frame is where a
- * reader's keystroke lands, and that is where these go.
+ * The edits are made from a frame of the page rather than driven from here, because where in
+ * a build each one lands is what these rows are about and this side cannot say. A locator's
+ * click is a task among the page's own: it is served between batches now
+ * (`endOfTask` in `packages/proof-editor/src/progressive-build.ts`), but which batch it falls
+ * between is a round trip's business, and an edit that landed after the last batch would
+ * prove nothing. A frame is where a reader's keystroke lands anyway, and from a frame the row
+ * reads how much of the document the editor held as it made each one.
  *
  * Each edit takes the editor's own path, never a shortcut into its state: the selection is a
  * DOM Range plus the `selectionchange` ProseMirror's DOMObserver reads, a type is
@@ -1111,12 +1161,568 @@ test(`two people write in ${documentNames.large} while its editor is built @phon
   }
 });
 
-// The three rows below are about what the page does in front of that draw, which is what the
-// numbers above are mostly made of. The document's own reads are started from the address, the
-// first of them before any of the page's own code has evaluated, so they wait for nothing the
-// entry chunk or the issue page does; and the margin beside the document draws no card a reader
-// cannot see. None of the three is timed: each reads what the page asked for and what it drew,
-// never how long either took.
+// The next three rows are about everything on the page that is not the build, for as long as
+// the build lasts. A batch hands the thread back so the page stays usable, and a hand-back the
+// page is served nothing in is no hand-back at all: the build used to resume through
+// `scheduler.yield()`, whose continuation the browser serves ahead of any posted task, so from
+// a build's first batch to its last no socket message, no fetch callback and no timer ran - and
+// React, whose scheduler posts one, drew nothing. Measured on this pod, `iphone` at 4x CPU
+// throttling, a `page.evaluate` poll was answered twice and then not again for 209 s, and
+// `scheduler.postTask()` at its default priority served a socket message in 7 ms while a
+// timer waited 19,945 ms. It hands the thread back as a timer now (`endOfTask` in
+// `packages/proof-editor/src/progressive-build.ts`), which queues the continuation behind
+// everything already waiting, and the three rows are the three things a reader loses while
+// nothing else runs: the page's own clock, a decision they answer, and another person's edit.
+
+/** The longest a message on the document's socket may wait to be served while the editor is
+ *  built. The same half-second R11 holds a main-thread task to: Chromium runs a networking
+ *  task ahead of a timer, so a socket message waits only for whatever the thread is in the
+ *  middle of, and the worst one measured across a build was 45 ms. */
+const aMessageWaitsAtMostMs = 500;
+
+/** How long a timer the page sets may wait, beyond the two longest main-thread tasks of the
+ *  build it was handed over inside.
+ *
+ *  A timer is not held to the half-second above, and the measurement is why. It waits for the
+ *  task in flight when it was handed over; then for the browser to lay out and paint a
+ *  document of 406,319 characters, which is not a task and so is in no main-thread task
+ *  number; then, where the batch's own timer was queued first, for that batch and the paint
+ *  after it as well. So two of the build's tasks, and this is the room left for the painting
+ *  between and after them. Measured on this pod at 4x CPU throttling, with one timer
+ *  outstanding at a time: on `iphone`, 67 to 1,194 ms through the batches against a longest
+ *  task of 564 ms, 2,941 and 4,437 ms for the two turns after the last batch where the
+ *  binding adopts the document and the decision cards draw, and 2,650, 3,463 and 4,161 ms
+ *  against longest tasks of 414 to 472 ms; on `chromium`, whose wider page lays out and
+ *  paints more of the document at once and whose longest task inside a build is 3,713 to
+ *  4,963 ms, 2,697, 8,473 and 9,073 ms. The most any of those waited past two of its build's
+ *  longest tasks is 3,747 ms.
+ *
+ *  It is read against the build's own tasks rather than against the build's length, which is
+ *  what stood here, because the length of the build is not what the hand-back buys: the same
+ *  9 s wait is a fifth of a build of 45 s and two fifths of the 20 s build left once the
+ *  frontier was fixed (`packages/proof-editor/src/progressive-build.ts`), so a share of the
+ *  build failed this row for the build having got faster. What the hand-back does buy is that
+ *  a timer waits for a turn of the page's loop rather than for the build, and that is what
+ *  this holds it to at any speed: `scheduler.yield()` served a timer set at the first batch
+ *  when the build ended - a wait of the whole build, against batches of 120 ms each - and
+ *  `scheduler.postTask()` left one waiting 19,945 ms, each of them far past two tasks of its
+ *  own build. */
+const aTimerWaitsAtMostThisPastTwoTasksMs = 5_000;
+
+/** How much build each timer served stands for, at worst: a page whose clock keeps running
+ *  serves far more than this, and a page that served one timer and then nothing until the
+ *  build ended serves far fewer. */
+const aTimerEveryMs = 2_000;
+
+/** The editor a reader already has while the rest of its blocks are built, as a selector an
+ *  init script can carry (`editorBeingBuilt` is the same root as a locator). */
+const liveEditorRoot = '.proof-editor[data-write-path="live"]';
+
+/** The finished editor's own name, which the host writes once `createProofEditor` has answered
+ *  its handle - a task after the binding connected - so an editor wearing it is one whose
+ *  build is over (`web/src/features/doc/editor.ts`). */
+const namedEditor = '[role="textbox"][aria-label="Document editor"]';
+
+/** How often the probe below hands the browser a timer. Often enough that a build of a few
+ *  seconds is covered by a dozen of them, rarely enough that the probe is not itself the thing
+ *  keeping the page busy. */
+const timerEveryMs = 250;
+
+/**
+ * Records what the page's own posted tasks cost it while the editor is being built: every
+ * timer the page hands the browser, every message the document's socket receives, and the
+ * build's own window, so the row can read the tasks handed over inside it.
+ *
+ * A timer is handed over from an animation frame, because a frame is the one thing that does
+ * run through a starved build and so the one place a probe can be handed over from. A socket
+ * message is timed from the message event's own `timeStamp`, which the browser sets when it
+ * makes the event - that is, when it queues the task that delivers it - so the difference is
+ * what the page's own thread made that message wait and nothing of the network's. The socket
+ * is wrapped as a `construct` proxy rather than a subclass for the reason
+ * `large-documents-page.ts` gives: the page's transport subclasses `globalThis.WebSocket` too.
+ *
+ * Install before the navigation; read once the editor has opened.
+ */
+async function whatTheBuildServes(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ every, live, named }: { every: number; live: string; named: string }) => {
+      const timers: ServedLate[] = [];
+      const messages: ServedLate[] = [];
+      const ran: TheBuildRan = {};
+      window.__servedTimers = timers;
+      window.__servedMessages = messages;
+      window.__theBuildRan = ran;
+      window.WebSocket = new Proxy(window.WebSocket, {
+        construct(made, args: [string | URL, (string | string[])?], asked) {
+          const socket = Reflect.construct(made, args, asked) as WebSocket;
+          if (!String(args[0]).includes("/ws/doc/")) {
+            return socket;
+          }
+          socket.addEventListener("message", (event) => {
+            messages.push({
+              handedAt: event.timeStamp,
+              waitedMs: performance.now() - event.timeStamp,
+            });
+          });
+          return socket;
+        },
+      });
+      let handedLast = Number.NEGATIVE_INFINITY;
+      /** Whether a timer the probe handed over has still to run. One at a time, because what
+       *  this row is about is how long the page waits for a timer, not how deep a queue of
+       *  them grows: a frame of this page costs hundreds of milliseconds, so a probe handing
+       *  one over every frame outruns the browser and measures its own backlog. A reader's
+       *  page posts one and waits for it - React's scheduler, and the one-card-per-task timer
+       *  of `useAskCardsDrawnInTasks` - which is what this does too. */
+      let owed = false;
+      const look = () => {
+        const now = performance.now();
+        const root = document.querySelector(live);
+        if (ran.firstBatchMs === undefined && root !== null) {
+          ran.firstBatchMs = now;
+        }
+        if (!owed && now - handedLast >= every) {
+          const handedAt = now;
+          handedLast = now;
+          owed = true;
+          // How far the build had got, read as the top-level child count of the editable host
+          // rather than a query over the whole document, so the probe costs the page nothing.
+          const built = root?.querySelector('[contenteditable="true"]')?.childElementCount ?? 0;
+          setTimeout(() => {
+            owed = false;
+            timers.push({ builtThen: built, handedAt, waitedMs: performance.now() - handedAt });
+          }, 0);
+        }
+        if (document.querySelector(named) !== null) {
+          ran.openedMs = now;
+          return;
+        }
+        requestAnimationFrame(look);
+      };
+      requestAnimationFrame(look);
+    },
+    { every: timerEveryMs, live: liveEditorRoot, named: namedEditor }
+  );
+}
+
+/** The tasks of `served` the browser was given while the build ran, which are the ones the
+ *  build could have starved. A task handed over inside the window and run after it is one of
+ *  them, which is why they are read by when each was handed over. */
+function handedToTheBuild(served: readonly ServedLate[], ran: TheBuildRan): ServedLate[] {
+  const from = ran.firstBatchMs ?? Number.POSITIVE_INFINITY;
+  const to = ran.openedMs ?? Number.POSITIVE_INFINITY;
+  return served.filter((task) => task.handedAt >= from && task.handedAt <= to);
+}
+
+/** The longest any of them waited, and 0 where there were none. */
+function longestWait(served: readonly ServedLate[]): number {
+  return served.reduce((worst, task) => Math.max(worst, task.waitedMs), 0);
+}
+
+test(`a page timer and a socket message are served while ${documentNames.large}'s editor is built @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const { path } = await seedDocument("specs-large.md", largeDocument);
+  const title = documentTitle(documentDiagrams.large);
+
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    // Bob has the document open with his caret in its first block before Alice loads hers, so
+    // the only thing left for him to do while she builds is press the keys: every word he
+    // types is a message on her socket.
+    const bobPage = await bob.newPage();
+    await bobPage.goto(path);
+    await expect(documentEditor(bobPage)).toContainText(title, { timeout: 240_000 });
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    await placeCaret(bobPage, "after", title);
+
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    const reached = await watchTheDocument(page);
+    await whatTheBuildServes(page);
+    await page.goto(path, { waitUntil: "commit" });
+
+    // From Alice's first batch until her editor opens, so his words cover her whole build
+    // rather than a moment this row has to guess at. Both moments are announcements the page
+    // makes rather than readings this side takes (`large-documents-page.ts`). He writes at a
+    // person's pace - a word every second or two, a few dozen of them - rather than as fast
+    // as the protocol allows, as the row above him does and for the same reason: four words a
+    // second into a document of 986 blocks is a load no reader puts on another, and what this
+    // row reads is what the build costs the page, not what a second client can.
+    //
+    // His words are short because it is his own page that they cost. He holds the same
+    // 986-block document, and on a desktop width each of his keystrokes costs a layout of it
+    // and of the margin beside it, so `Pangolin0` was three to four seconds of his and he
+    // wrote three words into a build of thirteen - which is what a build of this document now
+    // lasts, the frontier having stopped it rewriting the Yjs document a batch at a time
+    // (`packages/proof-editor/src/progressive-build.ts`). What covers a build is how often he
+    // writes, not how much.
+    await reached.firstBlock;
+    let open = false;
+    const opened = reached.editorOpened.then((at) => {
+      open = true;
+      return at;
+    });
+    let words = 0;
+    while (!open && words < 60) {
+      await bobPage.keyboard.type(` Pan${words}`, { delay: 25 });
+      await bobPage.waitForTimeout(500);
+      words += 1;
+    }
+    const openedMs = await opened;
+
+    const ran = (await page.evaluate(() => window.__theBuildRan)) ?? {};
+    const everyTimer = (await page.evaluate(() => window.__servedTimers)) ?? [];
+    const timers = handedToTheBuild(everyTimer, ran);
+    const messages = handedToTheBuild(
+      (await page.evaluate(() => window.__servedMessages)) ?? [],
+      ran
+    );
+    const built = (ran.openedMs ?? 0) - (ran.firstBatchMs ?? 0);
+    // Every timer of the load, not only the ones inside the build: what says whether a long
+    // wait is the build's doing is where the long ones fall.
+    const began = ran.firstBatchMs ?? 0;
+    const spread = everyTimer
+      .map(
+        (timer) =>
+          `${Math.round(timer.handedAt - began)}@${timer.builtThen ?? 0}:` +
+          `${Math.round(timer.waitedMs)}`
+      )
+      .join(" ");
+    // What one turn of the page's own loop cost while all that ran: a task the page was given
+    // waits behind whatever the thread is in the middle of, so the longest of those says what
+    // the waits above are made of.
+    const tasks = ((await page.evaluate(() => window.__largeDocumentLongTasks)) ?? []).filter(
+      (task) => task.at >= began && task.at <= (ran.openedMs ?? 0)
+    );
+    const longestTask = tasks.reduce((worst, task) => Math.max(worst, task.ms), 0);
+    // Printed before any of them is read against its target, as every other number in this
+    // file is: a run that missed one says what it measured rather than only what it wanted.
+    console.log(
+      `R11 posted tasks · a build of ${Math.round(built)} ms from its first batch, ` +
+        `${timers.length} timer(s) handed over inside it one at a time, worst wait ` +
+        `${Math.round(longestWait(timers))} ms (target ` +
+        `${aTimerWaitsAtMostThisPastTwoTasksMs} ms past two of the longest task below, and one ` +
+        `served every ${aTimerEveryMs} ms of the build); ${messages.length} socket message(s), ` +
+        `worst wait ${Math.round(longestWait(messages))} ms (target ${aMessageWaitsAtMostMs} ms). ` +
+        `${tasks.length} main-thread task(s) over 50 ms inside the build, longest ` +
+        `${Math.round(longestTask)} ms. The editor opened at ${Math.round(openedMs)} ms, with ` +
+        `${words} word(s) written into it while it was built (target more than 3). ` +
+        `Every timer of the load, as handed-over@blocks-built:waited, counted from the ` +
+        `first batch: ${spread}`
+    );
+
+    expect(words, "Bob never wrote while Alice's editor was being built").toBeGreaterThan(3);
+
+    // The window is a real build: its first batch landed well before the editor opened, so
+    // the tasks counted below were handed over while the batches held the thread.
+    expect(ran.firstBatchMs ?? 0).toBeGreaterThan(0);
+    expect(built).toBeGreaterThan(5_000);
+    // And the page was given both kinds of task inside it, so neither number below is the
+    // target met by nothing having happened.
+    expect(messages.length, "no socket message arrived while the build ran").toBeGreaterThan(3);
+
+    // The page's own clock ran right through the build: it was handed a timer, served it, was
+    // handed the next, over and over. A build that served one and then nothing until it ended
+    // is what this fails on.
+    expect(
+      timers.length,
+      `the page served ${timers.length} timer(s) across a build of ${Math.round(built)} ms: ` +
+        "its own clock stopped for the build rather than ticking through it"
+    ).toBeGreaterThanOrEqual(Math.floor(built / aTimerEveryMs));
+    expect(
+      Math.round(longestWait(timers)),
+      `a timer the page set during the build waited ${Math.round(longestWait(timers))} ms, ` +
+        `with the longest main-thread task inside that build ${Math.round(longestTask)} ms: ` +
+        "it is waiting for the build rather than for a turn of the page's own loop"
+    ).toBeLessThanOrEqual(Math.round(longestTask * 2 + aTimerWaitsAtMostThisPastTwoTasksMs));
+    expect(
+      Math.round(longestWait(messages)),
+      "a message on the document's socket waited longer than a reader feels as a freeze " +
+        "while the editor was being built: another person's edit, or a reconnect, is held " +
+        "for as long as the build lasts"
+    ).toBeLessThanOrEqual(aMessageWaitsAtMostMs);
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test(`a decision answered while ${documentNames.large}'s editor is built is stored before it opens @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const block = decisionBlockId(1);
+  const { issueKey, path } = await seedDocument("specs-large.md", largeDocument);
+  const indexed = (await listIssueAsks(issueKey)).find((ask) => ask.block_id === block);
+  expect(
+    indexed,
+    "the server indexed no ask for the document's first decision block"
+  ).toBeDefined();
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    const reached = await watchTheDocument(page);
+    await page.goto(path, { waitUntil: "commit" });
+    // The page's clock against this run's, read before the first batch, so the reading is not
+    // itself one of the things the build has to serve. `timeOrigin` never moves afterwards.
+    const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+    await reached.firstBlock;
+
+    // The card the editor hosts in the block the build has reached, answered while the rest of
+    // the document is still being built: the radio is React's own state, the button's enabled
+    // state is React's, and the answer is a fetch, so every step of this is a posted task the
+    // build has to let through.
+    const card = page
+      .locator(`${liveEditorRoot} [data-dispatch-ask-block="${block}"]`)
+      .locator("article[data-testid^=ask-]");
+    await card.getByRole("radio", { name: "The next window" }).check();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+
+    let storedAt = 0;
+    await expect
+      .poll(
+        async () => {
+          const state = (await listIssueAsks(issueKey)).find(
+            (ask) => ask.block_id === block
+          )?.state;
+          if (state === "answered" && storedAt === 0) {
+            storedAt = Date.now();
+          }
+          return state;
+        },
+        {
+          intervals: [250],
+          message: "the answer never reached the server",
+          timeout: 600_000,
+        }
+      )
+      .toBe("answered");
+
+    const openedMs = await reached.editorOpened;
+    const storedMs = storedAt - timeOrigin;
+    console.log(
+      `R11 decision during the build · answered and stored at ${Math.round(storedMs)} ms, ` +
+        `editor open at ${Math.round(openedMs)} ms, on the page's own clock.`
+    );
+    expect(
+      Math.round(storedMs),
+      "the answer reached the server only once the build was over: a reader who answers a " +
+        "decision while their editor is being built is answering nothing until it ends"
+    ).toBeLessThan(Math.round(openedMs));
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * Records the first animation frame in which the editor's own first block holds `word`, with
+ * how many blocks the editor held then and whether its build was over.
+ *
+ * Only the first block is read, because that is the block the other person writes in and
+ * reading the whole of a 406,000-character document every frame would be the thing slowing the
+ * page down. The loop does not stop when the editor is named: a word that lands only once the
+ * build is over is the failure this row is about, and the row says so rather than finding
+ * nothing recorded.
+ */
+async function whenTheirWordLands(page: Page, word: string): Promise<void> {
+  await page.addInitScript(
+    ({ live, named, wanted }: { live: string; named: string; wanted: string }) => {
+      const look = () => {
+        const root = document.querySelector(live);
+        const first = root === null ? null : root.querySelector("[data-block-id]");
+        if (root !== null && first !== null && (first.textContent ?? "").includes(wanted)) {
+          window.__theirWord = {
+            blocks: root.querySelectorAll("[data-block-id]").length,
+            open: document.querySelector(named) !== null,
+          };
+          return;
+        }
+        requestAnimationFrame(look);
+      };
+      requestAnimationFrame(look);
+    },
+    { live: liveEditorRoot, named: namedEditor, wanted: word }
+  );
+}
+
+test(`another person's edit reaches ${documentNames.large} while its editor is built @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(900_000);
+  const { artifactId, path } = await seedDocument("specs-large.md", largeDocument);
+  const title = documentTitle(documentDiagrams.large);
+  const word = "Pangolin.";
+
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const bobPage = await bob.newPage();
+    await bobPage.goto(path);
+    await expect(documentEditor(bobPage)).toContainText(title, { timeout: 240_000 });
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    await placeCaret(bobPage, "after", title);
+
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    const reached = await watchTheDocument(page);
+    await whenTheirWordLands(page, word);
+    await page.goto(path, { waitUntil: "commit" });
+
+    // Bob writes one word into the document's first block, which Alice's first batch has
+    // already built, the moment she has that batch: it is in her Yjs document before his
+    // keystroke is over, and the only thing between it and her editor is the socket message
+    // that carries it.
+    await reached.firstBlock;
+    await bobPage.keyboard.type(` ${word}`, { delay: 25 });
+
+    const openedMs = await reached.editorOpened;
+    const whole = await blocksBuilt(page);
+    const landed = await page.evaluate(() => window.__theirWord);
+    console.log(
+      `R11 their edit during the build · the word reached the editor with ` +
+        `${landed?.blocks ?? 0} of ${whole} blocks built, build ` +
+        `${landed?.open === true ? "over" : "running"}, editor open at ${Math.round(openedMs)} ms.`
+    );
+
+    expect(landed, "the editor never held the word the other person wrote").toBeDefined();
+    expect(landed?.blocks ?? 0).toBeGreaterThan(0);
+    expect(
+      landed?.open,
+      "the word reached the editor only once its build was over: another person's edit waits " +
+        "for the whole build before the reader sees it"
+    ).toBe(false);
+    expect(
+      landed?.blocks ?? 0,
+      "the editor held the whole document when the word reached it, so nothing about this run " +
+        "crossed a build"
+    ).toBeLessThan(whole);
+
+    // And it is the document's own word afterwards, not a redraw the binding undid.
+    await expect(documentEditor(page)).toContainText(`${title} ${word}`, { timeout: 240_000 });
+    await everythingOwedFinished("the word another person wrote during the build");
+    const { markdown } = await getArtifactText(artifactId);
+    expect(markdown).toContain(`# ${title} ${word}`);
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+// What the editor's build costs must be the document's business, not the page's. The same 986
+// top-level blocks took about 35 s to build over a page holding one screenful and about 200 s
+// over a page holding the whole drawn document - the same blocks, the same batches, and
+// minutes that scaled with what was already in the DOM (dispatch://INFRA-341, R11). The cost
+// was a forced layout of the whole page in each batch (`ProofDocument`'s `onBatch` read the
+// draw's box) over a page the build never let the browser render, so the layout was never
+// clean when it was read: 147 ms of each batch over the whole drawn document against 11 ms
+// over one screenful. That is more than the 120 ms a batch is budgeted, so the build cut every
+// batch to one or two blocks and paid it 414 times instead of 101. The build hands the thread
+// back as a posted task now, so the browser renders between batches and the read is of a
+// layout it has just done, and the draw is indexed once rather than scanned in each batch
+// (`takesTheBuiltBlocks`). This row is what keeps that: the build's own time over the whole
+// drawn document, against the build's own time over a screenful, measured one after the other
+// in one run so the pod's own load is the same for both.
+
+/** How many times longer the build over a page holding the whole drawn document may take than
+ *  the build over a page holding one screenful. A page carrying the whole draw beside the
+ *  editor carries about twice the boxes for the browser to lay out on its way through, which
+ *  no build can give back; what this rules out is the quadratic above, which was seven times
+ *  on this pod. Measured at 1.6 to 2.2 times over the runs this row was written against. */
+const theSameRangeTimes = 3;
+
+/** How long one editor's build took, on the page's own clock. */
+interface TheBuildsTime {
+  /** When the reader first had a block of the editor's own in the viewport, which is its
+   *  first batch. */
+  readonly firstBlockMs: number;
+  /** When the editor opened: its last batch in and its binding live. */
+  readonly openedMs: number;
+  /** The build itself: the time between the two. */
+  readonly buildMs: number;
+}
+
+/**
+ * Opens `path` on a page of its own and answers how long the editor's build took there.
+ *
+ * With `overTheWholeDraw`, the document's socket is held until the page's own draw holds that
+ * many of the document's top-level blocks, so the build runs over a page already holding the
+ * whole document; without it the build runs over the screenful the draw has drawn by then,
+ * which is what a reader whose socket answers at once gets. Both numbers are announcements
+ * the page makes, so neither is a reading this side takes.
+ */
+async function theBuildsTime(
+  browser: Browser,
+  path: string,
+  { overTheWholeDraw }: { overTheWholeDraw?: number } = {}
+): Promise<TheBuildsTime> {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await throttleTheCpu(page);
+    const reached = await watchTheDocument(page);
+    const transport =
+      overTheWholeDraw === undefined ? undefined : await documentTransport(page, { holding: true });
+    await page.goto(path, { waitUntil: "commit" });
+    if (transport !== undefined) {
+      await expect
+        .poll(() => page.locator(drawnBlocks).count(), {
+          intervals: [1_000],
+          message: "the page never drew the whole document, so no build ran over one",
+          timeout: 300_000,
+        })
+        .toBeGreaterThanOrEqual(overTheWholeDraw ?? 0);
+      await transport.release();
+    }
+    const firstBlock = await reached.firstBlock;
+    const openedMs = await reached.editorOpened;
+    return { buildMs: openedMs - firstBlock.at, firstBlockMs: firstBlock.at, openedMs };
+  } finally {
+    await alice.close();
+  }
+}
+
+test(`${documentNames.large}'s editor builds over the whole drawn document in the time it takes over one screenful @phone`, async ({
+  browser,
+}) => {
+  test.setTimeout(1_800_000);
+  const { artifactId, path } = await seedDocument("specs-large.md", largeDocument);
+  const whole = await topLevelBlocks(artifactId);
+  expect(whole).toBeGreaterThan(900);
+
+  // One screenful first, because that is the build the two measuring rows are held to: a pod
+  // that has grown slower since would show it there before it showed it in the ratio.
+  const screenful = await theBuildsTime(browser, path);
+  const drawn = await theBuildsTime(browser, path, { overTheWholeDraw: whole });
+  console.log(
+    `R11 build time · over one screenful ${Math.round(screenful.buildMs)} ms ` +
+      `(first block ${Math.round(screenful.firstBlockMs)} ms, editor open ` +
+      `${Math.round(screenful.openedMs)} ms); over the whole drawn document ` +
+      `(${whole} blocks) ${Math.round(drawn.buildMs)} ms (first block ` +
+      `${Math.round(drawn.firstBlockMs)} ms, editor open ${Math.round(drawn.openedMs)} ms); ` +
+      `${(drawn.buildMs / screenful.buildMs).toFixed(2)} times, against ${theSameRangeTimes}.`
+  );
+
+  expect(screenful.buildMs).toBeGreaterThan(0);
+  expect(drawn.buildMs).toBeGreaterThan(0);
+  expect(
+    drawn.buildMs,
+    "the editor took far longer to build over a page holding the whole drawn document than " +
+      "over one holding a screenful, for the same blocks in the same batches: the build is " +
+      "paying for what the page already holds once per batch again"
+  ).toBeLessThanOrEqual(screenful.buildMs * theSameRangeTimes);
+});
+
+// The three rows below are about what the page does in front of the document's own draw,
+// which is what the measured numbers above are mostly made of. The document's own reads are
+// started from the address, the first of them before any of the page's own code has
+// evaluated, so they wait for nothing the entry chunk or the issue page does; and the margin
+// beside the document draws no card a reader cannot see. None of the three is timed: each
+// reads what the page asked for and what it drew, never how long either took.
 
 /** A document of one short section, so these rows seed in a moment: what they read is the
  *  order the page does things in, which no length of document changes. */

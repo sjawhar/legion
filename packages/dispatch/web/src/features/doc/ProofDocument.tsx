@@ -59,7 +59,7 @@ import { AskBlockCard, PreviewDecisionCard, PreviewDecisionsContext } from "./As
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { DocumentPreview, documentPreview, takeTheBuiltBlocks } from "./DocumentPreview";
+import { DocumentPreview, documentPreview, takesTheBuiltBlocks } from "./DocumentPreview";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import { theFirstBatchIsAwaited, useAfterTheFirstBatch } from "./first-batch";
@@ -344,8 +344,19 @@ export function ProofDocument({
   /** Whether anything on the page stands at the pixel a block or a mark sits at: the margin
    *  laying its cards out beside the document, or those badges. Nothing else reads the numbers,
    *  and measuring them costs a forced layout of the whole document each time
-   *  (`marks.ts`'s `blockOffsets`), so a reader with neither is measured for nothing. */
-  const placed = placesItems || showsBlockBadges;
+   *  (`marks.ts`'s `blockOffsets`), so a reader with neither is measured for nothing.
+   *
+   *  Never while the editor is being built, whatever is beside it. The attribute is what turns
+   *  `content-visibility` off for every block of the document and of the draw in front of it
+   *  (`styles.css`), and the build hands the thread back between its batches, so an unskipped
+   *  document is laid out and painted again in each of those gaps: on a desktop width, where
+   *  the margin is beside the document from the page's first commit, that took the build of
+   *  the 406,319-character document past ten minutes. There is nothing to place meanwhile
+   *  either - the margin's cards stand at blocks the build has still to make - and `onBatch`
+   *  reads the draw's own box in each batch, which that skipping is what keeps cheap. It is
+   *  placed again in the commit the editor is drawn in, which is the commit its own
+   *  placements are reported from (`bindEditor`, dispatch://INFRA-341, R11). */
+  const placed = (placesItems || showsBlockBadges) && (editorDrawn || !editorBuilding);
   const versionQuery = useQuery({
     enabled: version !== undefined,
     queryKey: ["artifact", artifact.id, "version", version],
@@ -361,9 +372,8 @@ export function ProofDocument({
   // A document that holds a decision block is the exception, and it waits for nothing: that
   // block is a card the reader answers - in their own draw before any editor exists
   // (`PreviewDecisionCard`), and in every block the build makes after it - and the card is
-  // these asks. Held to the batch it would be answered only once the build released the
-  // thread, since the build's own continuations outrank the task React's update needs
-  // (`@legion/proof-editor`'s `endOfTask`), and a card that grew then would move the reader
+  // these asks. Held to the batch, they would go out only once the first batch had landed and
+  // be answered a round trip after that, and a card that grew then would move the reader
   // off the block their link landed on. So the document's own text decides: one that names an
   // ask block reads them with the text, one that names none reads them after the batch.
   const holdsDecisions = useMemo(
@@ -886,6 +896,12 @@ export function ProofDocument({
               // same index (`readersBlock`), and the editor holds every one of them by the
               // time the build ends.
               const place = readersBlock(documentPreview(parent.parentElement));
+              /** The draw's own blocks, indexed by their ids once rather than scanned for in
+               *  every batch (`takesTheBuiltBlocks`), against the element they were indexed
+               *  from, so a draw React has replaced is indexed again. */
+              let theDraw:
+                | { element: HTMLElement; take: (built: readonly string[]) => void }
+                | undefined;
               void createEditor(parent, {
                 // Cursor labels are outside the compact acceptance bar. Even with inline labels,
                 // yCursor's edge widget disrupts the mobile browser's post-update text selection.
@@ -944,9 +960,13 @@ export function ProofDocument({
                   if (preview === null) {
                     return undefined;
                   }
+                  if (theDraw?.element !== preview) {
+                    theDraw = { element: preview, take: takesTheBuiltBlocks(preview) };
+                  }
+                  const take = theDraw.take;
                   const before = preview.getBoundingClientRect();
                   return () => {
-                    takeTheBuiltBlocks(preview, built);
+                    take(built);
                     if (before.top >= 0 || preview.childElementCount === 0) {
                       return;
                     }

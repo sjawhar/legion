@@ -13,7 +13,8 @@ import {
   installFakeParseWorker,
   restoreParseWorker,
 } from "../refs/parse-worker-fixture";
-import { DocumentPreview } from "./DocumentPreview";
+import { DocumentPreview, takesTheBuiltBlocks } from "./DocumentPreview";
+import { BLOCK_ID_ATTRIBUTE } from "./scroll-block";
 
 /** The address these rows read the page at; no row puts a server draw in the page, so none of
  *  them adopts one. */
@@ -183,4 +184,47 @@ describe("the document preview's parse", () => {
       view.unmount();
     }
   }, 20_000);
+});
+
+/** A draw of `ids`, one block each, as the headless engine leaves it: every block carries the
+ *  id its own parse gave it, which is the document's own id where the markdown named one. */
+function drawnBlocks(ids: readonly string[]): HTMLElement {
+  const drawn = document.createElement("div");
+  for (const id of ids) {
+    const block = document.createElement("p");
+    block.setAttribute(BLOCK_ID_ATTRIBUTE, id);
+    block.textContent = id;
+    drawn.append(block);
+  }
+  return drawn;
+}
+
+/** The ids the draw still holds, in order. */
+function stillDrawn(drawn: HTMLElement): string[] {
+  return Array.from(drawn.children, (block) => block.getAttribute(BLOCK_ID_ATTRIBUTE) ?? "");
+}
+
+describe("the blocks each batch of the build takes off the draw", () => {
+  test("are taken by their place, a batch at a time, from the top", () => {
+    const drawn = drawnBlocks(["a", "b", "c", "d", "e"]);
+    const take = takesTheBuiltBlocks(drawn);
+
+    take(["one", "two"]);
+    expect(stillDrawn(drawn)).toEqual(["c", "d", "e"]);
+    take(["three"]);
+    expect(stillDrawn(drawn)).toEqual(["d", "e"]);
+    take(["four", "five"]);
+    expect(stillDrawn(drawn)).toEqual([]);
+  });
+
+  test("are taken by their id wherever the draw holds them, and every copy of one", () => {
+    // The editor's third batch names a block the markdown itself identified - a decision
+    // block, or one the server drew - which this draw holds under the same id further down.
+    const drawn = drawnBlocks(["a", "b", "decision-1", "d", "decision-1"]);
+    const take = takesTheBuiltBlocks(drawn);
+
+    take(["decision-1"]);
+
+    expect(stillDrawn(drawn)).toEqual(["b", "d"]);
+  });
 });

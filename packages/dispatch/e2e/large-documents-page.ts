@@ -98,24 +98,22 @@ declare global {
  *
  * Every number here is the page's own, and the run used to read each of them with
  * `page.evaluate`. A `page.evaluate` is a task on the page's main thread, and the editor's
- * build owns that thread from its first batch to its last: it hands the thread back between
- * batches through `scheduler.yield()`, whose continuations are served before any task the run
- * posts (`endOfTask` in `@legion/proof-editor`'s `progressive-build.ts`, which is there so the
- * build never queues behind the page's own timers). So for the whole of a build the run hears
- * nothing it asks for. Measured on this pod, `iphone` at 4x CPU throttling, with the socket
- * held until the reader's own draw of the 406,319-character document was complete: two
- * readings came back in the three seconds after the sync, and the next one 209 s later, when
- * the build ended.
+ * build used to own that thread from its first batch to its last: it handed the thread back
+ * through `scheduler.yield()`, whose continuations the browser serves before any posted task,
+ * so for the whole of a build the run heard nothing it asked for. Measured on this pod,
+ * `iphone` at 4x CPU throttling, with the socket held until the reader's own draw of the
+ * 406,319-character document was complete: two readings came back in the three seconds after
+ * the sync, and the next one 209 s later, when the build ended. The build hands the thread
+ * back as a timer now (`endOfTask` in `@legion/proof-editor`'s `progressive-build.ts`), so a
+ * reading the run takes is answered between batches.
  *
- * The page's own frame loop is not starved - the browser keeps rendering - so the page has had
- * both numbers since the build's first batch, and the only thing missing was a way to say so.
- * This is that way: the page calls `__largeDocumentReached` in the task it writes each number
- * in, which reaches the run through the binding rather than through the page's task queue, and
- * the run waits for the call instead of polling for the number. The two measuring rows never
- * felt the difference - their builds are about 35 s, so a poll read the number as soon as the
- * build ended, well inside its wait - and the row that holds the socket until the whole draw
- * is on the page, whose build is minutes long, stopped failing on a number the page had
- * recorded three seconds into it.
+ * The announcements stay, because what they time is not what a reading can time. Each number
+ * here is the moment the page reached something, and a poll can only say that the page had
+ * reached it by the time the poll ran: between the batches of a build on a throttled phone
+ * that is hundreds of milliseconds, against targets of three and five seconds. The page calls
+ * `__largeDocumentReached` in the task it writes each number in, which reaches the run
+ * through the binding, and the run waits for the call rather than asking again and again for
+ * a number the page already has.
  */
 interface Reached {
   /** The editor's first visible block, exactly as the page recorded it. */
@@ -483,8 +481,8 @@ export async function watchTheDocument(page: Page): Promise<Announcements> {
             inLiveEditor: block.closest(liveSelector) !== null,
             inPreview: block.closest(previewRoots) !== null,
           };
-          // Said in the task it was recorded in, because the build the page is in the middle
-          // of answers nothing the run asks for until it ends.
+          // Said in the task it was recorded in, so the number the run is given is the one
+          // the page wrote rather than the one a later reading found (`listenForThePage`).
           window.__largeDocumentReached?.({ firstBlock: window.__largeDocumentFirstBlock });
           return;
         }
@@ -637,9 +635,10 @@ export interface MeasurementWaits {
  * and then a scroll through the whole document (the module comment above).
  *
  * Neither wait reads the page. Both are announcements the page makes in the task it records
- * the number in, because a reading the run takes is a task the editor's build starves for the
- * whole of its build (`listenForThePage`). What is read below is read once the editor has
- * opened, which is when the page has its thread back.
+ * the number in, so each is the moment the page reached it rather than the moment a reading
+ * found it, which between the batches of a throttled build is hundreds of milliseconds apart
+ * (`listenForThePage`). What is read below is read once the editor has opened, which is when
+ * the page has its thread back.
  */
 export async function measureDocument(
   page: Page,
