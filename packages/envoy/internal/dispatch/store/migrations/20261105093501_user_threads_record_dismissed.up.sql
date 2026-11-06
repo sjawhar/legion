@@ -3,14 +3,23 @@
 -- INFRA-450: a new write by somebody else brings a dismissed thread back, unread, and the person's
 -- own reply does not - a reply they send from the Dismissed view leaves the thread there. This
 -- replaces user_threads_record (0095) with the same function plus one assignment: the statement
--- that moves the other participants' replied_at also clears their dismissed_at when the write is
--- newer than the mark. One statement, so a thread can never be left dismissed behind a newer write
--- by somebody else, which is what lets every read spell "dismissed" as `dismissed_at is not null`.
--- The writer's own row is the insert below, which never touches dismissed_at, so their own reply
--- leaves their mark where it stands.
+-- that moves the other participants' replied_at also clears their dismissed_at. One statement, so
+-- a thread can never be left dismissed behind a write by somebody else, which is what lets every
+-- read spell "dismissed" as `dismissed_at is not null`. The writer's own row is the insert below,
+-- which never touches dismissed_at, so their own reply leaves their own mark standing, which is
+-- what keeps a reply they send from the Dismissed view there.
 --
--- A mark at or after the new write stays: a dismiss carries the time the person dismissed through,
--- so a write they had already seen does not bring the thread back.
+-- The clear is unconditional: it compares the mark with nothing. p_at is the writing
+-- transaction's own stamp (now(), which is transaction_timestamp()), taken before the write
+-- became visible to anybody, so a dismiss that began later - and that therefore cannot have seen
+-- this write - may carry a mark newer than it, and no comparison of the two can tell a person who
+-- had seen this reply from one who could not have. Nor is there anything for one to protect: a
+-- trigger runs once, inside the writing transaction, so every mark this statement can reach was
+-- written before this write committed, by a dismiss that had not seen it. A dismiss that had seen
+-- it is turned away by the version it carries instead - its update writes only rows whose
+-- last_reply_id is still the one the person saw (inboxDismissMarkThreads, api/inbox_dismiss.go),
+-- and the statement below moves last_reply_id with replied_at, under the row lock that dismissal
+-- holds.
 --
 -- Its own migration, as each trigger of 0095-0097 is: `create or replace function` takes ACCESS
 -- EXCLUSIVE on the function's own catalogue row and no lock at all on user_threads, comments, asks
@@ -42,7 +51,7 @@ begin
     update user_threads
     set replied_at = greatest(replied_at, p_at),
         last_reply_id = case when replied_at is null or p_at >= replied_at then p_write else last_reply_id end,
-        dismissed_at = case when dismissed_at < p_at then null else dismissed_at end
+        dismissed_at = null
     where thread_id = p_thread and login is distinct from v_writer;
   end if;
   if v_writer is not null then

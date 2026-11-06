@@ -16,10 +16,15 @@
 -- leaves the person's own reply from the Dismissed view with the thread still dismissed, exactly as
 -- their own reply leaves a Reply thread's mark where it stands.
 --
--- A mark at or after the new reply stays, as 20261105093501's does: a dismiss carries the time the
--- person dismissed through, so a reply they had already seen does not bring the thread back. That
--- is the one comparison left, and it is made here, once, against the reply being written - not by
--- every read afterwards.
+-- The delete takes the root's mark whatever its time: it compares the mark with nothing. A
+-- trigger runs once, at this insert and inside the writing transaction, so every mark it can
+-- reach was written before this reply committed, by a dismiss that cannot have seen it. A
+-- dismiss that had seen this reply is turned away before it writes a mark at all, by the check it
+-- makes under the root lock against the thread's own replies (inboxDismissCheckAgentRoots,
+-- api/inbox_dismiss.go), which is a comparison of reply ids and not of times. A time could decide
+-- nothing here: created_at is the writing transaction's own stamp, taken before the write became
+-- visible to anybody, so a reply that commits after a dismiss began can carry a stamp older than
+-- that dismiss's mark.
 --
 -- The root is found up in_reply_to, as user_threads_message (0095) finds an issue message's thread:
 -- seven deep at most in production, and the walk stops at 64. A reply whose root is nobody's Agent
@@ -72,8 +77,7 @@ begin
     v_depth := v_depth + 1;
   end loop;
   perform 1 from messages where id = v_root for key share;
-  delete from user_agent_thread_dismissed
-  where message_id = v_root and dismissed_at < new.created_at;
+  delete from user_agent_thread_dismissed where message_id = v_root;
   return null;
 end;
 $$;
