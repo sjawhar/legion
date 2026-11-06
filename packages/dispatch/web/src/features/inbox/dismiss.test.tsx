@@ -11,7 +11,13 @@ import { MemoryRouter } from "react-router-dom";
 
 import { answerInboxDismisses } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
-import { inboxQuery, inboxThreadsQuery, myRepliesCountQuery, whoAmIQuery } from "../../api/queries";
+import {
+  dismissedThreadsQuery,
+  inboxQuery,
+  inboxThreadsQuery,
+  myRepliesCountQuery,
+  whoAmIQuery,
+} from "../../api/queries";
 import type { InboxRow, MyRepliesResponse, MyReplyRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { replyRow } from "../threads/replies-fixture";
@@ -52,9 +58,9 @@ function seeded(rows: readonly MyReplyRow[], asks: readonly InboxRow[] = []): Qu
   return client;
 }
 
-function renderInbox(client: QueryClient): void {
+function renderInbox(client: QueryClient, address = "/"): void {
   render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={[address]}>
       <QueryClientProvider client={client}>
         <KeymapProvider>
           <Inbox />
@@ -203,7 +209,7 @@ test("the bulk bar offers Snooze for the asks among the selection and Dismiss fo
   expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1"] });
 });
 
-test("Select all sends the list's narrowing with the list's own read mark, not the loaded ids", async () => {
+test("Select all over the Inbox's own read names every row of the group by id", async () => {
   const dismissed = answerInboxDismisses();
   dismissed.mockResolvedValue({ dismissed: 2 });
   renderInbox(seeded([replyRow("c1"), replyRow("c9")]));
@@ -214,10 +220,36 @@ test("Select all sends the list's narrowing with the list's own read mark, not t
   fireEvent.click(screen.getByRole("button", { name: "Select all" }));
   await screen.findByText("Every row selected");
 
+  // The Inbox's thread read is unpaged, so every id of the group is in hand - the rows behind
+  // **Show more** and inside a folded band with them - and one request names them all.
   fireEvent.click(screen.getByRole("button", { name: "Dismiss selected threads" }));
+  await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
+  expect(dismissed.mock.calls[0]?.[0]).toEqual({ threads: ["reply:c1", "reply:c9"] });
+});
+
+test("Select all in the paged Dismissed view sends the narrowing with that list's read mark", async () => {
+  const dismissed = answerInboxDismisses();
+  dismissed.mockResolvedValue({ dismissed: 2 });
+  const client = seeded([]);
+  client.setQueryData(dismissedThreadsQuery().queryKey, {
+    pageParams: [undefined],
+    pages: [threadsRead([replyRow("c1"), replyRow("c9")])],
+  });
+  renderInbox(client, "/?show=dismissed");
+
+  await waitFor(() => expect(rowIds()).toEqual(["reply:c1", "reply:c9"]));
+  fireEvent.click(screen.getAllByLabelText("Select Root")[0] as HTMLElement);
+  await screen.findByText("1 selected");
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  await screen.findByText("Every row selected");
+
+  // This list is the one the server pages, so the ids behind **Show more** are not loaded: the
+  // press names the narrowing and the mark the list was read at instead, never both.
+  fireEvent.click(screen.getByRole("button", { name: "Move to Inbox selected threads" }));
   await waitFor(() => expect(dismissed).toHaveBeenCalledTimes(1));
   expect(dismissed.mock.calls[0]?.[0]).toEqual({
     dismiss_through: AS_OF,
     kind: ["reply", "agent"],
+    restore: true,
   });
 });

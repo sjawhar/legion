@@ -38,8 +38,8 @@ export function BulkBar({
   show,
   threadCount,
 }: {
-  /** Whether the reader has selected every row of the group, the ones no page has loaded yet
-   *  included: that press is the one a dismiss sends the list's narrowing for. */
+  /** Whether the reader has selected every row the list's narrowing matches, the ones a fold or
+   *  a page is holding back included: the bar says so rather than counting what it can see. */
   all: boolean;
   /** How many open asks the selection holds, which is what **Snooze** would defer. */
   askCount: number;

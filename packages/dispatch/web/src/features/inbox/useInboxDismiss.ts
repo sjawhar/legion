@@ -8,8 +8,9 @@
  * that takes it out, and in the Dismissed view the same write with `restore` puts it back.
  *
  * One press is one `POST /api/v1/me/inbox/dismiss` (`inboxDismissRequest`), naming either the row
- * ids it changes or - for **Select all**, where the ids of rows the reader has not loaded are not
- * known - the narrowing the list is under with `dismiss_through`, that list read's own `as_of`.
+ * ids it changes - which is every press made over a list the reader has whole, a **Select all**
+ * of the unpaged Inbox read included - or, where the list pages at the server and the ids are
+ * not all loaded, the narrowing it is under with `dismiss_through`, that list read's own `as_of`.
  * The press is applied here first, because the reader pressed it: the rows leave the view they
  * were in and the unread count every badge shares drops by the unread ones among them. A refused
  * press puts each row back where it stood and the page says so (`dismissRefusalText`), which an
@@ -52,9 +53,10 @@ export function dismissRowId(row: InboxListRow): string | undefined {
   return prefixes.some((prefix) => id.startsWith(prefix)) ? id : undefined;
 }
 
-/** What one press changes: the rows the reader picked, or the whole group under the list's own
- *  narrowing, which is what **Select all** picks - the ids of rows behind **Show more** are not
- *  all loaded, so the request names the narrowing and the list's read mark instead. `restore`
+/** What one press changes: the rows it names - a row's own Dismiss, a picked selection, and a
+ *  **Select all** of a list the reader has whole - or the whole group under the list's own
+ *  narrowing, which only the paged Dismissed view needs: there the ids behind **Show more** are
+ *  not loaded, so the request names the narrowing and the list's read mark instead. `restore`
  *  puts the threads back in the Inbox rather than taking them out. */
 export type InboxDismissInput =
   | { readonly restore?: boolean; readonly rows: readonly string[] }
@@ -86,8 +88,8 @@ export function dismissesThread(thread: MyReplyRow, body: InboxDismissRequest): 
 }
 
 /** What the page says about a press the server refused: the rows are back, so it says what did
- *  not happen and the reason the server gave, as a refused bulk snooze does (`refusalText` in
- *  `Inbox.tsx`). */
+ *  not happen and the reason the server gave, as a refused bulk snooze does (`snoozeRefusalText`
+ *  in `useInboxSelection.ts`). */
 export function dismissRefusalText(count: number, restore: boolean, reason: string): string {
   const threads = `${count} ${count === 1 ? "thread" : "threads"}`;
   const what = restore ? `move ${threads} back to the Inbox` : `dismiss ${threads}`;
@@ -119,15 +121,23 @@ function withoutRows(
   };
 }
 
-/** `answer` with the rows a refused press took put back where each stood. */
+/** `answer` with the rows a refused press took put back where each stood, less any the answer
+ *  already holds: a read landing between the press and the refusal brings the rows back on its
+ *  own, and splicing them in again would draw each of them twice. */
 function withRows(answer: MyRepliesResponse, dropped: readonly DroppedRow[]): MyRepliesResponse {
   if (dropped.length === 0) return answer;
   const rows = [...answer.rows];
+  const here = new Set(rows.map((row) => rowId({ kind: "thread", thread: row })));
+  let back = 0;
   // Oldest index first, so each row lands at the place it held before any of them left.
   for (const { at, row } of [...dropped].sort((left, right) => left.at - right.at)) {
+    const id = rowId({ kind: "thread", thread: row });
+    if (here.has(id)) continue;
+    here.add(id);
     rows.splice(Math.min(at, rows.length), 0, row);
+    back += 1;
   }
-  return { ...answer, rows, total: answer.total + dropped.length };
+  return back === 0 ? answer : { ...answer, rows, total: answer.total + back };
 }
 
 /** What a press rolls back to: the unread count as it stood, and the rows it took out of the view
@@ -139,6 +149,14 @@ interface DismissRollback {
   readonly inbox: readonly DroppedRow[];
   /** What left each page of the Dismissed read, by page. */
   readonly dismissed: readonly (readonly DroppedRow[])[];
+}
+
+/** Every row a press took out of the views it was applied to, both sides at once: a dismiss
+ *  takes them out of the Inbox's own read and a restore out of the Dismissed read's pages, so a
+ *  press that names no row knows what it moved only from these. One rule for the count a refusal
+ *  names and for the ids `onSettled` hands back, so the two can never disagree. */
+function droppedRows(rollback: DismissRollback | undefined): readonly DroppedRow[] {
+  return [...(rollback?.inbox ?? []), ...(rollback?.dismissed ?? []).flat()];
 }
 
 /** The pages of the Dismissed read, as the infinite query holds them. */
@@ -194,7 +212,10 @@ export function useInboxDismiss({
     inline: true,
     label: (input) => (input.restore === true ? "Threads moved to the Inbox" : "Threads dismissed"),
     onError: (error, input, rollback) => {
-      const taken = "rows" in input ? input.rows.length : (rollback?.inbox.length ?? 0);
+      // What the press did not do, which is what the reader is told. A press under the
+      // narrowing names no row, and a restore's rows come out of the Dismissed read rather than
+      // the Inbox's, so the count is every row the optimistic apply took out, either side.
+      const taken = "rows" in input ? input.rows.length : droppedRows(rollback).length;
       setRefusal(dismissRefusalText(taken, input.restore === true, error.message));
       if (rollback === undefined) return;
       queryClient.setQueryData<MyRepliesResponse>(inboxKey, (current) =>
@@ -212,8 +233,16 @@ export function useInboxDismiss({
       );
       if (rollback.count !== undefined) queryClient.setQueryData(countKey, rollback.count);
     },
-    onMutate: (input) => {
+    onMutate: async (input) => {
       setRefusal(undefined);
+      // A read already out can land after this press's own apply and put every row it took back
+      // on the page, where the refusal below would then draw each of them twice. Cancel the
+      // reads this press writes first, as every optimistic write here does.
+      await Promise.all(
+        [inboxKey, dismissedKey, countKey].map((queryKey) =>
+          queryClient.cancelQueries({ queryKey })
+        )
+      );
       const body = inboxDismissBody(input);
       const restoring = input.restore === true;
       // A dismiss takes its rows out of the Inbox's own read; a restore takes them out of the
@@ -264,11 +293,7 @@ export function useInboxDismiss({
       }
       // A press under the narrowing names no row, so the rows it settles are the ones its own
       // optimistic apply took out of the view.
-      onSettled?.(
-        [...(context?.inbox ?? []), ...(context?.dismissed ?? []).flat()].map(({ row }) =>
-          rowId({ kind: "thread", thread: row })
-        )
-      );
+      onSettled?.(droppedRows(context).map(({ row }) => rowId({ kind: "thread", thread: row })));
     },
     request: (input) => inboxDismissRequest(inboxDismissBody(input)),
     target: () => "inbox:dismiss",

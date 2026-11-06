@@ -18,9 +18,9 @@ import { Inbox } from "./Inbox";
  * underneath never unmounts the page beneath it - the drawer itself closes instead
  * (`useCloseOnNavigation`), which is also what "open the item" from inside it does.
  *
- * Its filters, sort, grouping, read-thread switch and search text are its own `useState`, never
- * the URL: `Inbox`'s `filter`/`onFilterChange` exist exactly so a peek embedded on, say, the
- * Agents page does not navigate it to `/` the moment someone picks a person or types a word.
+ * Its filters, sort, grouping, Inbox-or-Dismissed switch and search text are its own `useState`,
+ * never the URL: `Inbox`'s `filter`/`onFilterChange` exist exactly so a peek embedded on, say,
+ * the Agents page does not navigate it to `/` the moment someone picks a person or types a word.
  * `keymapScope={DIALOG_SCOPE}` puts its j/k/Enter/Escape bindings on the scope a dialog anywhere
  * on the stack exclusively consults, instead of the standalone page's `inbox` scope, which a
  * dialog's keydown handling never reaches. `pane={false}` is the third: a peek is a strip beside
@@ -35,7 +35,7 @@ import { Inbox } from "./Inbox";
 export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   // An empty route is the Inbox as it opens: the reader's own work, newest first, banded by
-  // priority, unread threads only, and nothing typed in the search box.
+  // priority, every thread they have not dismissed, and nothing typed in the search box.
   const [filter, setFilter] = useState<InboxRoute>({});
   const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open });
   useCloseOnNavigation(open, onClose);

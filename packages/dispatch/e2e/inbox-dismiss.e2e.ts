@@ -376,11 +376,11 @@ test("three thread rows picked with x go out together in one bulk Dismiss", asyn
   }
 });
 
-test("Select all dismisses every row of the group in one request, and the Dismissed view pages them", async ({
+test("Select all dismisses every row of the group in one request that names each of them, and the Dismissed view pages them", async ({
   browser,
 }) => {
   // More rows than one band draws at once and more than one dismissed page holds, so the press
-  // can name no list of loaded ids and the Dismissed view has a second page to read.
+  // covers rows no page has drawn and the Dismissed view has a second page to read.
   const THREADS = INBOX_DISMISSED_PAGE + 50;
   await setLiveSessions([THREAD_SESSION]);
   await createProject({ key: "CORE", name: "Core" });
@@ -397,7 +397,10 @@ test("Select all dismisses every row of the group in one request, and the Dismis
     await expect(rows).toHaveCount(GROUP_PAGE);
     expect(await bandHeadings(page)).toEqual([`P2 (${THREADS})`]);
 
-    // One row ticked, then **Select all**: the band holds every row, loaded or not.
+    // One row ticked, then **Select all**: the band holds every row, drawn or not.
+    const drawn = await rows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-inbox-row") ?? "")
+    );
     const checkbox = rows.first().getByRole("checkbox");
     await expect(checkbox).toHaveAttribute("aria-label", /^Select Mirror root \d+$/);
     await checkbox.check();
@@ -406,8 +409,9 @@ test("Select all dismisses every row of the group in one request, and the Dismis
     await bar.getByRole("button", { name: "Select all" }).click();
     await expect(bar).toContainText("Every row selected");
 
-    // One request, and it names the list's own narrowing and the read mark that list was read
-    // at - never the fifty ids the band had drawn, which are not every row of it.
+    // One request, and it names every row of the group by id - the Inbox's own read is unpaged,
+    // so all of them are in hand, the ones behind **Show more** as much as the fifty drawn -
+    // rather than the narrowing, which only the paged Dismissed view has to fall back on.
     const sent = nextDismiss(page);
     await bar.getByRole("button", { name: "Dismiss selected threads" }).click();
     const body = (await sent).postDataJSON() as {
@@ -415,9 +419,11 @@ test("Select all dismisses every row of the group in one request, and the Dismis
       kind?: string[];
       threads?: string[];
     };
-    expect(Object.keys(body).sort()).toEqual(["dismiss_through", "kind"]);
-    expect(body.kind).toEqual(["reply", "agent"]);
-    expect(Date.parse(body.dismiss_through ?? "")).toBeGreaterThan(0);
+    expect(Object.keys(body)).toEqual(["threads"]);
+    const named = new Set(body.threads);
+    expect(named.size).toBe(THREADS);
+    expect([...named].every((id) => id.startsWith("reply:"))).toBe(true);
+    for (const id of drawn) expect(named.has(id)).toBe(true);
 
     // Every row of the band goes, the ones behind **Show more** with them.
     await expect(rows).toHaveCount(0);
@@ -434,6 +440,68 @@ test("Select all dismisses every row of the group in one request, and the Dismis
     await more.click();
     await expect(rows).toHaveCount(THREADS);
     await expect(more).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("Select all under a search dismisses every matching row of a band wider than one page", async ({
+  browser,
+}) => {
+  // A band wider than the fifty rows a page draws, and a word that matches every one of them:
+  // the press has to cover the rows below the page as well as the ones on it.
+  const MATCHING = GROUP_PAGE + 70;
+  const OTHERS = 3;
+  await setLiveSessions([THREAD_SESSION]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Rollout" });
+  await patchIssue(issue.key, { priority: 2 });
+  await seedBulkReplyThreads({ count: MATCHING, issueKey: issue.key, prefix: "Mirror" });
+  await seedBulkReplyThreads({
+    count: OTHERS,
+    issueKey: issue.key,
+    olderThan: 2 * MATCHING + 10,
+    prefix: "Backup",
+  });
+  expect(await unreadThreadRows()).toBe(MATCHING + OTHERS);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await inboxPage(alice);
+    const posted = watchDismisses(page);
+    const rows = page.locator("[data-inbox-row]");
+    await expect(rows).toHaveCount(GROUP_PAGE);
+
+    // The word narrows the band to the rows it matches, of which the page still draws fifty.
+    await page.getByRole("searchbox", { name: "Search asks" }).fill("mirror");
+    await expect(page).toHaveURL(/q=mirror/);
+    expect(await bandHeadings(page)).toEqual([`P2 (${MATCHING})`]);
+    await expect(rows).toHaveCount(GROUP_PAGE);
+
+    const checkbox = rows.first().getByRole("checkbox");
+    await checkbox.check();
+    const bar = page.getByRole("group", { name: "Selected rows" });
+    await expect(bar).toContainText("1 selected");
+    await bar.getByRole("button", { name: "Select all" }).click();
+    await expect(bar).toContainText("Every row selected");
+
+    // Every row the word matches goes, not the fifty on the page: the server's narrowing knows
+    // nothing of that word, so the press names the ids - and only the matching ones, which is
+    // why the three the word hides are still in the Inbox afterwards.
+    const sent = nextDismiss(page);
+    await bar.getByRole("button", { name: "Dismiss selected threads" }).click();
+    const body = (await sent).postDataJSON() as { dismiss_through?: string; threads?: string[] };
+    expect(Object.keys(body)).toEqual(["threads"]);
+    expect(new Set(body.threads).size).toBe(MATCHING);
+
+    await expect(rows).toHaveCount(0);
+    await expect.poll(async () => dismissedThreads()).toBe(MATCHING);
+    expect(await inboxThreads()).toBe(OTHERS);
+    expect(posted).toHaveLength(1);
+
+    // What the word hid is untouched, and the Inbox draws it again once the box is empty.
+    await page.getByRole("searchbox", { name: "Search asks" }).fill("");
+    await expect(rows).toHaveCount(OTHERS);
   } finally {
     await alice.close();
   }

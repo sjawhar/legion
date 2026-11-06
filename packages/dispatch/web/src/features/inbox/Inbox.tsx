@@ -92,8 +92,8 @@ import {
 } from "./sections";
 import { ThreadRowCard } from "./ThreadRowCard";
 import { ThreadTitle } from "./ThreadTitle";
-import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
-import { dismissRowId, useInboxDismiss } from "./useInboxDismiss";
+import { dismissRowId } from "./useInboxDismiss";
+import { useInboxSelection } from "./useInboxSelection";
 import { useInboxThreadRows } from "./useInboxThreadRows";
 
 /** When an agent replied last on a row that still needs the viewer, that reply is surfaced so
@@ -569,54 +569,6 @@ function heldRow(
   return movedBand ? { ...seen, row: listed } : undefined;
 }
 
-/**
- * What the bar says after a pick the server refused in part. The count alone cannot tell a
- * sign-out from `snoozed_until must be in the future`, so the reason travels with it: one reason
- * when every refusal gave the same one, otherwise the first and how many others there are.
- */
-function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | undefined {
-  const first = failed[0];
-  if (first === undefined) return undefined;
-  const reasons = new Set(failed.map(({ reason }) => reason));
-  const head = `Could not snooze ${failed.length} of ${of}: ${first.reason}`;
-  if (reasons.size === 1) return `${head}.`;
-  const others = reasons.size - 1;
-  return `${head}, and ${others} other reason${others === 1 ? "" : "s"}.`;
-}
-
-/**
- * Whether a row matches every word the reader typed, the one narrowing both kinds of row go
- * through. An ask reads the rule `inbox-search.ts` holds for it, the rule the counts and
- * anything else that narrows by that text read too (INFRA-963).
- *
- * A thread row is not an `InboxRow`, so the same fields are read off its own shape: the issue it
- * hangs under, by key and title; the document's name where it stands on a document alone, as an
- * ask's haystack takes it only where the row has no issue; its subject, which is what a thread
- * says of itself; and whoever wrote in it last, as the ask rule takes an author - the id, and a
- * session's stamped title and owner beside it. An Agent row belongs to no issue and no document,
- * and the session it was sent to is what names it, so its id and the name Dispatch knows it by
- * stand where an issue's words would.
- */
-function matchesRowSearch(row: InboxListRow, words: readonly string[]): boolean {
-  if (row.kind === "ask") return matchesInboxSearch(row.ask, words);
-  if (words.length === 0) return true;
-  const thread = row.thread;
-  const parts: (string | null | undefined)[] = [];
-  if (thread.kind === "agent") {
-    parts.push(thread.session.id, thread.session.name);
-  } else {
-    parts.push(thread.issue?.key, thread.issue?.title);
-    if (thread.issue === undefined) parts.push(thread.document?.name);
-  }
-  const author = thread.reply.author;
-  parts.push(thread.subject, author.id);
-  if (author.kind === "session") {
-    parts.push(author.origin?.session_title, author.owner);
-  }
-  const haystack = parts.filter(Boolean).join(" ").toLowerCase();
-  return words.every((word) => haystack.includes(word));
-}
-
 /** What the Inbox says when no band has a row. Typed text comes first: a reader who has narrowed
  *  the list is told why it is empty before anything else is, whatever view, filter or agent the
  *  address also carries. It answers on the words the box searches by rather than on a non-empty
@@ -798,53 +750,6 @@ export function Inbox({
       return next;
     });
   }, []);
-  // The rows the reader has marked, by `rowId` - asks and threads alike: `x` and the row's own
-  // checkbox are the two ways in. An id the list no longer holds drops out here, so a row that is
-  // listed again comes back unmarked; a mark whose row this view does not list, or whose band is
-  // folded shut, drops out of `selected` below, so the bar never counts - and `h` never writes -
-  // a row that is not on the page. The mark itself outlives both: open the band, or switch back,
-  // and it is still made.
-  const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
-  // Whether the reader pressed **Select all**, which takes in every row of the group, the ones no
-  // page has loaded included. A dismiss of that selection names the list's own narrowing rather
-  // than ids, since the ids are not all here to name. Any change to the marks ends it.
-  const [allRows, setAllRows] = useState(false);
-  // The bulk writes live here rather than in the bar, because an optimistic snooze or dismiss can
-  // take every marked row off this view at once and a bar that owned the write would be unmounted
-  // before its own refusal arrived. The bar reports one press downward and renders what it is
-  // told. The snooze's size is held with it, because that same move empties the selection the bar
-  // would otherwise count: `0 selected` while two asks are being snoozed.
-  const bulkWrite = useAskSnoozeMany();
-  const [bulkSnoozing, setBulkSnoozing] = useState(0);
-  const bulkBarRef = useRef<HTMLFieldSetElement>(null);
-  const [bulkRefusal, setBulkRefusal] = useState<string | undefined>(undefined);
-  /** The rows the reader has pressed Dismiss on here, by `rowId`, while that press is out: the
-   *  hand-hold below skips them, so a row they dismissed leaves the list at once even with their
-   *  hand still on it. An id leaves once its press settles - the rollback of a refused one puts
-   *  an ordinary row back, and one the server took is out of the list - so the hold never stops
-   *  covering a row the reader can still see. */
-  const dismissedHere = useRef<Set<string>>(new Set());
-  // The one dismiss write every control on this list shares, the row's own and the bar's: the
-  // write takes the row - and every control drawn on it - off the page, so its refusal is the
-  // page's to show rather than the row's (`useInboxDismiss`).
-  const dismissWrite = useInboxDismiss({
-    onSettled: (ids) => {
-      for (const id of ids) dismissedHere.current.delete(id);
-    },
-  });
-  const clearSelection = useCallback(() => {
-    setMarked(new Set());
-    setAllRows(false);
-    setBulkRefusal(undefined);
-  }, []);
-  const onMark = useCallback((id: string) => {
-    setAllRows(false);
-    setMarked((current) => {
-      const next = new Set(current);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
-  }, []);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
   // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
@@ -864,15 +769,6 @@ export function Inbox({
     },
     [folded, toggleFold]
   );
-  const paneSelection = usePaneSelection({
-    bulkSnoozing,
-    filter,
-    listRef,
-    openFoldedBand: useCallback(() => openFoldedBand(LATER_GROUP_KEY), [openFoldedBand]),
-    paneShown,
-    presented,
-    snoozing,
-  });
   // What this list holds, and computed here rather than after the early returns so the bindings
   // below speak for exactly the rows on the page.
   const agent = filter.agent;
@@ -906,7 +802,7 @@ export function Inbox({
     (row) =>
       (row.kind === "ask" && assigning.has(row.ask.id)) ||
       (inAssigneeFilter(row, selection, viewer ?? "") &&
-        matchesRowSearch(row, words) &&
+        matchesInboxSearch(row, words) &&
         INBOX_FILTER_FIELDS.every((field) =>
           inFieldFilter(row, field, filters[field], viewer ?? "")
         ))
@@ -915,14 +811,17 @@ export function Inbox({
   // it is one list of what the reader has already dealt with.
   const shown = showDismissed ? narrowed : sortRows(narrowed, sort, viewer ?? "");
   const byId = new Map(shown.map((row) => [rowId(row), row]));
+  // What a press that names the list's own narrowing rather than ids carries: the read mark of
+  // the list read the reader is looking at, and undefined where no such press may be made at
+  // all - the server knows the list's five fields and nothing of the text typed in the search
+  // box, so a press that sent the narrowing under typed text would act on rows the text hid.
+  // **Mark all read** and a **Select all** dismiss read this one name.
+  const narrowingMark = words.length === 0 ? threads.asOf : undefined;
   // The bar's **Mark all read**, over exactly this list: its filters, the read mark of the list
   // read it is showing, and the rows it is showing. The Dismissed view offers none, so it passes
-  // no read mark, and neither does a list the reader has typed into: one press sends the
-  // narrowing rather than ids (`mark-all.ts`), and the server knows the five fields but nothing
-  // of the typed text, so a press under it would mark rows the text hid - which is the one
-  // thing that press promises not to do.
+  // no read mark either: nothing there is left to mark.
   const markAll = useMarkAllRead({
-    asOf: showDismissed || words.length > 0 ? undefined : threads.asOf,
+    asOf: showDismissed ? undefined : narrowingMark,
     filters,
     rows: shown,
   });
@@ -955,71 +854,42 @@ export function Inbox({
   const drawnIds = new Set(
     bands.flatMap(({ key, rows }) => drawnIn(key, rows).map((row) => rowId(row)))
   );
-  /** The marks the bar counts and a press writes: the rows this view is drawing. */
-  const selected = [...marked].filter((id) => drawnIds.has(id));
-  const selectedAsks = selected.filter((id) => byId.get(id)?.kind === "ask");
-  const selectedThreads = selected.filter((id) => byId.get(id)?.kind === "thread");
-  // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
-  // control makes, once per ask. The ids the server took leave the selection; the ones it refused
-  // are marked again under its own reason, even if Clear ran while the write was in flight, so a
-  // second pick retries exactly those.
-  const snoozePick = (until: string) => {
-    const ids = [...selectedAsks];
-    setBulkRefusal(undefined);
-    setBulkSnoozing(ids.length);
-    void bulkWrite.submit(ids, until).then(({ failed }) => {
-      setBulkSnoozing(0);
-      setBulkRefusal(refusalText(failed, ids.length));
-      const refused = new Set(failed.map(({ askId }) => askId));
-      const taken = new Set(ids.filter((id) => !refused.has(id)));
-      setMarked((current) => {
-        const next = new Set([...current].filter((id) => !taken.has(id)));
-        for (const id of refused) next.add(id);
-        return next;
-      });
-    });
-  };
-  /** One press of the reader's, from a row's own control, from `e`, or from the bar: the ids go
-   *  into the hold's exception list first, so the rows leave the list under their hand. */
-  const dismissRows = (ids: readonly string[]) => {
-    for (const id of ids) dismissedHere.current.add(id);
-    dismissWrite.submit({ restore: showDismissed, rows: [...ids] });
-  };
-  // One press over the threads the bar is counting, through the one dismiss write. With **Select
-  // all** on, the ids are not all loaded, so the request names the list's own narrowing and the
-  // read mark of the list the reader is looking at instead, as **Mark all read** does - except
-  // while the reader has typed in the search box: the narrowing the server understands holds the
-  // five fields and not that text, so a press that sent it would dismiss rows the text hid. The
-  // text narrows only rows this page has read, so there the press names exactly the ids it
-  // matched, which are the rows the reader is looking at.
-  const dismissPick = () => {
-    if (allRows && words.length === 0 && threads.asOf !== undefined) {
-      for (const id of selectedThreads) dismissedHere.current.add(id);
-      dismissWrite.submit({ filters, restore: showDismissed, through: threads.asOf });
-    } else {
-      dismissRows(selectedThreads);
-    }
-    // The rows leave the view at once, so the marks on them go with them; a refusal puts them
-    // back under the line the page shows for it, not under a bar the reader must look for.
-    clearSelection();
-  };
-  // The bar, and the Clear it carries, shows while a mark is on the page, a pick is in the air or a
-  // refusal is showing. Escape with no row focused is the keyboard's Clear and is offered on this
-  // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
-  // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
-  const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
-  // A mark whose row the list no longer holds at all - dismissed, answered, resolved elsewhere -
-  // drops out here, so a row that comes back is unmarked. Read against every row the two reads
-  // answered, which is what the marks are keyed by.
-  const candidateIds = candidates.map((row) => rowId(row)).join(" ");
-  useEffect(() => {
-    const listed = new Set(candidateIds === "" ? [] : candidateIds.split(" "));
-    setMarked((current) =>
-      [...current].every((id) => listed.has(id))
-        ? current
-        : new Set([...current].filter((id) => listed.has(id)))
-    );
-  }, [candidateIds]);
+  // What the reader marked, and the two presses the bar makes on it: the state and both writes
+  // live in one hook of their own (`useInboxSelection`).
+  const {
+    allRows,
+    barRef: bulkBarRef,
+    barShown: bulkBarShown,
+    clearSelection,
+    dismissedHere,
+    dismissPick,
+    dismissRows,
+    dismissWrite,
+    marked,
+    onMark,
+    selectAll,
+    selectedAsks,
+    selectedThreads,
+    snoozePick,
+    snoozeRefusal,
+    snoozing: bulkSnoozing,
+  } = useInboxSelection({
+    asOf: narrowingMark,
+    candidates,
+    drawnIds,
+    filters,
+    rows: byId,
+    showDismissed,
+  });
+  const paneSelection = usePaneSelection({
+    bulkSnoozing,
+    filter,
+    listRef,
+    openFoldedBand: useCallback(() => openFoldedBand(LATER_GROUP_KEY), [openFoldedBand]),
+    paneShown,
+    presented,
+    snoozing,
+  });
   // The refetch a recorded answer triggers returns the list the optimistic removal already
   // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
   // is one of the ways the selection is handed on, and only while it is still the selected
@@ -1526,10 +1396,10 @@ export function Inbox({
   // sending is held exactly as it is today.
   const handId = anchor?.id;
   const seen =
-    handId === undefined || handId === answered.current || dismissedHere.current.has(handId)
+    handId === undefined || handId === answered.current || dismissedHere(handId)
       ? undefined
       : presented.current.find(
-          (placed) => rowId(placed.row) === handId && matchesRowSearch(placed.row, words)
+          (placed) => rowId(placed.row) === handId && matchesInboxSearch(placed.row, words)
         );
   const listed = seen === undefined ? undefined : byId.get(rowId(seen.row));
   const nowBand =
@@ -1585,12 +1455,9 @@ export function Inbox({
       onPickerFocus={(from) => {
         pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
       }}
-      onSelectAll={() => {
-        setMarked(new Set(shown.map((row) => rowId(row))));
-        setAllRows(true);
-      }}
+      onSelectAll={selectAll}
       pending={bulkSnoozing}
-      refusal={bulkRefusal}
+      refusal={snoozeRefusal}
       show={show}
       threadCount={selectedThreads.length}
     />

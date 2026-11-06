@@ -2,7 +2,8 @@
  * The Inbox's browser-kept choices: the ones that belong to the person's browser rather than to
  * the list they linked. The page and the drawer read the same values, so the two agree, and a
  * reload keeps them. Everything the address can carry - the filters, the sort, the grouping and
- * the read-thread switch - stays in the address on the page and in `useState` in the drawer.
+ * the switch between the Inbox and what the reader has dismissed out of it - stays in the
+ * address on the page and in `useState` in the drawer.
  *
  * The thread order is a browser-kept choice too, but it is no Inbox setting: every thread in
  * Dispatch reads in it, so it lives with the thread modules (`features/threads/thread-order.ts`).
