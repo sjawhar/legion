@@ -560,9 +560,9 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	if outcome != bindBound || held == nil {
 		t.Fatalf("the first bind = %v (subscription returned: %t), want bindBound", outcome, held != nil)
 	}
-	// The second process tries once the server reports the first bound: a push binding reaches
-	// the server a moment after Subscribe returns, and a second bind made before it lands is
-	// answered as a free durable rather than one another process holds.
+	// The bind above returned with the server already reporting the durable bound: it holds the
+	// durable's consumer lease until it does (awaitConsumerPushBound), which is what lets the
+	// second process read the durable rather than race it.
 	awaitPushBound(t, holder, "the durable is not bound to the first process")
 	refused, outcome := bindDurableConsumer(ctx, ctx, standby, leases, standbyThrottle, deliveryConsumerConfig(), subscribeIdle(standby))
 	if outcome != bindStandby || refused != nil {
@@ -600,6 +600,52 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = taken.Unsubscribe() })
 	awaitPushBound(t, standby, "the durable the standby bound is not push-bound")
+}
+
+// A second process must not bind a durable while the first is between the reconciliation that
+// created it and its own subscribe. In that window the server reports the durable bound by
+// nobody - the first process's subscription is still in its connection's write buffer - so
+// nats.go's own refusal cannot be what keeps the second out, and two processes that both bind one
+// push durable are each handed every delivery. CI showed it: two envoy-dispatch processes bound
+// delivery-events 36 ms apart and neither ever stood by (dispatch://INFRA-1075, run 42239459430).
+// The window is held open here by a subscribe that waits on a channel, so the test pins the rule
+// rather than the timing.
+func TestASecondProcessDoesNotBindWhileTheFirstIsBetweenItsCreateAndItsSubscribe(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	leases := deliveryTestLeases(t, pool)
+	holder := intakeTestClient(t)
+	standby := intakeTestClient(t)
+
+	subscribing, release := make(chan struct{}), make(chan struct{})
+	bound := make(chan bindOutcome, 1)
+	var held *natsgo.Subscription
+	go func() {
+		sub, outcome := bindDurableConsumer(ctx, ctx, holder, leases, &bindThrottle{}, deliveryConsumerConfig(), func() (*natsgo.Subscription, error) {
+			close(subscribing)
+			<-release
+			return subscribeIdle(holder)()
+		})
+		held = sub
+		bound <- outcome
+	}()
+	<-subscribing
+
+	// The durable exists, since the holder's reconciliation created it before it reached the
+	// subscribe, and no process is bound to it yet.
+	refused, outcome := bindDurableConsumer(ctx, ctx, standby, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(standby))
+	if refused != nil {
+		t.Cleanup(func() { _ = refused.Unsubscribe() })
+	}
+	close(release)
+	if first := <-bound; first != bindBound || held == nil {
+		t.Fatalf("the first process's bind = %v (subscription returned: %t), want bindBound", first, held != nil)
+	}
+	t.Cleanup(func() { _ = held.Unsubscribe() })
+	if outcome != bindStandby || refused != nil {
+		t.Fatalf("the second process's bind, made while the first was between its create and its subscribe, = %v (subscription returned: %t), want bindStandby and no subscription: the durable admits one subscriber",
+			outcome, refused != nil)
+	}
+	awaitPushBound(t, holder, "the durable the first process bound is not push-bound")
 }
 
 // TestAConsumerAnotherProcessIsBoundToIsLeftAlone: the destructive branch of the reconciliation
@@ -671,15 +717,16 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	}
 }
 
-// TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing: the configuration reconciliation runs under
-// the durable's own consumer lease (consumerLease), so that two processes never reconcile one
-// durable against each other. With that durable's lease held by another caller, a bind touches the
+// TestABindWhoseLeaseIsHeldElsewhereStandsBy: every step that decides a durable - the
+// configuration reconciliation and the subscribe both - runs under that durable's own consumer
+// lease (consumerLease), so that two processes never reconcile one durable against each other and
+// never both bind it. With that durable's lease held by another caller, a bind touches the
 // durable's configuration in no way -- no create, no update, no delete, however far the durable is
-// from what this release wants -- and still binds it: the process holding the lease is doing that
-// work. The lease taken here is the one the bind below takes, bus.DispatchDeliveryDurable's: a
-// test holding any other durable's lease would leave this bind free to reconcile and prove
-// nothing.
-func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
+// from what this release wants -- and binds nothing either: the process holding the lease is doing
+// that work, and this one's answer is its next poll's. The lease taken here is the one the bind
+// below takes, bus.DispatchDeliveryDurable's: a test holding any other durable's lease would
+// leave this bind free to reconcile and prove nothing.
+func TestABindWhoseLeaseIsHeldElsewhereStandsBy(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
 	leases := deliveryTestLeases(t, pool)
@@ -719,16 +766,24 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	}
 
 	sub, outcome := bindDurableConsumer(ctx, ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), subscribeIdle(natsClient))
+	if outcome != bindStandby || sub != nil {
+		if sub != nil {
+			_ = sub.Unsubscribe()
+		}
+		close(release)
+		t.Fatalf("the bind under a lease held elsewhere = %v (subscription returned: %t), want bindStandby and no subscription", outcome, sub != nil)
+	}
+	// Read while the other caller still holds the lease, so what the bind did is all that can
+	// have happened to the durable.
+	after, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+	if err != nil {
+		close(release)
+		t.Fatalf("read the durable after the bind: %v", err)
+	}
 	close(release)
 	if held := <-ran; !held {
 		t.Fatalf("the other caller never held the %s lease, so the bind was free to reconcile", consumerLease(bus.DispatchDeliveryDurable))
 	}
-	if outcome != bindBound || sub == nil {
-		t.Fatalf("the bind under a lease held elsewhere = %v (subscription returned: %t), want bindBound", outcome, sub != nil)
-	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
-
-	after := awaitPushBound(t, natsClient, "the bind reconciled nothing and did not subscribe either")
 	if after.Config.AckWait != before.Config.AckWait || after.Config.MaxAckPending != before.Config.MaxAckPending {
 		t.Fatalf("the durable's flow control is %s/%d, want the %s/%d it carried: the bind updated a durable whose lease it did not hold",
 			after.Config.AckWait, after.Config.MaxAckPending, before.Config.AckWait, before.Config.MaxAckPending)
@@ -736,8 +791,8 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	if !after.Created.Equal(before.Created) {
 		t.Fatalf("the durable was recreated (created %s, was %s) by a bind whose lease was held elsewhere", after.Created, before.Created)
 	}
-	if !after.PushBound {
-		t.Fatal("the bind reconciled nothing and did not subscribe either")
+	if after.PushBound {
+		t.Fatal("the bind subscribed to a durable whose lease another caller held")
 	}
 	var skipped bool
 	for _, record := range logs() {
