@@ -400,9 +400,10 @@ func TestASettleWaitingOnTheOwnerLockDoesNotFailTheBatchBesideIt(t *testing.T) {
 //
 // The staging is a due event held behind a blocker that names no retry, the shape holdBack
 // releases on: the owner has no chain then, so it is settled before the window opens. Round 16's
-// first fix closed the one route the outbox itself had to a release settled early - an event held
-// by a blocker carrying itself (TestAWaitingRoleForwardHoldsNoCopyOfItsOwnEvent) - and what this
-// covers is the batch's own result, which must carry a release whichever settle reached it.
+// first fix closed the one route the outbox itself had to a release settled early - an event
+// held by a blocker carrying itself, which the mention rule now leaves no copy to write
+// (TestAWaitingRoleForwardHoldsNoCopyOfItsOwnEvent) - and what this covers is the batch's own
+// result, which must carry a release whichever settle reached it.
 func TestAnOwnerSettledEarlyOnAReleasedOutcomeBlocksItsBatch(t *testing.T) {
 	// Long enough for a batch that stops nothing to run many of its own, and short enough that a
 	// test which fails does so in seconds.

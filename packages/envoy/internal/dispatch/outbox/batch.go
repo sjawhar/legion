@@ -486,17 +486,12 @@ type chain struct {
 // other case and holds nothing back, the mention itself delivering the comment to that session
 // (batchEvent.mentionPending).
 //
-// A waiting copy holds no copy of its own event. The order the outbox keeps is the one between
-// an owner's successive events, and the copies of one event have no order among themselves, so
-// the hold is read for the owner's later events alone (by.event != event). A forward waiting
-// for its holder's own live mention is keyed by that holder's agent subject, which the same
-// event's claimant, author, follower and route copies share, and those copies go in this pass:
-// nothing of the event has reached that session yet, so none of them can overtake the forward.
-// An event held by a blocker carrying itself would settle on an outcome settleEvent has not
-// written, whose zero state holdBack reads as released - no delay, and no mentionPendingDelay
-// clamp, which applies to a blocked outcome alone - so the batch would stop with that event
-// released and read it again at once, until the mention's attempt ran out its lease and the
-// copy the wait exists to stop was published after all.
+// A waiting copy of a comment is the only copy of that comment its holder's session gets. The
+// forward waits for that holder's own live mention and is keyed by the holder's agent subject,
+// and every other copy of the comment bound for that subject - its claimant, author, follower
+// and session-route copies - is left to the same mention (destinations.addSession,
+// destinations.leftToMention), so the wait holds back the owner's later events alone and never
+// a copy of the event that wrote it.
 //
 // A role route that counts as reached with nothing to send (roleForward.skip) goes on no chain: a
 // due event's is reached at once, and a not-due event's holds nothing back, since nothing of it is
@@ -547,7 +542,7 @@ func planChains(events []*batchEvent) []*chain {
 				continue
 			}
 			held := len(event.held)
-			if by, ok := blocked[event.owner][key]; ok && by.event != event {
+			if by, ok := blocked[event.owner][key]; ok {
 				event.held = append(event.held, by)
 			}
 			for _, earlier := range unknown[event.owner] {
