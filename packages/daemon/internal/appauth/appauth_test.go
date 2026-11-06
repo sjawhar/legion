@@ -109,16 +109,38 @@ func split(value string, sep byte) []string {
 	return append(parts, value[start:])
 }
 
-// mintedFor is GitHub's answer to a token exchange narrowed to repos: the token, its expiry and
-// the repositories GitHub says the token reaches, which every narrowed mint holds its answer to
-// (narrowedTo).
-func mintedFor(token string, expires time.Time, repos ...string) string {
+// mintedFor is GitHub's answer to a token exchange narrowed to repos and permissions: the token,
+// its expiry, the repositories GitHub says the token reaches and the permissions it says the
+// token holds, which every narrowed mint holds its answer to (narrowedTo). GitHub names in every
+// answer each permission the token it minted holds, so a stand-in names back the permissions the
+// request asked for (askedInExchange).
+func mintedFor(token string, expires time.Time, permissions map[string]string, repos ...string) string {
 	named := make([]string, 0, len(repos))
 	for _, repo := range repos {
 		named = append(named, fmt.Sprintf(`{"name":%q}`, repo))
 	}
-	return fmt.Sprintf(`{"token":%q,"expires_at":%q,"repository_selection":"selected","repositories":[%s]}`,
-		token, expires.Format(time.RFC3339), strings.Join(named, ","))
+	// A map of strings always marshals, and json.Marshal sorts its keys.
+	held, _ := json.Marshal(permissions)
+	return fmt.Sprintf(`{"token":%q,"expires_at":%q,"repository_selection":"selected","repositories":[%s],"permissions":%s}`,
+		token, expires.Format(time.RFC3339), strings.Join(named, ","), held)
+}
+
+// askedInExchange is the body of the token exchange r carries, both as the text it was sent as
+// and as GitHub parses it: the repositories the token is to reach and the permissions it is to
+// hold. A stand-in GitHub answers from it, as GitHub answers a token request from the body it
+// was sent (mintedFor).
+func askedInExchange(t *testing.T, r *http.Request) (string, accessTokensBody) {
+	t.Helper()
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("read the exchange body: %v", err)
+		return "", accessTokensBody{}
+	}
+	var asked accessTokensBody
+	if err := json.Unmarshal(raw, &asked); err != nil {
+		t.Errorf("the exchange body is not the JSON an access_tokens request is: %v", err)
+	}
+	return string(raw), asked
 }
 
 // grantedEverythingAsked is every permission readPermissions and the two writePermissions name,
@@ -216,11 +238,12 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 				t.Fatalf("method = %s, want POST", r.Method)
 			}
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			_, asked := askedInExchange(t, r)
 			mu.Lock()
 			exchanges++
 			exchange := exchanges
 			mu.Unlock()
-			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), "legion"))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), asked.Permissions, "legion"))
 		case "/app":
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
 			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
@@ -308,7 +331,8 @@ func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T
 				fmt.Fprint(w, `{"message":"Not Found"}`)
 				return
 			}
-			fmt.Fprint(w, mintedFor("installation-"+current, now.Add(time.Hour), "legion"))
+			_, asked := askedInExchange(t, r)
+			fmt.Fprint(w, mintedFor("installation-"+current, now.Add(time.Hour), asked.Permissions, "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
 		case "/users/legion-reviewer[bot]":
@@ -364,11 +388,12 @@ func TestForgetMakesTheNextTokenAndReadTokenMintAgain(t *testing.T) {
 		case "/app/installations/77":
 			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/app/installations/77/access_tokens":
+			_, asked := askedInExchange(t, r)
 			mu.Lock()
 			exchanges++
 			n := exchanges
 			mu.Unlock()
-			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", n), now.Add(time.Hour), "legion"))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", n), now.Add(time.Hour), asked.Permissions, "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
 		case "/users/legion-reviewer[bot]":
@@ -433,15 +458,12 @@ func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
 			fmt.Fprint(w, installationGranting("77", grantedEverythingAsked))
 		case "/app/installations/77/access_tokens":
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
+			raw, asked := askedInExchange(t, r)
 			mu.Lock()
-			bodies = append(bodies, string(body))
+			bodies = append(bodies, raw)
 			exchange := len(bodies)
 			mu.Unlock()
-			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), "legion"))
+			fmt.Fprint(w, mintedFor(fmt.Sprintf("installation-%d", exchange), now.Add(time.Hour), asked.Permissions, "legion"))
 		case "/app":
 			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
 		case "/users/legion-implementer[bot]":
@@ -509,7 +531,7 @@ func TestGrantedWriteSetAsksForTheThreeTheInstallationGrants(t *testing.T) {
 				return http.StatusUnprocessableEntity, `{"message":"The permissions requested are not granted to this installation."}`
 			}
 		}
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -552,7 +574,7 @@ func TestGrantedAccessBelowTheSetIsAskedForAtWhatIsGranted(t *testing.T) {
 		grants: map[string]string{"actions": "read", "checks": "write", "contents": "read", "metadata": "write", "pull_requests": "write"},
 	}
 	github.answer = func(exchange int, body accessTokensBody) (int, string) {
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -596,7 +618,7 @@ func TestGrantedAnAccessThisDoesNotKnowIsGrantedNone(t *testing.T) {
 		grants: map[string]string{"contents": "maintain", "metadata": "read", "statuses": "", "workflows": "admin"},
 	}
 	github.answer = func(exchange int, body accessTokensBody) (int, string) {
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -635,7 +657,7 @@ func TestGrantedReadSetLeavesOutActionsAndSaysSoOncePerOwner(t *testing.T) {
 		if body.Permissions["actions"] != "" {
 			return http.StatusUnprocessableEntity, `{"message":"The permissions requested are not granted to this installation."}`
 		}
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -830,12 +852,13 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 		jwt := r.Header.Get("Authorization")
 		if r.URL.Path == "/app/installations/77/access_tokens" {
 			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			_, asked := askedInExchange(t, r)
 			mu.Lock()
 			exchanges++
 			mu.Unlock()
 			close(exchangeStarted)
 			<-releaseExchange
-			fmt.Fprint(w, mintedFor("installation", now.Add(time.Hour), "legion"))
+			fmt.Fprint(w, mintedFor("installation", now.Add(time.Hour), asked.Permissions, "legion"))
 			return
 		}
 		switch r.URL.Path {
@@ -954,7 +977,8 @@ func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 						tc.exchange(w, r)
 						return
 					}
-					fmt.Fprint(w, mintedFor("installation-1", time.Now().Add(time.Hour), "legion"))
+					_, asked := askedInExchange(t, r)
+					fmt.Fprint(w, mintedFor("installation-1", time.Now().Add(time.Hour), asked.Permissions, "legion"))
 				default:
 					t.Errorf("unexpected GitHub path %s", r.URL.Path)
 				}
@@ -1005,16 +1029,7 @@ func (g *keyModeGitHub) serve(t *testing.T) *httptest.Server {
 			}
 			fmt.Fprintf(w, "[%s]", strings.Join(listed, ","))
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
-			raw, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Errorf("read the exchange body: %v", err)
-				return
-			}
-			var body accessTokensBody
-			if err := json.Unmarshal(raw, &body); err != nil {
-				t.Errorf("the exchange body is not the JSON an access_tokens request is: %v", err)
-				return
-			}
+			_, body := askedInExchange(t, r)
 			g.mu.Lock()
 			g.bodies = append(g.bodies, body)
 			exchange := len(g.bodies)
@@ -1103,7 +1118,7 @@ func TestTokenAsksForTheIssuesRepositoryAndTheAppsWritePermissions(t *testing.T)
 			var stderr bytes.Buffer
 			github := &keyModeGitHub{owners: []string{"sjawhar"}, slug: tc.slug}
 			github.answer = func(exchange int, body accessTokensBody) (int, string) {
-				return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+				return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 			}
 			tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -1133,7 +1148,7 @@ func TestReadTokenAsksForEveryRepositoryNamedAndTheFourReads(t *testing.T) {
 	var stderr bytes.Buffer
 	github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
 	github.answer = func(exchange int, body accessTokensBody) (int, string) {
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -1302,7 +1317,7 @@ func TestNoMintWithoutRepositoriesEverReachesGitHub(t *testing.T) {
 			var stderr bytes.Buffer
 			github := &keyModeGitHub{owners: []string{"sjawhar"}, slug: "legion-implementer"}
 			github.answer = func(int, accessTokensBody) (int, string) {
-				return http.StatusOK, mintedFor("ghs_wide", now.Add(time.Hour))
+				return http.StatusOK, mintedFor("ghs_wide", now.Add(time.Hour), nil)
 			}
 			tokens := keyModeManager(t, github, &now, &stderr)
 
@@ -1361,7 +1376,7 @@ func TestTwoRepositoryScopesOfOneRoleAndOwnerAreCachedApart(t *testing.T) {
 	var stderr bytes.Buffer
 	github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
 	github.answer = func(exchange int, body accessTokensBody) (int, string) {
-		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Repositories...)
+		return http.StatusOK, mintedFor(fmt.Sprintf("ghs_%d", exchange), now.Add(time.Hour), body.Permissions, body.Repositories...)
 	}
 	tokens := keyModeManager(t, github, &now, &stderr)
 

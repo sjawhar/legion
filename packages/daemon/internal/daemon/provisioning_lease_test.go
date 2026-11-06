@@ -49,7 +49,9 @@ type provisioningInstallation struct {
 // installation discovery, the token exchange and the App's identity — with an installation of its
 // own per owner, and a record of every token request's body, so a test reads what each mint asked
 // for and not only what it got back. It is appmint_test.go's gitHubStandIn with that record
-// added; that one stays as it is, since the boot tests' mints depend on its answers.
+// added, and the two answer a token request through the same pair of helpers (exchangeBody and
+// mintedToken); the boot tests' mints depend on gitHubStandIn's own answers, which stay as they
+// are.
 type provisioningGitHub struct {
 	tokens *appauth.Manager
 
@@ -101,7 +103,7 @@ func provisioningStandIn(t *testing.T, installations ...provisioningInstallation
 				http.NotFound(w, r)
 				return
 			}
-			repositories, permissions := provisioningBody(t, r)
+			repositories, permissions := exchangeBody(t, r)
 			github.mu.Lock()
 			github.requests = append(github.requests, provisioningTokenRequest{installation: id, repositories: repositories, permissions: permissions})
 			github.mu.Unlock()
@@ -138,9 +140,10 @@ func provisioningStandIn(t *testing.T, installations ...provisioningInstallation
 	return github
 }
 
-// provisioningBody is the repositories and the permissions a token request's body named, each
-// nil where the body named none.
-func provisioningBody(t *testing.T, r *http.Request) ([]string, map[string]string) {
+// exchangeBody is the repositories and the permissions a token request's body named, each nil
+// where the body named none. Every stand-in GitHub of this package answers from it, as GitHub
+// answers a token request from the body it was sent (mintedToken).
+func exchangeBody(t *testing.T, r *http.Request) ([]string, map[string]string) {
 	t.Helper()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -160,16 +163,18 @@ func provisioningBody(t *testing.T, r *http.Request) ([]string, map[string]strin
 	return payload.Repositories, payload.Permissions
 }
 
-// provisioningMint answers a token request with token, as GitHub's own answer is shaped: the
-// selection of the repositories the request named, which the mint holds its answer to
-// (appauth's narrowedTo).
-func provisioningMint(w http.ResponseWriter, token string, repositories []string) {
+// mintedToken answers a token request with token, as GitHub's own answer is shaped: the selection
+// of the repositories the request named and the permissions it asked for, which GitHub names in
+// every answer it makes and the mint holds its answer to (appauth's narrowedTo).
+func mintedToken(w http.ResponseWriter, token string, repositories []string, permissions map[string]string) {
 	named := make([]string, 0, len(repositories))
 	for _, repository := range repositories {
 		named = append(named, fmt.Sprintf(`{"name":%q}`, repository))
 	}
-	fmt.Fprintf(w, `{"token":%q,"expires_at":%q,"repository_selection":"selected","repositories":[%s]}`,
-		token, time.Now().Add(time.Hour).Format(time.RFC3339), strings.Join(named, ","))
+	// A map of strings always marshals, and json.Marshal sorts its keys.
+	held, _ := json.Marshal(permissions)
+	fmt.Fprintf(w, `{"token":%q,"expires_at":%q,"repository_selection":"selected","repositories":[%s],"permissions":%s}`,
+		token, time.Now().Add(time.Hour).Format(time.RFC3339), strings.Join(named, ","), held)
 }
 
 // provisioningRefusal is GitHub's 422 to a token request that narrowed the token: a repository
@@ -235,8 +240,8 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 
 	github := provisioningStandIn(t,
 		provisioningInstallation{id: readingInstallation, owner: readingOwner, granted: writeSet,
-			answer: func(w http.ResponseWriter, repositories []string, _ map[string]string) {
-				provisioningMint(w, "reading-lease", repositories)
+			answer: func(w http.ResponseWriter, repositories []string, permissions map[string]string) {
+				mintedToken(w, "reading-lease", repositories, permissions)
 			}},
 		// An installation whose account has not granted the App Actions: the permissions read
 		// says so, and the mint leaves actions out of its request rather than be refused with it.
@@ -246,7 +251,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 					provisioningRefusal(w)
 					return
 				}
-				provisioningMint(w, "narrowed-lease", repositories)
+				mintedToken(w, "narrowed-lease", repositories, permissions)
 			}},
 		// An installation that refuses the narrowed read — a grant that changed between the
 		// permissions read and the exchange reaches the adapter as the same 422 a repository it
@@ -257,7 +262,7 @@ func TestTheProvisioningTokenIsAReadingLease(t *testing.T) {
 					provisioningRefusal(w)
 					return
 				}
-				provisioningMint(w, "own-installation-token", repositories)
+				mintedToken(w, "own-installation-token", repositories, permissions)
 			}},
 		provisioningInstallation{id: flakyInstallation, owner: flakyOwner, granted: writeSet,
 			answer: func(w http.ResponseWriter, _ []string, _ map[string]string) {

@@ -50,6 +50,12 @@ type mintedToken struct {
 // and the permission the answer named, never a value the answer carries that a request did not,
 // which for this answer is the token.
 //
+// An answer naming no permission at all is refused as one naming no repository is: GitHub names
+// every permission a token holds, and the token it mints for a request whose permissions were
+// dropped on the way holds every permission the installation is granted — the owner-wide token
+// this package exists to stop — which no later read of the answer could tell from a narrowed
+// one.
+//
 // An access the answer names that this daemon cannot order (accessOrder) is refused too: it
 // cannot be held to be no wider than the one asked for, and an answer naming it is no answer
 // GitHub makes to a request that asked for a word of its own.
@@ -68,6 +74,10 @@ func (t mintedToken) narrowedTo(asked []string, permissions map[string]string) e
 		if !slices.ContainsFunc(asked, func(name string) bool { return strings.EqualFold(name, granted.Name) }) {
 			return wider("it reaches a repository the request did not name")
 		}
+	}
+	if len(t.Permissions) == 0 {
+		return fmt.Errorf("GitHub App token exchange returned a token wider than the permissions asked for (%s): it names no permission",
+			askedFor(asked, permissions))
 	}
 	for _, permission := range slices.Sorted(maps.Keys(t.Permissions)) {
 		access := t.Permissions[permission]
