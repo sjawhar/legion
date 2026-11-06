@@ -1092,10 +1092,10 @@ func TestEditNoticeARebuildNamesThePersonWhoRebuiltIt(t *testing.T) {
 }
 
 // recordLatestEditSourceTx records actor as the document's latest edit source and, a person, its
-// latest person sender, as a person's own append does (markUpdateOwedBy). It writes its own
+// latest person sender, as a person's own append does (updateOwedArgs). It writes its own
 // statement because no production writer leaves a document in that state without an edit:
 // persistLastActor, the one writer a test could call here, deliberately leaves the person alone.
-// What markUpdateOwedBy itself writes is held by
+// What an append's own write of that row does is held by
 // TestEditNoticeATwoPeerEditThatLandedClearsTheStoredPerson, through a real append.
 func recordLatestEditSourceTx(t *testing.T, service *Service, artifactID string, actor model.Actor) error {
 	t.Helper()
@@ -1189,8 +1189,8 @@ func TestEditNoticeAClosedAndReopenedIssueNamesTheLaterBrowserEditor(t *testing.
 		t.Fatalf("adam's joined write with zoe's browser edit inside it: %v", err)
 	}
 	waitForLandedAppends(t, service, artifactID)
-	service.SetIssueClosed(context.Background(), "DOC-1", true)
-	service.SetIssueClosed(context.Background(), "DOC-1", false)
+	setIssueClosedHere(t, service, "DOC-1", true)
+	setIssueClosedHere(t, service, "DOC-1", false)
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
 		t.Fatalf("load the reopened document: %v", err)
 	}

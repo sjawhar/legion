@@ -286,7 +286,7 @@ func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registr
 	registry.NewGaugeFunc(metricPrefix+"doc_writer_queued", "Writers waiting for a document's writer gate now.", sources.Docs.QueuedDocumentWriters)
 	registry.NewGaugeFunc(metricPrefix+"settlements_running", "Document settlements holding a settlement slot now.", func() int64 { return sources.Docs.SettlementLoad().Running })
 	registry.NewGaugeFunc(metricPrefix+"settlements_waiting", "Document settlements waiting for a settlement slot now.", func() int64 { return sources.Docs.SettlementLoad().Waiting })
-	registry.NewGaugeFunc(metricPrefix+"doc_rooms_resident", "Documents this process holds a live room for now, loaded or loading.", sources.Docs.ResidentRooms)
+	registry.NewGaugeFunc(metricPrefix+"doc_rooms_resident", "Documents this process holds a live room for now, loaded or loading.", sources.Docs.ResidentRoomCount)
 	registry.NewGaugeFunc(metricPrefix+"doc_rooms_peerless", "Resident rooms with no browser connected now: the rooms the resident-room budget counts.", sources.Docs.PeerlessRooms)
 	registry.NewGaugeFunc(metricPrefix+"doc_rooms_peerless_bytes", "Heap those rooms are taken to hold, from the bytes each load decoded: what the resident-room budget bounds.", sources.Docs.PeerlessRoomBytes)
 	registry.NewCounterVecFunc(metricPrefix+"doc_rooms_budget_closed_total", "Rooms closed because the resident-room budget did not hold them, least recently used first.", func() []metrics.Sample {

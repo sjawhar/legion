@@ -31,6 +31,11 @@ const (
 	SearchTermStatsLease = "search-term-stats"
 	// EditNoticeLease is docs.RunEditNotices': the sweep that sends each document's edit notice.
 	EditNoticeLease = "edit-notices"
+	// SettlementResumptionLease is docs.RunSettlementResumption's: the pass that arms the
+	// settlement of every document that still owes one. A settlement reads what it settles from
+	// the store under the document's lock whichever process runs it, so one process arming the
+	// owed settlements is the whole of the work.
+	SettlementResumptionLease = "settlement-resumption"
 	// WebhookRedeliveryLease is redeliver's GitHub webhook redelivery sweep's.
 	WebhookRedeliveryLease = "webhook-redelivery"
 	// ArchitectureImportLease is architecture's import ticker's.
@@ -57,7 +62,7 @@ const (
 )
 
 // leaseNames is every lease Exclusive takes, and Exclusive refuses any other: the lease pool has a
-// connection for each of these and one spare (store.leasePoolSize, held to this list's length by a
+// connection for each of these and two spare (store.leasePoolSize, held to this list's length by a
 // test), so a lease taken under a name not counted here would take a connection a listed lease
 // counted on. A loop that leases a new name - or holds a connection of the lease pool for any other
 // reason - adds its constant above and here, and store's count with it.
@@ -68,6 +73,7 @@ var leaseNames = [...]string{
 	BlockIndexLease,
 	SearchTermStatsLease,
 	EditNoticeLease,
+	SettlementResumptionLease,
 	WebhookRedeliveryLease,
 	ArchitectureImportLease,
 	DeliveryReconcileLease,
@@ -98,11 +104,12 @@ type Leases interface {
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
 // artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
 // at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
-// to. Within the two-key space the only other namespaces are the copy locks'
-// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
-// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
-// own, so a lease's second key, its name's hashtext, separates the leases from each other and from
-// nothing else.
+// to. Within the two-key space the other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY"), the test hooks' (the api package's
+// testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), a conditional edit's
+// admission's (docs.conditionalEditQueueLockNamespace) and the issue dependencies' (api's
+// lockProjectIssueDependencies), each a first key of its own, so a lease's second key, its name's
+// hashtext, separates the leases from each other and from nothing else.
 const leaseNamespace int32 = 0x4C4F4F50
 
 // takeLease tries for a lease without queueing behind its holder, and freeLease gives it back. Both

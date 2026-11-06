@@ -1921,7 +1921,7 @@ Compare the right rows:
   report summed every process named `postgres` on the box.
 - The request generator caps at 25,000 requests in flight. The report capped at 4,000.
 - Dispatch is built from this checkout. The report built a branch with a patched pool size; this
-  tree sizes the request pool in code (`store.SharedPoolSize`, 48 of a process's 94 connections).
+  tree sizes the request pool in code (`store.SharedPoolSize`, 48 of a process's 96 connections).
 
 ## Running on a cluster copy
 

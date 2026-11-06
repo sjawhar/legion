@@ -189,8 +189,17 @@ func TestDeleteAndRebuildTakeTheDocumentOffTheSweepsList(t *testing.T) {
 		t.Fatalf("begin the rebuild: %v", err)
 	}
 	defer tx.Rollback(ctx)
+	// RebuildTx replaces the history only while the head still is the one its caller read, so the
+	// head is read under the document's lock the rebuild takes again.
+	if err := lockDocumentRoom(ctx, tx, rebuilt); err != nil {
+		t.Fatalf("lock the document: %v", err)
+	}
+	head, err := versioned.head(ctx, tx, rebuilt)
+	if err != nil {
+		t.Fatalf("read the head the rebuild replaces: %v", err)
+	}
 	writer := newProofHistory(t, 303)
-	if _, err := versioned.RebuildTx(ctx, tx, rebuilt, writer.write("Rebuilt.\n")); err != nil {
+	if _, err := versioned.RebuildTx(ctx, tx, rebuilt, head, writer.write("Rebuilt.\n")); err != nil {
 		t.Fatalf("rebuild the document: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

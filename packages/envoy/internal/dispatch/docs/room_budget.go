@@ -245,9 +245,9 @@ func roomWeight(stored []byte) int64 {
 	return max(int64(len(stored))*roomHeapPerStoredByte, roomHeapFloor)
 }
 
-// ResidentRooms is how many documents this process holds a live room for, loaded or loading
-// (dispatch_doc_rooms_resident).
-func (s *Service) ResidentRooms() int64 {
+// ResidentRoomCount is how many documents this process holds a live room for, loaded or loading
+// (dispatch_doc_rooms_resident). The test hooks' ResidentRooms names them.
+func (s *Service) ResidentRoomCount() int64 {
 	return int64(len(s.srv.Rooms()))
 }
 

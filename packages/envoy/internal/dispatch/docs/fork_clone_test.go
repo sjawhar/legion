@@ -187,8 +187,9 @@ func describeMarkdown(markdown *string) string {
 }
 
 // A room is driven through the corpus (driveCorpusRooms), forked at each point the driver
-// compares at: before the room's first transaction, when the replica holds no state and the fork
-// read takes its copy from the room itself, and after each of its browser edits.
+// compares at: before the room's first transaction, when the replica holds no state and the read
+// point takes its copy from the room itself and starts the replica from it, which the fork read
+// then clones, and after each of its browser edits.
 func TestTheClonedForkMatchesTheReadPointsForkAcrossTheCorpus(t *testing.T) {
 	writes := 0
 	forks, documents := driveCorpusRooms(t, func(at corpusRoom) {
@@ -208,8 +209,9 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 	log := live.OpenUpdateLog()
 	defer log.Close()
 	replica := service.keepReplica(live, log, nil)
-	// A commit of its own gives the replica the room's state to follow: the fork of a replica
-	// holding none is a decode of the room's own copy and not a clone.
+	// A commit of its own gives the replica the room's state to follow before the fork is read,
+	// so the fork clones the replica the update observer keeps rather than the copy a first read
+	// of a replica holding none starts it from (renderedReplica.atPoint).
 	typeIntoLastParagraph(t, live, "first ")
 	replica.observe("room")
 	if replica.doc == nil {
@@ -280,8 +282,9 @@ func TestEveryForkLeavesTheWriteAuthoringUnderItsForksClientID(t *testing.T) {
 	log := live.OpenUpdateLog()
 	defer log.Close()
 	replica := service.keepReplica(live, log, nil)
-	// A commit of its own gives the replica the room's state to follow: the fork of a replica
-	// holding none is a decode of the room's own copy and not a clone.
+	// A commit of its own gives the replica the room's state to follow before the fork is read,
+	// so the fork clones the replica the update observer keeps rather than the copy a first read
+	// of a replica holding none starts it from (renderedReplica.atPoint).
 	typeIntoLastParagraph(t, live, "first ")
 	replica.observe("room")
 	if replica.doc == nil {

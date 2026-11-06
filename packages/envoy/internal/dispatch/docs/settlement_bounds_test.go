@@ -264,7 +264,7 @@ func TestASettlementWithoutItsPoolWarmsNoColdRoomThroughTheRequestPool(t *testin
 	// What the request pool has handed out, before and after: the settlement must take none of it,
 	// neither for the room's load nor for the issue read its warm-up's injection makes.
 	before := service.store.Pool.Stat().AcquireCount()
-	outcome := service.settleRoomWithin(ctx, artifactID, generation)
+	outcome := service.settleRoomWithin(ctx, artifactID, generation, false)
 
 	if outcome.next != settleRetry || !errors.Is(outcome.err, refused) {
 		t.Fatalf("the settlement ended as %+v, want a stop short carrying the settlements pool's own error", outcome)

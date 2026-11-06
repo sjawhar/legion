@@ -79,17 +79,18 @@ type repairPlan struct {
 // the durable version the room's instance held every update through (heldThrough, its roomCursor),
 // which the pass reads again once it holds the document's locks, the exact commit position the
 // copy is the room at (point), every update of the instance through which the pass stores before
-// it versions that copy (Ledger.flushThrough), and what its version credits - the in-flight
-// credits observed so far (creditThrough) and the latest edit source. An update observer credits
-// a change only once the room holds it, so every in-flight credit the take observed is for a
-// change the copy holds; one observed after it stays pending for the next version. The take holds
-// state.mu for itself alone: held across the copy and its render it would block the update
+// it versions that copy (Ledger.flushThrough), and the in-flight credits its version counts -
+// those observed so far (creditThrough). An update observer credits a change only once the room
+// holds it, so every in-flight credit the take observed is for a change the copy holds; one
+// observed after it stays pending for the next version. The latest edit source is not taken here:
+// a version names the one the document's pending-settlement row holds, which the pass reads under
+// the document's advisory lock (takeCredit), so two processes settle the same credit. The take
+// holds state.mu for itself alone: held across the copy and its render it would block the update
 // observer that credits and broadcasts every peer's keystroke.
 type settlementTake struct {
 	heldThrough   int64
 	point         roomPoint
 	creditThrough uint64
-	lastActor     *model.Actor
 }
 
 // copyTree is a copy of tree whose nodes and attributes its caller may change without changing
@@ -167,6 +168,12 @@ type settlementPass struct {
 	slots   []*suppressSlot
 	updates [][]byte
 	stamp   []byte
+	// renamed are the ask blocks the stamp gave an id of its own, and carried the authors the room
+	// held for the ids they replaced (recordStampedAskBlocks): the pass records them durably in
+	// the transaction that stores the stamp (recordStampedAskAuthors), so another process's
+	// settlement finds a stamped block's author too.
+	renamed []stampedAsk
+	carried map[string]model.Actor
 	// reconciliation is what the pass reconciled the document's ask blocks to, planned the repairs
 	// of (planRepairs), and published the events it has appended, published once it commits.
 	reconciliation settlementReconciliation
@@ -186,11 +193,13 @@ type settlementPass struct {
 // settlement refused a connection for overload (store.IsPoolBusy: the settlements pool's or the
 // rooms pool's acquire bound) is left to resume the same way, so overload fails
 // no room (maxSettleFailures). So is a settlement that has to write into a room Shutdown has begun
-// closing, which refuses the write (allowInject).
+// closing, which refuses the write (allowInject). A room Shutdown has begun closing is not loaded
+// for a settlement unless mayLoad says this is the settlement the shutdown drain owes it, whose
+// warm-up loads through the shutdown (withShutdownLoad).
 //
 // The settlement itself does only what no caller can do after it: a settlement that wrote into
-// the room and cannot finish fails the room, whose reload arms the settlement again, and one the
-// gate refuses on a room behind the durable head reloads the room (reloadRoomBehindHead). The
+// the room and cannot finish fails the room, whose reload arms the settlement again, and one whose
+// room holds a replaced stored history closes the room for a reload (reloadReplacedRoom). The
 // retries, the re-arming and the log lines of a settlement cut short are its caller's: the timer's
 // settlement and Shutdown's do them (followUpSettlement), and a caller that runs it synchronously
 // and answers for its outcome itself reports the reason instead (settleOwedNow).
@@ -199,7 +208,7 @@ type settlementPass struct {
 // document's owner row. A pass that commits a part of the settlement - a stamp, repairs - or plans
 // the repairs, or finds the document moved under its read, is followed by another, at most
 // maxSettlePasses in all and maxSettleRereads reads again.
-func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64) settleOutcome {
+func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64, mayLoad bool) settleOutcome {
 	settle := &settlement{service: s, room: room, generation: generation}
 	// stoppedShort is the outcome of a settlement that stopped short with err having written
 	// nothing into the room: a retry, unless its deadline or parent has ended, the pools refused it
@@ -236,7 +245,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.unlockState(room, state)
 	}()
 	settle.state = state
-	if s.shuttingDown(room) && s.srv.GetDoc(room) == nil {
+	shuttingDown := s.shuttingDown(room)
+	if shuttingDown && !mayLoad && s.srv.GetDoc(room) == nil {
 		return settleOutcome{}
 	}
 	release, err := s.settlements.acquire(parent)
@@ -267,7 +277,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Lock()
 		state.settleWarming = true
 		s.unlockState(room, state)
-		err := s.srv.Apply(withQueryPool(parent, settlements), room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		warmCtx := withQueryPool(parent, settlements)
+		if shuttingDown {
+			warmCtx = withShutdownLoad(warmCtx)
+		}
+		err := s.srv.Apply(warmCtx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		state.mu.Lock()
 		state.settleWarming = false
 		s.unlockState(room, state)
@@ -371,6 +385,11 @@ func (s *settlement) settlePass(parent context.Context) (settleStep, settleOutco
 		// holds the stamp's pending row.
 		return pass.commitStamp(ctx)
 	}
+	// Recorded before reconcileAskBlocks reads the durable authors, so a block the stamp renamed is
+	// found under its minted id there too.
+	if err := recordStampedAskAuthors(ctx, tx, s.room, pass.renamed, pass.carried); err != nil {
+		return settleDone, pass.abandon(err)
+	}
 	pass.reconciliation, err = s.service.reconcileAskBlocks(ctx, tx, s.room, owner, pass.read, pass.credit)
 	if err != nil {
 		return settleDone, pass.abandon(err)
@@ -407,15 +426,12 @@ func (p *settlementPass) take() (settleStep, settleOutcome) {
 		s.unlockState(room, state)
 		return settleDone, settleOutcome{}
 	}
-	// An open live write is not in the room yet; finishLiveWrite arms the settlement once it is
-	// published.
-	if state.liveWriter != nil {
-		state.settleDeferred = true
-		s.unlockState(room, state)
-		return settleDone, settleOutcome{}
-	}
+	// An open live write is not in the room yet, and finishLiveWrite arms the settlement once it
+	// is published; the pass goes on all the same, because the room it holds may be behind the
+	// stored head, and only a pass holding the document's lock catches it up (readLocked). The
+	// write is what stops it writing a version: applyStamp defers the settlement to it there.
 	p.generation = state.roomGeneration
-	p.taken = settlementTake{creditThrough: state.creditSeq.Load(), lastActor: state.lastActor}
+	p.taken = settlementTake{creditThrough: state.creditSeq.Load()}
 	s.unlockState(room, state)
 	// The cursor of the instance this settlement holds (doc), which gates the room updates it
 	// stores and the repairs it appends, and takes them in once they are stored (commitSettlement).
@@ -494,32 +510,62 @@ func (p *settlementPass) readLocked(ctx context.Context, parent context.Context)
 	}
 	// The gate, before this settlement writes anything. The room it holds must stand at that
 	// head: with two envoy-dispatch processes on one Postgres, an update the other process
-	// appended is not in this room, and settling from it corrupts three things at once. Its
-	// version would record a doc_update_version at or past that head over text that is missing the
-	// other process's update, so contentChangedSinceVersion then reports nothing past that cursor and
-	// those words are never versioned; clearSettlementPending would delete the one durable record
-	// that the work is still owed; and reconcileAskBlocks would retract every open ask whose block
-	// this stale tree cannot see.
+	// appended can be stored before this room's catch-up has taken it in, and settling from it
+	// corrupts three things at once. Its version would record a doc_update_version at or past that
+	// head over text that is missing the other process's update, so contentChangedSinceVersion
+	// then reports nothing past that cursor and those words are never versioned;
+	// clearSettlementPending would delete the one durable record that the work is still owed; and
+	// reconcileAskBlocks would retract every open ask whose block this stale tree cannot see.
 	//
-	// Nothing is lost by refusing. The transaction rolls back, so doc_settlements_pending still
-	// stands. The refusal is a verdict, not a fault to retry: a room behind the head never catches
-	// up without a reload (advanceRoomCursor), so every retry of this settlement on it is refused
-	// the same way. Counted toward maxSettleFailures, the third refusal failed the room, and every
-	// transaction that met the document until the failure's eviction had run answered
-	// ErrServiceUnavailable (INFRA-218). The room is reloaded instead (reloadRoomBehindHead), and
-	// the settlement that re-arms settles every update, this process's and the other's.
+	// So a room behind the head is caught up here, under the document's advisory lock this
+	// transaction holds, reading through that transaction (catchUpRoom): no append can land
+	// meanwhile, so the catch-up always brings the room to that head, and the settlement proceeds.
+	// The rows it applies move the instance's cursor past the take, so this pass reads the room
+	// again (settleMoved) and renders the other process's update with this one's. A history
+	// replaced under the room is the one case catch-up cannot mend: the transaction rolls back,
+	// which keeps doc_settlements_pending and releases the lock the room's close needs, and the
+	// room is closed and reloaded (reloadReplacedRoom).
 	//
-	// The cursor is the one this settlement marked its context with, read through the accessor
-	// its repairs' appends read (appendingCursor), so the two can never disagree.
-	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room, nil), head); err != nil {
-		// The rollback releases the document's advisory lock, which the room's close needs: a close
-		// flushes the room's persistence, whose appends take that lock.
-		_ = p.tx.Rollback(ctx)
-		if parent.Err() != nil {
+	// The cursor is the one this settlement marked its context with, which its repairs' appends
+	// are gated on (appendingCursor), so the two can never disagree.
+	if p.cursor != nil && p.cursor.heldThrough() != head {
+		outcome, err := s.catchUpRoom(ctx, p.tx, room, p.doc)
+		switch {
+		case err != nil:
 			return settleDone, p.stoppedShort(err)
+		case outcome == catchUpGone:
+			// The room no longer holds doc: whatever replaced it loads at the head, and its load
+			// arms the settlement the document owes.
+			return settleDone, settleOutcome{}
+		case outcome == catchUpReplaced:
+			// The rollback releases the document's advisory lock, which the room's close needs: a
+			// close flushes the room's persistence, whose appends take that lock.
+			_ = p.tx.Rollback(ctx)
+			refusal := fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
+				ErrRoomBehindHead, room, p.cursor.heldThrough(), head)
+			if parent.Err() != nil {
+				return settleDone, p.stoppedShort(refusal)
+			}
+			s.reloadReplacedRoom(parent, room, state, p.generation, p.doc, refusal)
+			return settleDone, settleOutcome{next: settleReloaded}
 		}
-		s.reloadRoomBehindHead(parent, room, state, p.generation, p.doc, err)
-		return settleDone, settleOutcome{next: settleReloaded}
+		if through := p.cursor.heldThrough(); through != head {
+			return settleDone, p.stoppedShort(fmt.Errorf("%w: room %s holds the document through update %d after its catch-up, the stored document stands at %d",
+				ErrRoomBehindHead, room, through, head))
+		}
+		// The rows the catch-up applied are another process's content change, which re-arms the
+		// settlement of a room whose settlement is armed or running - this one is - and moves the
+		// room's generation with it (rearmSettle, scheduleSettleLocked). This pass then writes no
+		// version and clears no pending settlement: the settlement it armed reads the caught-up
+		// room and versions every update, this process's and the other's. A shutdown's settlement
+		// re-arms nothing, so it reads the room again itself (settleMoved below) and versions it
+		// there and then, nothing about the room being left for the next process.
+		state.mu.Lock()
+		superseded := state.roomGeneration != p.generation
+		s.unlockState(room, state)
+		if superseded {
+			return settleDone, settleOutcome{}
+		}
 	}
 	// The room stands at the head; it must also still stand where it stood at the take. An update
 	// stored since may not be in the tree this pass rendered, and versioned, that tree would
@@ -544,14 +590,20 @@ func (p *settlementPass) readLocked(ctx context.Context, parent context.Context)
 }
 
 // takeCredit reads whom a version of this pass would list: the pending authors as this pass's
-// lock holds them - no append or write changes them until its transaction ends - and the
-// document's latest person sender as the stored updates and commits recorded it (readLastPerson),
-// which names who edited last once the room holds no in-flight credit that decides
-// (latestEditSource). The in-flight credits are the ones the pass's take bounded
-// (settlementAuthors). The ask blocks' sources the pass read stay (applyStamp). The version lists
-// the pending authors and deletes them; a pass that writes no version leaves them for the next.
+// lock holds them - no append or write changes them until its transaction ends - the latest edit
+// source the document's pending-settlement row holds (readOwedSettlement), which every process's
+// appends and commits write under this lock, and the document's latest person sender as the
+// stored updates and commits recorded it (readLastPerson), which names who edited last once the
+// room holds no in-flight credit that decides (latestEditSource). The in-flight credits are the
+// ones the pass's take bounded (settlementAuthors). The ask blocks' sources the pass read stay
+// (applyStamp). The version lists the pending authors and deletes them; a pass that writes no
+// version leaves them for the next.
 func (p *settlementPass) takeCredit(ctx context.Context) error {
 	owed, err := readPendingAuthors(ctx, p.tx, p.room)
+	if err != nil {
+		return err
+	}
+	_, recorded, err := readOwedSettlement(ctx, p.tx, p.room)
 	if err != nil {
 		return err
 	}
@@ -561,7 +613,7 @@ func (p *settlementPass) takeCredit(ctx context.Context) error {
 	}
 	sources := p.credit.askSources
 	p.state.mu.Lock()
-	p.credit = settlementAuthors(p.state, owed, durableLatest, p.taken)
+	p.credit = settlementAuthors(p.state, owed, recorded, durableLatest, p.taken)
 	p.state.mu.Unlock()
 	p.credit.askSources = sources
 	return nil
@@ -659,13 +711,12 @@ func (p *settlementPass) applyStamp(ctx context.Context) (settleStep, settleOutc
 	// What says the stamp wrote is the ids it minted, not the update the room took for them: a
 	// mutation that changed the tree it found and left the document as it was commits no ygo
 	// update, and so returns no slot (applySuppressed, writeLive).
-	var renamed []stampedAsk
 	stamped := false
 	if p.stamping {
 		slot, update, err := s.applySuppressed(ctx, room, p.doc, func(doc *crdt.Doc, origin any) error {
 			var minted int
 			var stampErr error
-			_, minted, renamed, stampErr = stampBlockIDs(doc, origin)
+			_, minted, p.renamed, stampErr = stampBlockIDs(doc, origin)
 			stamped = minted > 0
 			return stampErr
 		})
@@ -681,7 +732,9 @@ func (p *settlementPass) applyStamp(ctx context.Context) (settleStep, settleOutc
 	}
 
 	state.mu.Lock()
-	state.recordStampedAskBlocks(renamed)
+	// The authors the stamp carried are recorded durably in the transaction that stores the stamp,
+	// whichever way this pass commits it (recordStampedAskAuthors).
+	p.carried = state.recordStampedAskBlocks(p.renamed)
 	if s.roomGone(state) {
 		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, p.slots...)
@@ -750,6 +803,11 @@ func (p *settlementPass) commitStamp(ctx context.Context) (settleStep, settleOut
 	}
 	if s.afterSettleRepairAppend != nil {
 		s.afterSettleRepairAppend(room)
+	}
+	// The authors the stamp carried, recorded in the transaction that stores the stamp: whichever
+	// process settles the stamped document next finds a renamed block's author under its minted id.
+	if err := recordStampedAskAuthors(ctx, p.tx, room, p.renamed, p.carried); err != nil {
+		return settleDone, p.abandon(err)
 	}
 	if advanced, err := s.commitSettlement(ctx, p.tx, p.ledger, room, authorCapture{}, nil); err != nil {
 		return settleDone, p.commitFailed(advanced, fmt.Errorf("commit document identity update: %w", err))

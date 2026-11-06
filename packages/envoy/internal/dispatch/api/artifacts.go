@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1096,18 +1097,40 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	// A conditional edit joins the document's queue across every process serving the database
+	// before anything else (AcquireConditionalEdit): the writer gate below bounds this process's
+	// writers of one document, and that queue bounds the processes' together, so it is taken
+	// outside the gate - an edit waiting for the gate has already been counted, which is what
+	// lets the 33rd conditional edit of a document be refused EDIT_QUEUE_FULL however the 32
+	// before it are spread over the processes. Its admission is a transaction of its own that
+	// commits before this one returns, so the gate below still takes a caller holding no
+	// connection.
+	queued := func() {}
+	if input.Precondition != nil {
+		acquired, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
+		if err != nil {
+			s.writeHandlerError(w, r, err)
+			return
+		}
+		queued = sync.OnceFunc(acquired)
+		defer queued()
+	}
 	// Conditional or not, an edit writes the live document, so it queues for the document's
 	// writer gate before its transaction opens: a flood of stale conditional retries, or writers
-	// clustered on one document, wait here holding no connection. release ends that gate once -
-	// once the edit has committed and published, which is the gate's own contract (gateDocuments)
-	// and all a later writer of this document waits on, so the checks of this edit's new decision
-	// blocks never hold it; on every earlier return, by the defer below.
-	r, release, err := s.gateDocuments(r, artifact.ID)
+	// clustered on one document, wait here holding no connection. release ends that gate and the
+	// queue above once - once the edit has committed and published, which is the gate's own
+	// contract (gateDocuments) and all a later writer of this document waits on, so the checks of
+	// this edit's new decision blocks never hold it; on every earlier return, by the defer below.
+	r, gated, err := s.gateDocuments(r, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	defer release()
+	defer gated()
+	release := func() {
+		gated()
+		queued()
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)

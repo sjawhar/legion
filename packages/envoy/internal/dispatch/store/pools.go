@@ -127,16 +127,17 @@ func (r *RawPool) Ping(ctx context.Context) error {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 94 (ConnectionsPerProcess) that every pool of a process
+// It is 48 of one connection budget of 96 (ConnectionsPerProcess) that every pool of a process
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the five permanent listeners (the listener
-// pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 2, compaction 2
+// pool's one dial is one of them redialling), leases leasePoolSize (17), outbox 2, compaction 2
 // (Compaction), the event horizon 2 (Horizon) and the server process registry's own 1
 // (registryPoolSize). The partition
 // itself added nothing: it is the 87 the process opened before, the request pool having given up
 // 16, which background, live, settlements and the leases' two spare connections took; the event
 // horizon's 2, the background loops' shared wake listener, the outbox's second connection, the
-// outbox's own listener and the compaction's 2 are the only connections added since, and the
+// outbox's own listener, the compaction's 2 and the two lease names added since (the CI reconcile
+// pass's and the settlement resumption's) are the only connections added since, and the
 // horizon's came with the pool itself. A write
 // takes a connection per statement one after another, and a read pins one for its whole length
 // (PinConnection); an issue read, which once took six statements, two more when the issue had
@@ -233,26 +234,27 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from. Five permanent
-// listeners dial through it - the delivery hub, the event stream relay, the stale-room evictor,
-// the shared hub cmd/dispatch's woken background loops wait on (pglisten.Hub, one connection for
-// all of their channels) and the events outbox - and a sixth, the test hooks' fan-out
-// (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which production never sets.
-// Each connection is hijacked as soon as it is opened, so it leaves with its caller and the pool
-// holds none between dials: what one bounds is dials in flight, not connections held. A listener
-// redialling while another dials waits that dial out, which is what a loop that dials and then
-// waits for notifications for the life of the process can afford.
+// listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Five
+// permanent connections dial through it - the delivery hub's, the event stream relay's and the
+// events outbox's listeners, the process's shared listener hub (pglisten.Hub, on which the
+// document rooms' room sync and cmd/dispatch's woken background loops are registered, one
+// connection for all of their channels) and the document rooms' NOTIFY sender - and a sixth, the
+// test hooks' fan-out (api/test_hooks_fanout.go), under DISPATCH_TEST_HOOKS alone, which
+// production never sets. Each connection is hijacked as soon as it is opened, so it leaves with
+// its caller and the pool holds none between dials: what one bounds is dials in flight, not
+// connections held. A caller redialling while another dials waits that dial out, which is what a
+// loop that dials and then waits for notifications for the life of the process can afford, and
+// what the sender's first send after a failure can afford too.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
 // The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go),
-// the document rooms' stale-room evictor (docs/stale_room.go), the background loops' shared wake
-// hub (cmd/dispatch), the events outbox (outbox/lease.go) and, under the test hooks, their
-// fan-out (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications,
-// which is the life of the process: a connection of the shared pool held that long would be one
-// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled
-// it. A dial that does not get the pool's connection within listenAcquireBound is refused with
+// the events outbox (outbox/lease.go) and, under the test hooks, their fan-out
+// (api/test_hooks_fanout.go) each hold one for as long as they wait for notifications, which is
+// the life of the process: a connection of the shared pool held that long would be one fewer for
+// every request, and a LISTEN on a pooled connection would end when the pool recycled it. A dial
+// that does not get the pool's connection within listenAcquireBound is refused with
 // ErrPoolBusy.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(ListenPool, listenerPoolSize)
@@ -266,12 +268,36 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
+// Dedicated returns one connection of its own, as Listener does, that pg_stat_activity names
+// applicationName. The caller closes it. It is outside the nested-acquire guard
+// (ErrNestedAcquire) for the reason the other separate pools are: a connection that belongs to no
+// request-pool caller cannot close the cycle the guard prevents, so a request holding one of the
+// request pool's transactions may use one. Two such connections are held per process: the shared
+// listener hub that cmd/dispatch dials, whose name is how every Dispatch process reads which
+// processes are listening (docs.ListenerApplicationPrefix), and the document rooms' NOTIFY sender
+// (docs/room_sync.go), which a request inside a transaction sends through.
+func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn, error) {
+	conn, err := p.Listener(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, `select set_config('application_name', $1, false)`, applicationName); err != nil {
+		// Bounded, so a connection that went half-open between its dial and this statement
+		// cannot hold the caller in its Terminate.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+		return nil, fmt.Errorf("name the connection %s: %w", applicationName, err)
+	}
+	return conn, nil
+}
+
 // leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
 // counted here because store cannot import duty, and held to that list by a test.
-const leaseNameCount = 14
+const leaseNameCount = 15
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
-// (duty.Exclusive): a connection for every lease name on duty's list, and one spare. A caller and
+// (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
 // not a lease needs the connection - Exclusive takes it before it learns whether the lease is
 // held, so a pass that skips because another process holds the lease holds one for that round
 // trip too - and every listed name has one caller, since each delivery intake takes its own
@@ -279,19 +305,17 @@ const leaseNameCount = 14
 // once. Exclusive refuses a name that is not on the list, so a loop added to the list adds its
 // connection here rather than taking one another loop counted on.
 //
-// The spare connection is for what holds one without being a listed lease's pass: pgxpool's own
-// health check and lifetime expiry take an idle connection while they ping or replace it, and a
-// pass whose unlock failed holds its connection until the close that ends its session
-// (duty.FreeSessionLock, leaseCallTimeout). Without it the next pass waits on those (review BG-5).
-// There were two until the CI reconcile pass (duty.CIReconcileLease) joined the list: its
-// connection is the second spare's, which keeps the process at one budget (ConnectionsPerProcess)
-// rather than growing it. Two such holders at once leave the next lease waiting, and an acquire
-// that waits leaseAcquireBound makes Exclusive skip the pass rather than queue, so the cost is one
-// skipped pass that its next tick runs. The connections cannot come from the request pool: a
-// lease is held for the whole pass, which is minutes for the compaction sweep, and the request
-// pool's connections are what every request reads through. The compaction sweep holds only its
-// lease here: each document it compacts reads and writes on the compaction pool (Pool.Compaction).
-const leasePoolSize = leaseNameCount + 1
+// The two spare connections are for what holds one without being a listed lease's pass: pgxpool's
+// own health check and lifetime expiry take an idle connection while they ping or replace it, and
+// a pass whose unlock failed holds its connection until the close that ends its session
+// (duty.FreeSessionLock, leaseCallTimeout). Without them the next pass waits on those (review
+// BG-5). Three such holders at once leave the next lease waiting, and an acquire that waits
+// leaseAcquireBound makes Exclusive skip the pass rather than queue, so the cost is one skipped
+// pass that its next tick runs. The connections cannot come from the request pool: a lease is held
+// for the whole pass, which is minutes for the compaction sweep, and the request pool's
+// connections are what every request reads through. The compaction sweep holds only its lease
+// here: each document it compacts reads and writes on the compaction pool (Pool.Compaction).
+const leasePoolSize = leaseNameCount + 2
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -318,14 +342,17 @@ const outboxPoolSize = 2
 const registryPoolSize = 1
 
 // permanentListeners is how many connections the listener pool dials and hands off for the life
-// of the process (Listener): the delivery hub, the event stream relay, the stale-room evictor,
-// the shared wake hub cmd/dispatch's woken background loops wait on, which main.go dials through
-// database.Pool.Listener, and the events outbox's LISTEN on dispatch_events and
-// dispatch_duty_holds.
+// of the process: the delivery hub's, the event stream relay's and the events outbox's listeners
+// (Listener), and the document rooms' two (Dedicated): the shared listener hub that room sync and
+// cmd/dispatch's woken background loops are registered on, and the NOTIFY sender, which opens at
+// the first send and then stays open. The outbox's LISTEN on dispatch_events and
+// dispatch_duty_holds is its own rather than a registration on the hub, as the delivery hub's and
+// the relay's are: cmd/dispatch builds the outbox only with NATS, and the LISTEN starts and stops
+// inside outbox.Outbox.Run, while the hub takes no registration once it runs.
 const permanentListeners = 5
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres, the
-// budget of 94 SharedPoolSize describes: every pool's size, the registry's own pool
+// budget of 96 SharedPoolSize describes: every pool's size, the registry's own pool
 // (processes.Register) and the event horizon's (Horizon) among them, and one connection per
 // permanent listener, which the listener pool dials and hands off rather than holds (its one dial
 // in flight is a permanent listener redialling, so it is not counted twice).
