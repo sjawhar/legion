@@ -52,8 +52,8 @@ declare global {
     /** Where Jump to latest placed the newest card, read in the page the moment the reader took
      *  it (`jumpToLatestOnTheFirstBatch`); `undefined` until then. */
     __heavyBodiesJumpPlaced?: number;
-    /** When the reader pressed the mouse, on the page's own clock (`recordTheReadersPress`);
-     *  0 until they do. */
+    /** When the reader pressed the mouse, on the page's own clock
+     *  (`holdTheFillUntilThePress`); 0 until they do. */
     __heavyBodiesPressedAt?: number;
   }
 }
@@ -752,19 +752,85 @@ test("Jump to latest keeps a newest long turn under the composer while it fills"
   }
 });
 
-/** When the reader pressed the mouse, on the page's own clock, so a row can say which batches of
- *  a fill landed after their drag had begun. */
-async function recordTheReadersPress(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+/**
+ * Holds a sliced paint back from the batch after its first until the reader presses the mouse,
+ * and records when they pressed, on the page's own clock. The window the row below measures is
+ * then the row's own to open: one batch of the body is in the page, the rest are not, and they
+ * land while the drag crosses what has.
+ *
+ * What is held is the page's own scheduler, not a switch in the product: a sliced paint asks for
+ * its next task with `window.setTimeout(nextSlice, 0)` (`paintAcrossTasks` in
+ * `useRenderedMarkdown.tsx`), which is how every long body in every engine lands, and this keeps
+ * that call's callback until the press. Nothing in `web/src` knows this row exists.
+ *
+ * Which timer is the painter's is read from the page rather than guessed: the task that lands a
+ * batch adds to the filling element and then asks for the next task, in that order, so a
+ * zero-delay timer asked for in a task that has just added to a `[data-markdown-pending]`
+ * element is that paint's next batch. `MutationObserver.takeRecords` answers that inside the
+ * task, since an observer's own callback drains its queue at the end of every task, leaving
+ * each task only its own records; every other timer the page asks for is passed straight
+ * through, and so is the first batch, which no batch of this paint precedes.
+ *
+ * Without it the row is a race it loses: the fill of 8,000 items is a few hundred milliseconds
+ * and every step of a drag from this process is a round trip that queues behind the page's own
+ * tasks, so in WebKit the whole body had landed 115 ms before the press arrived
+ * (sjawhar/legion#2712, run 42255533963).
+ */
+async function holdTheFillUntilThePress(page: Page): Promise<void> {
+  await page.addInitScript((filling) => {
+    const realSetTimeout = window.setTimeout.bind(window);
+    const realClearTimeout = window.clearTimeout.bind(window);
+    /** The next batches held back, by the timer id the page was given for each. */
+    const held = new Map<number, () => void>();
+    let pressed = false;
+    // The callback does nothing: what this observer is for is `takeRecords` below, and being
+    // called is what empties its queue between tasks.
+    const watching = new MutationObserver(() => undefined);
+    watching.observe(document, { childList: true, subtree: true });
+    const landedABatch = (): boolean =>
+      watching
+        .takeRecords()
+        .some(
+          (record) =>
+            record.addedNodes.length > 0 &&
+            record.target instanceof Element &&
+            record.target.closest(filling) !== null
+        );
+    window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]): number => {
+      if (pressed || typeof handler !== "function" || (delay ?? 0) !== 0 || !landedABatch()) {
+        return realSetTimeout(handler, delay, ...args);
+      }
+      // A timer of its own for the id, so the one the page is handed is an id `clearTimeout`
+      // knows and a paint the page stops is stopped here too; what it runs is nothing, and the
+      // batch waits in `held` until the press.
+      const id = realSetTimeout(() => undefined, 0);
+      held.set(id, () => {
+        (handler as (...rest: unknown[]) => void)(...args);
+      });
+      return id;
+    }) as typeof window.setTimeout;
+    window.clearTimeout = ((id?: number): void => {
+      if (id !== undefined) {
+        held.delete(id);
+      }
+      realClearTimeout(id);
+    }) as typeof window.clearTimeout;
     window.__heavyBodiesPressedAt = 0;
     document.addEventListener(
       "mousedown",
       () => {
+        // The press is timed before the batches are let go, so every batch this releases lands
+        // after it, which is the whole of what the row asserts about the two.
         window.__heavyBodiesPressedAt = Date.now();
+        pressed = true;
+        for (const run of held.values()) {
+          realSetTimeout(run, 0);
+        }
+        held.clear();
       },
       { capture: true, once: true }
     );
-  });
+  }, fillingBody);
 }
 
 /** How long the row below waits for a body to begin filling before it says none did. Well inside
@@ -777,9 +843,10 @@ const REACH_THE_FILL_MS = 15_000;
 // covers it and nothing turns selection off, so a drag across a body still filling answers with
 // the body's own words.
 // SLOW(>=2s): the drag has to cross the body between two batches of its fill, so the row opens
-// the card, waits for the first batch, drags from where that batch put the body, and then waits
-// out the rest of the 8,000 items - the selection is only worth proving of a body that still
-// ends formatted, and formatting 8,000 items is the draw it is.
+// the card, holds the fill after its first batch (`holdTheFillUntilThePress`), drags from where
+// that batch put the body, and then waits out the rest of the 8,000 items - the selection is
+// only worth proving of a body that still ends formatted, and formatting 8,000 items is the
+// draw it is.
 test("a long body's text can be selected while its formatting is still landing", async ({
   browser,
 }) => {
@@ -790,16 +857,17 @@ test("a long body's text can be selected while its formatting is still landing",
   try {
     const page = await alice.newPage();
     await watchTheFill(page);
-    await recordTheReadersPress(page);
+    // The fill waits for the press rather than the press racing the fill: held, 1 of the body's
+    // 32 batches is in the page when the drag begins and 31 land while it crosses what is.
+    await holdTheFillUntilThePress(page);
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     const card = page.locator('[data-turn^="comment:"]');
     await expect(card).toHaveCount(1);
-    // Where the drag starts, answered by the page in the task the first batch landed in: every
-    // read from this process costs a round trip, and what the drag has to land inside is the
-    // rest of the fill. The body is taller than the window, so its top sits at the top of the
-    // page, under the docked composer: the drag starts below that, inside the body itself. A
-    // body that never fills leaves this waiting out the row's own deadline, so what it answers
-    // then is the row's own reason rather than a bare timeout.
+    // Where the drag starts, answered by the page once the first batch has landed: the body is
+    // taller than the window, so its top sits at the top of the page, under the docked
+    // composer, and the drag starts below that, inside the body itself. A body that never
+    // fills leaves this waiting out the row's own deadline, so what it answers then is the
+    // row's own reason rather than a bare timeout.
     const start = await page
       .waitForFunction(
         (filling) => {
