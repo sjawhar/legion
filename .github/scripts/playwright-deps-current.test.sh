@@ -130,10 +130,13 @@ check "exits 0" "$(is "$status" 0)"
 check "says the list is current" "$(contains "$out" 'The pinned list is current')"
 
 echo "case: a package Playwright now asks for that the dropped packages' closure holds"
-# Playwright 1.64.1 lists libsoup-3.0-0 for ubuntu24.04, and on noble gstreamer1.0-plugins-good
-# depends on it, so it is in the closure of the four dropped packages. Holding the missing set
-# against that closure alone accepts it, and the step - whose pinned list does not hold it -
-# never installs it. The pinned list is what has to decide.
+# Playwright 1.64.1 does not ask for libsoup-3.0-0 on ubuntu24.04: the name is in that
+# platform's lib2package map, for libsoup-3.0.so.0, and not in its tools, chromium, firefox or
+# webkit list, which are what install-deps asks apt for. This case is an upgrade that adds it
+# to one of those lists. On noble gstreamer1.0-plugins-good depends on it, so it is in the
+# closure of the four dropped packages. Holding the missing set against that closure alone
+# accepts it, and the step - whose pinned list does not hold it - never installs it. The
+# pinned list is what has to decide.
 run_check PLAYWRIGHT_LIST="$PLAYWRIGHT_ASKS libsoup-3.0-0" APT_SIM_STDOUT="$CLOSURE_WITH_LIBSOUP" \
   PLAYWRIGHT_STATUS=1 PLAYWRIGHT_STDOUT='Missing system dependencies (1):
   libsoup-3.0-0'

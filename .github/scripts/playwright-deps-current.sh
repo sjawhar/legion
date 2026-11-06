@@ -14,8 +14,9 @@
 # `packages=` names the same four for a reader of the workflow.
 #
 # Its one caller is that step, which runs it from packages/dispatch after `bunx playwright
-# install chromium webkit firefox`, so both sides are read from the same state. It reads no file
-# and changes no directory.
+# install chromium webkit firefox`, so both sides are read from the same state. It changes no
+# directory, and the one file it writes, the record of Playwright's apt call, is in a temporary
+# directory it removes on exit.
 #
 # It takes the pinned list as its arguments, and `bunx` resolves Playwright from the caller's
 # working directory, so it reads the Dispatch suite's Playwright only when it is run from

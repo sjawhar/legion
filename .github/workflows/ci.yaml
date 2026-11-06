@@ -2492,24 +2492,31 @@ jobs:
       # about 30 s for the list check: 920 s, rounded up to 16 min. Healthy today is a 38 s
       # median and a 102 s 95th percentile for the whole step.
       #
-      # Each bound is derived from its own phase, by scaling the measured mirror rates of the
-      # 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z to 23:07:42Z, a
-      # different window from the table above, which is why its count differs) onto the head's
-      # smaller fetch. The job that sets them is 127238648049, the slowest install this job has
-      # run: there apt logged `Fetched 10.5 MB in 1s (9797 kB/s)` for `apt-get update` at
-      # 12:18:39Z and `Fetched 114 MB in 10min 13s (186 kB/s)` for the packages at 12:28:54Z. At
-      # those two rates the head's 12.9 MB of indexes take about 1.3 s and its 51.4 MB of
-      # packages about 276 s. Reading the two phases at one blended rate - 126.9 MB over 614 s,
-      # or 207 kB/s - mixes that fast update into the slow download and understates the
-      # download, which is why the bound is derived per phase.
+      # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
+      # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
+      # population is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
+      # to 23:07:42Z, a different window from the table above, which is why its count differs),
+      # read in full for the 26 whose install step ran over 73 s. No shorter step can reach
+      # either bound: an update need over 90 s means a merge-base index fetch of 10.5 MB taking
+      # over 73 s, and a download need over 300 s means a merge-base fetch of 114 MB taking over
+      # 665 s.
       #
-      # The 300 s download bound leaves 24 s over that modelled 276 s, about 9 per cent, which
-      # is wider than the model's own uncertainty: as the overhead constant moves 10, 14, 20,
-      # 25, 30 s, the modelled failure count moves 1, 1, 0, 0, 0. So on a model that reads the
-      # two phases apart, the two bounds fail at most one of those 205 green jobs. The model
-      # assumes a retry meets the same mirror rate, and azure.archive.ubuntu.com is a pool, so
-      # the real rate is at or below every figure here. Both bounds come from the slowest mirror
-      # this repository has seen, and are read again when a slower one appears.
+      # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 51.4 MB need
+      # 276.3 s there, and 300 s leaves 8.6 per cent of headroom. Job 127357441704 binds the
+      # update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get update`, so the
+      # head's 12.9 MB need 55.4 s there, and 90 s leaves 63 per cent. On this model the two
+      # bounds fail none of the 205.
+      #
+      # One blended rate per job is the wrong model, as job 127238648049's own log shows:
+      # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
+      # packages. One rate over both phases mixes a fast update into a slow download and
+      # understates the download. The model assumes a retry meets the same mirror rate, and
+      # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
+      # Both bounds come from the slowest mirror a green job of that window met, and are read
+      # again when a green job meets a slower one. A slower mirror on both attempts - under
+      # about 143 kB/s for the indexes or 171 kB/s for the packages - fails the step by its own
+      # name: job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it.
       #
       # The worst case the step now carries: if both `apt-get update` attempts fail, `twice`
       # returns 1 and the step stops after about 180 s, so the longest the bounded apt phases
