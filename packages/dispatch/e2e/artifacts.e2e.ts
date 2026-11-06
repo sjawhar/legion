@@ -673,7 +673,20 @@ const tinyWebm = [
   "ABxTu2uRu4+zgSC3iveBAfGCC0XwgQo=",
 ].join("");
 
-/** Uploads `base64` through the Artifacts tab's own picker, under `name` and `mimeType`. */
+/**
+ * Uploads `base64` through the Artifacts tab's own picker, under `name` and `mimeType`, and
+ * returns only once that version is stored and the picker has let go of the pick.
+ *
+ * Both waits are needed, and neither alone would do. The uploader clears its staged file in the
+ * upload's own `onSuccess` (`web/src/features/artifacts/ArtifactUpload.tsx`), so a pick staged
+ * while an earlier upload is still out is wiped under it, and the "Upload" press that follows
+ * finds the idle picker's button of that same name and only reopens the chooser: the second
+ * version is never sent. Waiting on the 201 alone leaves that window open, since the response
+ * arrives before React has run `onSuccess`; waiting on the staged row's disappearance alone
+ * would also answer to a "Cancel". So: the POST's own 201, which the server sends only after it
+ * has stored the version, and then the staged row's "Summary (optional)" field gone, which only
+ * the cleared pick removes.
+ */
 async function uploadBytes(
   page: Page,
   name: string,
@@ -685,7 +698,15 @@ async function uploadBytes(
     mimeType,
     name,
   });
+  const stored = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/artifacts") &&
+      response.status() === 201
+  );
   await confirmUpload(page);
+  await stored;
+  await expect(page.getByLabel("Summary (optional)")).toHaveCount(0);
 }
 
 /** Fails unless nothing under `scope` reports a `naturalWidth` of zero, which is how a picture
