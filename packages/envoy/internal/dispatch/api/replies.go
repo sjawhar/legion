@@ -106,9 +106,10 @@ const (
 // its answer, read as the answerer and the answer's options and text), what the thread is about
 // (the ask's question, or its root's text), where it lives (the row's own owner columns, its
 // issue's priority and its project), how far the caller has read it, whether it is still unread,
-// how many writes in it they have not read, and the document mark its root is anchored to. Its ref
-// always names the thread's root, never the reply: a reply carries no anchor, so a link to it
-// would skip the document redirect an anchored root takes.
+// how many writes in it they have not read, the document mark its root is anchored to, and the
+// version a dismissal of the row is held to (user_threads.version, migration 20261105093500).
+// Its ref always names the thread's root, never the reply: a reply carries no anchor, so a link
+// to it would skip the document redirect an anchored root takes.
 //
 // $4 is the number of rows to read, null for every row; a Dismissed page resumes from $5 and $6
 // (myRepliesDismissedCursor).
@@ -147,11 +148,12 @@ const myRepliesPageRows = `
 	),
 	page as (
 		select p.thread_id, kept.kind, kept.replied_at, kept.dismissed_at, kept.last_reply_id,
-		       kept.issue_key, kept.artifact_id, kept.read_through, kept.project_key, kept.unread
+		       kept.issue_key, kept.artifact_id, kept.read_through, kept.project_key, kept.unread,
+		       kept.version
 		from picked p
 		join lateral (
 			select u.kind, u.replied_at, u.dismissed_at, u.last_reply_id, u.issue_key,
-			       u.artifact_id, u.read_through, u.project_key, u.unread
+			       u.artifact_id, u.read_through, u.project_key, u.unread, u.version
 			from user_threads u
 			where u.login = $1 and u.thread_id = p.thread_id
 			offset 0
@@ -196,7 +198,8 @@ const myRepliesPageRest = `
 	       coalesce(rc.body, rm.body, answered.text, ''),
 	       coalesce(rc.created_at, rm.created_at, p.replied_at),
 	       i.priority, p.project_key, p.read_through, p.unread,
-	       coalesce(counted.unread_count, 0), coalesce(root.anchor, a.anchor), p.dismissed_at
+	       coalesce(counted.unread_count, 0), coalesce(root.anchor, a.anchor), p.dismissed_at,
+	       p.version
 	from page p
 	-- The thread's own root and the reply the row shows, each read by its id. They are laterals
 	-- with an offset-0 fence rather than joins because a join leaves the planner free to hash the
@@ -673,7 +676,7 @@ func (s *server) readMyReplyRows(
 			&issueKey, &issueTitle, &project, &slug, &name,
 			&subject, &replyID, &isAnswer, &author, &body, &row.Reply.CreatedAt,
 			&row.Priority, &projectKey, &readThrough, &row.Unread, &row.UnreadCount, &anchor,
-			&row.DismissedAt,
+			&row.DismissedAt, &row.Version,
 		); err != nil {
 			return nil, fmt.Errorf("scan my reply: %w", err)
 		}

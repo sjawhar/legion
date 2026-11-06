@@ -29,26 +29,22 @@ func dismissedBy(t *testing.T, response *httptest.ResponseRecorder) int {
 	}](t, response).Dismissed
 }
 
-// The two statements a test reads a row's version out of, which is what the page would have
+// The two statements a test reads a row's drawn state out of, which is what the page would have
 // shown in it and what a dismissal of that row carries (seen_replies): for a Reply row the
-// caller's own last_reply_id, and for an Agent row the newest session reply in the root's
-// thread. The Agent one is spelled as the route's own check spells it - the same walk, the same
-// `order by created_at desc, id desc limit 1` (inboxDismissCheckAgentRoots, myAgentRowFacts) -
-// so a test names the reply the page named.
+// caller's own user_threads.version, and for an Agent row the newest session reply in the root's
+// thread with the ids drawn as unread there, read through the list route's own lateral
+// (myAgentRootsWithFacts), so a test draws what the page draws.
 const seenReplyVersions = `
-	select t.thread_id::text, t.last_reply_id::text from user_threads t
+	select t.thread_id::text, t.version from user_threads t
 	where t.login = $1 and t.thread_id = any($2::uuid[])`
 
-var seenAgentVersion = `select (` + agentThreadCTE("$1::uuid") + `
-		select t.id::text from thread t
-		where t.author->>'kind' = 'session'
-		order by t.created_at desc, t.id desc limit 1
-	)`
+var seenAgentDrawn = myAgentMarks + `
+	roots as (select $3::uuid as root_id)
+	select agent.reply_id::text, agent.unread_reply_ids` + myAgentRootsWithFacts
 
 // seenRepliesOf is the seen_replies a page would carry for the rows named: one entry per row,
-// read out of the state the test seeded rather than written down, and null for a row that holds
-// no reply at all - a thread nobody has written in, or one the caller has no row for, which the
-// page saw as a version like any other.
+// read out of the state the test seeded rather than written down. A Reply row the caller has no
+// row for is carried at version 0, the version every row starts at.
 func seenRepliesOf(t *testing.T, database *store.Store, login string, rows []string) map[string]any {
 	t.Helper()
 	ctx := context.Background()
@@ -58,7 +54,7 @@ func seenRepliesOf(t *testing.T, database *store.Store, login string, rows []str
 			threads = append(threads, thread)
 		}
 	}
-	versions := map[string]*string{}
+	versions := map[string]int64{}
 	if len(threads) > 0 {
 		read, err := database.Pool.Query(ctx, seenReplyVersions, login, threads)
 		if err != nil {
@@ -67,7 +63,7 @@ func seenRepliesOf(t *testing.T, database *store.Store, login string, rows []str
 		defer read.Close()
 		for read.Next() {
 			var thread string
-			var version *string
+			var version int64
 			if err := read.Scan(&thread, &version); err != nil {
 				t.Fatalf("scan a thread's version: %v", err)
 			}
@@ -80,20 +76,22 @@ func seenRepliesOf(t *testing.T, database *store.Store, login string, rows []str
 	seen := map[string]any{}
 	for _, row := range rows {
 		if root, isAgent := strings.CutPrefix(row, inboxDismissAgentPrefix); isAgent {
-			var version *string
-			if err := database.Pool.QueryRow(ctx, seenAgentVersion, root).Scan(&version); err != nil {
-				t.Fatalf("read the newest session reply under %s: %v", root, err)
+			var newest string
+			unread := []string{}
+			if err := database.Pool.QueryRow(ctx, seenAgentDrawn, login, login, root).
+				Scan(&newest, &unread); err != nil {
+				t.Fatalf("read what the page drew in %s: %v", root, err)
 			}
-			seen[row] = version
+			seen[row] = map[string]any{"newest_reply": newest, "unread_replies": unread}
 			continue
 		}
-		seen[row] = versions[row]
+		seen[row] = map[string]any{"version": versions[row]}
 	}
 	return seen
 }
 
-// dismissBody is one named dismissal's body: the rows it names and the version the page saw in
-// each of them, which every named dismissal carries.
+// dismissBody is one named dismissal's body: the rows it names and what the page drew in each of
+// them, which every named dismissal carries.
 func dismissBody(t *testing.T, database *store.Store, login string, rows []string) map[string]any {
 	t.Helper()
 	return map[string]any{"threads": rows, "seen_replies": seenRepliesOf(t, database, login, rows)}
@@ -1269,15 +1267,13 @@ func TestDismissLeavesAnAgentThreadWhoseInterleavedRepliesInvertTheirStamps(t *t
 	replying := beginGateHold(t, database, "the reply this test holds")
 	writeAgentReply(t, replying.tx, seed.agentReply, "session", "s1", databaseNow(t, replying.tx))
 	// B: begun after A and committed at once, under the newer stamp, which makes it the thread's
-	// newest reply and so the version the page shows.
+	// newest reply and so the reply the page draws.
 	newest := writeAgentReply(t, database.Pool, seed.agentReply, "session", "s1", databaseNow(t, database.Pool))
 	body := dismissBody(t, database, "alice", []string{inboxDismissAgentPrefix + seed.agent})
-	seen, _ := body["seen_replies"].(map[string]any)[inboxDismissAgentPrefix+seed.agent].(*string)
-	if seen == nil {
-		t.Fatal("the dismissal names no reply in the agent row, want the one committed second")
-	}
-	if *seen != newest {
-		t.Fatalf("the dismissal names %s as the row's newest reply, want %s, the one committed second", *seen, newest)
+	drawn, _ := body["seen_replies"].(map[string]any)[inboxDismissAgentPrefix+seed.agent].(map[string]any)
+	seen, _ := drawn["newest_reply"].(string)
+	if seen != newest {
+		t.Fatalf("the dismissal names %s as the row's newest reply, want %s, the one committed second", seen, newest)
 	}
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- postInboxDismiss(t, handler, "alice", body) }()

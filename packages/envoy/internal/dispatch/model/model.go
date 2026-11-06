@@ -1610,6 +1610,13 @@ type MyReplyRow struct {
 	// DismissedAt is when the caller dismissed the thread out of their Inbox, absent on a thread
 	// that is in it. It is the order state=dismissed answers in and the cursor it resumes from.
 	DismissedAt *time.Time `json:"dismissed_at,omitempty"`
+	// Version is a Reply row's user_threads.version, which counts the writes somebody else has
+	// made in the thread: a dismissal of the row carries it back and the route writes the mark
+	// only while the row still holds it, so a press can bury no write the page never drew. An
+	// Agent row has no user_threads row, so it carries no version of its own and this stays 0;
+	// what a dismissal of one carries is the reply it drew and the ids it drew as unread
+	// (api/inbox_dismiss.go).
+	Version int64 `json:"version"`
 }
 
 // MyRepliesResponse is the caller's Inbox threads in one state's own order, and how many there are

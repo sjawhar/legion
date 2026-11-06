@@ -178,12 +178,12 @@ func myAgentDismissedRoot(root string) string {
 // lateral, so a root no session ever answered is no Agent row, as it was when these rows were
 // read from the replies themselves.
 //
-// `newest` - `order by created_at desc, id desc limit 1` - is the version of an Agent row: the
-// reply this page showed is what a dismissal of that row names, and what the dismissal's check
-// reads the thread for before it writes a mark (inboxDismissCheckAgentRoots, api/inbox_dismiss.go)
-// is that same one reply, spelled there as the same order and the same limit. The two must go on
-// naming one reply, so a reader changing either has to change the other: a check that named a
-// different reply would refuse every dismissal this page's own answer asks for.
+// `newest` - `order by created_at desc, id desc limit 1` - and unread_reply_ids are what the
+// page draws of an Agent row and what a dismissal of that row carries back
+// (inboxDismissCheckAgentRoots, api/inbox_dismiss.go). That check reads them out of this same
+// lateral rather than spelling the walk again, so the reply the page drew and the reply the
+// check reads are one reply by construction: a second spelling that named another would refuse
+// every dismissal this page's own answer asks for.
 var myAgentRowFacts = `
 	join lateral (` + agentThreadCTE("r.root_id") + `,
 		root as (
