@@ -1,0 +1,4 @@
+kind: Added
+body: Read-only SQL audit of requirement conversation sources, with stable hand-check samples and participation counts.
+custom:
+  Issue: pr2801
