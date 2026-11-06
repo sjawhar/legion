@@ -917,12 +917,21 @@ func (d *destinations) addDestination(dest destination) {
 	d.list = append(d.list, dest)
 }
 
-// addSession adds sessionID's own subject, named by label and id. The copy carries the event's own
-// dedupe key, except the copy of a new comment to a session one of whose mention attempts failed:
-// that one carries the dedupe key the failed attempt's send went under
-// (mentionDeliveries.fallbackKeys, destination.dedupeKey), so a host the mention reached before
-// its attempt failed drops the copy and one no mention reached shows it.
+// addSession adds sessionID's own subject, named by label and id, unless the comment's mention
+// attempts leave that session's copy to the mention (destinations.leftToMention). This is where
+// every copy of a new comment bound for a session's own topic asks that one rule - the session
+// route, the claimant, a primary document's or a thread's author, a follower - so a session the
+// attempts name is left to its mention whatever the payload's mentions say, which an unanswered
+// @role: mention's session is named by alone.
+//
+// The copy carries the event's own dedupe key, except the copy of a new comment to a session one
+// of whose mention attempts failed: that one carries the dedupe key the failed attempt's send
+// went under (mentionDeliveries.fallbackKeys, destination.dedupeKey), so a host the mention
+// reached before its attempt failed drops the copy and one no mention reached shows it.
 func (d *destinations) addSession(sessionID, label, id string) {
+	if d.leftToMention(sessionID) {
+		return
+	}
 	d.addDestination(destination{
 		subject:   contracts.AgentSubject(sessionID),
 		label:     label,
@@ -953,8 +962,8 @@ func (d *destinations) err(cause error) error {
 // owner's route, its claimant route, its primary document's sessions and its author routes, then
 // its follower routes and the previous claimant's notice. mentionPending reports a session's copy
 // held back for a mention still being sent (destinations.leftTo). The mention deliveries of a new
-// comment that names a mentioned session, or suppresses its route by a mention's target
-// (payloadSuppressedRouteTarget), are read before anything else, so a lookup of them that fails
+// comment that names a mention at all (payloadHasMentions) are read before anything else, so a
+// lookup of them that fails
 // leaves the event with no destination. Any other lookup that fails, or a route that does not
 // parse, ends the list there: the destinations before it are returned with the error, which backs
 // the event off once they are sent. So a recipient read the batch has no answer for
@@ -968,8 +977,7 @@ func (d *destinations) err(cause error) error {
 func eventDestinations(ctx context.Context, deps Deps, item *batchEvent, look lookup) (list []destination, mentionPending bool, err error) {
 	event := item.event
 	d := &destinations{seen: map[string]struct{}{}, delivered: item.delivered}
-	if event.Type == "comment.created" &&
-		(len(payloadMentionedSessions(event.Payload)) > 0 || payloadSuppressedRouteTarget(event.Payload) != "") {
+	if event.Type == "comment.created" && payloadHasMentions(event.Payload) {
 		commentID := payloadString(event.Payload, "id")
 		d.comment = mentionComment{ctx: ctx, deps: deps, event: event, id: commentID}
 		if d.mentions, err = look.mentionDeliveries(commentID); err != nil {
@@ -1040,10 +1048,10 @@ func addRoute(d *destinations, route *string) error {
 // claimant only when the claimant subscribed to the whole issue, or happens to be the route, a
 // follower of the ask, or an author the thread or document names, and the session working the
 // issue misses what a person told it there. Only a person's event qualifies (Actor.Kind "user"):
-// an agent's events reach nobody new through here, even the ones that notify. A new comment whose
-// mentions resolved to the claimant is left to the mention once the mention delivered it
-// (destinations.leftToMention); a claimant whose mention failed gets this copy instead, and the
-// comment's edit, resolution and reopening are never left to it. The claim is the one the batch
+// an agent's events reach nobody new through here, even the ones that notify. A new comment the
+// claimant's own mention of it delivers is left to that mention (destinations.addSession, the
+// mention rule); a claimant whose mention failed gets this copy instead, and the comment's edit,
+// resolution and reopening are never left to it. The claim is the one the batch
 // read when the event is published (readBatch, routing), not when it was written, so a retry after
 // the claim moved reaches the new claimant. A claimant that is also the route, a follower or an
 // author gets one copy: destinations adds a subject once per event. The claimant's subject is an
@@ -1060,11 +1068,6 @@ func addClaimantRoute(event model.Event, claimant string, d *destinations) {
 		"message.created", "message.answered":
 	default:
 		return
-	}
-	if event.Type == "comment.created" {
-		if _, mentioned := payloadMentionedSessions(event.Payload)[claimant]; mentioned && d.leftToMention(claimant) {
-			return
-		}
 	}
 	d.addSessions([]string{claimant}, "publish claimant route to")
 }
@@ -1114,11 +1117,10 @@ func payloadPreviousClaimSession(payload any) string {
 // followers, who otherwise learn of it only by subscribing to the whole issue. A quiet ask.edited
 // (a version move of an approval request that an earlier version already moved since it was
 // opened or last handed back, model.AskEditEventPayload.Quiet) reaches no follower. The event's own
-// actor is skipped, and so is a follower a new reply's mentions resolved to
-// (payloadMentionedSessions) once the mention delivered the reply to it
-// (destinations.leftToMention); a follower whose mention failed gets this copy instead. Only the
-// reply's creation is left to the mention; its edit, resolution and reopening reach every
-// follower. A topic the route already reaches is not added twice.
+// actor is skipped, and a follower whose own mention of a new comment delivers it is left to that
+// mention (destinations.addSession, the mention rule); a follower whose mention failed gets this
+// copy instead. Only the reply's creation is left to the mention; its edit, resolution and
+// reopening reach every follower. A topic the route already reaches is not added twice.
 func addFollowerRoutes(event model.Event, look lookup, d *destinations) error {
 	var askID string
 	switch event.Type {
@@ -1138,16 +1140,9 @@ func addFollowerRoutes(event model.Event, look lookup, d *destinations) error {
 	if err != nil {
 		return err
 	}
-	var mentioned map[string]struct{}
-	if event.Type == "comment.created" {
-		mentioned = payloadMentionedSessions(event.Payload)
-	}
 	var sessionIDs []string
 	for _, follower := range followers {
 		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower}) {
-			continue
-		}
-		if _, ok := mentioned[follower]; ok && d.leftToMention(follower) {
 			continue
 		}
 		sessionIDs = append(sessionIDs, follower)
@@ -1160,10 +1155,11 @@ func addFollowerRoutes(event model.Event, look lookup, d *destinations) error {
 // no session claimant (takesPrimaryAuthors) to every session the issue's primary document credits,
 // each on its own topic: a session that writes an issue's spec without a claim still hears the
 // comments on it. The comment's own thread does not matter: a comment in an ask's thread, or a
-// reply, reaches those sessions too. The batch reads them for all such events in one query
-// (loadLookups, loadPrimaryDocumentAuthors); when that query failed, its error ends the event's
-// destinations here. The actor is skipped, and so is a session the comment's mentions resolved to
-// (payloadMentionedSessions) once its mention delivered the comment (recipientFilter).
+// reply, reaches those sessions too. The batch reads them
+// for all such events in one query (loadLookups, loadPrimaryDocumentAuthors); when that query
+// failed, its error ends the event's destinations here. The actor is skipped (recipientFilter),
+// and a session whose own mention of the comment delivers it is left to that mention
+// (destinations.addSession, the mention rule).
 func addPrimaryDocumentAuthors(event model.Event, routing routing, look lookup, d *destinations) error {
 	if !takesPrimaryAuthors(event, routing) {
 		return nil
@@ -1172,7 +1168,7 @@ func addPrimaryDocumentAuthors(event model.Event, routing routing, look lookup, 
 	if err != nil {
 		return err
 	}
-	filter := newRecipientFilter(event, d)
+	filter := newRecipientFilter(event)
 	var targets []string
 	for _, sessionID := range authors {
 		if filter.keep(sessionID) {
@@ -1201,11 +1197,11 @@ func addPrimaryDocumentAuthors(event model.Event, routing routing, look lookup, 
 // artifact.human_edited, which the notice sweep appends once a person's quiet window on a document
 // ends (docs.sendEditNotice), reaches every session the document its payload's artifact_id names
 // credits, read the same way. Ask threads are not walked here: their asker and repliers are the
-// ask's followers (addFollowerRoutes). The event's own actor is skipped, and so is a session the
-// comment's mentions resolved to (payloadMentionedSessions) once its mention delivered the comment
-// (recipientFilter); an author whose mention failed is added instead.
+// ask's followers (addFollowerRoutes). The event's own actor is skipped (recipientFilter), and a
+// session whose own mention of the comment delivers it is left to that mention
+// (destinations.addSession, the mention rule); an author whose mention failed is added instead.
 func addAuthorRoutes(event model.Event, look lookup, d *destinations) error {
-	filter := newRecipientFilter(event, d)
+	filter := newRecipientFilter(event)
 	var targets []string
 	consider := func(sessionID string) {
 		if filter.keep(sessionID) {

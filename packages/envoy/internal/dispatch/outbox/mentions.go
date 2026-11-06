@@ -256,10 +256,22 @@ func (o mentionOutcomes) record(key string, state mentionState) {
 	}
 }
 
-// leftToMention is the one rule every session route of a new comment applies to a session the
-// comment's mentions resolved to: it reports whether the route leaves that session's copy, on its
-// own topic, to the mention (destinations.leftTo). Callers ask only about a session their payload
-// names as mentioned; a session no mention delivers to has no attempt, so it is never skipped.
+// leftToMention is the one rule every copy of a new comment bound for a session's own topic
+// applies (destinations.addSession): it reports whether that copy, on that session's own topic,
+// is left to the comment's mention of the session (destinations.leftTo).
+//
+// The comment's attempt rows decide it, never the payload's mentions. An unanswered @role:
+// mention names no session in the payload - its listener lookup went unanswered within the
+// 250 ms window - and its sender pins the session on the comment_deliveries row after the
+// comment commits (coalesce(session_id, $6), internal/dispatch/api/comment_delivery.go), so a
+// rule read from the payload alone leaves that session's route, claimant, author and follower
+// copies in the event's list beside the mention, under the event's own key, and its host is
+// shown the comment twice. The attempts name it either way (model.MentionSessionSQL), and they
+// are what the keys of the copies that do go out are read from already
+// (mentionDeliveries.fallbackKeys, settledKeys).
+//
+// A session no attempt of the comment names reads mentionFailed, the state of a key with no
+// attempt at all, so it is published to as if it had not been mentioned.
 func (d *destinations) leftToMention(sessionID string) bool {
 	return d.leftTo(d.mentions.sessions, sessionID, contracts.AgentSubject(sessionID))
 }
@@ -338,6 +350,13 @@ func (d *destinations) leftTo(outcomes mentionOutcomes, key, destination string)
 // once the mention of that target delivered the comment, the same rule keyed by the target. Either
 // way the copy leftTo holds back is the route's own topic (routeTopic). A route whose mention
 // failed is published to.
+//
+// This is what a role route's copy has: a route whose topic is a role's is published to that
+// topic and forwarded from there, so addSession never sees it and the mention rule it applies to
+// a session's own topic cannot hold it back. A session route needs no suppression of its own -
+// addSession leaves that session's copy to its mention by the comment's attempts, whatever the
+// payload records (destinations.leftToMention) - and this one is read for it all the same, since
+// the attempts of a target no session is pinned to are keyed by that target alone.
 func suppressesCurrentRoute(payload any, current *string, d *destinations) bool {
 	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
 		return false
@@ -392,24 +411,17 @@ func payloadSuppressedRouteTarget(payload any) string {
 	return ""
 }
 
-// payloadMentionedSessions reads the sessions a comment payload's mentions count under
-// (model.MentionSession), as the batch decodes the payload from JSON: each mentions[].session_id,
-// and the <id> of a session:<id> mention that names none (its lookup went unanswered, so the
-// sender resolves it after the commit). These are candidates only: a session route skips one once
-// the mention delivered to it (destinations.leftToMention).
-func payloadMentionedSessions(payload any) map[string]struct{} {
-	values, ok := payload.(map[string]any)
-	if !ok {
-		return nil
-	}
+// payloadHasMentions reports whether a comment payload names a mention at all (mentions[]), as
+// the batch decodes the payload from JSON. It is the one reading of the payload the destinations
+// make of a comment's mentions: it says whether the comment can have a comment_deliveries row at
+// all, so a comment with none is read for none (eventDestinations). Which session each mention
+// counts under the payload does not say - an unanswered @role: mention names none there, and its
+// sender pins one on the attempt row after the commit - so the attempts decide every copy left to
+// a mention (destinations.leftToMention).
+func payloadHasMentions(payload any) bool {
+	values, _ := payload.(map[string]any)
 	mentions, _ := values["mentions"].([]any)
-	result := map[string]struct{}{}
-	for _, entry := range mentions {
-		if sessionID, ok := model.MentionSession(payloadString(entry, "session_id"), payloadString(entry, "target")); ok {
-			result[sessionID] = struct{}{}
-		}
-	}
-	return result
+	return len(mentions) > 0
 }
 
 // holdFallbackCopy records the fallback row of the copy of the comment at destination, decided by

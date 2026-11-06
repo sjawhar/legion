@@ -171,26 +171,18 @@ func takesPrimaryAuthors(event model.Event, routing routing) bool {
 }
 
 // recipientFilter keeps, of the sessions one route of a notifying event reaches on their own
-// topics, each one once, and none that is the event's actor. A session the comment's mentions
-// resolved to (payloadMentionedSessions, which the claimant and follower routes read too) is left
-// to the mention by the rule every session route of a new comment applies
-// (destinations.leftToMention): skipped once its mention delivered, held back while the send is
-// undecided, and kept when it failed. addAuthorRoutes and addPrimaryDocumentAuthors both filter
-// through it.
+// topics, each one once, and none that is the event's actor. Whether a session is left to its
+// own mention of a new comment is the destination build's own rule, asked of the comment's
+// attempt rows where every copy bound for a session's own topic asks it
+// (destinations.addSession, destinations.leftToMention). addAuthorRoutes and
+// addPrimaryDocumentAuthors both filter through this.
 type recipientFilter struct {
-	actor        model.Actor
-	suppressed   map[string]struct{}
-	seen         map[string]bool
-	destinations *destinations
+	actor model.Actor
+	seen  map[string]bool
 }
 
-func newRecipientFilter(event model.Event, d *destinations) *recipientFilter {
-	return &recipientFilter{
-		actor:        event.Actor,
-		suppressed:   payloadMentionedSessions(event.Payload),
-		seen:         map[string]bool{},
-		destinations: d,
-	}
+func newRecipientFilter(event model.Event) *recipientFilter {
+	return &recipientFilter{actor: event.Actor, seen: map[string]bool{}}
 }
 
 // keep reports whether sessionID is a recipient, the first time the filter is asked about it.
@@ -199,6 +191,5 @@ func (f *recipientFilter) keep(sessionID string) bool {
 		return false
 	}
 	f.seen[sessionID] = true
-	_, suppressed := f.suppressed[sessionID]
-	return !suppressed || !f.destinations.leftToMention(sessionID)
+	return true
 }

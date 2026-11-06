@@ -346,8 +346,10 @@ func TestAnUnansweredSessionMentionHoldsTheCopiesOfTheSessionItNames(t *testing.
 // TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention: a route whose string is the
 // target of a mention whose lookup went unanswered is suppressed by that string alone, with no
 // session known. Its copy follows that target's attempt: held back while it is pending, skipped
-// once it was sent, published once it failed. A route moved to another string since is
-// published to whatever the mention did.
+// once it was sent, published once it failed. A route moved to another string since carries no
+// create-time suppression of its own and is published to whatever the mention did - unless it
+// names the very session that mention's sender pinned on its attempt row, every copy bound for
+// whose own topic is left to that mention (destinations.addSession, destinations.leftToMention).
 func TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention(t *testing.T) {
 	const (
 		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
@@ -366,7 +368,8 @@ func TestARouteSuppressedByAnUnansweredMentionsTargetFollowsThatMention(t *testi
 		{route: "role:reviewer", delivery: "pending", want: []string{issueTopic}, wantErr: errMentionPending},
 		{route: "role:reviewer", delivery: "sent", want: []string{issueTopic}},
 		{route: "role:reviewer", delivery: "failed", want: []string{issueTopic, routeTopic}},
-		{route: "session:s1", delivery: "sent", want: []string{issueTopic, "notifications.agent.s1"}},
+		{route: "session:s1", delivery: "sent", want: []string{issueTopic}},
+		{route: "session:s2", delivery: "sent", want: []string{issueTopic, "notifications.agent.s2"}},
 	} {
 		t.Run(tc.route+" "+tc.delivery, func(t *testing.T) {
 			commentNumber++

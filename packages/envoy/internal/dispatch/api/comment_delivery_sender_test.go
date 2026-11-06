@@ -607,9 +607,10 @@ func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T)
 
 // A route that names the mentioned session by a different string - here session:s1, while the
 // comment mentions role:reviewer, which s1 holds - is not suppressed when the mention's lookup
-// goes unanswered: no session is known to compare. s1 receives the comment twice, once from the
-// mention sender and once as the route copy on its own topic, under different dedupe keys.
-func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing.T) {
+// goes unanswered: no session is known to compare, so the payload names none. The mention's own
+// sender pins s1 on the attempt row when it sends, and the outbox reads that row rather than the
+// payload, so the route copy to s1 is left to the mention and s1 hears the comment once.
+func TestAnUnansweredMentionOfAnotherStringForTheRouteIsLeftToThatMention(t *testing.T) {
 	got := commentWithAnUnansweredLookup(t, unansweredLookup{
 		route: "session:s1", mention: "role:reviewer", hungPath: "/v1/roles/reviewer",
 	})
@@ -620,8 +621,8 @@ func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}
-	if !slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
-		t.Fatalf("the outbox published comment.created to %v, want s1's topic among them as well: s1 gets two copies",
+	if slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic left out: the attempt row names s1 though the payload's mention names nobody, and the mention delivered the comment",
 			got.destinations)
 	}
 }
@@ -642,18 +643,19 @@ func TestAnUnansweredSessionMentionOfTheRootAuthorSuppressesTheAuthorCopy(t *tes
 	}
 }
 
-// A reply that mentions role:reviewer, which the root author s1 holds, names no session when the
-// role's lookup goes unanswered: the author route still reaches s1, which hears the reply twice,
-// once from the mention sender and once on its own topic.
-func TestAnUnansweredRoleMentionHeldByTheRootAuthorLeavesTwoCopies(t *testing.T) {
+// A reply that mentions role:reviewer, which the root author s1 holds, names no session in its
+// payload when the role's lookup goes unanswered. The mention's sender pins s1 on the attempt
+// row when it sends, which is what the author route reads, so s1 is left to the mention there
+// too and hears the reply once.
+func TestAnUnansweredRoleMentionHeldByTheRootAuthorIsLeftToThatMention(t *testing.T) {
 	got := commentWithAnUnansweredLookup(t, unansweredLookup{
 		mention: "role:reviewer", hungPath: "/v1/roles/reviewer", replyToS1: true,
 	})
 	if len(got.sends) != 1 || got.sends[0].session != "s1" {
 		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
 	}
-	if !slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
-		t.Fatalf("the outbox published comment.created to %v, want s1's topic among them as well: s1 gets two copies",
+	if slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic left out: the attempt row names s1 though the payload's mention names nobody, and the mention delivered the reply",
 			got.destinations)
 	}
 }

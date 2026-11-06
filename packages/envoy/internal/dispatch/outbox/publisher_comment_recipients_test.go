@@ -48,8 +48,8 @@ func appendCommentEvent(t *testing.T, database *store.Store, broker *events.Brok
 }
 
 // appendIssueCommentEvent appends a comment event on issueKey's issue with the payload the API
-// writes for it: the comment's mentions resolved to each session of mentioned, which the outbox's
-// session routes read (payloadMentionedSessions).
+// writes for it: the comment's mentions resolved to each session of mentioned, whose attempt
+// rows the outbox's session routes read (destinations.leftToMention).
 func appendIssueCommentEvent(t *testing.T, database *store.Store, broker *events.Broker, issueKey, eventType string, actor model.Actor, comment model.Comment, mentioned ...string) model.Event {
 	t.Helper()
 	comment.IssueKey = new(issueKey)
