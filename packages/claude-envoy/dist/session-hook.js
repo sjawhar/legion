@@ -15069,6 +15069,11 @@ function dedupeKeyNamesItsEvent(envelope) {
       return false;
   }
 }
+// ../contracts/src/envoy-session.ts
+var SESSION_HEARTBEAT_MS = 90000;
+var LISTENER_CALL_TIMEOUT_MS = 5000;
+var LISTENER_CALL_RETRY_DELAY_MS = 250;
+var LISTENER_CALL_ATTEMPTS = 2;
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
@@ -25617,7 +25622,7 @@ function dispatchTarget(env, config) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
+var DEFAULT_HEARTBEAT_MS = SESSION_HEARTBEAT_MS;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;

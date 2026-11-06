@@ -1,0 +1,10 @@
+kind: Changed
+body: |-
+    `scripts/smoke-registration-stall.sh` reads the refresh interval and the live window its
+    budgets are measured in from `@legion/contracts` (`SESSION_HEARTBEAT_MS` and
+    `SESSION_LIVE_WINDOW_MS`), rather than with `sed` over `envoy-settings.ts` and `registry.go`,
+    so a declaration written another way no longer stops the smoke. `bun` joins the tools it
+    requires, and a run prints both numbers before it does anything else.
+time: 2026-11-05T23:29:12.000000000Z
+custom:
+    Issue: pr2838
