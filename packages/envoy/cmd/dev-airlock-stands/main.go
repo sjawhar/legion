@@ -9,6 +9,15 @@
 //	dev-airlock-stands [--dir <path>] [--address <stand>=<host:port> ...] [--host <stand>=<name> ...]
 //	                   [--github-owner <owner>=<installation id> ...] [--google-lifetime <duration>]
 //	                   [--aws-key <key id>=<secret key>] [--records-address <host:port>]
+//	dev-airlock-stands front --listen <host:port> [--backend <host:port> ...] [--backends-file <path>]
+//	dev-airlock-stands enroll-pod --url <broker> --token-file <path> --pod-token-file <path>
+//	                   --pod-uid <uid> --thumbprint <thumbprint> [--service <name>] [--session <id>]
+//
+// The stack needs two more small things of its own, and they are modes of this one command
+// rather than commands of their own so that it builds one binary: `front`, one TCP address in
+// front of several (front.go), and `enroll-pod`, the two calls that enrol a pod session
+// (enroll.go). With no subcommand it serves the stands, which is what the rest of this comment
+// is about.
 //
 // A stand is named s, t, github, google, microsoft or aws. Each binds 127.0.0.1 on a port the
 // operating system picks unless --address names one, and each HTTPS stand's certificate names
@@ -23,15 +32,21 @@
 // It writes one JSON object to standard output naming every address, every recording route and
 // every file it wrote - the authority's certificate and key, which
 // BROKER_AIRLOCK_CA_CERT_FILE, BROKER_AIRLOCK_CA_KEY_FILE and
-// BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE name, and each HTTPS stand's own certificate - and the
-// AWS key pair the AWS stand verifies against, which the script signs its calls with. It then
-// logs "stands listening records=<records URL>" and serves until it is interrupted. Every key
-// here is made at each start and is a stand-in's: nothing it prints opens anything.
+// BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE name, and each HTTPS stand's own certificate - the AWS
+// key pair the AWS stand verifies against, which the script signs its calls with, and the
+// GitHub App key the GitHub stand mints for, which the local stack's fake secret store holds as
+// that App's stored value. It then logs "stands listening records=<records URL>" and serves
+// until it is interrupted. Every key here is made at each start and is a stand-in's: nothing it
+// prints opens anything.
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -80,6 +95,27 @@ const (
 	defaultAWSSecretKey = "the-stand-in-aws-secret-access-key"
 )
 
+// standInGitHubAppID is the App id the stored github-app value carries. The GitHub stand reads
+// no assertion, so nothing but the minter's own JWT header ever sees it.
+const standInGitHubAppID = "123456"
+
+// writeGitHubAppKey makes this run's stand-in GitHub App key and writes it as PEM, answering
+// the path. The App JWT the github-app minter signs needs a real RSA key, and the key has to
+// come from somewhere: it comes from here, beside the AWS pair, so the local stack's fake
+// secret store is filled from this one report and no script generates a key of its own.
+func writeGitHubAppKey(dir string) (string, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", fmt.Errorf("generate the stand-in GitHub App key: %w", err)
+	}
+	path := filepath.Join(dir, "github-app.pem")
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		return "", fmt.Errorf("write the stand-in GitHub App key: %w", err)
+	}
+	return path, nil
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -99,7 +135,18 @@ type options struct {
 	recordsAddress string
 }
 
+// run reads the subcommand, if there is one, and otherwise serves the stands. The two
+// subcommands are words rather than flags of the stands' own flag set: each has flags of its
+// own, and a flag set that held all three modes' flags would accept any mixture of them.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "front":
+			return runFront(ctx, args[1:], stdout, stderr)
+		case "enroll-pod":
+			return runEnrollPod(ctx, args[1:], stdout, stderr)
+		}
+	}
 	fs := flag.NewFlagSet("dev-airlock-stands", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	o := options{addresses: standFlags{flagName: "--address"}, hosts: hostFlags{}, installations: map[string]int64{}}
@@ -236,6 +283,12 @@ type report struct {
 	// script signs its calls with and the broker's fake secret store holds as the real key.
 	AWSKeyID     string `json:"aws_key_id"`
 	AWSSecretKey string `json:"aws_secret_key"`
+	// GitHubAppID and GitHubAppKeyFile are the App the GitHub stand mints installation tokens
+	// for: the id and the PEM private key this run made, which the broker's fake secret store
+	// holds as a github-app secret's stored value. The stand verifies no assertion, so the key
+	// is only ever what the minter signs its App JWT with.
+	GitHubAppID      string `json:"github_app_id"`
+	GitHubAppKeyFile string `json:"github_app_key_file"`
 	// Stands is each stand by name.
 	Stands map[string]standReport `json:"stands"`
 }
@@ -273,9 +326,15 @@ func serve(ctx context.Context, o options, stdout, stderr io.Writer) int {
 			service.Close()
 		}
 	}()
+	appKeyFile, err := writeGitHubAppKey(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "dev-airlock-stands: %v\n", err)
+		return 1
+	}
 	out := report{
 		Dir: dir, CACertFile: certFile, CAKeyFile: keyFile,
 		AWSKeyID: o.awsKeyID, AWSSecretKey: o.awsSecretKey,
+		GitHubAppID: standInGitHubAppID, GitHubAppKeyFile: appKeyFile,
 		Stands: map[string]standReport{},
 	}
 	for _, name := range stands {

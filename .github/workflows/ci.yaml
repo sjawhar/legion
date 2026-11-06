@@ -662,6 +662,7 @@ jobs:
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/broker-refgen/*'
               - 'packages/envoy/internal/broker/airlock/*'
+              - 'packages/envoy/internal/broker/airlockproxy/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -884,6 +885,7 @@ jobs:
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/dev-oidc-issuer/*'
               - 'packages/envoy/internal/broker/airlock/*'
+              - 'packages/envoy/internal/broker/airlockproxy/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -1153,6 +1155,7 @@ jobs:
               - 'packages/envoy/docker/rds-global-bundle.pem'
               - 'packages/envoy/internal/broker/airlock/*'
               - 'packages/envoy/internal/broker/airlock/testdata/**'
+              - 'packages/envoy/internal/broker/airlockproxy/*'
               - 'packages/envoy/internal/broker/api/*'
               # The approval page's own files, its embedded templates and stylesheet included.
               - 'packages/envoy/internal/broker/approval/**'
@@ -2864,6 +2867,9 @@ jobs:
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
+      - name: Isolation test for dev-airlock.sh (fakes psql/go/curl; no real Postgres, network or Go build)
+        run: bash scripts/dev-airlock.test.sh
         working-directory: packages/envoy
       - name: Isolation test for dev-stack.sh (fakes go/psql/curl/python3; no real Postgres or network)
         run: bash scripts/dev-stack.test.sh

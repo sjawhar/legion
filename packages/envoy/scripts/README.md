@@ -131,6 +131,66 @@ scenario's listener and NATS logs and every poll, one JSON line each) goes to `-
 `$TMPDIR/envoy-e2e-refill`). `E2E_REFILL_NATS_PORT` (14232) and `E2E_REFILL_PORT` (19030) move the
 ports. A full run takes about ten minutes, so it is a manual proof, not a CI job.
 
+## dev-airlock.sh
+
+Brings up the whole local surface the airlock's checks run on, with no container
+runtime and no cluster, and prints the exports a check needs. It runs
+`dev-broker.sh` for Postgres, `dev-oidc-issuer`, the five built binaries and that
+script's own broker, and reads what it printed, rather than starting any of that a
+second time; on top it starts `cmd/dev-airlock-stands` (the stand-in services S and
+T, the GitHub, Google and Microsoft endpoints and the AWS service, and the
+certificate authority they are signed by), writes a rules file and a fake Secrets
+Manager naming each other, starts **two** broker processes on a database of their
+own with the whole `BROKER_AIRLOCK_*` block, puts one TCP front over both brokers'
+API ports and one over both proxy ports (`dev-airlock-stands front`, round-robin per
+connection), and enrols one pod session the way the Legion daemon does — a service
+login at `POST /v1/launcher-credentials/token`, then `POST /v1/enrollments` of kind
+`pod` — so `agent-secrets self` answers `kind: pod`.
+
+```bash
+DEV_BROKER_POSTGRES_URL="$LEGION_TEST_PG_DSN" packages/envoy/scripts/dev-airlock.sh
+```
+
+Everything it makes lives under `${TMPDIR:-/tmp}`, as `dev-broker.sh`'s work
+directory now does. Each bound host (`s.airlock.test` and the rest) listens on port
+443 of a loopback address of its own, because the airlock refuses a request whose
+`Host` header is not its CONNECT target and a client writes the port into that
+header for every port but 443. The airlock's secrets are owned by the service the
+enrolled pod runs as, so its requests for them are granted at once; the
+`azure-login` secret is human tier, and the exports name the approver and the
+sign-in URL a check approves it with.
+
+Options: `--keep-values` and `--no-kind`, the two negative controls
+(`BROKER_AIRLOCK_TEST_KEEP_VALUES` and `BROKER_AIRLOCK_TEST_NO_KIND`),
+`--idle-seconds N` (`BROKER_AIRLOCK_IDLE_SECONDS`; check k9's control sets 60),
+`--one-broker`, and `--help`. A usage error exits 2.
+
+`dev-airlock.test.sh` proves the driver's own decisions behind fake binaries — the
+work directories under `TMPDIR`, two brokers with the whole airlock block on one
+database, one front over each pair of ports, the options reaching the brokers, the
+enrolment written beside the session key, the usage error, and the cleanup stopping
+everything it started — with no real Postgres, no network and no Go build; CI runs
+it in the `envoy-go` job of `.github/workflows/ci.yaml`.
+
+## airlock-mutants.sh
+
+Proves that the airlock's differential fuzz test and the Lean proofs catch a defect
+in the decision code. Each file of `internal/broker/airlock/testdata/mutants` is one
+defect as a unified diff; for each, the script copies `packages/envoy` to a fresh
+directory under `$TMPDIR`, applies that one patch there, and requires the copy to
+fail — a `go-*.patch` under the comparison fuzz test over the committed seed corpus,
+a `lean-*.patch` under `lake build` or, when it still builds, that same comparison
+against the mutated model. A mutant nothing catches fails the run.
+
+```bash
+AIRLOCK_MODEL=<the built airlock-model> packages/envoy/scripts/airlock-mutants.sh [<name>...]
+```
+
+With no name it runs every mutant; a name is a patch's file name with or without
+`.patch`. It prints one `PASS:` or `FAIL:` line per mutant and exits non-zero when
+any was not caught, 2 when the model mutants need `lake` and it is not installed.
+No patch ever touches this repository.
+
 ## listener-deploy-probe.sh
 
 Watches an Envoy listener from a client's seat while its deployment rolls, and
