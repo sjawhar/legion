@@ -6,13 +6,11 @@ import (
 	"net/url"
 	"time"
 
-	// The SDK modules the loop calls into. The loop itself lands in later files of this
-	// package; until it does, these imports are what names each module a direct requirement
-	// of github.com/sjawhar/envoy, and they go as the real imports arrive.
-	_ "github.com/anthropics/anthropic-sdk-go"
+	// The SDK modules the loop calls into for protocols no file of this package serves yet.
+	// Until one does, these imports are what names each module a direct requirement of
+	// github.com/sjawhar/envoy, and they go as the real imports arrive.
 	_ "github.com/grafana/ai-sdk/providers/azure"
 	_ "github.com/grafana/ai-sdk/providers/openai-compatible"
-	_ "github.com/openai/openai-go/v3"
 )
 
 // Kind is the wire protocol an endpoint speaks. It picks the provider a call is made through
