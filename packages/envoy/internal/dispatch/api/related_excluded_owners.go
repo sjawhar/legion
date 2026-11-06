@@ -12,8 +12,8 @@ import (
 // relatedInput.excludes drops - but before the page takes its suggestionSearchDepth rows rather
 // than after, which is the whole point of filtering here (INFRA-1160). Those two forms of the
 // one rule, the SQL here and the Go below, are in this file together for that reason: the
-// statement drops an excluded owner's rows before the page takes its ten, and excludes drops in
-// Go whatever a check running the statement without the filter still finds.
+// statement drops an excluded owner's rows before the page takes its suggestionSearchDepth, and
+// excludes applies the same rule again in Go to whatever rows come back (fillRelatedItems).
 //
 // A row's owner is the issue it belongs to when it carries no owner document and that document
 // otherwise, as scanSearchRows reads the same two columns; an ask and a document are named by
