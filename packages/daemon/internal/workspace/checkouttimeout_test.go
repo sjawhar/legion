@@ -51,10 +51,12 @@ func slowCheckoutRunner(t *testing.T, delay, budget time.Duration) *recordingRun
 }
 
 // Every provisioning command is given a bound of its own: the checkout, the one that writes the
-// issue's whole working copy, is given CheckoutTimeout, and every other command — `jj workspace
-// update-stale`, which only a workspace that already exists runs, among them — the runner's
-// slow-command budget. A fresh workspace and one provisioned a second time are read together, so
-// both paths through Provision are covered.
+// issue's whole working copy, is given CheckoutTimeout, and every command but it and the shared
+// clone's four size-following steps — `jj workspace update-stale`, which only a workspace that
+// already exists runs, among them — the runner's slow-command budget. Those four share one
+// CloneTimeout and are TestTheSharedClonesCloneIsBoundedByCloneTimeout's, so this case passes
+// over them (isSharedCloneStep). A fresh workspace and one provisioned a second time are read
+// together, so both paths through Provision are covered.
 func TestProvisionBoundsEachCommandByItsOwnBudget(t *testing.T) {
 	run := newLocalRunner(t)
 	req := feedRequest(t, run, provisionRequest(t))

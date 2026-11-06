@@ -121,16 +121,18 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, err
 	}
 	// The checkout writes the issue's working copy, every file of the tree, into the workspace the
-	// registration made with no files: the one step whose time follows the repository's size, and
-	// it writes nothing of the shared clone's, so it runs with the store lock let go, beside other
-	// issues' checkouts, holding one of the places the daemon bounds checkouts by.
+	// registration made with no files: past the shared clone's own clone, whose four
+	// size-following steps share one CloneTimeout of their own (ensureRepoClone, above), it is the
+	// one step whose time follows the repository's size, and it writes nothing of the shared
+	// clone's, so it runs with the store lock let go, beside other issues' checkouts, holding one
+	// of the places the daemon bounds checkouts by.
 	//
-	// It is also the one provisioning command no change of this repository's makes fit
+	// It is also the one command past those steps that no change of this repository's makes fit
 	// CommandTimeout's five minutes: one write of the largest repository mapped took nine minutes
 	// in an issue pod (CheckoutTimeout), and the runner killing it there failed the whole
 	// provision and spent one of the claim's three launches. So this command alone takes
-	// CheckoutTimeout (request.checkoutBound), and every other provisioning command keeps the
-	// runner's slow-command budget.
+	// CheckoutTimeout (request.checkoutBound), and every provisioning command but it and those
+	// steps keeps the runner's slow-command budget.
 	store.unlock()
 	if checkout {
 		release, err := request.checkoutPlace(ctx)
