@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // The fake OMP child is this test binary, re-executed with fakeOMPEnv set: a Go program that
@@ -399,18 +400,13 @@ type stub struct {
 // Legion role's TMPDIR is the issue's shared scratch on its volume
 // (/legion/scratch/tmp, 19 bytes), and a developer's macOS TMPDIR is a path under
 // /var/folders. Under either, the test's own name pushes the socket past sun_path and the listen
-// fails with "bind: invalid argument" before the test does anything. /tmp is the shortest base
-// every machine has, so the socket's own directory is made there and removed with the test, while
-// every other file a test writes stays under t.TempDir(); cmd/legion's socketDir
-// (worker_shim_test.go) is the same answer in that package.
+// fails with "bind: invalid argument" before the test does anything. The socket's own directory
+// comes from testtmp, which places it under TMPDIR and falls back to /tmp for the socket path's
+// length alone, and removes it with the test; every other file a test writes stays under
+// t.TempDir().
 func socketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "legion-shim")
-	if err != nil {
-		t.Fatalf("socket directory: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "s")
+	return testtmp.Socket(t, "s")
 }
 
 func listen(t *testing.T, path string) *stub {

@@ -32,26 +32,30 @@ const testTimeout = 30 * time.Second
 // pile up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
 // that sets a home of its own afterward (newLocalRunner's) still wins: os.Environ() is read fresh
 // by every exec.Command.
-func TestMain(m *testing.M) {
+func TestMain(m *testing.M) { os.Exit(runUnderAHomeOfThePackagesOwn(m)) }
+
+// runUnderAHomeOfThePackagesOwn does the setup the comment above describes and removes the home
+// afterwards. The removal is deferred, so it also runs when the setup below panics. A run killed
+// by a signal still keeps the home, which nothing here can help.
+func runUnderAHomeOfThePackagesOwn(m *testing.M) int {
 	if err := fixtureenv.Guard(); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
 	home, err := os.MkdirTemp("", "legion-test-home")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
+	defer os.RemoveAll(home)
 	for _, entry := range fixtureenv.Home(home) {
 		key, value, _ := strings.Cut(entry, "=")
 		if err := os.Setenv(key, value); err != nil {
 			fmt.Fprintln(os.Stderr, "TestMain:", err)
-			os.Exit(1)
+			return 1
 		}
 	}
-	code := m.Run()
-	os.RemoveAll(home)
-	os.Exit(code)
+	return m.Run()
 }
 
 func TestTheTestProcessIsGuarded(t *testing.T) {
