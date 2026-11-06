@@ -489,51 +489,49 @@ func TestASpecStampsTheIssueKeyOnlyOnARepositoryTheProjectNames(t *testing.T) {
 }
 
 // The Claude lane is told the issue key by the builders every role uses. The daemon reads the
-// claim's repository alone, whatever harness the role runs and whichever runtime launches it: the
-// backend decides the process and, under Kubernetes, the plugin install (stalePluginInstall), and
-// nothing of the launch's environment. Each runtime then builds one environment for every role —
-// a pane's -e pairs (runtime/tmux's panePairs, read here through PaneVariables) and a pod's main
-// container (runtime/sandbox's mainEnvironment over issuePod.agentEnv, which that runtime's own
-// TestAPodIsToldTheIssueKeyItStampsItsCommitsWith reads) — so a Claude Code launch carries
-// LEGION_ISSUE_TRAILER exactly as an Oh My Pi one does.
-func TestAClaudeLaunchCarriesTheIssueKeyItStampsUnderEachRuntime(t *testing.T) {
+// claim's repository alone, whatever harness the role runs: the backend decides the process and,
+// under Kubernetes, the plugin install (stalePluginInstall), and nothing of the launch's
+// environment. Each runtime then builds one environment for every role, and this package reaches
+// one of the two — a pane's -e pairs (runtime/tmux's panePairs, read here through PaneVariables).
+// The pod side is the Sandbox runtime's own TestAPodIsToldTheIssueKeyItStampsItsCommitsWith, over
+// runtime/sandbox's mainEnvironment of issuePod.agentEnv. So a Claude Code launch carries
+// LEGION_ISSUE_TRAILER into its pane exactly as an Oh My Pi one does.
+func TestAClaudeLaunchCarriesTheIssueKeyItStampsIntoItsPane(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
-	for _, runtimeName := range []string{"tmux", "kubernetes"} {
-		for _, backend := range []runtime.Backend{runtime.BackendOmp, runtime.BackendClaude} {
-			t.Run(runtimeName+"/"+string(runtime.Of(backend)), func(t *testing.T) {
-				s := specs{
-					stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
-					runtimeName:             runtimeName,
-					commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
-					same:                    newRepositories("acme", ghrepo.Renames{}).same,
-					backend:                 func(claim.Role) runtime.Backend { return backend },
-					repository: func(context.Context, string) (ghrepo.Repository, string, error) {
-						return ghrepo.MustParse("acme/widgets"), "main", nil
-					},
-				}
-				token, err := claim.NewToken("acme", "ACME-7", claim.RoleImplementer)
-				if err != nil {
-					t.Fatal(err)
-				}
-				spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "ACME-7", Tree: "ACME-1", Role: claim.RoleImplementer})
-				if err != nil {
-					t.Fatalf("SpawnSpec: %v", err)
-				}
-				if spec.Backend != backend || spec.IssueTrailer != "ACME-7" {
-					t.Fatalf("the launch runs %q carrying IssueTrailer %q, want %q and ACME-7", spec.Backend, spec.IssueTrailer, backend)
-				}
-				variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{StateDir: t.TempDir()}, nil)
-				if err != nil {
-					t.Fatalf("PaneVariables: %v", err)
-				}
-				if !slices.Contains(variables, "LEGION_ISSUE_TRAILER=ACME-7") {
-					t.Errorf("the pane is told %q, want LEGION_ISSUE_TRAILER=ACME-7 among them", variables)
-				}
-			})
-		}
+	for _, backend := range []runtime.Backend{runtime.BackendOmp, runtime.BackendClaude} {
+		t.Run(string(runtime.Of(backend)), func(t *testing.T) {
+			s := specs{
+				stateDir: t.TempDir(), project: "acme", prompts: composer, repositories: noRepositoriesView,
+				runtimeName:             "tmux",
+				commitIssueTrailerRepos: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+				same:                    newRepositories("acme", ghrepo.Renames{}).same,
+				backend:                 func(claim.Role) runtime.Backend { return backend },
+				repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+					return ghrepo.MustParse("acme/widgets"), "main", nil
+				},
+			}
+			token, err := claim.NewToken("acme", "ACME-7", claim.RoleImplementer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "ACME-7", Tree: "ACME-1", Role: claim.RoleImplementer})
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			if spec.Backend != backend || spec.IssueTrailer != "ACME-7" {
+				t.Fatalf("the launch runs %q carrying IssueTrailer %q, want %q and ACME-7", spec.Backend, spec.IssueTrailer, backend)
+			}
+			variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{StateDir: t.TempDir()}, nil)
+			if err != nil {
+				t.Fatalf("PaneVariables: %v", err)
+			}
+			if !slices.Contains(variables, "LEGION_ISSUE_TRAILER=ACME-7") {
+				t.Errorf("the pane is told %q, want LEGION_ISSUE_TRAILER=ACME-7 among them", variables)
+			}
+		})
 	}
 }
 

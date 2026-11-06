@@ -27,7 +27,9 @@
 //    new id and so a new overlay path, so this line replaces an earlier one rather than joining
 //    it: exactly one `export JJ_CONFIG=` stands however many times the hook runs. A session that
 //    is no Legion pane gets nothing, and an overlay that could not be written (no jj, or a jj
-//    that never answers inside its 3 s) costs the session that one export and nothing else.
+//    that never answers inside its 3 s) costs the session that one export and nothing else: the
+//    line an earlier SessionStart wrote is removed, since a chain naming the pre-`/clear`
+//    session's overlay would stamp a wrong session id where no chain stamps none.
 // 3. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
 // 4. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
@@ -177,6 +179,15 @@ const JJ_CONFIG_EXPORT = "export JJ_CONFIG="
  *  costs the session the export and nothing else. */
 const JJ_BASE_CHAIN_TIMEOUT_MS = 3_000
 
+/** `value` as a single-quoted shell word: Claude Code sources this file before every bash command
+ *  of the session, so a path or a config chain holding a space, a quote or a `$` must reach the
+ *  shell as one word, and single quotes are the one form Claude Code's PowerShell bridge also
+ *  reads. A single quote inside the value ends the quoting, is passed as an escaped quote of its
+ *  own, and opens it again. */
+function singleQuoted(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
 /** What the env file holds, and "" when it does not exist yet: Claude Code names the file before
  *  any hook has written it. */
 function envFileText(envFile: string): string {
@@ -223,6 +234,21 @@ function replaceOnce(envFile: string, prefix: string, line: string): void {
   writeAtomically(envFile, lines.join("\n"))
 }
 
+/** Deletes the one line starting with `prefix` from the env file, and does nothing when there is
+ *  none: a SessionStart that wrote no overlay must leave none of an earlier one behind. After a
+ *  `/clear` the earlier line names the pre-clear session's overlay, so every commit the session
+ *  makes would carry that session's id — a *wrong* trailer, where the write this hook could not
+ *  do costs only the *absence* of one, which is what this module degrades to. Removal is written
+ *  the same atomic way `replaceOnce` writes a replacement, and every other line keeps its text
+ *  and its place. */
+function removeOnce(envFile: string, prefix: string): void {
+  const lines = envFileText(envFile).split("\n")
+  const at = lines.findIndex((existing) => existing.startsWith(prefix))
+  if (at === -1) return
+  lines.splice(at, 1)
+  writeAtomically(envFile, lines.join("\n"))
+}
+
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
@@ -232,7 +258,7 @@ async function openAsks(raw: unknown): Promise<void> {
   if (envFile) {
     appendOnce(envFile, DISPATCH_HOST_LINE)
     if (chosen.path !== null) {
-      appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
+      appendOnce(envFile, `export ENVOY_CONFIG_FILE=${singleQuoted(chosen.path)}`)
     }
     const stateDir = process.env["LEGION_STATE_DIR"]
     if (stateDir) {
@@ -243,17 +269,15 @@ async function openAsks(raw: unknown): Promise<void> {
           ...paneAttributionOptions(process.env),
           resolveBase: () => userConfigChain(JJ_BASE_CHAIN_TIMEOUT_MS),
         })
-        if (chain !== undefined) {
-          replaceOnce(
-            envFile,
-            JJ_CONFIG_EXPORT,
-            `${JJ_CONFIG_EXPORT}'${chain.replaceAll("'", "'\\''")}'`,
-          )
+        if (chain === undefined) {
+          removeOnce(envFile, JJ_CONFIG_EXPORT)
+        } else {
+          replaceOnce(envFile, JJ_CONFIG_EXPORT, `${JJ_CONFIG_EXPORT}${singleQuoted(chain)}`)
         }
       } catch (error) {
-        // The overlay writer swallows its own failures, but replacing a line writes a temporary
-        // file beside the env file, which needs its directory writable where appending above did
-        // not: attribution must cost the session neither its exports nor its summary.
+        // The overlay writer swallows its own failures, but replacing or removing a line writes a
+        // temporary file beside the env file, which needs its directory writable where appending
+        // above did not: attribution must cost the session neither its exports nor its summary.
         process.stderr.write(`envoy: could not export the jj attribution — ${messageFor(error)}\n`)
       }
     }

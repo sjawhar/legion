@@ -790,3 +790,48 @@ test("gives up on a jj that never answers, keeping the other exports and the sum
     await rm(scratch, { recursive: true, force: true })
   }
 })
+
+// A `/clear` after an overlay the hook could not write would otherwise leave the chain of the
+// session before it, and so stamp every commit of this session with the pre-clear session's id: a
+// wrong trailer, where no chain is the absence of one. The writer takes its base from an
+// inherited JJ_CONFIG and spawns no jj at all when it finds one, so the hanging run is given an
+// environment carrying none, as Claude Code's hook process is.
+test("removes the export of an earlier session when this one's overlay could not be written", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-jj-stale-"))
+  const stateDir = join(scratch, "state")
+  await mkdir(stateDir)
+  const userConfig = join(scratch, "jj-user.toml")
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const env = (bin: string) => ({
+      HOME: scratch,
+      PATH: `${bin}:${process.env["PATH"] ?? ""}`,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      LEGION_STATE_DIR: stateDir,
+      LEGION_ISSUE_TRAILER: "ACME-7",
+    })
+    const working = await jjDirectory(
+      join(scratch, "working"),
+      `printf '%s\\n' ${JSON.stringify(userConfig)}`,
+    )
+    expect((await runHook(hookInput, env(working))).exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toContain(
+      `export JJ_CONFIG='${userConfig}:${join(stateDir, "omp-attribution-s-1.toml")}'\n`,
+    )
+
+    const hanging = await jjDirectory(join(scratch, "hanging"), "exec sleep 30")
+    expect((await runHook({ ...hookInput, session_id: "s-2" }, env(hanging))).exitCode).toBe(0)
+
+    expect(await readFile(envFile, "utf8")).toBe(
+      [
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        "",
+      ].join("\n"),
+    )
+    expect(await readdir(stateDir)).toEqual(["omp-attribution-s-1.toml"])
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}, 20_000)

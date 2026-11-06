@@ -284,8 +284,8 @@ describe("exportJjSessionAttribution", () => {
   });
 
   // The id reaches both the TOML literal and the overlay's file name, so an id that is not one
-  // (`SESSION_ID`) passes nothing on: a single quote would end the literal and break every `jj`
-  // command in the pane, and a `/` would move the overlay out of the state directory.
+  // (`SESSION_ID_PATTERN`) passes nothing on: a single quote would end the literal and break every
+  // `jj` command in the pane, and a `/` would move the overlay out of the state directory.
   it.each([
     ["an empty session id", ""],
     ["a session id holding a single quote", "s'1"],
