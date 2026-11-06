@@ -109,12 +109,16 @@ type lexer struct {
 
 	// failAt is where scan.l first raised an error, or -1. Most error rules report
 	// lexer_errposition(), which is the yylloc SET_YYLLOC() last set, so failAt is the first byte
-	// of the token the error rule read rather than the byte inside it the rule stopped on. The
-	// escape rules of <xe> and <xeu> are the exception: they PUSH_YYLLOC() and SET_YYLLOC() to
-	// point the cursor at the escape sequence itself, so Postgres reports a byte inside the
-	// literal where this reading reports the literal's start. That direction is the safe one -
-	// the report covers from the literal's start, which is at or before the byte Postgres named -
-	// and it is why a reading of this field may not be called a reading of lexer_errposition().
+	// of the token the error rule read rather than the byte inside it the rule stopped on. Two
+	// exceptions. The escape rules of <xe> and <xeu> PUSH_YYLLOC() and SET_YYLLOC() to point the
+	// cursor at the escape sequence itself, so Postgres reports a byte inside the literal where
+	// this reading reports the literal's start. And pg_verifymbstr, which the <xqs> action calls
+	// over the literal it assembled, reports no position at all: it is raised in mbutils.c
+	// outside the scanner, so PostgreSQL 18.6 answers select e'\400' with "invalid byte sequence
+	// for encoding "UTF8": 0x00" and no LINE or caret, where this reading reports the literal's
+	// start. Both go the same way - the report covers from the literal's start, which is at or
+	// before any byte Postgres named - and that is why a reading of this field may not be called
+	// a reading of lexer_errposition().
 	failAt int
 }
 
@@ -243,7 +247,6 @@ func lexSQL(text string, standardConformingStrings bool, emit func(sqlToken)) in
 			// everything after the end quote back with yyless(0) and return the literal. That
 			// action runs wherever {quotecontinue} does not match, so the three need no
 			// patterns of their own and lexRules holds no row for this state.
-			// <xqs>: {quotecontinue} or the three rules that undo the lookahead.
 			if n := matchQuotecontinue(l, l.pos); n > 0 {
 				actQuotecontinue(l, l.pos, n)
 			} else {
@@ -259,9 +262,13 @@ func lexSQL(text string, standardConformingStrings bool, emit func(sqlToken)) in
 			}
 		}
 		if best < 0 {
-			// No rule of this state matches, which cannot happen: every state has a rule for any
-			// one byte. Taking the byte keeps the loop finite if scan.l ever grows a state that
-			// does not.
+			// No rule of this state matches. Every state of scan.l has a rule for any one byte,
+			// so this is a state of this reading that has lost one, and the byte it cannot read
+			// is a byte whose meaning it does not know: a carriage return in <xeu> was exactly
+			// that, and skipping it printed the tail of a refused statement. Failing here covers
+			// the rest of the text, which is the answer a reading that cannot go on owes, and
+			// taking the byte keeps the loop finite.
+			l.fail()
 			l.pos++
 			continue
 		}
@@ -926,59 +933,44 @@ func matchRealMantissa(l *lexer, i int) int {
 }
 
 // integer_junk {decinteger}{identifier}
-func matchIntegerJunk(l *lexer, i int) int {
-	// {decinteger} is {decdigit}(_?{decdigit})*: only its underscores can end a shorter match.
-	return matchJunk(l, i, matchDecinteger(l, i), i+1)
-}
+func matchIntegerJunk(l *lexer, i int) int { return matchJunk(l, i, matchDecinteger(l, i)) }
 
 // numeric_junk {numeric}{identifier}
-func matchNumericJunk(l *lexer, i int) int {
-	n := matchNumeric(l, i)
-	if n < 0 {
-		return -1
-	}
-	// The {decinteger} whose length can vary is the one after the dot, and the earliest
-	// underscore it can hold is its second byte. An empty one holds none, and the number's own
-	// end is then the only end it has.
-	dot := i + strings.IndexByte(l.text[i:i+n], '.')
-	return matchJunk(l, i, n, min(dot+2, i+n))
-}
+func matchNumericJunk(l *lexer, i int) int { return matchJunk(l, i, matchNumeric(l, i)) }
 
 // real_junk {real}{identifier}
-func matchRealJunk(l *lexer, i int) int {
-	n := matchReal(l, i)
-	if n < 0 {
-		return -1
-	}
-	// The {decinteger} whose length can vary is the exponent: the mantissa has to end on the
-	// [Ee], and a shorter {decinteger} or {numeric} ends on a digit or on a dot.
-	j := i + matchRealMantissa(l, i) + 1
-	if l.text[j] == '-' || l.text[j] == '+' {
-		j++
-	}
-	return matchJunk(l, i, n, j+1)
-}
+func matchRealJunk(l *lexer, i int) int { return matchJunk(l, i, matchReal(l, i)) }
 
 // matchJunk is the longest match of a junk rule - {decinteger}{identifier},
-// {numeric}{identifier}, {real}{identifier} - whose number matches n bytes at its longest and
-// whose varying {decinteger} can hold an underscore from vary on. Flex matches a rule's whole
-// pattern and takes the longest match of it, so the number's own longest match is not the only
-// place the identifier may begin: an underscore is an {ident_start} as well as a {decinteger}'s
-// separator, and every match of {decinteger} that stops before one is a match the identifier can
-// follow. 1_0$$ is therefore not the number 1_0 and then $$, but {integer_junk} matching the
-// number 1 and the identifier _0$$ - PostgreSQL 18.6 answers select 1_0$$ x $$ with "trailing
-// junk after numeric literal" at the 1 and reads no dollar-quoted literal in it at all.
+// {numeric}{identifier}, {real}{identifier} - whose number matches n bytes at its longest. Flex
+// matches a rule's whole pattern and takes the longest match of it, so the number's own longest
+// match is not the only place the identifier may begin: an underscore is an {ident_start} as
+// well as a {decinteger}'s separator, and every match of {decinteger} that stops before one is a
+// match the identifier can follow. 1_0$$ is therefore not the number 1_0 and then $$, but
+// {integer_junk} matching the number 1 and the identifier _0$$ - PostgreSQL 18.6 answers
+// select 1_0$$ x $$ with "trailing junk after numeric literal" at the 1 and reads no
+// dollar-quoted literal in it at all.
+//
+// Where such an underscore can be is one question for all three rules, and the answer is the
+// number's trailing run of [0-9_]: the {decinteger} whose length can vary is the last one of the
+// number, every byte before that run is a byte the number cannot end before ([.eE+-] and the
+// digits ahead of them), and a {decinteger} neither begins nor ends on an underscore. So the
+// identifier begins at the first underscore of that run, where the run holds one.
 //
 // The earliest such underscore gives the longest match of the whole rule, so there is nothing to
 // search: every later end of the number is a byte of {ident_cont} inside the identifier that
 // starts at that underscore, so the identifier starting there would end on the same byte.
-func matchJunk(l *lexer, i, n, vary int) int {
+func matchJunk(l *lexer, i, n int) int {
 	if n < 0 {
 		return -1
 	}
 	end := i + n
-	if at := strings.IndexByte(l.text[vary:i+n], '_'); at >= 0 {
-		end = vary + at
+	run := end
+	for run > i && (isDigit(l.text[run-1]) || l.text[run-1] == '_') {
+		run--
+	}
+	if at := strings.IndexByte(l.text[run:end], '_'); at >= 0 {
+		end = run + at
 	}
 	name := matchIdentifier(l, end)
 	if name < 0 {
@@ -1017,12 +1009,17 @@ func matchParamJunk(l *lexer, i int) int {
 	return n + name
 }
 
-// other . , which flex's dot does not match a newline with; in INITIAL every newline is
-// {whitespace} and in <xeu> the newline has a rule of its own.
+// other . , which flex's dot matches every byte but a line feed with: flex's "." is [^\n], and
+// scan.l's {newline} is [\n\r], so a carriage return is a byte "." takes. In INITIAL that costs
+// nothing, since {whitespace} matches a carriage return and is the earlier rule; inside <xeu> it
+// is the whole of the rule, because <xeu>. is what refuses a carriage return where the second
+// half of a surrogate pair was wanted. PostgreSQL 18.6 answers select E'\ud83d<CR>\udc00' with
+// "invalid Unicode surrogate pair at or near" that byte, and a reading that let <xeu>. refuse it
+// matched no rule of that state at all and went on reading past a statement Postgres refused.
 func matchOther(l *lexer, i int) int { return matchDot(l, i) }
 
 func matchDot(l *lexer, i int) int {
-	if isLexNewline(l.text[i]) {
+	if l.text[i] == '\n' {
 		return -1
 	}
 	return 1
@@ -1268,7 +1265,15 @@ func octValue(s string) int {
 	return v
 }
 
-// <xq,xe,xus>{xqdouble}: addlitchar('\”).
+// <xq,xe,xus>{xqdouble}, whose action adds one quote byte to the literal:
+//
+//	addlitchar('\'');
+//
+// (in a block because gofmt reads two quotes in doc text as a closing typographic quote and
+// rewrites them, which is how this line came to carry a U+201D). Only <xe> is wired to it here,
+// because the <xqs> action reads what an <xe> literal assembled and no reader of this file asks
+// for what the other two assemble; their {xqdouble} is actSkip, which reads the same two bytes
+// and keeps nothing.
 func actXqdouble(l *lexer, i, n int) {
 	l.lit.WriteByte('\'')
 	l.pos = i + n

@@ -227,21 +227,34 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		"escapes that make a character it holds": {"on and off", `select e'\xc3\xa9' , ghp_SECRET`, "select ? , ghp_SECRET"},
 		// addunicode refuses a codepoint outside 0 < c <= 0x10FFFF with "invalid Unicode escape
 		// value", which 18.6 answers for both of the first two. A surrogate pair that spells a
-		// character is read; <xeu> refuses anything else after a first half, a letter and a
-		// carriage return alike - and <xeu> is the only place a carriage return reaches a rule
-		// that raises, since between tokens it is {space}.
-		"a codepoint no escape value holds":                {"on and off", `select e'\U0011FFFF' , ghp_SECRET`, "select ?"},
-		"the codepoint zero":                               {"on and off", `select e'\u0000' , ghp_SECRET`, "select ?"},
-		"a surrogate pair that spells a character":         {"on and off", `select e'\ud83d\ude00' , ghp_SECRET`, "select ? , ghp_SECRET"},
-		"a letter where a second half was wanted":          {"on and off", `select e'\ud83dX' , ghp_SECRET`, "select ?"},
-		"a carriage return where a second half was wanted": {"on and off", "select e'\\ud83d\r' , ghp_SECRET", "select ?"},
+		// character is read; <xeu>. refuses every other byte after a first half, a letter and a
+		// carriage return alike, since flex's "." is [^\n] and a carriage return is a byte it
+		// takes - 18.6 answers invalid Unicode surrogate pair at or near that byte for each.
+		//
+		// The last four rows are two pairs, each pair one byte apart in the same position, and
+		// the second of each pair is the one that matters: where the refusing byte is the last
+		// before the closing quote the tail is covered because the literal never ends, which
+		// hides a reading that does not refuse at all, and where the escape recovers and the
+		// literal terminates the tail survives to be printed unless the refusal is made. A
+		// reading whose <xeu>. did not take a carriage return printed that tail.
+		"a codepoint no escape value holds":                     {"on and off", `select e'\U0011FFFF' , ghp_SECRET`, "select ?"},
+		"the codepoint zero":                                    {"on and off", `select e'\u0000' , ghp_SECRET`, "select ?"},
+		"a surrogate pair that spells a character":              {"on and off", `select e'\ud83d\ude00' , ghp_SECRET`, "select ? , ghp_SECRET"},
+		"a letter where a second half was wanted":               {"on and off", `select e'\ud83dX' , ghp_SECRET`, "select ?"},
+		"a letter, and then the literal recovers":               {"on and off", `select e'\ud83dX\udc00' , ghp_SECRET`, "select ?"},
+		"a carriage return where a second half was wanted":      {"on and off", "select e'\\ud83d\r' , ghp_SECRET", "select ?"},
+		"a carriage return, and then the literal recovers":      {"on and off", "select e'\\ud83d\r\\udc00' , ghp_SECRET", "select ?"},
+		"a carriage return inside a literal that is no refusal": {"on and off", "select e'a\rb' , ghp_SECRET", "select ? , ghp_SECRET"},
 		// {operator} refuses a token of NAMEDATALEN bytes or more with "operator too long". One
 		// byte short of it is a token the lexer hands over and the parser complains about, which
 		// moves nothing.
 		"an operator of NAMEDATALEN bytes": {"on and off", "select 1 " + strings.Repeat("@", 64) + " ghp_SECRET", "select ? ?"},
 		"an operator one byte shorter":     {"on and off", "select 1 " + strings.Repeat("@", 63) + " ghp_SECRET", "select ? " + strings.Repeat("@", 63) + " ghp_SECRET"},
-		// A carriage return is {space} in scan.l and whitespace between tokens: select \r 1
-		// answers 1 on 18.6, before the number and after it alike, so both rows keep the name.
+		// Between tokens a carriage return is {space}: select \r 1 answers 1 on 18.6, before the
+		// number and after it alike, so both rows keep the name. That holds in INITIAL and says
+		// nothing about the states a literal is read in, where the same byte can be the one a
+		// rule refuses - the two rows above it are that case, and reading this one as general is
+		// what left that refusal out for two rounds.
 		"a carriage return before a number": {"on and off", "select \r 1 ghp_SECRET", "select ? ghp_SECRET"},
 		"a carriage return after a number":  {"on and off", "select 1 \r ghp_SECRET", "select ? ghp_SECRET"},
 		// Three refusals that are not the lexer's, which 18.6 answers with syntax error at or
