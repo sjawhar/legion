@@ -12,7 +12,7 @@
 --
 -- Somebody else, on this half, is the session: an Agent row is a one-off message the person sent a
 -- session, and the only writes the Inbox reads in that thread are the session's own replies
--- (api/replies.go). So the trigger fires on a session's write and on nothing else, which is what
+-- (api/replies_agent.go). So the trigger fires on a session's write and on nothing else, which is what
 -- leaves the person's own reply from the Dismissed view with the thread still dismissed, exactly as
 -- their own reply leaves a Reply thread's mark where it stands.
 --

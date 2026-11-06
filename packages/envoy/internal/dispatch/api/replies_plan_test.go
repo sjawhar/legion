@@ -18,13 +18,17 @@ import (
 // Dismissed view resumes from.
 //
 // The Agent half of each state is here too. Its rows come from the messages themselves, read one
-// root at a time (api/replies.go), and the dismissal it tests is a row of
+// root at a time (api/replies_agent.go), and the dismissal it tests is a row of
 // user_agent_thread_dismissed (20261105093505): the Inbox's own reads take the person's marks as
 // one set, which the login index answers, and the Dismissed view reads those marks in the order it
 // answers in, which is the same index's other half. Neither may scan that table,
 // and neither may sort it: the sorts those plans do carry are the list's own - the order the
 // Inbox's two states answer in, over the roots they found - so what each Agent case holds is that
 // no sort stands in for the dismissal, named by its column.
+//
+// The last case is no read at all but the write that clears a mark, which is here because it is
+// the one reader of that table's key: every session reply runs it, and its column order is the
+// only thing keeping it off a scan.
 //
 // Bitmap scans are off with sequential scans: on a fixture this small a bitmap scan of either index
 // is the cheapest plan, and a bitmap scan answers in heap order, which loses exactly the order
@@ -78,8 +82,9 @@ func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
 		},
 		// The Inbox's own states read the person's dismissal marks as one set rather than asking
 		// the table about one root at a time, so what answers them is the login index, not the
-		// primary key: the key is what a dismiss and a restore write by, and what the trigger of
-		// 20261105093507 deletes through is the message index 20261105093506 adds.
+		// primary key. The key is what a dismiss and a restore write by, and what the trigger of
+		// 20261105093507 deletes through: its message_id leads for that delete's sake, which is
+		// the case below.
 		{
 			"the agent rows under state=inbox", myAgentInboxRowsQuery, agentArgs(everyRow),
 			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
@@ -96,6 +101,19 @@ func TestMyRepliesQueriesReadTheirStatesIndex(t *testing.T) {
 			"an agent page under state=dismissed from its cursor", myAgentDismissedFromQuery,
 			agentArgs(&dismissedPage, cursorAt, cursorThread),
 			"user_agent_thread_dismissed_login_dismissed_at", "user_agent_thread_dismissed", "dismissed_at",
+		},
+		// The trigger of 20261105093507 runs in the transaction of every session reply and
+		// deletes by the root alone - the reply does not name whoever dismissed the thread - so
+		// the key's leading column is the whole reason it is (message_id, login): under the other
+		// order this delete scans a table holding a row per person per thread they have ever
+		// dismissed. The statement is the trigger's own (20261105093505's up-file), with the
+		// casts this file's other reads bind their text through.
+		{
+			"the clear trigger's delete",
+			`delete from user_agent_thread_dismissed
+				where message_id = $1::text::uuid and dismissed_at < $2::text::timestamptz`,
+			[]any{cursorThread, cursorAt},
+			"user_agent_thread_dismissed_pkey", "user_agent_thread_dismissed", "",
 		},
 	} {
 		t.Run(query.name, func(t *testing.T) {

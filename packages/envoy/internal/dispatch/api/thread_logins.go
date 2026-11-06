@@ -81,7 +81,7 @@ func commentThreadLogins(ctx context.Context, tx pgx.Tx, comment model.Comment) 
 // can have moved. An issue message moves a Replies row, so it names the logins with a row on its
 // thread root, found up in_reply_to as the user_threads trigger finds it (0095's
 // user_threads_message). An issue-less message is a direct conversation, which keeps no
-// user_threads row: it moves the Agent row of the person who opened the thread (api/replies.go,
+// user_threads row: it moves the Agent row of the person who opened the thread (api/replies_agent.go,
 // myAgentRootFilter), so it names that root author's canonical login, and [] when a session or the
 // system opened the thread and no Agent row holds it. tx must hold the message's insert.
 func messageThreadLogins(ctx context.Context, tx pgx.Tx, message model.Message) ([]string, error) {

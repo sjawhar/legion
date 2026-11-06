@@ -20,33 +20,40 @@ import (
 //
 // The set it marks is exactly what GET /api/v1/me/replies?state=unread answers under the same
 // narrowing, so it is read through that route's own filters - myRepliesUnread for the Reply rows
-// and the Agent read beside it (api/replies.go) - rather than predicates of its own: two
-// spellings of "unread" would let the button mark a row the list never showed, or leave one it
-// did.
+// (api/replies.go) and the Agent read beside it (api/replies_agent.go) - rather than predicates of
+// its own: two spellings of "unread" would let the button mark a row the list never showed, or
+// leave one it did.
 
-// inboxReadReplyThreads reads the Reply threads one request marks: the caller's unread rows
-// (myRepliesUnread, with the list route's own parameters $1 login, $2 issue, $3 document) whose
-// newest reply is at or before the read mark ($4), of the priorities ($5, null for every one,
-// with $6 for a thread whose issue carries none) and the projects ($7, null for every one) the
-// request names. It answers each thread's id and the owner this transaction locks before it
-// writes: its issue or its document. The project whose event announces the mark is not read
-// here: the update answers the project of every row it moved, and those are the projects this
-// transaction locks, after the rows (inboxReadLockDocuments).
+// inboxReplyMatchQuery builds the Reply read both write routes over these rows make: the caller's
+// rows in one state (source, one of the list route's own myRepliesUnread, myRepliesInbox and
+// myRepliesDismissed, with that route's parameters $1 login, $2 issue, $3 document) whose mark -
+// the column that state is ordered by, named by mark - is at or before $4, of the priorities ($5,
+// null for every one, with $6 for a thread whose issue carries none) and the projects ($7, null
+// for every one) the request names. It answers each thread's id and the owner this transaction
+// locks before it writes: its issue or its document. The project whose event announces the write
+// is not read here: the update answers the project of every row it moved, and those are the
+// projects this transaction locks, after the rows (inboxReadLockDocuments).
+//
+// One builder rather than a statement per state and route: the mark-all reads the caller's unread
+// rows and the dismiss route the Inbox's own or the dismissed ones (api/inbox_dismiss.go), and the
+// three differ in the state they match and the mark they narrow by and in nothing else, so three
+// spellings of it would be three places to carry a fix to the one plan below.
 //
 // The rows are matched first, as myRepliesCount matches them, so the planner reads them through
-// user_threads_unread rather than misjudging the stored flag; the narrowing this route adds is
-// applied over that set, where the issue join costs one lookup per matched row.
+// the state's own partial index rather than misjudging the stored flag; the narrowing these routes
+// add is applied over that set, where the issue join costs one lookup per matched row.
 //
 // The match reads the index and nothing else - the thread id it answers and the mark it narrows by
-// are both columns user_threads_unread holds - and each matched row's owner is then read by that
-// id, fenced from the planner as the list route's page read is (myRepliesPageRows, api/replies.go):
-// a one-step match reads the owner columns too, and the cheapest way to read a few columns of a
-// thousand rows out of a table one login owns is a scan of the whole table, which at INFRA-450's
-// a14 seed is 101,540 rows read to mark 1,300.
-const inboxReadReplyThreads = `
+// are both columns the state's partial index holds - and each matched row's owner is then read by
+// that id, fenced from the planner as the list route's page read is (myRepliesPageRows,
+// api/replies.go): a one-step match reads the owner columns too, and the cheapest way to read a
+// few columns of a thousand rows out of a table one login owns is a scan of the whole table, which
+// at INFRA-450's a14 seed is 101,540 rows read to mark 1,300.
+func inboxReplyMatchQuery(source, mark string) string {
+	return `
 	with matched as materialized (
-		select u.thread_id, u.replied_at
-		` + myRepliesUnread + `
+		select u.thread_id, u.` + mark + `
+		` + source + `
 	)
 	select m.thread_id::text, owner.issue_key, owner.artifact_id::text
 	from matched m
@@ -57,24 +64,45 @@ const inboxReadReplyThreads = `
 		offset 0
 	) owner on true
 	left join issues i on i.key = owner.issue_key
-	where m.replied_at <= least($4::text::timestamptz, now())
+	where m.` + mark + ` <= least($4::text::timestamptz, now())
 	  and ($5::int[] is null or i.priority = any($5::int[]) or ($6::boolean and i.priority is null))
 	  and ($7::text[] is null or owner.project_key = any($7::text[]))
 	order by m.thread_id`
+}
 
-// inboxReadAgentRest is what this route selects over the Inbox's one-off agent roots: each root
-// holding a reply the caller has not read, whose newest reply is at or before the read mark ($4),
-// with the unread replies the mark writes by id.
-var inboxReadAgentRest = `
-	select r.root_id::text, agent.session_id, agent.unread_reply_ids` + myAgentRootsWithFacts + `
-	where agent.replied_at <= least($4::text::timestamptz, now())
+// inboxReadReplyThreads reads the Reply threads one request marks: the caller's unread rows
+// (myRepliesUnread, read through user_threads_unread) whose newest reply is at or before the read
+// mark.
+var inboxReadReplyThreads = inboxReplyMatchQuery(myRepliesUnread, "replied_at")
+
+// inboxAgentRootsQuery builds the Agent read both write routes make over one state's roots: each
+// root the request changes, its session - which one event names - and the replies a write that
+// marks the thread read writes by id, which is inboxAgentUnreadReplies for such a write and an
+// empty array for one that leaves the read mark alone. match is what narrows those roots: the mark
+// the request carries ($4), or the ids it named ($4 again, as the array). Each root's own facts are
+// read as the list route reads them (myAgentRootsWithFacts, api/replies_agent.go), so a change to
+// either moves the list and these routes together.
+func inboxAgentRootsQuery(roots, replies, match string) string {
+	return roots + `
+	select r.root_id::text, agent.session_id, ` + replies + myAgentRootsWithFacts + `
+	where ` + match + `
 	order by r.root_id`
+}
 
-// inboxReadAgentThreads is the list route's own Agent read with that select over it: the roots
+// inboxAgentUnreadReplies is what a write that marks the thread read selects, and
+// inboxAgentRepliedThrough the narrowing the Inbox's own states take: the roots whose newest
+// session reply is at or before the mark ($4).
+const (
+	inboxAgentUnreadReplies  = `agent.unread_reply_ids`
+	inboxAgentRepliedThrough = `agent.replied_at <= least($4::text::timestamptz, now())`
+)
+
+// inboxReadAgentThreads is the list route's own unread roots with that read over them: the roots
 // holding a reply this login has not read, and each root's own facts, are myAgentUnreadRoots and
-// myAgentRootsWithFacts, the constants myAgentRowsQuery is built from (api/replies.go), so a
+// myAgentRootsWithFacts, the constants myAgentRowsQuery is built from (api/replies_agent.go), so a
 // change to either moves the list and this button together.
-var inboxReadAgentThreads = myAgentUnreadRoots + inboxReadAgentRest
+var inboxReadAgentThreads = inboxAgentRootsQuery(
+	myAgentUnreadRoots, inboxAgentUnreadReplies, inboxAgentRepliedThrough)
 
 // The lock statements of this transaction, which it takes in the order markInboxReadThreads
 // writes down: the owner rows of the threads it marks `for share`, then the caller's own
@@ -140,16 +168,32 @@ var inboxReadPriorityLevels = map[string]int32{"P0": 0, "P1": 1, "P2": 2, "P3": 
 
 const inboxReadNone = "none"
 
-// inboxReadRequest is the body: the read mark, and the same narrowing the Inbox's filter writes
-// into the list route's query. Every list is optional and an absent one means every value.
+// inboxThreadFilters is the narrowing the Inbox's filter writes into the list route's query, as
+// the two write routes over these rows read it off their body: the mark-all (inboxReadRequest) and
+// the dismiss route (inboxDismissRequest, api/inbox_dismiss.go), which read it with one parser
+// (parseInboxReadScope). Every list is optional and an absent one means every value. It is one
+// embedded struct rather than six fields spelled in each body, so the two cannot drift into
+// refusing different requests.
+type inboxThreadFilters struct {
+	Kind     []string `json:"kind"`
+	Priority []string `json:"priority"`
+	Urgency  []string `json:"urgency"`
+	Project  []string `json:"project"`
+	Issue    string   `json:"issue"`
+	Artifact string   `json:"artifact"`
+}
+
+// narrows is whether a request carries any of them, which is what a request that names its own
+// rows may not do (dismissInbox).
+func (filters inboxThreadFilters) narrows() bool {
+	return len(filters.Kind) > 0 || len(filters.Priority) > 0 || len(filters.Urgency) > 0 ||
+		len(filters.Project) > 0 || filters.Issue != "" || filters.Artifact != ""
+}
+
+// inboxReadRequest is the body: the read mark, and that narrowing.
 type inboxReadRequest struct {
-	ReadThrough *string  `json:"read_through"`
-	Kind        []string `json:"kind"`
-	Priority    []string `json:"priority"`
-	Urgency     []string `json:"urgency"`
-	Project     []string `json:"project"`
-	Issue       string   `json:"issue"`
-	Artifact    string   `json:"artifact"`
+	ReadThrough *string `json:"read_through"`
+	inboxThreadFilters
 }
 
 // inboxReadResponse answers how many threads the request marked: the Reply threads whose mark
@@ -179,7 +223,7 @@ type inboxReadScope struct {
 // parseInboxReadScope reads the narrowing. kind defaults to both, unlike the list route's default
 // of reply alone: the button sits over one list of both kinds, and a person who has filtered
 // nothing means all of it.
-func parseInboxReadScope(input inboxReadRequest) (inboxReadScope, error) {
+func parseInboxReadScope(input inboxThreadFilters) (inboxReadScope, error) {
 	scope := inboxReadScope{priorityNone: true, projectNone: true, urgencyNone: true}
 	reply, agent, err := parseThreadKinds(input.Kind)
 	if err != nil {
@@ -256,8 +300,10 @@ func (scope inboxReadScope) wantsAgentThreads() bool {
 }
 
 // inboxReadThreads is what the transaction read before it took a lock or wrote a row: the Reply
-// threads to mark with the owners to lock for them, and the Agent threads' unread replies, their
-// sessions and their roots.
+// threads to write over with the owners to lock for them, the Agent threads' unread replies, their
+// sessions and their roots, and the Agent roots themselves. Both write routes over these rows read
+// into it (api/inbox_dismiss.go), which is what lets them share this read, the owner lock and the
+// agent-reply write.
 type inboxReadThreads struct {
 	threads   []string
 	documents []string
@@ -267,6 +313,11 @@ type inboxReadThreads struct {
 	sessions []string
 	replies  []string
 	roots    map[string]string
+	// agentRoots are the Agent threads the request changes, sorted, and rootSessions names each
+	// root's session, which is one event each. They are the dismiss route's to use: the mark-all
+	// writes no row per root, it marks the replies.
+	agentRoots   []string
+	rootSessions map[string]string
 }
 
 // markInboxRead answers POST /api/v1/me/inbox/read.
@@ -291,7 +342,7 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	scope, err := parseInboxReadScope(input)
+	scope, err := parseInboxReadScope(input.inboxThreadFilters)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -311,20 +362,25 @@ func (s *server) markInboxRead(w http.ResponseWriter, r *http.Request) {
 // has committed.
 //
 // This comment is where the Inbox's read-mark lock order is written down. putThreadRead
-// (api/replies.go), the lock statements above, the race tests and packages/envoy/AGENTS.md
-// point here rather than saying it again.
+// (api/replies.go), the dismiss route (api/inbox_dismiss.go), the lock statements above, the
+// race tests and packages/envoy/AGENTS.md point here rather than saying it again.
 //
-// The order is owner, then the caller's rows, then the agent replies it prunes, then the project
-// its events name:
+// The order is owner, then the caller's rows, then the agent rows it writes, then the project
+// its events name. Step 3 is the dismiss route's alone - this button writes no dismissal - and
+// it is numbered here rather than there because one order written in two places is two orders
+// as soon as one of them is edited:
 //
 //  1. the owner row of every thread it marks, `for share`, documents then issues, in ascending
 //     owner-key order (lockInboxReadOwners, inboxReadLockDocuments);
 //  2. the caller's user_threads rows, `for no key update`, in ascending thread_id order
 //     (inboxReadLockThreads), which the update that follows re-locks;
-//  3. the caller's dead user_agent_reply_read rows, `for no key update`, in ascending reply_id
+//  3. the caller's own user_agent_thread_dismissed rows, `for no key update`, in ascending
+//     message_id order (inboxDismissLockAgentThreads, api/inbox_dismiss.go), which the insert
+//     or the delete that follows re-locks;
+//  4. the caller's dead user_agent_reply_read rows, `for no key update`, in ascending reply_id
 //     order, which the same statement deletes (pruneAgentReplies, api/state.go); the other
 //     writer of that table, putUserAgentState, takes them in that order too;
-//  4. the project of every row that update moved, through LockOwners, in sorted key order and
+//  5. the project of every row that update moved, through LockOwners, in sorted key order and
 //     before the first append.
 //
 // PUT /api/v1/me/threads/{id}/read takes that same order over its one thread, and the two need
@@ -371,7 +427,7 @@ func (s *server) markInboxReadThreads(
 	if _, err := tx.Exec(ctx, "set local statement_timeout = '"+inboxReadStatementTimeout+"'"); err != nil {
 		return 0, nil, fmt.Errorf("bound the mark-all's statements: %w", err)
 	}
-	read, err := s.readInboxReadThreads(ctx, tx, actor, login, readThrough, scope)
+	read, err := readInboxReadThreads(ctx, tx, actor, login, readThrough, scope)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -382,7 +438,7 @@ func (s *server) markInboxReadThreads(
 	events := []model.Event{}
 	marked := 0
 	if len(read.threads) > 0 {
-		projects, err := markInboxReadReplyThreads(ctx, tx, login, readThrough, read.threads)
+		projects, err := writeInboxThreadMarks(ctx, tx, login, read.threads, inboxReadMarkThreads, []any{readThrough})
 		if err != nil {
 			return 0, nil, fmt.Errorf("mark the inbox's threads read: %w", err)
 		}
@@ -405,17 +461,24 @@ func (s *server) markInboxReadThreads(
 			events = append(events, userAgentStateEvent(actor, session))
 		}
 	}
-	// A request that moved nothing announces nothing and has nothing to commit: the Inbox marks
-	// itself read on every click, and each event would refetch the list in every tab the viewer
-	// has open.
+	return s.commitInboxMarks(ctx, tx, marked, events)
+}
+
+// commitInboxMarks ends both write routes over these rows. A request that changed nothing
+// announces nothing and has nothing to commit: the Inbox marks itself read on every click, and
+// each event would refetch the list in every tab the viewer has open. A request that changed
+// something takes the project of every event it appends - step 5 of the lock order above, in one
+// sorted order after the rows it wrote and before the first append, an agent reply's event naming
+// no owner and so taking no lock here - appends them and commits. It answers the count its caller
+// answers, 0 when nothing changed, and the events to publish once the transaction has committed.
+func (s *server) commitInboxMarks(
+	ctx context.Context, tx pgx.Tx, changed int, events []model.Event,
+) (int, []model.Event, error) {
 	if len(events) == 0 {
 		return 0, nil, tx.Rollback(ctx)
 	}
-	// Step 4 of the lock order above: every project this transaction announces in, taken in one
-	// sorted order after the rows it marked and before the first append. An agent reply's event
-	// names no owner, so it takes no lock here.
 	if err := s.deps.Events.LockOwners(ctx, tx, events...); err != nil {
-		return 0, nil, fmt.Errorf("lock the marked threads' projects: %w", err)
+		return 0, nil, fmt.Errorf("lock the changed threads' projects: %w", err)
 	}
 	appended := make([]model.Event, 0, len(events))
 	for _, event := range events {
@@ -428,81 +491,109 @@ func (s *server) markInboxReadThreads(
 	if err := tx.Commit(ctx); err != nil {
 		return 0, nil, err
 	}
-	return marked, appended, nil
+	return changed, appended, nil
 }
 
 // readInboxReadThreads reads both kinds of thread this request marks, and the owners to lock for
 // them, each list sorted so the locks that follow are taken in one order.
-func (s *server) readInboxReadThreads(
+func readInboxReadThreads(
 	ctx context.Context, tx pgx.Tx, actor model.Actor, login, readThrough string, scope inboxReadScope,
 ) (inboxReadThreads, error) {
-	read := inboxReadThreads{roots: map[string]string{}}
+	read := inboxReadThreads{roots: map[string]string{}, rootSessions: map[string]string{}}
 	if scope.wantsReplyThreads() {
-		rows, err := tx.Query(ctx, inboxReadReplyThreads,
+		if err := readInboxReplyRows(ctx, tx, &read, inboxReadReplyThreads,
 			login, scope.issue, scope.artifact, readThrough,
-			scope.priorities, scope.priorityNone, scope.projects)
-		if err != nil {
-			return read, fmt.Errorf("read the inbox's unread threads: %w", err)
+			scope.priorities, scope.priorityNone, scope.projects); err != nil {
+			return read, err
 		}
-		defer rows.Close()
-		documents, issues := map[string]struct{}{}, map[string]struct{}{}
-		for rows.Next() {
-			var thread string
-			var issueKey, artifactID *string
-			if err := rows.Scan(&thread, &issueKey, &artifactID); err != nil {
-				return read, fmt.Errorf("scan an unread thread: %w", err)
-			}
-			read.threads = append(read.threads, thread)
-			if issueKey != nil {
-				issues[*issueKey] = struct{}{}
-			}
-			if artifactID != nil {
-				documents[*artifactID] = struct{}{}
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return read, fmt.Errorf("read the inbox's unread threads: %w", err)
-		}
-		read.documents = slices.Sorted(maps.Keys(documents))
-		read.issues = slices.Sorted(maps.Keys(issues))
 	}
 	if scope.wantsAgentThreads() {
 		args := append(unreadDirectRepliesArgs(actor.ID, nil), readThrough)
-		rows, err := tx.Query(ctx, inboxReadAgentThreads, args...)
-		if err != nil {
-			return read, fmt.Errorf("read the inbox's unread agent threads: %w", err)
-		}
-		defer rows.Close()
-		sessions := map[string]string{}
-		for rows.Next() {
-			var root, session string
-			var replies []string
-			if err := rows.Scan(&root, &session, &replies); err != nil {
-				return read, fmt.Errorf("scan an unread agent thread: %w", err)
-			}
-			for _, reply := range replies {
-				read.replies = append(read.replies, reply)
-				read.roots[reply] = root
-				sessions[reply] = session
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return read, fmt.Errorf("read the inbox's unread agent threads: %w", err)
-		}
-		// One lock order for the new rows, the ids' own, as putUserAgentState sorts them: two
-		// writes naming the same replies in opposite orders would wait on each other.
-		slices.Sort(read.replies)
-		read.sessions = make([]string, 0, len(read.replies))
-		for _, reply := range read.replies {
-			read.sessions = append(read.sessions, sessions[reply])
+		if err := readInboxAgentRows(ctx, tx, &read, inboxReadAgentThreads, args); err != nil {
+			return read, err
 		}
 	}
 	return read, nil
 }
 
+// readInboxReplyRows reads the Reply threads one statement matches and the owners to lock for
+// them, each sorted. Both write routes over these rows read through it: their statements differ in
+// the state they match and the mark they narrow by (inboxReplyMatchQuery), and the three columns
+// they answer are the same three.
+func readInboxReplyRows(
+	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, args ...any,
+) error {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("read the inbox's threads: %w", err)
+	}
+	defer rows.Close()
+	documents, issues := map[string]struct{}{}, map[string]struct{}{}
+	for rows.Next() {
+		var thread string
+		var issueKey, artifactID *string
+		if err := rows.Scan(&thread, &issueKey, &artifactID); err != nil {
+			return fmt.Errorf("scan one of the inbox's threads: %w", err)
+		}
+		read.threads = append(read.threads, thread)
+		if issueKey != nil {
+			issues[*issueKey] = struct{}{}
+		}
+		if artifactID != nil {
+			documents[*artifactID] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the inbox's threads: %w", err)
+	}
+	read.documents = slices.Sorted(maps.Keys(documents))
+	read.issues = slices.Sorted(maps.Keys(issues))
+	return nil
+}
+
+// readInboxAgentRows reads the Agent threads one statement matches: each root, its session and the
+// replies a write that marks the thread read writes by id, sorted as those writes take them. The
+// roots are sorted too, for the dismissal that writes one row per root (api/inbox_dismiss.go).
+func readInboxAgentRows(
+	ctx context.Context, tx pgx.Tx, read *inboxReadThreads, query string, args []any,
+) error {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("read the inbox's agent threads: %w", err)
+	}
+	defer rows.Close()
+	sessions := map[string]string{}
+	for rows.Next() {
+		var root, session string
+		var replies []string
+		if err := rows.Scan(&root, &session, &replies); err != nil {
+			return fmt.Errorf("scan one of the inbox's agent threads: %w", err)
+		}
+		read.agentRoots = append(read.agentRoots, root)
+		read.rootSessions[root] = session
+		for _, reply := range replies {
+			read.replies = append(read.replies, reply)
+			read.roots[reply] = root
+			sessions[reply] = session
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the inbox's agent threads: %w", err)
+	}
+	slices.Sort(read.agentRoots)
+	// One lock order for the new rows, the ids' own, as putUserAgentState sorts them: two
+	// writes naming the same replies in opposite orders would wait on each other.
+	slices.Sort(read.replies)
+	read.sessions = make([]string, 0, len(read.replies))
+	for _, reply := range read.replies {
+		read.sessions = append(read.sessions, sessions[reply])
+	}
+	return nil
+}
+
 // lockInboxReadOwners takes the owner row of every thread this request marks, step 1 of the
 // lock order markInboxReadThreads writes down. The caller's rows follow, in
-// markInboxReadReplyThreads, and the projects after them.
+// writeInboxThreadMarks, and the projects after them.
 func lockInboxReadOwners(ctx context.Context, tx pgx.Tx, read inboxReadThreads) error {
 	if len(read.documents) > 0 {
 		if _, err := tx.Exec(ctx, inboxReadLockDocuments, read.documents); err != nil {
@@ -524,19 +615,24 @@ type inboxReadMarked struct {
 	keys   []string
 }
 
-// markInboxReadReplyThreads takes the caller's rows in thread_id order, runs the Reply threads'
-// one update over them and reads back the project of every row it moved. A thread already read
-// past the mark is locked with the rest - what orders two presses must be the rows they named,
-// not the rows one of them happens to move - but it is not among those answered: its
-// read_through is the later one, the update leaves it alone, and the answer does not count it.
-func markInboxReadReplyThreads(ctx context.Context, tx pgx.Tx, login, readThrough string, threads []string) (inboxReadMarked, error) {
+// writeInboxThreadMarks takes the caller's rows in thread_id order, runs one mark statement over
+// them and reads back the project of every row it changed. A row the statement leaves alone - a
+// thread already read past the mark, one already dismissed, one that carries no dismissal under a
+// restore - is locked with the rest, since what orders two requests must be the rows they named
+// rather than the rows one of them happens to move, and it is not among those answered.
+//
+// Every statement it runs binds the caller ($1), the mark it stores when it stores one, and the
+// rows last (inboxMarkArgs), so mark carries that one parameter or none: a restore stores none.
+func writeInboxThreadMarks(
+	ctx context.Context, tx pgx.Tx, login string, threads []string, query string, mark []any,
+) (inboxReadMarked, error) {
 	moved := inboxReadMarked{}
 	// Step 2 of that order: the update below locks what its plan reaches in the order it
 	// reaches it, which is not one order across two presses (markInboxReadThreads).
 	if _, err := tx.Exec(ctx, inboxReadLockThreads, login, threads); err != nil {
 		return moved, fmt.Errorf("lock the caller's threads: %w", err)
 	}
-	rows, err := tx.Query(ctx, inboxReadMarkThreads, login, readThrough, threads)
+	rows, err := tx.Query(ctx, query, inboxMarkArgs(login, mark, threads)...)
 	if err != nil {
 		return moved, err
 	}
@@ -555,6 +651,12 @@ func markInboxReadReplyThreads(ctx context.Context, tx pgx.Tx, login, readThroug
 	}
 	moved.keys = slices.Sorted(maps.Keys(projects))
 	return moved, nil
+}
+
+// inboxMarkArgs are one mark statement's parameters, the shape every mark on these two routes
+// takes: the caller, the mark it stores if it stores one, and the rows it writes over.
+func inboxMarkArgs(login string, mark []any, rows []string) []any {
+	return append(append([]any{login}, mark...), rows)
 }
 
 // markInboxReadAgentReplies writes the agent replies by id and prunes what the sessions' own read

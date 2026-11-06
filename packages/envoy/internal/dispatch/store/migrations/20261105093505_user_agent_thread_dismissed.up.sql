@@ -12,10 +12,19 @@
 -- myAgentDismissedRoot). A dismiss of a thread that came back writes its row again, the one the
 -- trigger deleted.
 --
--- The index is the Dismissed view's read: the login it narrows to, then the order it answers in and
--- the cursor it resumes from (newest dismissal first, ties by message id descending), so one index
--- scan answers a page of 200 with no sort. The primary key is what the Inbox list's own read
--- asks - is this root dismissed for this login - and what a dismiss and a restore write by key.
+-- The key is (message_id, login) rather than (login, message_id), which is the one order that
+-- leaves this table two indexes instead of three. Three reads ask it anything at all. A dismiss
+-- and a restore name both columns, so either order answers them. The Inbox's own reads ask for one
+-- person's whole set of marks (api/replies_agent.go, myAgentDismissedRootSet), which the index below
+-- answers index-only, login first. And 20261105093507's trigger deletes by the root alone - the
+-- reply that brings a thread back does not name whoever dismissed it - which only an index with
+-- message_id leading can read: under the other order every session reply would scan the table,
+-- one row per person per thread they have ever dismissed, 110,000 of them for one person at
+-- INFRA-450's a14 seed.
+--
+-- The index is the Dismissed view's read: the login it narrows to, then the order it answers in
+-- and the cursor it resumes from (newest dismissal first, ties by message id descending), so one
+-- index scan answers a page of 200 with no sort.
 --
 -- A create table and its index take ACCESS EXCLUSIVE on a relation no other transaction can see
 -- yet, since the table does not exist until this migration commits: no reader and no writer of any
@@ -31,7 +40,7 @@ create table user_agent_thread_dismissed (
   login        text not null,
   message_id   uuid not null,
   dismissed_at timestamptz not null,
-  primary key (login, message_id)
+  primary key (message_id, login)
 );
 
 create index user_agent_thread_dismissed_login_dismissed_at

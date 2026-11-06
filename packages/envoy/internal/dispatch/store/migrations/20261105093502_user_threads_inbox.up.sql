@@ -13,7 +13,7 @@
 -- undismissed row carrying a replied_at, read rows included. The window is therefore one scan and
 -- sort of user_threads, with no row rewritten and none refused, and the census answers 0.
 -- Migrations run in one transaction, so create index concurrently is impossible here; it is a
--- plain create index, as 0148's and 20261103071942's are.
+-- plain create index, as 0148's is.
 --
 -- Measured on this pod's test database: user_threads held 24 rows after the api suite's Inbox
 -- seeds, the largest any one test's database held while

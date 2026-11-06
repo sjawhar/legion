@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -641,5 +642,164 @@ func TestADismissedAgentThreadComesBackOnlyOnASessionReplyPastItsMark(t *testing
 	}
 	if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, seed.agent) {
 		t.Fatalf("state=unread = %#v, want the agent thread unread again", unread)
+	}
+}
+
+// threadArtifact is the document a Reply thread hangs under, as the caller's own row names it.
+// The seed knows its threads by id and the Inbox never answers an owner, so the owner a request
+// locks is read back from the row the trigger wrote.
+func threadArtifact(t *testing.T, database *store.Store, login, thread string) string {
+	t.Helper()
+	var artifact string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select artifact_id::text from user_threads where login = $1 and thread_id = $2
+	`, login, thread).Scan(&artifact); err != nil {
+		t.Fatalf("read the document %s's thread %s hangs under: %v", login, thread, err)
+	}
+	return artifact
+}
+
+// holdGateDocument holds one document's row the way a write to it takes it, on a connection of
+// the test's own, so a dismiss that locks that document queues behind this transaction. It
+// releases once however many callers ask, as holdGateThread does and for the same reason.
+func holdGateDocument(t *testing.T, database *store.Store, document string) gateHold {
+	t.Helper()
+	held, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("hold the gate document's row: %v", err)
+	}
+	var once sync.Once
+	hold := gateHold{
+		tx:      held,
+		release: func() { once.Do(func() { _ = held.Rollback(context.Background()) }) },
+	}
+	t.Cleanup(hold.release)
+	if _, err := held.Exec(context.Background(), `
+		select 1 from artifacts where id = $1 for no key update
+	`, document); err != nil {
+		t.Fatalf("hold the gate document's row: %v", err)
+	}
+	return hold
+}
+
+// A dismiss reads the rows it changes before it writes their marks, and between the two it waits
+// for every lock the order takes. A reply by somebody else that commits inside that window leaves
+// its thread in the Inbox, unread: the alternative is a thread dismissed under a mark older than
+// a reply nobody has read, which nothing undoes - user_threads_record and the trigger of
+// 20261105093507 each clear a mark that is already there, and a mark written after they have run
+// is not.
+//
+// The window is made rather than waited for, as TestInboxReadRacingAnotherMarkAll makes its
+// crossing, and it is the real one rather than a thread back-dated into it: every row holds the
+// row of a document the request dismisses a thread of. That document is step 1 of the request's
+// lock order (markInboxReadThreads, api/inbox_read.go), taken after the read and before the
+// issues and every write, so a request queued on it has read its rows and written none, and
+// WaitForStatementBehind watches for that one statement rather than counting whoever waits. The
+// reply each row then writes lands somewhere the gate does not reach - another issue's thread, or
+// an Agent thread, which has no owner row at all - so it commits while the dismiss waits.
+//
+// The Agent row dismisses a Reply thread beside its root for that gate alone: an agent-only
+// request locks no owner, and the one row it would queue on, its own dismissal, is the row it is
+// about to write.
+//
+// What no row here reaches is the reply whose own transaction commits after the dismiss's write
+// statement has begun. On the Reply half that one is the trigger's: it waits on the row the
+// dismiss holds and clears the mark behind it. On the Agent half there is no row to wait on
+// until the insert commits, so a reply written inside that one statement can still find no mark
+// to delete and leave one behind it - a window of one statement, where the window these rows
+// close is every lock the request waits for.
+func TestDismissLeavesAThreadRepliedToWhileItRan(t *testing.T) {
+	for name, row := range map[string]struct {
+		// body is the dismiss under test, and write the reply by somebody else that commits
+		// while it waits. thread is the row that must come out of it still in the Inbox, and
+		// mark its stored dismissal, which must be none.
+		body   func(seed inboxReadSeed) map[string]any
+		write  func(t *testing.T, seed inboxReadSeed)
+		thread func(seed inboxReadSeed) string
+		mark   func(t *testing.T, seed inboxReadSeed) *time.Time
+	}{
+		"a named reply dismiss": {
+			body: func(seed inboxReadSeed) map[string]any {
+				return map[string]any{"threads": []string{
+					inboxDismissReplyPrefix + seed.document, inboxDismissReplyPrefix + seed.first,
+				}}
+			},
+			write: func(t *testing.T, seed inboxReadSeed) {
+				sessionComment(t, seed.handler, "/api/v1/issues/"+seed.firstIssue+"/comments",
+					map[string]any{"body": "One more thing.", "reply_to": seed.first})
+			},
+			thread: func(seed inboxReadSeed) string { return seed.first },
+			mark: func(t *testing.T, seed inboxReadSeed) *time.Time {
+				return threadDismissal(t, seed.database, "alice", seed.first)
+			},
+		},
+		"a filtered reply dismiss": {
+			body: func(seed inboxReadSeed) map[string]any {
+				return map[string]any{
+					"dismiss_through": time.Now().UTC().Format(time.RFC3339Nano),
+					"kind":            []string{myReplyKindReply},
+				}
+			},
+			write: func(t *testing.T, seed inboxReadSeed) {
+				sessionComment(t, seed.handler, "/api/v1/issues/"+seed.firstIssue+"/comments",
+					map[string]any{"body": "One more thing.", "reply_to": seed.first})
+			},
+			thread: func(seed inboxReadSeed) string { return seed.first },
+			mark: func(t *testing.T, seed inboxReadSeed) *time.Time {
+				return threadDismissal(t, seed.database, "alice", seed.first)
+			},
+		},
+		"an agent dismiss": {
+			body: func(seed inboxReadSeed) map[string]any {
+				return map[string]any{"threads": []string{
+					inboxDismissReplyPrefix + seed.document, inboxDismissAgentPrefix + seed.agent,
+				}}
+			},
+			write: func(t *testing.T, seed inboxReadSeed) {
+				replied := replyTo(t, seed.handler, seed.agent, "And another thing.")
+				if replied.Code != http.StatusCreated {
+					t.Fatalf("reply to the agent thread: status=%d body=%s", replied.Code, replied.Body.String())
+				}
+			},
+			thread: func(seed inboxReadSeed) string { return seed.agent },
+			mark: func(t *testing.T, seed inboxReadSeed) *time.Time {
+				return agentThreadDismissal(t, seed.database, "alice", seed.agent)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			seed := seedInboxRead(t)
+			handler, database := seed.handler, seed.database
+			held := holdGateDocument(t, database, threadArtifact(t, database, "alice", seed.document))
+			answered := make(chan *httptest.ResponseRecorder, 1)
+			go func() { answered <- postInboxDismiss(t, handler, "alice", row.body(seed)) }()
+			if storetest.WaitForStatementBehind(t, database, held.tx, inboxReadLockDocuments, 10*time.Second) == 0 {
+				t.Fatal("the dismiss never queued on the document row it locks before it writes")
+			}
+			row.write(t, seed)
+			held.release()
+			response := <-answered
+			if response.Code != http.StatusOK {
+				t.Fatalf("the dismiss answered %d %s", response.Code, response.Body.String())
+			}
+			// The gate thread, which nobody wrote in, is dismissed: the request ran whole, so
+			// what the thread under test shows is this one comparison and not a request lost.
+			if at := threadDismissal(t, database, "alice", seed.document); at == nil {
+				t.Fatal("the document thread carries no mark, so the dismiss wrote nothing at all")
+			}
+			thread := row.thread(seed)
+			if at := row.mark(t, seed); at != nil {
+				t.Fatalf("thread %s was dismissed at %s, past a reply nobody has read", thread, at)
+			}
+			if inbox := threadsInState(t, handler, "alice", myRepliesStateInbox); !slices.Contains(inbox, thread) {
+				t.Fatalf("state=inbox = %#v, want the thread replied to while the dismiss ran", inbox)
+			}
+			if away := threadsInState(t, handler, "alice", myRepliesStateDismissed); slices.Contains(away, thread) {
+				t.Fatalf("state=dismissed = %#v, want the thread replied to while the dismiss ran left out of it", away)
+			}
+			if unread := unreadThreads(t, handler, "alice"); !slices.Contains(unread, thread) {
+				t.Fatalf("state=unread = %#v, want the thread replied to while the dismiss ran unread", unread)
+			}
+		})
 	}
 }
