@@ -770,7 +770,8 @@ func TestLaunchSettingsHoldEveryLaunchKeyOfTheClassTable(t *testing.T) {
 		"runtime.kubernetes.resources.controller", "runtime.kubernetes.resources.issue",
 		"runtime.kubernetes.scheduling.node_selector", "runtime.kubernetes.scheduling.priority_class",
 		"runtime.kubernetes.scheduling.tolerations",
-		"runtime.kubernetes.session_store", "runtime.kubernetes.setup", "runtime.kubernetes.storage_class",
+		"runtime.kubernetes.session_store", "runtime.kubernetes.setup",
+		"runtime.kubernetes.skills_repository", "runtime.kubernetes.storage_class",
 		"runtime.kubernetes.test_postgres", "worker_backends",
 	}
 	if got := slices.Sorted(maps.Keys(settings)); !slices.Equal(got, want) {
