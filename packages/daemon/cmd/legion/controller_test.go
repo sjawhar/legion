@@ -115,17 +115,18 @@ func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerD
 // App tokens from tokens for a project under two owners, acme and sjawhar, for the tests of the
 // controller's GitHub credential fetch and refresh loop.
 func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *controllerDaemon {
-	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens, owners: []string{"sjawhar", "acme"}})
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens,
+		repos: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}})
 }
 
 // controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
 // the project's mapped repositories (for the controller's addressing), and, for the
-// tests of the controller's GitHub credential route, a Tokens fake and the owners of the
-// project's repositories its mints need.
+// tests of the controller's GitHub credential route, a Tokens fake and the project's served
+// repositories its mints are narrowed to.
 type controllerDaemonOptions struct {
 	gate         config.DesignGate
 	tokens       appauth.Tokens
-	owners       []string
+	repos        []ghrepo.Repository
 	repositories []string
 	// rawStateBody, set, replaces GET /legion/v1/state's whole response body verbatim (for a
 	// malformed or structurally invalid body a real projection never produces: `{}`, `null`, a
@@ -196,7 +197,7 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
 		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Tokens: opts.tokens, GitHubOwners: func() []string { return opts.owners },
+		Tokens: opts.tokens, GitHubRepositories: func() []ghrepo.Repository { return opts.repos },
 		State: fixedStateSource{repositories: opts.repositories}, StateTransactions: fixedStateTransactions{},
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1693,7 +1694,7 @@ func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
 	c := newControllerStart(t, d, controllerOptions{})
 	ghDir := filepath.Join(c.defaultDir, "gh")
 	stale := ghconfig.Render("ghs_stale_from_an_earlier_run", "review", time.Now().Add(time.Hour))
-	if _, err := ghconfig.WriteBundle(ghDir, ghconfig.Bundle{Default: "acme", Owners: map[string]ghconfig.Rendered{"acme": stale}}); err != nil {
+	if _, err := ghconfig.WriteBundle(ghDir, ghconfig.Bundle{Default: "acme", Dirs: map[string]ghconfig.Rendered{"acme": stale}}); err != nil {
 		t.Fatalf("seed the stale gh bundle: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), []byte(stale.Hosts), 0o600); err != nil {

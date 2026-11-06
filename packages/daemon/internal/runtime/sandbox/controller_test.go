@@ -243,7 +243,7 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	if secret := g.secret(secretName(name)); secret != nil {
 		t.Errorf("the controller's launch wrote the provisioning Secret %s: %v", secretName(name), secret.Data)
 	}
-	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data) != 2+2*len(staticOwners) || len(secret.Data[LauncherTokenFile]) == 0 {
+	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data) != 2+2*len(staticDirs) || len(secret.Data[LauncherTokenFile]) == 0 {
 		t.Fatalf("the controller's role Secret holds %+v, want the launcher token, the default and the review App's gh files of each owner, and nothing else", secret)
 	}
 	for _, role := range claim.Roles {
@@ -266,7 +266,7 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 // (writeLauncherSecrets): a credential source that refuses every mint fails the launch naming the
 // controller role, exactly as it would an issue pod's role.
 func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) {
-	credential := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+	credential := func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubCredential = credential }))
@@ -286,7 +286,7 @@ func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) 
 // nothing to refresh and logs nothing.
 func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
 	logs := &lockedLog{}
-	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+	noOwner := func(context.Context, claim.Role, ghrepo.Repository) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
 	}
 	options := withOptions(func(o *Options) {

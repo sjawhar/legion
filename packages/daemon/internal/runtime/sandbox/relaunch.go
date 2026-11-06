@@ -836,9 +836,9 @@ func (r *Runtime) waitedOut(ctx context.Context, s *sandbox) string {
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
 // launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
-// credential, its gh bundle (gitHubBundles): each owner's hosts.yml and config.yml (GitHubHostsKey,
-// GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container projects at
-// GHConfigDir.
+// credential, its gh bundle (gitHubBundles): each directory's hosts.yml and config.yml
+// (GitHubHostsKey, GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container
+// projects at GHConfigDir.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launch) error {
 	bundles, err := r.gitHubBundles(ctx, l)
 	if err != nil {
@@ -851,9 +851,9 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 		}
 		bundle := bundles[role]
 		data := map[string][]byte{LauncherTokenFile: []byte(token), GitHubDefaultKey: []byte(bundle.Default)}
-		for _, owner := range l.gitHubOwners {
-			rendered := bundle.Owners[owner]
-			data[GitHubHostsKey(owner)], data[GitHubConfigKey(owner)] = []byte(rendered.Hosts), []byte(rendered.Config)
+		for _, dir := range l.gitHubDirs {
+			rendered := bundle.Dirs[dir]
+			data[GitHubHostsKey(dir)], data[GitHubConfigKey(dir)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
 		if err := r.upsertSecret(ctx, corev1.Secret{
 			ObjectMeta: r.secretMeta(s, *l, roleSecretName(s.Name, role)),
@@ -866,28 +866,30 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 			r.log.Info("sandbox runtime: no GitHub owner to act for; the role's gh acts as nobody", "sandbox", s.Name, "role", role)
 			continue
 		}
-		written := bundle.Owners[bundle.Default]
+		written := bundle.Dirs[bundle.Default]
 		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
+			"expiresAt", written.ExpiresAt, "dirs", l.gitHubDirs)
 	}
 	return nil
 }
 
-// gitHubBundles mints each launcher role's gh bundle for the issue's repository's owner
-// (Options.GitHubCredential) and records the bundle's owners and default on l, which the pod's gh
-// volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
-// and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
-// refuses does, naming the role, since a pod whose gh holds no token would start every role unable
-// to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
-// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
-// nobody, as `legion controller start` does there, its bundle empty — no owner, no default — and
-// its gh directory an empty one (volumes).
+// gitHubBundles mints each launcher role's gh bundle for the issue's repository
+// (Options.GitHubCredential) and records the bundle's directories and default on l, which the
+// pod's gh volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the
+// same directories and default, and one that does not fails the launch, as a mint that fails or a
+// bundle Validate refuses does, naming the role, since a pod whose gh holds no token would start
+// every role unable to reach GitHub. The one exception is the controller of a project with no
+// GitHub owner to mint for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it
+// runs with gh acting as nobody, as `legion controller start` does there, its bundle empty — no
+// directory, no default — and its gh directory an empty one (volumes). The controller's launch
+// names no repository of its own (its spec carries none), which is what makes its bundle
+// read-only throughout.
 func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
-	l.gitHubOwners, l.gitHubDefault = nil, ""
+	l.gitHubDirs, l.gitHubDefault = nil, ""
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
 	for i, role := range l.roles {
 		minting, cancel := call(ctx)
-		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
+		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository)
 		cancel()
 		switch {
 		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
@@ -898,12 +900,12 @@ func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]
 		if err != nil {
 			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
 		}
-		owners := bundle.OwnerNames()
+		dirs := bundle.DirNames()
 		if i == 0 {
-			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
-		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
-			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
-				role, owners, bundle.Default, l.gitHubOwners, l.gitHubDefault)
+			l.gitHubDirs, l.gitHubDefault = dirs, bundle.Default
+		} else if !slices.Equal(dirs, l.gitHubDirs) || bundle.Default != l.gitHubDefault {
+			return nil, fmt.Errorf("write the github credential for %s: its directories %v (default %s) are not the pod's %v (default %s)",
+				role, dirs, bundle.Default, l.gitHubDirs, l.gitHubDefault)
 		}
 		bundles[role] = bundle
 	}

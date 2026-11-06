@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -520,7 +521,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		Executable:       func() (string, error) { return r.legion, nil },
 		GitHubCredential: staticCredential,
 		GH:               fakeGH,
-		RepositoryOwner:  acmeOwner,
+		ClaimRepository:  acmeWidgets,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -1116,14 +1117,14 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	// wrote its credential would change the live pane's gh files.
 	var mintMu sync.Mutex
 	mints := 0
-	minting := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
-		bundle, err := staticCredential(ctx, role, owner)
+	minting := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, repo)
 		mintMu.Lock()
 		mints++
 		token := fmt.Sprintf("ghs_mint_%d", mints)
 		mintMu.Unlock()
-		written := bundle.Owners[bundle.Default]
-		bundle.Owners[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
+		written := bundle.Dirs[bundle.Default]
+		bundle.Dirs[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
 		return bundle, err
 	}
 	withMinting := func(o *Options) { o.GitHubCredential = minting }

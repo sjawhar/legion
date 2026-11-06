@@ -511,11 +511,9 @@ func TestReadTokenDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing.T) 
 	if read.Token != "installation-77-2" {
 		t.Fatalf("read token = %q, want installation-77-2, the exchange that named no actions", read.Token)
 	}
-	// INFRA-513 t4: the controller's whole bundle was minted here, through GitHubCredential,
-	// which names no repository until the next commit of this pull request gives it the project's
-	// mapped repositories. The second owner's read token is asked for directly meanwhile, which
-	// is what the bundle did for it: one mint per owner, each refused its actions and served
-	// without them.
+	// The second owner's read token is asked for directly, which is what a controller's bundle
+	// does for it (ControllerCredential): one mint per owner, over the repositories that owner
+	// serves, each refused its actions and served without them.
 	second, err := tokens.ReadToken(context.Background(), Review, "sjawhar", []string{"legion"})
 	if err != nil {
 		t.Fatalf("read token for the second installation that holds no actions: %v", err)

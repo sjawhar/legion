@@ -116,12 +116,15 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
-	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
-	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
-	GitHubOwners func() []string
+	// GitHubRepositories are the project's repositories as the daemon serves them
+	// (daemon's repositories.Accepted): the controller's gh bundle holds a read-only token per
+	// owner of them, each narrowed to that owner's repositories (appauth.ControllerCredential),
+	// and this server's own GitHub calls read their owners for whose installation holds a
+	// renamed repository now (serving).
+	GitHubRepositories func() []ghrepo.Repository
 	// RepositoryRenames is the deployment's repository equivalence
 	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
-	// configured rename's two owners (appauth.GitHubCredential). The zero value configures none.
+	// configured rename's two owners (appauth.ControllerCredential). The zero value configures none.
 	RepositoryRenames ghrepo.Renames
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
@@ -250,10 +253,10 @@ type server struct {
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
-	githubOwners func() []string
+	githubRepositories func() []ghrepo.Repository
 	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
 	// that says which owner's installation holds a repository recorded under the name a transfer
-	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
+	// moved it away from, which the controller's gh bundle reads (appauth.ControllerCredential) and
 	// serving reads for this server's own GitHub calls. The zero value configures none.
 	renames    ghrepo.Renames
 	githubAPI  string
@@ -315,7 +318,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
-		githubOwners:       opts.GitHubOwners,
+		githubRepositories: opts.GitHubRepositories,
 		renames:            opts.RepositoryRenames,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
@@ -424,20 +427,20 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 // serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
 // other name of its configured pair when the project's owners make that name's owner the one
 // whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
-// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
-// than written a second time.
+// one rule, read here over the repositories this server already holds
+// (Options.GitHubRepositories) rather than written a second time.
 func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
 	return s.renames.Serving(recorded, s.ownsOwner)
 }
 
 // ownsOwner is whether owner is an owner of the project's repositories, compared without case as
-// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
-// — owns none.
+// GitHub compares owners. A server built with no repositories — a test's, a daemon with no
+// GitHub Apps — owns none.
 func (s *server) ownsOwner(owner string) bool {
-	if s.githubOwners == nil {
+	if s.githubRepositories == nil {
 		return false
 	}
-	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
+	return slices.ContainsFunc(s.githubRepositories(), func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,

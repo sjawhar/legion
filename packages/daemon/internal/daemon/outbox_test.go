@@ -2449,8 +2449,11 @@ func (t outboxTokens) ReadToken(context.Context, appauth.AppRole, string, []stri
 	return appauth.Lease{Token: "outbox-token-read", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-// legionOwner is a project whose one repository's owner is legion, as the sandbox rigs here name it.
-func legionOwner() []string { return []string{"legion"} }
+// legionRepos is a project whose one repository is legion/legion, as the sandbox rigs here name
+// it, and legionDirs the gh directories a bundle built over it holds.
+func legionRepos() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("legion/legion")} }
+
+func legionDirs(repo ghrepo.Repository) []string { return appauth.GitHubDirs(legionRepos, ghrepo.Renames{}, repo) }
 
 type outboxSpecs struct{}
 

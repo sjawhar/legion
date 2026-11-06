@@ -123,7 +123,9 @@ func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launche
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
-		Tokens: tokens, GitHubOwners: func() []string { return []string{"sjawhar", "acme"} },
+		Tokens: tokens, GitHubRepositories: func() []ghrepo.Repository {
+			return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
+		},
 	}).Handler
 	return h
 }
@@ -475,7 +477,7 @@ func TestControllerGitHubCredentialWithoutAnOwner(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubOwners: func() []string { return nil },
+		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubRepositories: func() []ghrepo.Repository { return nil },
 	}).Handler
 	secret := h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED")

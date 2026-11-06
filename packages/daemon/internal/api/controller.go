@@ -141,7 +141,8 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
 // controller capability buys the review App's fresh read-only tokens for every owner of the
-// project (appauth.GitHubCredential), each rendered as the two files `gh` reads. The capability
+// project, each narrowed to the repositories that owner serves
+// (appauth.ControllerCredential), each rendered as the two files `gh` reads. The capability
 // compare runs under controllerMu, the same lock the mint and the controller-session grant take,
 // so a capability a concurrent mint just replaced is never matched; the token mints run after the
 // lock is released, since GitHub is the slow step and holding the lock across it would block every
@@ -185,7 +186,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners, s.renames)(r.Context(), claim.RoleController, req.Default)
+	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames)(r.Context(), req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
@@ -200,19 +201,19 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	answer := ControllerCredentialResponse{
-		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Owners)),
+		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Dirs)),
 		Default: bundle.Default,
-		App:     bundle.Owners[bundle.Default].App,
+		App:     bundle.Dirs[bundle.Default].App,
 	}
 	var soonest time.Time
-	for owner, rendered := range bundle.Owners {
+	for owner, rendered := range bundle.Dirs {
 		answer.Owners[owner] = ControllerOwnerCredential{Hosts: rendered.Hosts, Config: rendered.Config}
 		if soonest.IsZero() || rendered.ExpiresAt.Before(soonest) {
 			soonest = rendered.ExpiresAt
 		}
 	}
 	answer.ExpiresAt = soonest.UTC().Format(timeFormat)
-	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.OwnerNames())
+	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.DirNames())
 	writeJSON(w, http.StatusOK, answer)
 }
 

@@ -21,13 +21,13 @@ func gitCredentialBundle(t *testing.T) (root, defaultDir string) {
 	t.Helper()
 	root = filepath.Join(t.TempDir(), "gh")
 	expires := time.Now().Add(time.Hour)
-	if _, err := ghconfig.WriteBundle(root, ghconfig.Bundle{Default: "acme", Owners: map[string]ghconfig.Rendered{
+	if _, err := ghconfig.WriteBundle(root, ghconfig.Bundle{Default: "acme", Dirs: map[string]ghconfig.Rendered{
 		"acme":    ghconfig.Render("ghs_acme_write", "implement", expires),
 		"sjawhar": ghconfig.Render("ghs_sjawhar_read", "implement", expires),
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	return root, ghconfig.OwnerDir(root, "acme")
+	return root, ghconfig.Dir(root, "acme")
 }
 
 func runGitCredentialHere(t *testing.T, stdin string, args ...string) (code int, stdout, stderr string) {
@@ -216,8 +216,9 @@ func (namedTokens) ReadToken(_ context.Context, role appauth.AppRole, owner stri
 // and sjawhar's directory, which the pod's GH_CONFIG_DIR names.
 func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaultDir string) {
 	t.Helper()
-	credential := appauth.GitHubCredential(namedTokens{}, func() []string { return []string{"cybermonklabs"} }, renames)
-	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, "sjawhar")
+	repos := func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("cybermonklabs/legion")} }
+	credential := appauth.GitHubCredential(namedTokens{}, repos, renames)
+	bundle, err := credential(context.Background(), legionclaim.RoleImplementer, ghrepo.MustParse("sjawhar/legion"))
 	if err != nil {
 		t.Fatalf("build the bundle: %v", err)
 	}
@@ -225,7 +226,7 @@ func renamedCredentialBundle(t *testing.T, renames ghrepo.Renames) (root, defaul
 	if _, err := ghconfig.WriteBundle(root, bundle); err != nil {
 		t.Fatal(err)
 	}
-	return root, ghconfig.OwnerDir(root, bundle.Default)
+	return root, ghconfig.Dir(root, bundle.Default)
 }
 
 // A pod whose issue is recorded on the repository as it was still has to write the repository as

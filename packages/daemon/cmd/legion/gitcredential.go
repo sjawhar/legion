@@ -122,7 +122,7 @@ func readCredentialRequest(r io.Reader) map[string]string {
 // ownerGHConfigDir is owner's gh directory of the bundle under ownersDir, refused when the bundle
 // holds none: owner is then no owner of this project.
 func ownerGHConfigDir(ownersDir, owner string) (string, error) {
-	dir := ghconfig.OwnerDir(ownersDir, owner)
+	dir := ghconfig.Dir(ownersDir, owner)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return "", fmt.Errorf("%q is not an owner of this project: %s holds no gh directory for it", owner, ownersDir)
 	}

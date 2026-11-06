@@ -43,7 +43,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 		BootTokens:   h.tokens,
 		Project:      testProject,
 		Tokens:       tokens,
-		GitHubOwners: func() []string { return []string{"sjawhar"} },
+		GitHubRepositories: func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")} },
 		Grants:       credential.New(nil),
 		Pool:         h.store.Pool(),
 		Record:       record.NewStore(),

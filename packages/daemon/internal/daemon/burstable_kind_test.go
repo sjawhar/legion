@@ -136,14 +136,15 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 	}
 	opts.Conns, opts.StreamURL, opts.Store = listener, listener.Addr(), firstLaunchStore{}
 	opts.Tokens = publicCloneTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		rendered := ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
-		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
+		owner := strings.ToLower(repo.Owner())
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
 	// The stand-in bundle holds the launch's own owner and no other, so the proof's project
 	// serves none of its own: every pod it makes projects what it was launched with, and no pod
-	// has drifted from an owner the daemon serves (sandbox's movedGhOwners).
-	opts.GitHubOwners = func() []string { return nil }
+	// has drifted from a directory the daemon serves (sandbox's movedGhOwners).
+	opts.GitHubDirs = func(ghrepo.Repository) []string { return nil }
 	opts.Mapped = func() []ghrepo.Repository { return []ghrepo.Repository{burstableLiveRepository} }
 	opts.Agent = burstableLiveStub
 	rt, err := sandbox.New(ctx, rc, opts)

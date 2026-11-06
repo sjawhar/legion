@@ -7,7 +7,6 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -33,47 +32,27 @@ func (t implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (str
 	return lease.Token, err
 }
 
-// Credential is the harness's GitHubCredential: every role's gh bundle renders the implement App's
-// tokens, the one App the harness holds — its full lease for the repository of owner (the run's
-// repository's owner when owner is empty, the controller's launch), and its read-only lease,
-// narrowed to that owner's repository, for every other owner of the run's repositories. Stage 4a
-// proves the files reach each role, follow the lease and pick the owner a command names, not which
-// App a role writes as; Stage 4b's daemon hands each role its own.
-func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner string) (ghconfig.Bundle, error) {
-	owner = strings.ToLower(owner)
-	if owner == "" {
-		owner = strings.ToLower(t.repos[0].Owner())
-	}
-	bundle := ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{}}
-	for _, repo := range t.repos {
-		name := strings.ToLower(repo.Owner())
-		if _, done := bundle.Owners[name]; done {
-			continue
-		}
-		lease, err := t.apps.ReadToken(ctx, appauth.Implement, name, []string{repo.Name()})
-		if name == owner {
-			lease, err = t.apps.Token(ctx, appauth.Implement, repo)
-		}
-		if err != nil {
-			return ghconfig.Bundle{}, fmt.Errorf("mint the implement App's lease for %s: %w", repo, err)
-		}
-		bundle.Owners[name] = ghconfig.Render(lease.Token, string(appauth.Implement), lease.ExpiresAt)
-	}
-	return bundle, nil
+// Credential is the harness's GitHubCredential: the daemon's own bundle
+// (appauth.GitHubCredential) over the run's repositories, with every lease minted as the
+// implement App, the one App the harness holds — its write lease for the repository the role
+// works, a lease narrowed to that one repository for each other repository of its owner, and a
+// read-only lease per other owner over the repositories it serves. Every role is rendered as the
+// implementer's, so Stage 4a proves the files reach each role, follow the lease and pick the
+// directory a command names, not which App a role writes as; Stage 4b's daemon hands each role
+// its own.
+func (t implementTokens) Credential(ctx context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+	return appauth.GitHubCredential(t.apps, t.repositories, ghrepo.Renames{})(ctx, claim.RoleImplementer, repo)
 }
 
-// ProjectOwners is the harness's GitHubOwners (Options.GitHubOwners): the owners of the run's
-// repositories as appauth.GitHubOwners reads them for a deployment that configures no rename,
-// lowercased and sorted, which is the set every bundle Credential renders holds a directory for.
-func (t implementTokens) ProjectOwners() []string {
-	return appauth.GitHubOwners(func() []string {
-		owners := make([]string, 0, len(t.repos))
-		for _, repo := range t.repos {
-			owners = append(owners, repo.Owner())
-		}
-		return owners
-	}, ghrepo.Renames{})
+// ProjectDirs is the harness's GitHubDirs (Options.GitHubDirs): the directories a bundle built
+// now for repo would hold (appauth.GitHubDirs), which is what Credential renders, so the two
+// answers move together as the daemon's own do.
+func (t implementTokens) ProjectDirs(repo ghrepo.Repository) []string {
+	return appauth.GitHubDirs(t.repositories, ghrepo.Renames{}, repo)
 }
+
+// repositories is the run's repositories, as the daemon's mapping would serve them.
+func (t implementTokens) repositories() []ghrepo.Repository { return t.repos }
 
 // resolveApp mints the implement App's tokens through the token command the script hands the
 // harness (LEGION_E2E_IMPLEMENT_APP_TOKEN_COMMAND): lib/github-apps.sh's own app_token_command,

@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -119,13 +120,13 @@ func TestTheControllerWorksInADirectoryAndAWindowOfItsOwn(t *testing.T) {
 func TestAControllerWithNoGitHubOwnerRunsWithGhActingAsNobody(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
-	noOwner := func(_ context.Context, role claim.Role, _ string) (ghconfig.Bundle, error) {
+	noOwner := func(_ context.Context, role claim.Role, _ ghrepo.Repository) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for %s: %w", role, runtime.ErrNoGitHubOwner)
 	}
 	f := newFakeServerRuntime(t, noOwner, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	spec := controllerSpec(t, "omp")
 	root := runtime.GHConfigDir(f.stateDir, spec.Claim)
-	stale, _ := staticCredential(ctx, claim.RoleController, "acme")
+	stale, _ := staticCredential(ctx, claim.RoleController, ghrepo.MustParse("acme/widgets"))
 	if _, err := ghconfig.WriteBundle(root, stale); err != nil {
 		t.Fatal(err)
 	}

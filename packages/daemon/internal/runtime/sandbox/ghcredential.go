@@ -48,16 +48,17 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // being deleted —
 // a pod waiting to be scheduled starts its launchers from the Secret as it is then — and, for each
 // of the kind's roles, reads the role's Secret, skips one another Sandbox owns (the pod's Sandbox
-// replaced since the pod was listed), renders the credential for the default owner the Secret
-// records (GitHubDefaultKey), and rewrites only the owners whose hosts.yml is not the render. A
-// Secret that records no default (one an older runtime wrote, whose pod the next launch replaces),
+// replaced since the pod was listed), renders the credential for the pod's own repository, and
+// rewrites only the directories whose hosts.yml is not the render. A Secret that records no
+// default (one an older runtime wrote, whose pod the next launch replaces),
 // a render that fails, or one whose default is not the Secret's is logged and the role keeps its
 // last tokens until the next tick, and a Secret whose default is empty (a controller whose project
 // had no GitHub owner when its pod started, whose gh directory is an empty one) has nothing to
 // refresh until its next pod; a write that conflicts is retried once on a fresh read. Nothing
-// of the Secret but the rewritten owners' gh keys changes: the launcher token, whose hash binds the
-// launcher (credentialFromSecret), the default, the annotations, and the keys of an owner the
-// render no longer holds, which the pod's projection may still name, stay as they are. An issue
+// of the Secret but the rewritten directories' gh keys changes: the launcher token, whose hash
+// binds the launcher (credentialFromSecret), the default, the annotations, and the keys of a
+// directory the render no longer holds, which the pod's projection may still name, stay as they
+// are. An issue
 // pod whose workspace-fetch has yet to finish has its provisioning Secret refreshed too
 // (refreshProvisioningToken).
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
@@ -75,7 +76,7 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			continue
 		}
 		for _, role := range kind.roles() {
-			r.refreshGitHubCredential(ctx, pod.Name, owner.UID, role)
+			r.refreshGitHubCredential(ctx, pod, owner.UID, role)
 		}
 		if _, issue := kind.(issuePod); issue && fetchUnfinished(pod) {
 			r.refreshProvisioningToken(ctx, pod, owner.UID)
@@ -144,9 +145,25 @@ func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod,
 	}
 }
 
-// refreshGitHubCredential is one role's refresh (refreshGitHubCredentials): the role's Secret in the
-// pod named sandbox, owned by the Sandbox with uid.
-func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, uid types.UID, role claim.Role) {
+// refreshGitHubCredential is one role's refresh (refreshGitHubCredentials): the role's Secret in
+// the pod, owned by the Sandbox with uid.
+//
+// The repository the credential is rendered for is the pod's own, read from its workspace-fetch
+// argument (fetchRepository), and the zero Repository for a pod that fetches none, the
+// controller's. It is not the Secret's recorded default, which names an owner and so could never
+// name a repository: a bundle rendered from an owner alone would mint nothing, every mint now
+// naming the repositories it reaches. A pod the previous daemon created carries no repository in
+// its Secret and needs none, since its fetch argument names it, so its refresh keeps working and
+// no live issue is stopped. What such a pod lacks is the repository directories of a bundle built
+// now, which a pod's gh projection is fixed at and only a new pod can gain: that is the drift
+// check's business (movedGhOwners), which opens an update round whose workers push before the pod
+// is replaced.
+//
+// The Secret's recorded default is still what the bundle is held to: a render whose default is
+// another owner is refused rather than written, since the pod's GH_CONFIG_DIR was fixed at that
+// directory.
+func (r *Runtime) refreshGitHubCredential(ctx context.Context, pod *corev1.Pod, uid types.UID, role claim.Role) {
+	sandbox := pod.Name
 	name := roleSecretName(sandbox, role)
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	failed := func(err error) {
@@ -172,8 +189,9 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 	if owner == "" {
 		return
 	}
+	repo, _ := fetchRepository(pod)
 	minting, cancel := call(ctx)
-	bundle, err := r.gitHubCredential(minting, role, owner)
+	bundle, err := r.gitHubCredential(minting, role, repo)
 	cancel()
 	if err != nil {
 		failed(err)
@@ -184,9 +202,9 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		return
 	}
 	var changed []string
-	for _, o := range bundle.OwnerNames() {
-		if string(secret.Data[GitHubHostsKey(o)]) != bundle.Owners[o].Hosts {
-			changed = append(changed, o)
+	for _, dir := range bundle.DirNames() {
+		if string(secret.Data[GitHubHostsKey(dir)]) != bundle.Dirs[dir].Hosts {
+			changed = append(changed, dir)
 		}
 	}
 	if len(changed) == 0 {
@@ -196,9 +214,9 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
 		}
-		for _, o := range changed {
-			rendered := bundle.Owners[o]
-			secret.Data[GitHubHostsKey(o)], secret.Data[GitHubConfigKey(o)] = []byte(rendered.Hosts), []byte(rendered.Config)
+		for _, dir := range changed {
+			rendered := bundle.Dirs[dir]
+			secret.Data[GitHubHostsKey(dir)], secret.Data[GitHubConfigKey(dir)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
 		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
 		if err == nil {
@@ -209,8 +227,8 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 			return
 		}
 		// Something else wrote the Secret since it was read — a launch binding it to its new pod
-		// (bindLauncherSecrets) — so its write is kept and the changed owners' keys set over a
-		// fresh read.
+		// (bindLauncherSecrets) — so its write is kept and the changed directories' keys set over
+		// a fresh read.
 		if secret, err = read(); err != nil {
 			failed(err)
 			return
@@ -219,7 +237,7 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 			return
 		}
 	}
-	written := bundle.Owners[owner]
+	written := bundle.Dirs[owner]
 	r.log.Info("sandbox runtime: github credential refreshed", "sandbox", sandbox, "role", role, "app", written.App,
-		"expiresAt", written.ExpiresAt, "owners", changed)
+		"expiresAt", written.ExpiresAt, "dirs", changed)
 }

@@ -94,7 +94,7 @@ func testOptions() Options {
 		AdoptTimeout:          time.Minute,
 		Tokens:                staticTokens{},
 		GitHubCredential:      staticCredential,
-		GitHubOwners:          func() []string { return staticOwners },
+		GitHubDirs:            func(ghrepo.Repository) []string { return staticDirs },
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
@@ -126,56 +126,57 @@ func staticReadToken(role claim.Role, owner string) string {
 	return "ghs_" + string(appauth.AppRoleFor(role)) + "_read_" + owner
 }
 
-// staticCredential is the runtime's GitHubCredential in every test: a bundle of owner — sjawhar
-// when owner is empty, the controller's launch — holding the role's App's write token
-// (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with a fixed
-// expiry; owner is the bundle's default.
-func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+// staticCredential is the runtime's GitHubCredential in every test: a bundle of repo's owner —
+// sjawhar when repo is the zero Repository, the controller's launch — holding the role's App's
+// write token (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with
+// a fixed expiry; repo's owner is the bundle's default.
+func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 	app := string(appauth.AppRoleFor(role))
+	owner := strings.ToLower(repo.Owner())
 	if owner == "" {
 		owner = "sjawhar"
 	}
-	return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{
+	return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{
 		"acme": ghconfig.Render(staticReadToken(role, "acme"), app, staticCredentialExpiry),
 		owner:  ghconfig.Render(staticCredentialToken(role), app, staticCredentialExpiry),
 	}}, nil
 }
 
-// staticOwners are the owners of every bundle staticCredential renders for the test specs, whose
-// repository's owner is sjawhar, sorted: the set testOptions serves as GitHubOwners too, so a
+// staticDirs are the directories of every bundle staticCredential renders for the test specs,
+// whose repository's owner is sjawhar, sorted: the set testOptions serves as GitHubDirs too, so a
 // pod a rig launches projects a gh directory for each of them and has drifted from none.
-var staticOwners = []string{"acme", "sjawhar"}
+var staticDirs = []string{"acme", "sjawhar"}
 
 // addedOwner is an owner the project's mapping gained after a pod was created: no owner of
-// staticOwners, and sorted between them, so a pod built before it holds no directory of that
+// staticDirs, and sorted between them, so a pod built before it holds no directory of that
 // name and a bundle rendered now holds one.
 const addedOwner = "globex"
 
-// servedOwners are the owners a daemon servingAddedOwner serves, sorted: staticOwners with
-// addedOwner among them, which is what appauth.GitHubOwners answers once the mapping names a
-// repository of that owner. It is derived, so a staticOwners this package edits moves it too.
-var servedOwners = slices.Sorted(slices.Values(append(slices.Clone(staticOwners), addedOwner)))
+// servedDirs are the directories a daemon servingAddedOwner serves, sorted: staticDirs with
+// addedOwner among them, which is what appauth.GitHubDirs answers once the mapping names a
+// repository of that owner. It is derived, so a staticDirs this package edits moves it too.
+var servedDirs = slices.Sorted(slices.Values(append(slices.Clone(staticDirs), addedOwner)))
 
-// servingAddedOwner is a restarted daemon serving one owner more: GitHubOwners answers
-// servedOwners, and every bundle it renders holds addedOwner's read-only files beside the
-// owners staticCredential always renders, as the daemon's own two answers move together
-// (appauth.GitHubOwners and appauth.GitHubCredential read one mapping). A pod created before it
+// servingAddedOwner is a restarted daemon serving one owner more: GitHubDirs answers
+// servedDirs, and every bundle it renders holds addedOwner's read-only files beside the
+// directories staticCredential always renders, as the daemon's own two answers move together
+// (appauth.GitHubDirs and appauth.GitHubCredential read one mapping). A pod created before it
 // projects no directory for the new owner and never will (movedGhOwners).
 func servingAddedOwner(o *Options) {
-	o.GitHubOwners = func() []string { return servedOwners }
-	o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
-		bundle, err := staticCredential(ctx, role, owner)
+	o.GitHubDirs = func(ghrepo.Repository) []string { return servedDirs }
+	o.GitHubCredential = func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, repo)
 		if err != nil {
 			return bundle, err
 		}
-		bundle.Owners[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		bundle.Dirs[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
 		return bundle, nil
 	}
 }
 
 // launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
 // role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
-// name the bundle's owners.
+// name the bundle's directories.
 func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
 	t.Helper()
 	l, err := r.prepare(spec)

@@ -354,7 +354,7 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // mount holding every named role's overlays and the project's memory overlays in role's container
 // (movedRoleOverlays), the secrets broker's enrollment its next generation is started against
 // (movedEnrollment), the whole session store it was created under (movedSessionStore), and the
-// GitHub owners its gh volume projects a directory for (movedGhOwners). Each is fixed for the
+// gh directories its gh volume projects (movedGhOwners). Each is fixed for the
 // pod's life, so the pod must be replaced for the role to run as one launched now — but each
 // leaves the workers already in the pod running and able to reach this daemon, so each is a
 // reason to open a round (PodDrift) and ask them to push, where replacing the pod under them
@@ -374,60 +374,66 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)
 	}
-	if owners, ok := r.movedGhOwners(pod.Spec, role); ok {
-		moved = append(moved, owners)
+	if dirs, ok := r.movedGhOwners(pod, role); ok {
+		moved = append(moved, dirs)
 	}
 	return moved
 }
 
-// movedGhOwners is the GitHub owners the daemon serves now (r.gitHubOwners, appauth.GitHubOwners)
-// that role's gh volume of the pod spec projects no directory for; ok is whether it lacks any.
-// That volume is one Secret projection whose items are fixed when the pod is created (volumes),
-// one pair of keys per owner of the launch, while the role Secret those keys come from gains an
-// owner's pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds
-// a new owner's files reaches no pod made before it: the pod's /var/run/legion/gh has no
-// directory of that owner's name, every `gh` call of its roles against that owner's repositories
-// runs unauthenticated, and only a new pod projects it.
+// movedGhOwners is the gh directories the daemon serves now (r.gitHubDirs, appauth.GitHubDirs)
+// that role's gh volume of the pod projects none of; ok is whether it lacks any. That volume is
+// one Secret projection whose items are fixed when the pod is created (volumes), one pair of keys
+// per directory of the launch, while the role Secret those keys come from gains a directory's
+// pair the moment the daemon serves it (refreshGitHubCredentials). So a Secret that holds a new
+// directory's files reaches no pod made before it: the pod's /var/run/legion/gh has no directory
+// of that name, every `gh` call of its roles that would read the token there runs
+// unauthenticated, and only a new pod projects it.
+//
+// The directories a pod created now would hold depend on the pod's own repository, since the
+// owner it writes to holds one directory per other repository that owner serves, so the pod's
+// repository is read from its workspace fetch (fetchRepository) and a pod that fetches none —
+// the controller's — is read against the owner-only set its launch was handed.
 //
 // The two pods without a Secret projection are not the same. One with no gh volume at all is no
 // pod of this runtime's making and stays unmoved: this runtime does not know what it holds. One
-// whose gh volume is an EmptyDir was launched with no owners at all (volumes: a Secret projection
-// with no items would project every key of the Secret, the launcher token among them), so it
-// holds the empty owner set — a controller whose project had no owner yet reads every owner the
-// daemon serves now as lacking, and the first owner its project gains remakes it. The comparison
-// runs one way only: an owner the pod holds that the daemon no longer serves costs the pod a
-// stale directory and nothing more, and must never be worth remaking a pod and deleting its disk
-// for.
-func (r *Runtime) movedGhOwners(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
+// whose gh volume is an EmptyDir was launched with no directories at all (volumes: a Secret
+// projection with no items would project every key of the Secret, the launcher token among
+// them), so it holds the empty set — a controller whose project had no owner yet reads every
+// directory the daemon serves now as lacking, and the first owner its project gains remakes it.
+// The comparison runs one way only: a directory the pod holds that the daemon no longer serves
+// costs the pod a stale directory and nothing more, and must never be worth remaking a pod and
+// deleting its disk for.
+func (r *Runtime) movedGhOwners(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
 	name := roleVolume(ghVolume, role)
-	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == name })
+	at := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == name })
 	if at < 0 {
 		return movedAddress{}, false
 	}
 	var held []string
-	if secret := pod.Volumes[at].Secret; secret != nil {
+	if secret := pod.Spec.Volumes[at].Secret; secret != nil {
 		for _, item := range secret.Items {
-			if owner, ok := GitHubHostsOwner(item.Key); ok {
-				held = append(held, owner)
+			if dir, ok := GitHubHostsDir(item.Key); ok {
+				held = append(held, dir)
 			}
 		}
 	}
-	served := r.gitHubOwners()
-	lacking := slices.ContainsFunc(served, func(owner string) bool { return !slices.Contains(held, owner) })
+	repo, _ := fetchRepository(pod)
+	served := r.gitHubDirs(repo)
+	lacking := slices.ContainsFunc(served, func(dir string) bool { return !slices.Contains(held, dir) })
 	if !lacking {
 		return movedAddress{}, false
 	}
 	slices.Sort(held)
-	return movedAddress{where: name, held: ghOwnersName(held), handed: ghOwnersName(slices.Sorted(slices.Values(served)))}, true
+	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(slices.Sorted(slices.Values(served)))}, true
 }
 
-// ghOwnersName names the gh directories a set of owners is projected as, each owner's name in
-// order; "(unset)" for none, and no credential in any of it.
-func ghOwnersName(owners []string) string {
-	if len(owners) == 0 {
+// ghDirsName names a set of gh directories as one string, each name in order; "(unset)" for none,
+// and no credential in any of it.
+func ghDirsName(dirs []string) string {
+	if len(dirs) == 0 {
 		return "(unset)"
 	}
-	return strings.Join(owners, " ")
+	return strings.Join(dirs, " ")
 }
 
 // movedRoleOverlays is the first overlay of any role role_config_files names

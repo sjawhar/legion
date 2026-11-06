@@ -374,7 +374,7 @@ func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 // reads its own App's gh bundle at GHConfigDir, so this is appended once for every kind.
 func ghAgentEnv(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
-		{Name: "GH_CONFIG_DIR", Value: ghconfig.OwnerDir(GHConfigDir, l.gitHubDefault)},
+		{Name: "GH_CONFIG_DIR", Value: ghconfig.Dir(GHConfigDir, l.gitHubDefault)},
 		{Name: "GH_TOKEN", Value: ""},
 		{Name: "GITHUB_TOKEN", Value: ""},
 		{Name: "GH_HOST", Value: ""},
