@@ -3696,7 +3696,7 @@ test("reviewer-text-findings: a case.txt that disagrees with the directory, and 
 // run left.
 test("retro-threads, text-fixes: one reply and one resolution per thread, the text fixes pushed, passes", () => {
   expect(out).toMatch(
-    /retro-threads-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 replied=2 replyCalls=2 resolved=2 resolveCalls=2 bulk=false pushes=1 threadsLine=true complete=true backward=none/
+    /retro-threads-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 listed=true replied=2 replyCalls=2 resolved=2 resolveCalls=2 bulk=false pushes=1 threadsLine=true complete=true backward=none/
   );
   expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md"]');
 });

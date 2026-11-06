@@ -924,6 +924,21 @@ function resolvesAThread(call: z.infer<typeof Call>): boolean {
   );
 }
 
+/** Whether a recorded gh call listed the pull request's review threads: the `reviewThreads` query
+ * `skills/legion-worker/references/review-threads.md` gives, asked of GitHub itself. Retro reads
+ * the open threads there because no round follows an approval and nobody names them to it, and
+ * because the pull request's body is the implementer's record while GitHub is the fact: a run
+ * that takes the ids from anywhere else closes the threads that source lists and leaves the rest.
+ * One run of 2026-11-06 took them from the gh stand-in's own fixtures file and scored a pass. */
+function listsTheThreads(call: z.infer<typeof Call>): boolean {
+  return (
+    call.as === "gh" &&
+    call.argv[0] === "api" &&
+    call.argv.includes("graphql") &&
+    callText(call).includes("reviewThreads")
+  );
+}
+
 /** reviewer-text-findings: the reviewer's verdict rule, which `skill://legion-worker` states and
  * `references/merge-gate.md` defines — `REQUEST_CHANGES` only when a behavioural finding stands,
  * one whose closing changes code that runs, and otherwise the approval of the head it read, named
@@ -1113,15 +1128,18 @@ function retroThreads(runDir: string, run: string, label: string, dirCase: strin
       (thread) =>
         (back.reason ?? "").includes(thread.id) || (back.reason ?? "").includes(thread.path)
     );
+  // The first of the five acts R5 names: retro lists the pull request's unresolved threads
+  // itself. A run that never asked GitHub closed whatever its other source listed.
+  const listed = calls.some(listsTheThreads);
   const pass =
     retroCase === "code-defect"
       ? pushes.length === 0 && sentBack
-      : repliedEach && resolvedEach && textFixesOnly && threadsLine && complete;
+      : listed && repliedEach && resolvedEach && textFixesOnly && threadsLine && complete;
   const ref = readCalls(session(runDir)).some((call) =>
     call.target.includes("skill://legion-worker/references/review-threads.md")
   );
   const notes = [
-    `case=${retroCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} pushes=${pushes.length} threadsLine=${threadsLine} complete=${complete} backward=${back === undefined ? "none" : back.to}`,
+    `case=${retroCase} threads=${threads.length} listed=${listed} replied=${replied.size} replyCalls=${replies.length} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} pushes=${pushes.length} threadsLine=${threadsLine} complete=${complete} backward=${back === undefined ? "none" : back.to}`,
     `changed=${JSON.stringify(changed)} wanted=${JSON.stringify(wanted)} sentBack=${sentBack}`,
     lines(path.join(runDir, "out.txt")).at(-1) ?? "",
   ];
@@ -3594,10 +3612,14 @@ const SKILL_NAMED =
  * directory, and a file under it, is no reach into another label's text, whichever label the run
  * is: the rig runs every label out of one checkout's harness, so the `gh` a run is given is a
  * script naming that checkout's gh-standin.ts, and an agent that reads the `gh` on its own PATH
- * reads a file under whichever label's checkout the rig was run from. The harness is the same
- * text for every label and holds no skill and no role prompt, so it is no part of what the
- * labels compare. It alone is exempt: another label's skills/ and the rest of its source are
- * read as they were. */
+ * reads a file under whichever label's checkout the rig was run from. One run of every batch
+ * reaches that harness whatever its label, so refusing the read would refuse the ablate arm and
+ * leave the comparison without one. What it is not is a label's own text: the harness holds no
+ * skill and no role prompt, so it is no part of what the labels compare, and a pull request that
+ * changes the harness — this one does — changes it for every label at once, since the rig runs
+ * them all out of the one checkout it was started from. `outsideReaches` still records the
+ * reach on the row. The harness alone is exempt: another label's skills/ and the rest of its
+ * source are read as they were. */
 const RIG_DIR = "/packages/pi-legion/scripts/skill-scenarios";
 /** RIG_DIR, or a path under it, in a path or in a command's text: the name ends there or a `/`
  * follows, so a directory whose name merely begins with it is no hit. RIG_UNDER_CHECKOUT is the
