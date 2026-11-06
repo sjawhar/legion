@@ -1032,8 +1032,7 @@ func TestAMountPointsPlaceRereadsAnEntryThatChangedUnderTheWalk(t *testing.T) {
 }
 
 // openDescriptors is every descriptor this process holds open and what each names, read the
-// moment it is called. No test of this package runs in parallel, so a snapshot taken either side
-// of a call holds that call's opens alone.
+// moment it is called.
 func openDescriptors(t *testing.T) map[int]string {
 	t.Helper()
 	entries, err := os.ReadDir("/proc/self/fd")
@@ -1055,18 +1054,18 @@ func openDescriptors(t *testing.T) map[int]string {
 	return open
 }
 
-// descriptorsKept reports the two snapshots of openDescriptors as sets, never as counts: what the
-// call between them left open, and what it closed that it never opened.
+// descriptorsKept reports what the call between the two snapshots left open, as a set and never
+// as a count: a descriptor open after it, on a target that was not open on that number before
+// it, is one the call opened and did not close. It reads the whole process, so it holds only
+// what no other part of the binary can produce, and that is this direction alone: a descriptor
+// vanishing between the snapshots is no finding, because the finaliser of a file an earlier test
+// left unreferenced closes it at whatever garbage collection lands in the window (measured, with
+// the two snapshots around a runtime.GC()), and a finaliser closes where it never opens.
 func descriptorsKept(t *testing.T, label string, before, after map[int]string) {
 	t.Helper()
 	for number, target := range after {
 		if held, ok := before[number]; !ok || held != target {
 			t.Errorf("%s left descriptor %d open on %s, want every handle it opened closed", label, number, target)
-		}
-	}
-	for number, target := range before {
-		if _, ok := after[number]; !ok {
-			t.Errorf("%s closed descriptor %d on %s, which it did not open", label, number, target)
 		}
 	}
 }
