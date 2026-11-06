@@ -127,12 +127,13 @@ func (e *Engine) startLook(ctx context.Context, tx pgx.Tx, issue record.Issue, c
 // task by this line (the phase tasks open with "Continue"), and a test pins it.
 const checkTaskLead = "Production check of "
 
-// checkTask is what the implementer is told at a look of its closed issue's production check. The
+// checkTask is what the check's role is told at a look of the closed issue's production check. The
 // session it reaches may be fresh — a woken pod after a lost volume — so the text stands on its
-// own: the issue, the repository, the pull request, the merge commit, the look and what woke it,
-// whether it is the last, and the rules of the check in prose: how to reach the deploy, the three
-// verdicts and what each asks of the pull request, no commit, and no waiting in the session for a
-// deploy, which the daemon wakes the check on.
+// own: the issue, the repository, the pull request, the merge commit, the look and what woke it
+// (wokenBy), whether it is the last, and the rules of the check in prose: the three verdicts and
+// what each asks of the pull request, no commit, the wake a pending names for its own next look
+// and the suspension that follows it, and nothing to wait for in the session, since the look ends
+// with the report.
 func checkTask(issue record.Issue, check record.ProductionCheck, cause, detail string, last bool) string {
 	merge := check.MergeSHA
 	if merge == "" {
@@ -144,25 +145,36 @@ func checkTask(issue record.Issue, check record.ProductionCheck, cause, detail s
 	if last {
 		text.WriteString(" This is the last look: no look follows.")
 	}
-	text.WriteString("\nDo what the deployment instructions say to reach the deploy (publish the merge commit to the deploy role; await no reply), " +
-		"read whether production carries the merge, then report with the legion tool's handoff_complete and a verdict, committing nothing: " +
+	text.WriteString("\nDo what the deployment instructions say to reach production, read whether production carries the merge, " +
+		"then report with the legion tool's handoff_complete and a verdict, committing nothing: " +
 		"pass once you drove the changed path in production and recorded the issue's after_merge check with dispatch result at the merge commit, its observed naming what woke this look, and put the line that command prints in the pull request body; " +
-		"pending when production does not carry the merge yet, the summary naming what is missing, with no result recorded and the pull request body saying the check waits on the deploy of the merge commit; " +
-		"fail for a defect, never an issue you file (skill://legion-worker/references/findings.md): a defect with a clear fix goes to the controller topic your Legion addressing line names, with its evidence posted as a comment on the controller's report issue; a defect that needs a decision is a dispatch ask on that report issue, whose reference you then publish to the controller topic. Either names this issue, the pull request, the merge commit, what you drove and what failed; record the after_merge check as a fail with dispatch result at the merge commit, and name the message or the ask in its observed, in the line you put in the pull request body and in the summary. " +
-		"Wait for no deploy in this session: the daemon wakes the check on the deploy's event.")
+		"pending when production does not carry the merge yet, the summary naming what is missing and what you will look for next, with no result recorded and the pull request body saying the check is still open on the merge commit; " +
+		"fail for a defect, never an issue you file (skill://legion-worker/references/findings.md): a defect with a clear fix goes to the controller topic your Legion addressing line names, with its evidence posted as a comment on the controller's report issue; a defect that needs a decision is a dispatch ask on that report issue, whose reference you then publish to the controller topic. Either names this issue, the pull request, the merge commit, what you drove and what failed; record the after_merge check as a fail with dispatch result at the merge commit, and name the message or the ask in its observed, in the line you put in the pull request body and in the summary.")
 	if last {
-		text.WriteString(" On this last look a pending closes the check as not run: before reporting it, write on the pull request that the check did not run because production did not carry the merge within the bound.")
+		text.WriteString(" This last look's pending carries no wake_at and closes the check as not run: before reporting it, write on the pull request that the check did not run because production did not carry the merge within the bound.")
+	} else {
+		text.WriteString(" A pending report also carries wake_at, an RFC 3339 time: when you want your next look. " +
+			"Nothing else starts one. A time less than a minute ahead is moved out to a minute, and a time at or after the check's own bound starts no look of its own, since the look at the bound already stands. " +
+			"At that report the daemon stops this process and keeps this session, and your next look resumes it with a task naming the summary you gave as what woke it.")
 	}
+	text.WriteString(" Wait for nothing in this session: end the turn with the report.")
 	return text.String()
 }
 
-// wokenBy is the check task's wording of a look's wake, from the cause and its detail.
+// wokenBy is the check task's wording of a look's wake, from the cause and its detail: the merge
+// that opened the check (wakeMerge, the merge commit as its detail), its bound (wakeBound, what
+// the bound's look is told went unseen), or a check_wake row (wakeNamed), whose reason is either
+// the summary the pending report gave (checkReported) or the retry of a look nobody reported
+// (endLook). The last two read as one sentence after the dash, so the lead names who named the
+// wake rather than what it says.
 func wokenBy(cause, detail string) string {
 	switch cause {
 	case wakeMerge:
 		return "the merge"
 	case wakeBound:
 		return "the bound: " + detail
+	case wakeNamed:
+		return "the wake named at the last look — " + detail
 	default:
 		return cause + " " + detail
 	}
