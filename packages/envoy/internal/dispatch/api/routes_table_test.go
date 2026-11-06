@@ -106,14 +106,19 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 	}
 }
 
-// The table is the registration: every row is mounted, every row is described, and the
-// count only moves when a route is deliberately added or removed.
+// The table is the registration: every row is mounted, every row is described, and no row is
+// listed twice.
+//
+// No count is pinned. A count is one number two branches cannot both be right about: a branch
+// that adds a route updates it, and the base that added one first then makes that branch's
+// merge red for a reason that is not the branch's change
+// (docs/solutions/github/a-base-gate-arrives-in-the-merge-and-the-job-your-branch-alone-adds-is-the-line-it-refuses-pr2517.md:63-67
+// records that failure: "routes() has 147 rows, want 146: the base had added a route").
+// TestRouteIndexListsEveryRouteSortedByPathThenMethod and
+// TestWriteRouteIndexCarriesEveryRouteTheTableHas are the table's guard instead: they pin every
+// row against the committed index, which conflicts textually when two branches add a route.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 163
 	routes := (&server{}).routes()
-	if len(routes) != registeredRoutes {
-		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
-	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
 		key := route.Method + " " + route.Pattern
@@ -133,8 +138,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+12 {
-		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, registeredRoutes+12)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != len(routes)+12 {
+		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, len(routes)+12)
 	}
 }
 
