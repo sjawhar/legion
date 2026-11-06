@@ -28,8 +28,8 @@ export const SUMMARY_BLOCK_ID = "summary";
  *  issue's open question. */
 export const OPEN_QUESTION_BLOCK_ID = "q-open";
 
-/** How a seeded check's newest result stands, in the words `VerificationTab.tsx:29-43` draws
- *  today, plus `no-control`: a pass on a before-merge run that records no negative control,
+/** How a seeded check's newest result stands, in the words `NODE_STATE_WORDS.check` draws
+ *  (`web/src/features/issue/page-words.ts`), plus `no-control`: a pass on a before-merge run that records no negative control,
  *  which is one of the five gaps `c-chain` names and reads `passed` on the page. */
 export const CHECK_STATE_ORDER = [
   "passed",

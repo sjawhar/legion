@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { primarySpec } from "../../api/issue-cache";
 import type { Artifact, IssueDetails } from "../../api/types";
+import { textMutedOnCanvas } from "../../theme/classes";
 import { IssueChildren } from "./IssueChildren";
 import { IssuePresets } from "./IssuePresets";
 import { IssueThreeThings, nodesOfType, specSummary } from "./IssueThreeThings";
@@ -10,7 +11,9 @@ import { IssueTree } from "./IssueTree";
 import type { AddressTarget, IssueAddress } from "./issue-address";
 import { pathToTarget } from "./issue-address";
 import { artifactsBySlug, uncitedArtifacts } from "./issue-artifacts";
-import { EMPTY_STATE_LINES, PRESET_ORDER } from "./page-words";
+import type { TreeNode } from "./issue-tree";
+import { pageChrome } from "./page-structure";
+import { EMPTY_STATE_LINES, PRESET_ORDER, type Preset, WAITING_LINES } from "./page-words";
 import { presetCounts, presetView } from "./presets";
 import { useIssueTree } from "./useIssueTree";
 
@@ -72,6 +75,14 @@ export function IssueBody({
     [targetId, targetKind]
   );
   const reveal = useMemo(() => pathToTarget(root, target), [root, target]);
+  // The node the preset draws the body of without being asked: the decision waiting for the
+  // reader's review, whose body holds Keep and Change, so a reader who opens the preset is in
+  // front of what waits for them (R7). It opens the body and never takes the focus, which is
+  // the reader's.
+  const opened = useMemo(
+    () => (target === undefined ? opensOn(root, address.preset) : undefined),
+    [address.preset, root, target]
+  );
   const named = useMemo(() => {
     const node = reveal?.at(-1);
     return new Set(node === undefined ? [] : [node.id]);
@@ -113,15 +124,35 @@ export function IssueBody({
         uncited={uncited}
       />
       <IssueChildren issue={issue} />
+      {/* What the Checks preset does not hold yet: the coverage read counts the checks that
+          serve each requirement and names none of them, and the chain read that would is not
+          served (R20). The counts themselves are on each requirement's own body. */}
+      {address.preset === "checks" ? (
+        <p className={`mb-1 text-xs ${textMutedOnCanvas}`} {...pageChrome}>
+          {WAITING_LINES.chain}
+        </p>
+      ) : null}
       <IssueTree
         artifacts={artifacts}
         context={view.context}
         emptyLine={EMPTY_STATE_LINES[address.preset]}
         focusReveal={address.preset !== "spec" && targetKind !== "node"}
+        isClosed={isClosed}
         onEditing={onEditing}
+        openBody={opened}
         reveal={reveal}
         root={view.root}
       />
     </>
   );
+}
+
+/**
+ * The chain down to the node a preset opens on when the address names none: on the Decisions
+ * preset the first decision waiting for the reader's review, so the reader lands on what waits
+ * for them with Keep and Change in its body (R6, R7). Every other preset opens on no node.
+ */
+function opensOn(root: TreeNode, preset: Preset): string | undefined {
+  if (preset !== "decisions") return undefined;
+  return nodesOfType(root, "decision").find((node) => node.waiting)?.id;
 }

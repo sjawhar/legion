@@ -2,7 +2,8 @@ import { parseBlockPointerValue } from "@legion/contracts";
 
 import type { Actor, Ask } from "../../api/types";
 import { buildDispatchReference, parseNodeReference } from "../refs/routes";
-import type { IssueTreeReads, NodeChip, NodeCounts } from "./issue-tree";
+import { checkFacts, resultFacts } from "./check-facts";
+import type { IssueTreeReads, NodeChip, NodeCounts, NodeFact } from "./issue-tree";
 import { type GapKind, NODE_TYPES, type NodeType } from "./page-words";
 
 /**
@@ -32,6 +33,8 @@ export interface Draft {
   author?: Actor;
   chips: NodeChip[];
   counts?: NodeCounts;
+  /** What the node's body draws under its text (`check-facts.ts`). */
+  facts: NodeFact[];
   gaps: GapKind[];
   readonly id: string;
   order: number;
@@ -47,6 +50,8 @@ export interface Draft {
   state?: string;
   text: string;
   type: NodeType;
+  /** Whether this decision waits for the reader's review (`Decision.waiting_review`). */
+  waiting: boolean;
 }
 
 /**
@@ -219,6 +224,7 @@ function add(drafts: Map<string, Draft>, draft: Draft): Draft {
 function blank(id: string, type: NodeType, order: number): Draft {
   return {
     chips: [],
+    facts: [],
     gaps: [],
     id,
     order,
@@ -228,6 +234,7 @@ function blank(id: string, type: NodeType, order: number): Draft {
     replaced: false,
     text: "",
     type,
+    waiting: false,
   };
 }
 
@@ -417,7 +424,7 @@ function addDecisions(
     // it (`GraphNode.ref` is optional).
     draft.chips = [
       ...decision.links.flatMap((link) =>
-        link.to.ref === undefined ? [] : [context.chipOf(link.to.ref)]
+        link.to.ref === undefined ? [] : [{ ...context.chipOf(link.to.ref), stale: link.stale }]
       ),
       ...decision.asks.map((ask) =>
         context.chipOf(buildDispatchReference({ id: ask, key: context.key, kind: "ask" }))
@@ -431,6 +438,9 @@ function addDecisions(
     draft.reference = decision.ref;
     draft.replaced = decision.replaced;
     draft.text = decision.text;
+    // What waits for the reader: its node is where Keep and Change are drawn, and the one the
+    // Decisions preset opens on (R7, `DecisionActions.tsx`).
+    draft.waiting = decision.waiting_review;
   });
 }
 
@@ -491,8 +501,9 @@ function requirementGaps(
 
 /**
  * Each check of the issue's Verification document with the results recorded against it: the
- * check's own words and how it stands, and one node per result under the check it was recorded
- * against (R4, "a result under its check"). The check's `serves` is no part of this read
+ * check's own words, how it stands and the four attributes its body draws, and one node per
+ * result under the check it was recorded against (R4, "a result under its check"), each with
+ * what that result recorded (`check-facts.ts`). The check's `serves` is no part of this read
  * (`CheckBlock` carries none), so its placement is the block's own pointer, below.
  */
 function addChecks(drafts: Map<string, Draft>, reads: IssueTreeReads, context: TreeContext): void {
@@ -502,6 +513,7 @@ function addChecks(drafts: Map<string, Draft>, reads: IssueTreeReads, context: T
     const id = blockNodeId(slug, check.block_id);
     const held = drafts.get(id);
     const draft = add(drafts, blank(id, "check", held?.order ?? 0));
+    draft.facts = checkFacts(check);
     draft.parents = held?.parents ?? [slug];
     draft.pointers = held?.pointers ?? {};
     draft.reference = check.ref;
@@ -510,6 +522,7 @@ function addChecks(drafts: Map<string, Draft>, reads: IssueTreeReads, context: T
     check.results.forEach((result, index) => {
       const row = add(drafts, blank(result.id, "result", index));
       row.author = result.actor;
+      row.facts = resultFacts(result);
       row.parents = [id];
       row.text = result.observed;
     });
@@ -520,7 +533,8 @@ function addChecks(drafts: Map<string, Draft>, reads: IssueTreeReads, context: T
  * How a check stands, from the newest result recorded against it, in the states
  * `NODE_STATE_WORDS.check` names: `older` and `unmarked` are about the result's currency rather
  * than its verdict, and a currency the server left out reads as `unmarked` because nothing
- * judged it. The same reading as the Verification tab's (`features/verification/VerificationTab.tsx`).
+ * judged it. It is the one reading of a check's state the page has: the Checks preset draws
+ * the node, and the five states are told apart by a word and a shape (R15, R21).
  */
 function checkState(results: readonly { currency?: string; verdict: string }[]): string {
   const latest = results[0];

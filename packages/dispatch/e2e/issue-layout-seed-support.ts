@@ -72,7 +72,8 @@ export async function pause(milliseconds: number): Promise<void> {
   await tick.promise;
 }
 
-/** How a check's newest result stands, by the rule `VerificationTab.tsx:31-43` reads it: `none`
+/** How a check's newest result stands, by the rule the page reads it with (`checkState` in
+ *  `web/src/features/issue/tree-drafts.ts`): `none`
  *  for a check nobody has run, and a result whose currency the server left out is `unknown` for
  *  the reason the page calls it unmarked - nothing judged it. */
 function currencyOf(check: CheckBlock): string {

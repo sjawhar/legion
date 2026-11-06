@@ -79,7 +79,7 @@ export type NodeType = keyof typeof NODE_TYPE_NAMES;
  * entry holding an empty table would invite a row to draw a blank badge.
  *
  * The ask's three states are the `state` choices of the `ask` block (`blocks.json`). The
- * check's five are `checkState`'s (`features/verification/VerificationTab.tsx`), and the page
+ * check's five are `checkState`'s (`features/issue/tree-drafts.ts`), and the page
  * must tell all five apart, so each keeps a word of its own.
  */
 export const NODE_STATE_WORDS = freeze({
@@ -284,6 +284,24 @@ export const RESULT_CURRENCY_WORDS = freeze({
   older: "Older",
 } as const);
 
+/** What a recorded result says it saw, in the page's own words rather than the wire's `pass`
+ *  and `fail`: the verdict is drawn as a fact of the result's own node (R15). */
+export const RESULT_VERDICT_WORDS = freeze({
+  fail: "Fail",
+  pass: "Pass",
+} as const);
+
+/**
+ * One line per read the page draws from that Dispatch does not serve yet (R20). A preset says
+ * what it does not hold rather than drawing a count with nothing behind it: the coverage read
+ * counts the checks that serve a requirement and names none of them, and the chain read that
+ * would name them (dispatch://INFRA-1098 item 14) has no route.
+ */
+export const WAITING_LINES = freeze({
+  chain:
+    "Each requirement counts the checks that serve it, and naming them waits on a read Dispatch does not answer yet.",
+} as const);
+
 /**
  * How a document of the issue stands with its reviewers, in words (R5): the head's "How it gets
  * done" row says this of the plan. The keys are `ArtifactApproval.state`; the version a review
@@ -314,6 +332,9 @@ export const CONTROL_LABELS = freeze({
   also_under: "Also under",
   /** Leaves an editor with the value the issue had, in every editor the page opens. */
   cancel: "Cancel",
+  /** Answers an agent's decision with a change, on the decision's own node (R7). It opens the
+   *  composer below, whose comment is anchored to the decision's own words. */
+  change_decision: "Change",
   /** The collapsible section of child issues at the top of every preset (R10). */
   children: "Children",
   /** The direct children done of total, labelled on the collapsed header (R10). */
@@ -322,8 +343,13 @@ export const CONTROL_LABELS = freeze({
   close_issue: "Close issue",
   /** The heading of the conversation inside the one right-hand panel (R12). */
   conversation: "Conversation",
+  /** The word that control carries, beside the command it copies. */
+  copy: "Copy",
   /** Copies a check's `run` command, which renders as code beside it (R15). */
   copy_command: "Copy the command",
+  /** What it says once the command is on the clipboard, and when the browser refused it. */
+  copied: "Copied",
+  copy_failed: "Copy failed",
   /** The one row a branch below the three drawn levels folds to, which opens it in place: the
    *  count before it is the branch's own and carries `AUTHOR_TEXT_ATTRIBUTE` (R1). */
   deeper_nodes: "nodes deeper in this branch",
@@ -342,6 +368,9 @@ export const CONTROL_LABELS = freeze({
   /** The one control row one keeps the actions behind: close, reopen and setting the parent.
    *  It names actions, never a property (R11 bans "more"). */
   issue_actions: "Issue actions",
+  /** Agrees with an agent's decision as its node draws it, which takes it out of what waits
+   *  for the reader's review (R7). */
+  keep_decision: "Keep",
   /** Keeps a node's body open once the focus leaves it (R2); the focused node's body is open
    *  without it. */
   keep_open: "Keep open",
@@ -369,6 +398,9 @@ export const CONTROL_LABELS = freeze({
   save_blocked_by: "Save blocked by",
   save_parent: "Save parent",
   save_route: "Save route",
+  /** Sends the change a reader wrote against a decision, named apart from the conversation's
+   *  own Send so a page drawing both offers two controls a reader can tell apart (R7). */
+  send_change: "Send change",
   /** What a control says while its own write is out: Dispatch has not answered, so none of
    *  these says the thing is done. */
   saving_close: "Closing…",
@@ -386,6 +418,9 @@ export const CONTROL_LABELS = freeze({
   subtree_done: "Whole tree done",
   /** What a chip says of a target nothing answers to now (`ReferenceTarget.gone`). */
   target_gone: "Deleted",
+  /** What a chip says of a block a decision shaped and changed after: the decision changed
+   *  since it named the block, and the block has not changed since (`DecisionLink.stale`). */
+  target_stale: "Out of date",
   /** The body of the page, as a reader of the tree hears it named (R1). */
   tree: "Issue tree",
   /** Opens a branch of the tree (R1). */
@@ -404,6 +439,8 @@ export const CONTROL_LABELS = freeze({
   /** Names the author of a node whose author the model holds (R7); the name itself is the
    *  author's own text. */
   written_by: "Written by",
+  /** The box that composer writes in: what the reader would change about the decision. */
+  your_change: "Your change",
 } as const);
 
 /**
@@ -447,6 +484,33 @@ export const BLOCK_ATTRIBUTE_LABELS = freeze({
 export function blockAttributeLabel(name: string): string {
   const labels: Readonly<Record<string, string>> = BLOCK_ATTRIBUTE_LABELS;
   return labels[name] ?? name.replaceAll("_", " ");
+}
+
+/**
+ * A plain label for every fact a node's body draws that is no attribute of a block: what a
+ * recorded result says of itself (`features/issue/check-facts.ts`). A check's own attributes
+ * keep the labels their document's header draws them under, so a check reads the same in the
+ * tree and in the document it lives in, and only what the schema has no name for is here.
+ *
+ * A label is lowercase, like the attribute labels it sits beside, and the row draws the colon.
+ */
+export const NODE_FACT_LABELS = freeze({
+  commit: "commit",
+  excluded: "excluded",
+  failed: "failed",
+  role: "role",
+  screenshot: "screenshot",
+  skipped: "skipped",
+  /** Whether the result still speaks for the work as it stands (`RESULT_CURRENCY_WORDS`). */
+  stands: "how it stands",
+  verdict: "verdict",
+} as const);
+
+/** The label of the fact `name`: this module's own where it has one, else the label its block
+ *  attribute carries (`blockAttributeLabel`). */
+export function nodeFactLabel(name: string): string {
+  const labels: Readonly<Record<string, string>> = NODE_FACT_LABELS;
+  return labels[name] ?? blockAttributeLabel(name);
 }
 
 /**
@@ -553,12 +617,15 @@ const WORD_SOURCES: readonly unknown[] = [
   GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
+  RESULT_VERDICT_WORDS,
+  WAITING_LINES,
   APPROVAL_STATE_WORDS,
   CONTROL_LABELS,
   PROPERTY_LABELS,
   MARGIN_SECTION_NAMES,
   HELP_LINES,
   BLOCK_ATTRIBUTE_LABELS,
+  NODE_FACT_LABELS,
 ];
 
 /**

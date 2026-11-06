@@ -8,10 +8,12 @@ import {
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { DecisionActions } from "./DecisionActions";
 import { STAGE_IN_ROW, useDocumentStage } from "./document-stage";
 import { bringOnScreen } from "./identity-block";
 import { firstLineOf, type NodeChip, type TreeNode } from "./issue-tree";
 import { NodeArtifact } from "./NodeArtifact";
+import { NodeFacts } from "./NodeFacts";
 import { NodeGlyph } from "./NodeGlyph";
 import { authorText, pageChrome } from "./page-structure";
 import {
@@ -44,11 +46,13 @@ export function NodeRow({
   artifact,
   body,
   context,
+  document,
   editing,
   expanded,
   focused,
   folded,
   indent,
+  isClosed,
   level,
   node,
   oneLine,
@@ -66,6 +70,10 @@ export function NodeRow({
   /** Whether the preset draws this row only as the ancestor of a match: the row is faint and
    *  marked, and the arrow keys reach it as they reach any other row (R3). */
   context: boolean;
+  /** The document this row's node is a block of, which its body writes against: a decision's
+   *  Keep and Change are writes on the decisions document (R7). Undefined for a node that is
+   *  no block of a document of this issue. */
+  document?: Artifact;
   /** The document this row's own text lives in, while the reader is editing it here: its
    *  editor is drawn in this row's body and the caret is in this node's block (R9). */
   editing?: string;
@@ -77,6 +85,8 @@ export function NodeRow({
   folded?: number;
   /** How far in the row is drawn, in pixels. */
   indent: number;
+  /** Whether the issue is closed, which the writes a body offers are refused on. */
+  isClosed: boolean;
   level: number;
   node: TreeNode;
   /** Whether the row is drawn on one line, which is how the zoomed tree draws it at 1024 px and
@@ -181,7 +191,15 @@ export function NodeRow({
         )}
       </div>
       {body ? (
-        <NodeBody artifact={artifact} editing={editing} node={node} onPin={onPin} pinned={pinned} />
+        <NodeBody
+          artifact={artifact}
+          document={document}
+          editing={editing}
+          isClosed={isClosed}
+          node={node}
+          onPin={onPin}
+          pinned={pinned}
+        />
       ) : null}
     </div>
   );
@@ -229,6 +247,7 @@ function Chip({ chip, label }: { chip: NodeChip; label?: string }): ReactNode {
       data-node-chip=""
     >
       {label === undefined ? null : <span {...pageChrome}>{label} </span>}
+      {chip.stale === true ? <span {...pageChrome}>{CONTROL_LABELS.target_stale} </span> : null}
       {chip.gone ? (
         <span {...pageChrome}>{CONTROL_LABELS.target_gone} </span>
       ) : (
@@ -247,8 +266,9 @@ const BODY_MEASURE = 660;
 
 /**
  * The node's whole text, with what the model holds about it that a row has no line for: the
- * gaps said in full, the two counts the coverage read carries for a requirement, and the control
- * that keeps the body open once the focus leaves it.
+ * facts of a check and of a result (`NodeFacts.tsx`), the gaps said in full, the two counts
+ * the coverage read carries for a requirement, what a reader does with a decision
+ * (`DecisionActions.tsx`), and the control that keeps the body open once the focus leaves it.
  *
  * What stands for "the node's whole text" depends on what the node is. A block of a document
  * the reader is editing draws that document's own editor, moved here from wherever the page
@@ -259,13 +279,17 @@ const BODY_MEASURE = 660;
  */
 function NodeBody({
   artifact,
+  document,
   editing,
+  isClosed,
   node,
   onPin,
   pinned,
 }: {
   artifact?: Artifact;
+  document?: Artifact;
   editing?: string;
+  isClosed: boolean;
   node: TreeNode;
   onPin: () => void;
   pinned: boolean;
@@ -289,6 +313,7 @@ function NodeBody({
       ) : (
         <div className="flex min-w-0 flex-col" ref={stage} {...authorText} />
       )}
+      <NodeFacts facts={node.facts} />
       {node.gaps.map((gap) => (
         <p className={`text-xs ${textMutedOnCanvas}`} key={gap} {...pageChrome}>
           {GAP_LINES[gap]}
@@ -302,6 +327,9 @@ function NodeBody({
           <span {...authorText}>{node.counts.planTasks}</span>
         </p>
       )}
+      {node.type === "decision" ? (
+        <DecisionActions document={document} isClosed={isClosed} nodeReference={node.reference} />
+      ) : null}
       <p>
         <button
           className={`text-xs underline ${textMutedOnCanvas}`}

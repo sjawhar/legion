@@ -76,12 +76,31 @@ export interface NodeChip {
   readonly name: string;
   /** The target's own `dispatch://` address. */
   readonly ref: string;
+  /** Whether the decision holding this chip changed after it first named the target and the
+   *  target has not changed since (`DecisionLink.stale`); absent for every other edge. */
+  readonly stale?: boolean;
 }
 
 /** What the coverage read counts for one requirement, with no identity behind either number. */
 export interface NodeCounts {
   readonly checks: number;
   readonly planTasks: number;
+}
+
+/**
+ * How a fact's value is drawn in a node's body: a command in a monospace block with its own
+ * copy control (R15), a picture loaded through the bytes route the page already serves, one of
+ * the page's own words, or the author's own text.
+ */
+export type FactDrawing = "command" | "picture" | "text" | "word";
+
+/** One name/value fact of a node, which its body draws under its text: what the model holds
+ *  about the node that a row has no line for, such as how a check is run and what a result
+ *  recorded. The name is the key its label is declared under (`nodeFactLabel`). */
+export interface NodeFact {
+  readonly draw: FactDrawing;
+  readonly name: string;
+  readonly value: string;
 }
 
 /** One node of the issue's tree. A node drawn under more than one parent is one node per
@@ -95,6 +114,8 @@ export interface TreeNode {
   readonly chips: readonly NodeChip[];
   /** What the coverage read counts for a requirement. */
   readonly counts?: NodeCounts;
+  /** What the model holds about the node that a row has no line for, drawn in its body. */
+  readonly facts: readonly NodeFact[];
   readonly gaps: readonly GapKind[];
   /** How many nodes this one holds, at any depth: what a folded row says it holds. */
   readonly held: number;
@@ -116,6 +137,9 @@ export interface TreeNode {
   /** Whether this placement is a transclusion rather than the node's edited place. */
   readonly transcluded: boolean;
   readonly type: NodeType;
+  /** Whether this decision waits for the reader's review, which is where Keep and Change are
+   *  drawn and what the Decisions preset opens on (R7). */
+  readonly waiting: boolean;
 }
 
 /** One document's blocks, as `GET /api/v1/artifacts/{id}/blocks` answers them. */
@@ -251,6 +275,7 @@ function assemble(
       children,
       chips: draft.chips,
       ...(draft.counts === undefined ? {} : { counts: draft.counts }),
+      facts: draft.facts,
       gaps: draft.gaps,
       held: children.reduce((total, child) => total + child.held + 1, 0),
       id: draft.id,
@@ -261,6 +286,7 @@ function assemble(
       text: draft.text,
       transcluded: parents.indexOf(parent) > 0,
       type: draft.type,
+      waiting: draft.waiting,
     };
   };
   const children = childrenOf(key, [key]);
@@ -268,6 +294,7 @@ function assemble(
     alsoUnder: [],
     children,
     chips: [],
+    facts: [],
     gaps: [],
     held: children.reduce((total, child) => total + child.held + 1, 0),
     id: key,
@@ -278,5 +305,6 @@ function assemble(
     text: `${key} ${issue.title}`,
     transcluded: false,
     type: "issue",
+    waiting: false,
   };
 }

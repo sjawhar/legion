@@ -32,9 +32,7 @@ import { NotFoundPage } from "../shell/NotFoundPage";
 import { type FrameAttributes, usePageFrame } from "../shell/page-frame";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { VerificationTab } from "../verification/VerificationTab";
 import { narrowConversation } from "./conversation-states";
-import { DecisionsPanel } from "./DecisionsPanel";
 import { DocumentStage, DocumentStages, STAGE_IN_PANEL, useDocumentStage } from "./document-stage";
 import { type FocusedNode, FocusedNodeProvider, useFocusedNode } from "./focused-node";
 import { IssueBody } from "./IssueBody";
@@ -480,7 +478,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         ) : null}
       </div>
       <RoleDocumentPanel
-        Tab={VerificationTab}
         activated={activatedTabs.verification}
         active={activeTab === "verification"}
         artifact={verificationArtifact}
@@ -579,19 +576,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         id="issue-activity-panel"
       >
         {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
-      </div>
-      <div
-        aria-hidden={activeTab !== "decisions"}
-        hidden={activeTab !== "decisions"}
-        id="issue-decisions-panel"
-      >
-        {activatedTabs.decisions ? (
-          <DecisionsPanel
-            artifacts={issue.data?.artifacts ?? []}
-            isClosed={isClosed}
-            issueKey={issueKey}
-          />
-        ) : null}
       </div>
     </section>
   );

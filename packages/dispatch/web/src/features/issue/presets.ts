@@ -28,11 +28,13 @@ import type { NodeType, Preset } from "./page-words";
 /**
  * The node types each preset's query keeps, and `undefined` for the Tree preset, which keeps
  * every node. A result is in the Checks preset because it is the evidence recorded against a
- * check and sits under it; nothing else is in two presets' types.
+ * check and sits under it, and an ask is in the Decisions preset because an open question is
+ * what a decision answers and the old Decisions tab listed the two together; nothing else is
+ * in two presets' types.
  */
 const PRESET_TYPES: Readonly<Record<Preset, readonly NodeType[] | undefined>> = {
   checks: ["check", "result"],
-  decisions: ["decision"],
+  decisions: ["ask", "decision"],
   plan: ["plan_task"],
   spec: ["requirement"],
   tree: undefined,

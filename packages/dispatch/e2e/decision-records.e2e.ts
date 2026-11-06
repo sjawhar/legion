@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+import { CONTROL_LABELS } from "../web/src/features/issue/page-words";
 import { createIssue, createIssueArtifact, createProject, editArtifact, getArtifact } from "./api";
 import { blockId } from "./editor";
+import { gotoIssue, nodeRows } from "./issue-page";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
@@ -54,29 +56,35 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
   await expect(page.locator(`[data-margin-item$=":${newest}"]`)).toHaveCount(1);
   await expect(page.locator(`[title="${STALE_TITLE}"]`)).toHaveCount(0);
 
-  // The Decisions tab lists it under the reader's review, with both blocks and neither out of
-  // date.
-  await page.goto(`/issues/${issue.key}/decisions`);
-  const waiting = page.getByRole("region", { name: "Waiting for your review" });
-  await expect(waiting.getByRole("heading", { name: DECISION })).toBeVisible();
-  await expect(waiting.getByText("out of date")).toHaveCount(0);
+  // The Decisions preset: the decision is a node of the issue's tree, the preset opens on it
+  // because it waits for the reader's review, and its body holds Keep and Change. Until
+  // 2026-11-06 this read the Decisions tab's four sections of cards
+  // (`features/issue/DecisionsPanel.tsx`, `region "Waiting for your review"`), which
+  // dispatch://INFRA-1196 replaced with the tree: the sections are gone, so what waits for the
+  // reader is the decision whose node carries Keep, and a shaped link that went out of date is
+  // a word on that node's own chip instead of a line in a card.
+  await gotoIssue(page, `/issues/${issue.key}/decisions`);
+  const decision = nodeRows(page).filter({ hasText: DECISION }).first();
+  await expect(decision).toBeVisible();
+  await expect(page.getByText(CONTROL_LABELS.target_stale)).toHaveCount(0);
 
   // Change opens the composer on the decision's own text and posts a comment anchored to it.
-  await waiting.getByRole("button", { name: "Change" }).click();
+  await decision.focus();
+  await decision.getByRole("button", { exact: true, name: CONTROL_LABELS.change_decision }).click();
   const composer = page.getByRole("form", { name: `Change ${DECISION}` });
   await expect(composer.getByTestId("decision-quote")).toContainText(REASON);
   await composer.getByRole("textbox").fill("Measure the file store first.");
-  await composer.getByRole("button", { name: "Send" }).click();
+  await composer.getByRole("button", { name: CONTROL_LABELS.send_change }).click();
   await expect(composer).toBeHidden();
 
-  // The agent changes the decision's text: both blocks it links are out of date, on the Decisions
-  // tab and as a mark on the Spec tab.
+  // The agent changes the decision's text: both blocks it links are out of date, on the
+  // Decisions preset and as a mark on the Spec tab.
   await editArtifact(decisions.artifact.id, {
     ops: [{ find: REASON, op: "replace", with: `${REASON} Measured against the file store.` }],
     summary: "measured",
   });
-  await page.goto(`/issues/${issue.key}/decisions`);
-  await expect(page.getByText("out of date")).toHaveCount(2);
+  await gotoIssue(page, `/issues/${issue.key}/decisions`);
+  await expect(page.getByText(CONTROL_LABELS.target_stale)).toHaveCount(2);
   await page.goto(`/issues/${issue.key}/spec`);
   await expect(page.locator(`[title="${STALE_TITLE}"]`)).toHaveCount(2);
 
@@ -87,21 +95,16 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
   });
   await page.goto(`/issues/${issue.key}/spec`);
   await expect(page.locator(`[title="${STALE_TITLE}"]`)).toHaveCount(1);
-  await page.goto(`/issues/${issue.key}/decisions`);
-  await expect(page.getByText("out of date")).toHaveCount(1);
+  await gotoIssue(page, `/issues/${issue.key}/decisions`);
+  await expect(page.getByText(CONTROL_LABELS.target_stale)).toHaveCount(1);
 
-  // Keep records the reader's agreement: the decision leaves the section that waits for it and
-  // stands under the decisions that are theirs.
-  await page
-    .getByRole("region", { name: "Waiting for your review" })
-    .getByRole("button", { name: "Keep" })
-    .click();
+  // Keep records the reader's agreement: the decision stops waiting for the reader's review,
+  // so the control that takes it there is gone and the decision is still a node of the tree.
+  const waiting = nodeRows(page).filter({ hasText: DECISION }).first();
+  await waiting.focus();
+  await waiting.getByRole("button", { exact: true, name: CONTROL_LABELS.keep_decision }).click();
   await expect(
-    page.getByRole("region", { name: "Waiting for your review" }).getByRole("heading", {
-      name: DECISION,
-    })
+    page.getByRole("button", { exact: true, name: CONTROL_LABELS.keep_decision })
   ).toHaveCount(0);
-  await expect(
-    page.getByRole("region", { name: "Your decisions" }).getByRole("heading", { name: DECISION })
-  ).toBeVisible();
+  await expect(nodeRows(page).filter({ hasText: DECISION }).first()).toBeVisible();
 });

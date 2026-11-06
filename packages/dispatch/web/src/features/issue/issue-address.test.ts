@@ -9,6 +9,7 @@ function node(id: string, type: NodeType, over: Partial<TreeNode> = {}): TreeNod
     alsoUnder: [],
     children: [],
     chips: [],
+    facts: [],
     gaps: [],
     held: 0,
     id,
@@ -17,6 +18,7 @@ function node(id: string, type: NodeType, over: Partial<TreeNode> = {}): TreeNod
     text: id,
     transcluded: false,
     type,
+    waiting: false,
     ...over,
   };
 }

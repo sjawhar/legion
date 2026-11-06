@@ -335,6 +335,7 @@ a {
   align-items: baseline;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
+  min-width: 0;
 }
 
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-name] {
@@ -359,15 +360,26 @@ a {
 /* The block's own leading text, so it takes the primary-body role: 15px medium, the same as
    an ask's question and the document's prose, rather than a size of its own. */
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-title] {
+  min-width: 0;
   font-size: 15px;
   font-weight: 500;
   line-height: 1.625;
+  overflow-wrap: break-word;
   color: #0f172b; /* slate-900 */
 }
 
+/* A typed block's attributes are a two-column grid, name beside value, and not the wrapping
+   row they were: a row wrapped a label away from its value, let a long value push the block
+   past its card and cut five values mid-word at 390 px, which is most of the sixteen faults
+   measured on the issue page (dispatch://INFRA-1196/artifact/design-notes-md section 5). The
+   list takes the whole line of the header it sits in, each value a column that may be zero
+   wide, and a value with nothing else to break on breaks inside a word, so a block fits
+   whatever its author wrote in it. */
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  flex-basis: 100%;
+  min-width: 0;
   gap: 0 0.5rem;
   margin: 0;
   font-size: 12px;
@@ -376,7 +388,9 @@ a {
 }
 
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt {
+  min-width: 0;
   font-weight: 600;
+  overflow-wrap: break-word;
 }
 
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt::after {
@@ -384,7 +398,9 @@ a {
 }
 
 :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dd {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 @media (prefers-color-scheme: dark) {

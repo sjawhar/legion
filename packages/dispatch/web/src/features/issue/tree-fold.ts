@@ -147,10 +147,22 @@ export function treeRows(root: TreeNode, opened: OpenedBranches = NOTHING_OPENED
  * the reader is on and its children as one line each, with no second indent level under them.
  * The path down to it is the breadcrumb above the rows (`zoomBreadcrumb`) rather than a row
  * apiece, because the identity block leaves a phone one screenful of rows, not five.
+ *
+ * A row the preset draws only as the ancestor of a match (`context`) is no stop of its own
+ * here: the one screen a phone has goes to what the preset matched, so a node's children are
+ * the nearest rows below it the preset kept. The Checks preset at 390 px therefore draws its
+ * checks under the issue, where at 1440 px each sits under the requirement it serves and that
+ * requirement is drawn faint above it (R3, R17).
  */
-export function zoomedRows(root: TreeNode, zoom: string | undefined): DrawnRow[] {
+export function zoomedRows(
+  root: TreeNode,
+  zoom: string | undefined,
+  context: ReadonlySet<string> = new Set()
+): DrawnRow[] {
   const chain = pathTo(root, zoom ?? root.id) ?? [root];
   const node = chain.at(-1) ?? root;
+  const matched = (of: TreeNode): TreeNode[] =>
+    of.children.flatMap((child) => (context.has(child.id) ? matched(child) : [child]));
   const rows: DrawnRow[] = [
     {
       ...(node.children.length > 0 ? { expanded: true } : {}),
@@ -160,7 +172,7 @@ export function zoomedRows(root: TreeNode, zoom: string | undefined): DrawnRow[]
       ...(chain.length < 2 ? {} : { parent: chain[chain.length - 2]?.id ?? root.id }),
     },
   ];
-  for (const child of node.children) {
+  for (const child of matched(node)) {
     rows.push({
       ...(child.children.length > 0 ? { expanded: false, folded: child.held } : {}),
       kind: "node",

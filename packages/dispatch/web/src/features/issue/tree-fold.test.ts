@@ -28,6 +28,7 @@ function node(
     alsoUnder: [],
     children,
     chips: [],
+    facts: [],
     gaps: [],
     held: children.reduce((total, child) => total + child.held + 1, 0),
     id,
@@ -36,6 +37,7 @@ function node(
     text: id,
     transcluded: false,
     type,
+    waiting: false,
     ...extra,
   };
 }

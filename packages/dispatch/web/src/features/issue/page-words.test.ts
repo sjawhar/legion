@@ -25,15 +25,19 @@ import {
   GLYPH_TOKENS,
   ISSUE_STATUS_WORDS,
   issueStatusWord,
+  NODE_FACT_LABELS,
   NODE_STATE_WORDS,
   NODE_TYPE_NAMES,
   NODE_TYPES,
+  nodeFactLabel,
   nodeStateWord,
   nodeStateWords,
   nodeTypeName,
   PRESET_NAMES,
   PRESET_ORDER,
   RESULT_CURRENCY_WORDS,
+  RESULT_VERDICT_WORDS,
+  WAITING_LINES,
   wordsIn,
 } from "./page-words";
 
@@ -94,12 +98,15 @@ const WORD_SOURCES: readonly unknown[] = [
   GAP_WORDS,
   CHECK_WHEN_WORDS,
   RESULT_CURRENCY_WORDS,
+  RESULT_VERDICT_WORDS,
+  WAITING_LINES,
   APPROVAL_STATE_WORDS,
   CONTROL_LABELS,
   PROPERTY_LABELS,
   MARGIN_SECTION_NAMES,
   HELP_LINES,
   BLOCK_ATTRIBUTE_LABELS,
+  NODE_FACT_LABELS,
 ];
 
 test("the conversation's four states are named in the order the panel offers them", () => {
@@ -272,6 +279,25 @@ test("every block attribute the schema declares has a label, and one it does not
   }
   expect(Object.keys(BLOCK_ATTRIBUTE_LABELS)).not.toContain("owner_of_record");
   expect(blockAttributeLabel("owner_of_record")).toBe("owner of record");
+});
+
+test("every fact a node's body draws has a plain label, and a block attribute keeps its own", () => {
+  for (const [name, label] of Object.entries(NODE_FACT_LABELS)) {
+    expect(label, `the fact ${name} is named with an internal token`).toMatch(/^[a-z][^_]*$/);
+  }
+  expect(nodeFactLabel("stands")).toBe("how it stands");
+  expect(nodeFactLabel("negative_control")).toBe(BLOCK_ATTRIBUTE_LABELS.negative_control);
+  expect(nodeFactLabel("owner_of_record")).toBe("owner of record");
+});
+
+test("a result's verdict reads as a word, and every waiting line is one sentence", () => {
+  expect(Object.keys(RESULT_VERDICT_WORDS).sort()).toEqual(["fail", "pass"]);
+  for (const word of Object.values(RESULT_VERDICT_WORDS)) {
+    expect(word).toMatch(/^[A-Z][^_]*$/);
+  }
+  for (const line of Object.values(WAITING_LINES)) {
+    expect(line).toMatch(/^[A-Z][^_]*\.$/);
+  }
 });
 
 test("DECLARED_WORDS holds every declared word and no other", () => {

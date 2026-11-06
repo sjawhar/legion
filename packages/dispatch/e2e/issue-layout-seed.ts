@@ -88,7 +88,7 @@ import { ONE_PIXEL_PNG } from "./sends";
  *   `seedWholeIssue` records its results while the fake GitHub serves the repository and the pull
  *   request and then seeds the fake with no repository: the head results stay `current`, the
  *   reworded check's goes `older`, and the one at a commit no pull request names reads `unknown`,
- *   the `Unmarked` of `VerificationTab.tsx:29-51`. `seedRequestBaseline` keeps the repository
+ *   the `Unmarked` of `NODE_STATE_WORDS.check`. `seedRequestBaseline` keeps the repository
  *   installed, because its three GitHub reads are part of the measured baseline, so only four of
  *   the five states appear there.
  * - **The reply that answers a reply.** `threadHeadOf` in

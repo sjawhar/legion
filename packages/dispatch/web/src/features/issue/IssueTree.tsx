@@ -47,7 +47,9 @@ export function IssueTree({
   context,
   emptyLine,
   focusReveal,
+  isClosed,
   onEditing,
+  openBody,
   reveal,
   root,
 }: {
@@ -63,10 +65,16 @@ export function IssueTree({
    *  one of its blocks, a block named by a fragment - because the document lands on it there,
    *  and two surfaces scrolling for the same node would each undo the other. */
   focusReveal: boolean;
+  /** Whether the issue is closed, which the writes a node's body offers are refused on. */
+  isClosed: boolean;
   /** The document the reader is editing a node of here, so the page draws that document's one
    *  editor rather than leaving the row with nothing to put a caret in; `undefined` whenever
    *  the reader is editing nothing. */
   onEditing: (artifactId: string | undefined) => void;
+  /** The node this preset draws the body of without being asked: what waits for the reader
+   *  there, such as a decision waiting for their review (R7). It opens that body and takes no
+   *  focus, which stays the reader's. */
+  openBody?: string;
   /** The chain down to the node the address names, the issue first: the tree unfolds it and
    *  puts the focus on its last node, once per address (R19). */
   reveal: readonly TreeNode[] | undefined;
@@ -114,7 +122,7 @@ export function IssueTree({
   // below the tree is always zoomed, one node at a time, which is `zoomedRows`.
   const rooted = zoom === undefined ? root : (pathTo(root, zoom)?.at(-1) ?? root);
   const rows = zoomed
-    ? zoomedRows(root, on)
+    ? zoomedRows(root, on, context)
     : treeRows(rooted, cycle === EVERYTHING ? everythingOpened(rooted) : shown);
   const breadcrumb: readonly TreeNode[] = zoomed
     ? zoomBreadcrumb(root, on)
@@ -402,14 +410,17 @@ export function IssueTree({
                 focused === key ||
                 pinned.has(key) ||
                 editing?.row === key ||
+                row.node.id === openBody ||
                 drawsBody(cycle, row.level)
               }
               context={context.has(row.node.id)}
+              {...(place?.blockId === undefined ? {} : { document: place.artifact })}
               {...(editing?.row === key ? { editing: editing.artifactId } : {})}
               expanded={row.expanded}
               focused={focused === key}
               folded={row.folded}
               indent={indent}
+              isClosed={isClosed}
               key={key}
               level={row.level}
               node={row.node}
