@@ -2777,12 +2777,10 @@ jobs:
     # step's own 20 minutes, which is 21; after the unit step's measured 35 minutes, natslive's
     # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
     #
-    # 80 rather than 60 TEMPORARILY, for the three temporary steps at the end of this job: the
-    # INFRA-1260 proof's two ten-minute package deadlines take it to 58, the INFRA-1075
-    # clone-cost measurement's own ten to 68, and the INFRA-1075 request profile's three
-    # deadlines of 3, 3 and 2 minutes, with the Postgres it starts, to 79. It goes back to 60
-    # with them (dispatch://INFRA-1260, dispatch://INFRA-1075).
-    timeout-minutes: 80
+    # 60 rather than 48 TEMPORARILY, for the INFRA-1260 proof step at the end of this job, whose
+    # two ten-minute package deadlines take the bound to 58. It goes back to 60's own arithmetic
+    # with that step (dispatch://INFRA-1260).
+    timeout-minutes: 60
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3021,100 +3019,6 @@ jobs:
         run: |
           go test -count=20 -run '^TestRunMakesNoStatementOnceItsBootDrainAndPassAreDone$' ./internal/dispatch/embedqueue/
           go test -count=20 -run '^TestAnUploadHoldsNoIssueLockWhileTheStoreWrites$' ./internal/dispatch/api/
-        working-directory: packages/envoy
-      # TEMPORARY, the INFRA-1075 clone-cost measurement: one CI run has to say, from a real
-      # runner and its own non-durable service rather than from a development pod, what one api
-      # test's floor is made of, what a clone and a drop cost at 8 and at 24 at once under
-      # `strategy file_copy` and under `strategy wal_log`, how big the migrated template is, and
-      # what moving the drop off a test's critical path is worth. It runs after the test steps
-      # above, so the per-package times this run also reports are measured without it, and it
-      # comes out before the final pair of runs, with its one Go file
-      # (internal/dispatch/api/clonecost_measure_test.go), its pin in ci_job_reads.py and the ten
-      # minutes this job's timeout-minutes carries for it (dispatch://INFRA-1075).
-      - name: Measure what a test's database clone costs (INFRA-1075)
-        run: |
-          go test -tags clonecost -v -count=1 -timeout 10m -run '^TestCloneCostMeasurement$' ./internal/dispatch/api/
-        working-directory: packages/envoy
-      # TEMPORARY, the INFRA-1075 request-profile step: one CI run has to say where an api test's
-      # 217 ms of body and 66 ms of teardown go - a handler's own work, work every test repeats
-      # unshared, or the harness - from a real runner rather than a development pod. It answers
-      # the two questions that measurement left open: a CPU profile of this package
-      # (`go test -cpuprofile`, read with `go tool pprof -top -cum`) and the server's own
-      # pg_stat_statements, by total time and by calls. It runs after the test steps above, so
-      # the per-package times this run also reports are measured without it, and it comes out
-      # before the final pair of runs, with its one Go file behind the apiprofile tag
-      # (internal/dispatch/api/apiprofile_measure_test.go), its two pins in ci_job_reads.py and
-      # the eleven minutes this job's timeout-minutes carries for it (dispatch://INFRA-1075).
-      #
-      # pg_stat_statements has to be loaded by the server (shared_preload_libraries), which this
-      # job's service deliberately does not do: loading it there would move every time the steps
-      # above measured onto a server that is not the one those times are from, and the extension
-      # costs a few per cent. So this step starts a Postgres of its own instead, from the image
-      # the service runs and with the service's own five settings, and points this one step at
-      # it. The job's service is untouched.
-      #
-      # Two profiled runs, because they answer different halves. The workload test makes one api
-      # test's three requests over and over against one server, so the profile's cumulative top
-      # is the request path rather than the package's one-off setup, and so the first request
-      # can be told from the fortieth; it reads its own statement window itself. The four
-      # ordinary tests are the simplest database-backed tests of the package - two plain CRUD,
-      # one document edit, one room settlement - profiled whole, which is what a reader needs to
-      # see the setup and the migrations beside the requests; the third go test call, over
-      # TestAPIProfileStatements alone, is what prints their statement window. The whole package
-      # is not profiled: it takes about twenty minutes, its profile would be whatever runs
-      # longest rather than what a request costs, and this job has no such room.
-      - name: Profile a request and the statements it runs (INFRA-1075)
-        env:
-          DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5433/postgres?sslmode=disable
-        run: |
-          set -o pipefail
-          out="$RUNNER_TEMP/api-profile"
-          mkdir -p "$out"
-          image=$(docker inspect -f '{{.Image}}' "${{ job.services.postgres.id }}")
-          docker run -d --name api-profile-pg --shm-size=1g -p 5433:5432 -e POSTGRES_PASSWORD=ci "$image" postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20 -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.max=10000 -c pg_stat_statements.track=all
-          ready=
-          for _ in $(seq 60); do
-            if docker exec api-profile-pg pg_isready -U postgres -q; then ready=yes; break; fi
-            sleep 1
-          done
-          if [ -z "$ready" ]; then docker logs api-profile-pg; echo "::error::the measurement Postgres never came up"; exit 1; fi
-          # In template1 as well as in postgres: every database the harness makes is a copy of
-          # template1, and the workload test resets the counters from the database it holds.
-          docker exec api-profile-pg psql -U postgres -d template1 -qAtc 'create extension if not exists pg_stat_statements'
-          docker exec api-profile-pg psql -U postgres -d postgres -qAtc 'create extension if not exists pg_stat_statements'
-          docker exec api-profile-pg psql -U postgres -d postgres -qAtc "select 'the server these numbers are from: ' || version() || '; shared_preload_libraries=' || current_setting('shared_preload_libraries') || '; pg_stat_statements.track=' || current_setting('pg_stat_statements.track')"
-          cat <<'TEXT'
-
-          ======== PART 1 of 4, one request over and over, profiled. The workload test prints
-          what each of its requests cost, what the test around them cost, what the server ran for
-          them, and a reading of the three. The server's own log lines are filtered out of it.
-          TEXT
-          go test -tags apiprofile -count=1 -v -timeout 3m -cpuprofile "$out/workload.prof" -o "$out/workload.test" -run '^TestAPIProfileWorkload$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
-          cat <<'TEXT'
-
-          ======== PART 2 of 4, go tool pprof -top -cum over that profile, the top 30 by
-          cumulative time. A CPU profile sees this Go process alone: the Postgres it talks to is
-          a container of its own, and not one microsecond of its CPU is here. The statement
-          tables of part 1 are that other half, and the two together are what a request costs.
-          TEXT
-          go tool pprof -top -cum -nodecount=30 "$out/workload.test" "$out/workload.prof"
-          cat <<'TEXT'
-
-          ======== PART 3 of 4, the same profile focused on the request loop alone
-          TEXT
-          go tool pprof -top -cum -nodecount=20 -focus TestAPIProfileWorkload "$out/workload.test" "$out/workload.prof"
-          cat <<'TEXT'
-
-          ======== PART 4 of 4, four ordinary database-backed api tests, profiled whole: two
-          plain CRUD tests, one document edit and one room settlement. The counters are reset
-          first, so the statement tables at the end hold the template migration this package
-          makes once, and every clone and drop, which the loop in part 1 leaves out on purpose.
-          TEXT
-          docker exec api-profile-pg psql -U postgres -d postgres -qAtc "select 'the counters were reset at ' || pg_stat_statements_reset()"
-          go test -count=1 -v -timeout 3m -cpuprofile "$out/tests.prof" -o "$out/tests.test" -run '^(TestIssueTitlesAreCappedOnCreateAndRetitle|TestIssueDocumentsTakeTheirRoleFromTheirName|TestRejectedConditionalEditWritesNothingDurable|TestEveryReadServesATreeAtTheDepthBound)$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
-          go tool pprof -top -cum -nodecount=30 "$out/tests.test" "$out/tests.prof"
-          go test -tags apiprofile -count=1 -v -timeout 2m -run '^TestAPIProfileStatements$' ./internal/dispatch/api/ 2>&1 | grep -vE ' (INFO|WARN|DEBUG) |^=== '
-          docker rm -f api-profile-pg > /dev/null
         working-directory: packages/envoy
       # Always, because a red attempt's times are the ones a reader needs, and one artifact per
       # attempt because a run's artifacts are listed per run, not per attempt, and a download by
