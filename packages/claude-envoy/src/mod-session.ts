@@ -1,7 +1,7 @@
 // The Claude Code session as the router drives it (INFRA-1026): what the mod says is happening in
 // it, and the calls that put something into it.
 //
-// Three measured facts shape everything here, all on 2.1.310 in this pod:
+// Four measured facts shape everything here, all on 2.1.310 in this pod:
 //
 //   - `$.prompt.submit` resolves only once the turn it starts has ended. So a submit is never
 //     awaited by a caller that has a frame to answer, and at most one is ever in flight: a second
@@ -14,19 +14,26 @@
 //     a row made it into is read off `step-request`, which the mod sends as the request goes
 //     out, and never off the `step` snapshots, which follow the first chunk: a row added in the
 //     seconds between the two would otherwise look read by a request that left without it.
+//   - a `$.command.run` of this session's writes its rows after the call that asked for it has
+//     answered, and those rows carry `origin.kind` `plugin` or `engine`, where a command a
+//     person typed at the session's own terminal carries `unclassified`. So a run stays
+//     outstanding past its own result (`runsCommandRow`, `runCommand`), and a row is tied to a
+//     run by that run being outstanding rather than by the command the row names: Claude Code
+//     runs `/cost` as `/usage` and `/model anthropic/haiku` as `/model haiku`.
 //
 // The turn tracking is built from the mod's events alone (`../hooks/mod-protocol`), which have one
 // consumer: the live view reads them and hands each one here (`observe`), so nothing in this file
 // opens a socket or reads the link's stream.
 import { messageFor } from "@legion/envoy-client/errors"
 import type {
+  ModAppendOrigin,
   ModCallResults,
   ModConfigValue,
   ModContentBlock,
   ModEffort,
   ModEvent,
 } from "../hooks/mod-protocol"
-import { claudeCommandOutput, claudeEchoedCommandLine } from "./claude-rows"
+import { claudeCommandOutput } from "./claude-rows"
 import type { ModLink } from "./mod-link"
 
 /**
@@ -97,6 +104,23 @@ export interface ModSession {
   connected(): boolean
   /** Take one of the mod's events. The live view hands over every event it reads, in order. */
   observe(event: ModEvent): void
+  /**
+   * Whether a row of the `command` door is one this session's own `$.command.run` produced,
+   * which is the row the live view must not draw as a person's message: Claude Code echoes the
+   * command it ran rather than the one that was asked for - `/cost` ran as `/usage`, and
+   * `/model anthropic/haiku` as `/model haiku`, measured live on 2.1.310 (INFRA-1026) - so the
+   * echo drawn is a second message the person never wrote, beside Dispatch's stored copy of the
+   * one they did send.
+   *
+   * True while a run of this session's is outstanding and `origin` is not `unclassified`. The
+   * rows of a run carry `{"kind":"plugin"}` or `{"kind":"engine"}`
+   * (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:312-321` and `:70-72`,
+   * `logs/mod3-q1q3q5.jsonl:195-196`) and a command a person typed at the session's own
+   * terminal carries `{"kind":"unclassified"}` (`logs/mod2.jsonl:178-188` and `:218-222`,
+   * `logs/mod3-q2-310.jsonl:118-119`), so `origin` tells the two apart where the command's own
+   * name cannot.
+   */
+  runsCommandRow(origin: ModAppendOrigin): boolean
   /** Add one row the model reads at its next request, and resolve with the row's id. Nothing is
    *  started by it: a card joins the conversation without a turn of its own. */
   show(content: readonly ModContentBlock[]): Promise<string>
@@ -151,14 +175,12 @@ interface WatchedRow {
   readonly messageId: string
 }
 
-/** One `$.command.run` in flight, and the output row Claude Code wrote for it. */
+/** One `$.command.run` outstanding, and the output row Claude Code wrote for it. A run is
+ *  outstanding past its own result: its rows arrive after the call answers
+ *  (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`, where the caveat, echo and
+ *  output rows followed the result by 7 ms, 90 ms and 119 ms), and nothing but the run being
+ *  outstanding ties them to it. */
 interface CommandRun {
-  /** The command line this run's echo row carries: `/effort low` for `("effort", "low")`. */
-  readonly line: string
-  /** Whether the echo row naming that line has been seen. It is what ties the output row to the
-   *  run it belongs to, as far as the protocol allows: a `ModAppendMessage` carries no command
-   *  name, and the rows of one command arrive in order - caveat, echo, output. */
-  echoed: boolean
   /** What the output row held, once one has been read as this run's. */
   output?: string
   /** Woken by that row, so a result carrying no output answers the moment the row lands. */
@@ -202,54 +224,58 @@ export function modSession(options: ModSessionOptions): ModSession {
   /** Whether a `$.prompt.submit` is in flight: it holds until its turn ends, so the next one
    *  waits behind it. */
   let submitting: Promise<void> = Promise.resolve()
-  /** The `$.command.run` calls in flight, oldest first. Each one is dropped as its call ends,
-   *  so this holds what a person has running and nothing else. */
+  /** The `$.command.run` calls outstanding, oldest first. A run is outstanding from the call
+   *  going out until its output row has been read or the wait for that row has passed, so this
+   *  holds what a person has running and nothing else. */
   const commandRuns: CommandRun[] = []
   const outputMs = options.commandOutputMs ?? COMMAND_OUTPUT_MS
 
-  /** One row of the `command` door, while a command of this session's runs: the echo row ties
-   *  the rows that follow it to the run they belong to, and the output row is what that run
-   *  printed. */
+  const runsCommandRow = (origin: ModAppendOrigin): boolean =>
+    commandRuns.length > 0 && origin.kind !== "unclassified"
+
+  /** One row of the `command` door of a run of this session's: the output row is what that run
+   *  printed, and the caveat and echo rows beside it say nothing this session needs. */
   const commandRow = (content: readonly ModContentBlock[]): void => {
-    const line = claudeEchoedCommandLine(content)
-    if (line !== undefined) {
-      const echoed = commandRuns.find((run) => !run.echoed && run.line === line)
-      if (echoed !== undefined) echoed.echoed = true
-      return
-    }
     const output = claudeCommandOutput(content)
     if (output === undefined) return
-    // The output belongs to the run whose echo row came last and has no output yet; a run whose
-    // echo row named another command line takes it only when it is the one command in flight,
-    // which is what a person sending one message at a time has.
-    let run: CommandRun | undefined
-    for (let at = commandRuns.length - 1; at >= 0; at--) {
-      const waiting = commandRuns[at]
-      if (waiting?.echoed === true && waiting.output === undefined) {
-        run = waiting
-        break
-      }
-    }
-    if (run === undefined && commandRuns.length === 1) run = commandRuns[0]
-    if (run === undefined || run.output !== undefined) return
+    // The oldest run with no output yet: Claude Code runs a session's commands one after
+    // another and writes each run's echo before its output
+    // (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`), so the output rows arrive
+    // in the order the runs were asked for. The command the row names says nothing about which
+    // run it is: `/cost` is run as `/usage`.
+    const run = commandRuns.find((waiting) => waiting.output === undefined)
+    if (run === undefined) return
     run.output = output
     run.arrived?.()
   }
 
+  /** This run is over: no row that arrives from here on is its. */
+  const endRun = (run: CommandRun): void => {
+    const at = commandRuns.indexOf(run)
+    if (at !== -1) commandRuns.splice(at, 1)
+  }
+
   /** What the output row of `run` held, waited for a bounded moment: the row and the call's
-   *  result cross (`COMMAND_OUTPUT_MS`), and a run whose row never came printed nothing. */
+   *  result cross (`COMMAND_OUTPUT_MS`), and a run whose row never came printed nothing. The
+   *  run is outstanding until this wait ends, which is one wait per run however many callers
+   *  read it: the rows of a run arrive after its call has answered, and `runsCommandRow` has to
+   *  know them for the run's as they do. */
   const outputRowOf = async (run: CommandRun): Promise<string> => {
-    if (run.output === undefined) {
-      const waited = Promise.withResolvers<void>()
-      const timer = setTimeout(waited.resolve, outputMs)
-      timer.unref()
-      run.arrived = () => {
-        clearTimeout(timer)
-        waited.resolve()
+    try {
+      if (run.output === undefined) {
+        const waited = Promise.withResolvers<void>()
+        const timer = setTimeout(waited.resolve, outputMs)
+        timer.unref()
+        run.arrived = () => {
+          clearTimeout(timer)
+          waited.resolve()
+        }
+        await waited.promise
       }
-      await waited.promise
+      return run.output ?? ""
+    } finally {
+      endRun(run)
     }
-    return run.output ?? ""
   }
 
   /** Hand the mod one prompt, behind every prompt handed before it. Never awaited by a caller:
@@ -307,9 +333,12 @@ export function modSession(options: ModSessionOptions): ModSession {
         return
       }
       if (event.kind === "append") {
-        // A row of the `command` door only matters while a command of this session's runs: the
-        // rows of a command a person ran at the terminal belong to nobody here.
-        if (event.door === "command" && commandRuns.length > 0) commandRow(event.message.content)
+        // A row of the `command` door is read only where it is a row of a run of this
+        // session's: the rows of a command a person ran at their own terminal belong to nobody
+        // here, and `origin` is what tells the two apart (`runsCommandRow`).
+        if (event.door === "command" && runsCommandRow(event.origin)) {
+          commandRow(event.message.content)
+        }
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
@@ -338,28 +367,33 @@ export function modSession(options: ModSessionOptions): ModSession {
       else void submit(unreadRowPrompt([{ messageId, text }]), false)
       return result.uuid
     },
+    runsCommandRow,
     async runCommand(command, args) {
-      const run: CommandRun = {
-        echoed: false,
-        line: args === "" ? `/${command}` : `/${command} ${args}`,
-      }
+      const run: CommandRun = {}
       commandRuns.push(run)
+      let result: ModCallResults["command.run"]
       try {
-        const result = await link.request(
+        result = await link.request(
           "command.run",
           { command, ...(args === "" ? {} : { args }) },
           { timeoutMs: COMMAND_TIMEOUT_MS },
         )
-        // What the command printed, in the order the measurements put it: the result's own
-        // text, then its `context` entries, which is where a terminal `/context` puts its table
-        // and the only place it puts it
-        // (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`, a result with no
-        // `text` field at all), then the output row Claude Code wrote for this run.
-        return resultOutput(result) ?? (await outputRowOf(run))
-      } finally {
-        const at = commandRuns.indexOf(run)
-        if (at !== -1) commandRuns.splice(at, 1)
+      } catch (error) {
+        endRun(run)
+        throw error
       }
+      // The run's own rows are still to come: measured on 2.1.310, the result landed 7 ms
+      // before the caveat row, 90 ms before the echo and 119 ms before the output
+      // (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`). So the wait for the
+      // output row is started whatever the result carried, and the run is outstanding until it
+      // ends - that is what makes those rows this run's rather than a person's typing.
+      const row = outputRowOf(run)
+      // What the command printed, in the order the measurements put it: the result's own
+      // text, then its `context` entries, which is where a terminal `/context` puts its table
+      // and the only place it puts it
+      // (`/legion/scratch/tmp/infra-1026-spike/logs/mod3-q7-int.jsonl:70-73`, a result with no
+      // `text` field at all), then the output row Claude Code wrote for this run.
+      return resultOutput(result) ?? (await row)
     },
     async fork(prompt) {
       const result = await link.request("model.fork", { prompt }, { timeoutMs: FORK_TIMEOUT_MS })

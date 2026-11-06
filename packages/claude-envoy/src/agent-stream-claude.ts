@@ -24,6 +24,7 @@ import {
 } from "@legion/pi-shared/agent-stream"
 import type {
   ModAppendMessage,
+  ModAppendOrigin,
   ModCommandInfo,
   ModConfigRow,
   ModContentBlock,
@@ -125,6 +126,15 @@ export interface ClaudeAgentStreamDeps {
    * session's own keeps its own id as its tag, as every row did before.
    */
   readonly tagFor?: (row: string) => string | undefined
+  /**
+   * Whether a row of the `command` door is one this session's own `$.command.run` produced
+   * (`./mod-session`, `runsCommandRow`). Claude Code echoes the command it ran rather than the
+   * one that was asked for - `/cost` ran as `/usage`, and `/model anthropic/haiku` as
+   * `/model haiku`, measured live on 2.1.310 - so the echo row drawn is a second message the
+   * person never wrote, beside Dispatch's stored copy of the one they did send (INFRA-1026).
+   * Absent where no run of this session's can exist, and every command row is a person's own.
+   */
+  readonly runsCommandRow?: (origin: ModAppendOrigin) => boolean
 }
 
 export interface ClaudeAgentStream {
@@ -417,6 +427,12 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
       const line = claudeEchoedCommandLine(message.content)
       if (line !== undefined) {
         if (isPane && isPaneSeededRename(line)) return
+        // The echo of a command this session ran for a person is not drawn at all: it is the
+        // command Claude Code ran rather than the one the person sent, and their own line
+        // reaches the page as the message Dispatch stored, which the Agents page shows beside
+        // this stream. Drawn, a `/cost` the person sent put `/cost` and `/usage` in front of
+        // them as two messages of theirs, measured live on 2.1.310 (INFRA-1026).
+        if (deps.runsCommandRow?.(origin) === true) return
         record(
           subject,
           {

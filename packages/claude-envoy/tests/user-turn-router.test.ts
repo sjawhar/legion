@@ -646,56 +646,27 @@ test("a command that printed nothing is answered saying so rather than with sile
   }
 })
 
-// The Agents page hides Dispatch's stored copy of a person's message only where the row the
-// session streamed carries that message's id (`turnSaysBody`,
-// `packages/dispatch/web/src/features/agent-view/conversation.ts`). The row a `/` message becomes
-// is the one Claude Code echoes the command in, which holds the command line and none of the
-// words of the message - so nothing tied it to the message and the page drew the command twice,
-// the stored copy and the echo, measured on a 2.1.310 terminal session (INFRA-1026).
-test("the row Claude Code echoes a person's command in is recorded as their Dispatch message", async () => {
+// A command does not run under the name the person sent it with: measured live on 2.1.310, a
+// `/cost` from Dispatch was run and echoed by Claude Code as `/usage`, and a
+// `/model anthropic/haiku` as `/model haiku` (INFRA-1026). So what ties the output row to the
+// run is that the run is outstanding, never the command the rows name.
+test("a command Claude Code runs under another name is still answered from that run's output", async () => {
   const mod = fakeMod({ "command.run": () => ({}) })
   const session = await harness({
     link: mod.link,
-    accept: () => accepted("/context"),
+    accept: () => accepted("/cost"),
     commandOutputMs: 500,
   })
   try {
-    expect(await session.router.route(frame(personSends("/context")))).toBe(true)
+    expect(await session.router.route(frame(personSends("/cost")))).toBe(true)
     await waitFor(async () => mod.madeOf("command.run").length === 1, "the command to run")
+    expect(mod.madeOf("command.run")).toEqual([{ command: "cost" }])
 
-    session.observe(commandEcho("context", ""))
-    session.observe(commandOutput("## Context Usage"))
+    session.observe(commandEcho("usage", ""))
+    session.observe(commandOutput("Total cost:            $0.0993"))
     await waitFor(async () => session.replies.length === 1, "the command's reply")
 
-    // The echo row is the one row the live view draws for that message, so it is tagged with it.
-    expect(session.state.messageOf("row-echo-context")).toBe(MESSAGE)
-  } finally {
-    await rm(session.directory, { recursive: true, force: true })
-  }
-})
-
-test("the row of a command a person ran at their own terminal is recorded as no message", async () => {
-  const mod = fakeMod({ "command.run": () => ({}) })
-  const session = await harness({
-    link: mod.link,
-    accept: () => accepted("/context"),
-    commandOutputMs: 500,
-  })
-  try {
-    expect(await session.router.route(frame(personSends("/context")))).toBe(true)
-    await waitFor(async () => mod.madeOf("command.run").length === 1, "the command to run")
-
-    // `/config` was typed at the session's own terminal while the `/context` from Dispatch ran:
-    // no message asked for it, and the message waiting for its own row is not it.
-    session.observe(commandEcho("config", ""))
-    expect(session.state.messageOf("row-echo-config")).toBeUndefined()
-
-    // The row that message is still arrives, and is still recognised.
-    session.observe(commandEcho("context", ""))
-    session.observe(commandOutput("## Context Usage"))
-    await waitFor(async () => session.replies.length === 1, "the command's reply")
-
-    expect(session.state.messageOf("row-echo-context")).toBe(MESSAGE)
+    expect(session.replies.map((posted) => posted.body)).toEqual(["Total cost:            $0.0993"])
   } finally {
     await rm(session.directory, { recursive: true, force: true })
   }

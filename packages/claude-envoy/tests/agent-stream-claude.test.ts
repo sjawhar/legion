@@ -19,7 +19,15 @@ import {
   agentStreamFramesSubject,
 } from "@legion/contracts"
 import { AgentStreamPublisher } from "@legion/pi-shared/agent-stream"
-import type { ModCommandInfo, ModConfigRow, ModContentBlock, ModEvent } from "../hooks/mod-protocol"
+import type {
+  ModAppendOrigin,
+  ModCallName,
+  ModCallResults,
+  ModCommandInfo,
+  ModConfigRow,
+  ModContentBlock,
+  ModEvent,
+} from "../hooks/mod-protocol"
 import {
   CLAUDE_EFFORT_LEVELS,
   CLAUDE_THINKING_HIDDEN,
@@ -27,6 +35,7 @@ import {
   claudeAgentStreamCommands,
   createClaudeAgentStream,
 } from "../src/agent-stream-claude"
+import { modSession } from "../src/mod-session"
 
 const SESSION = "0c3b6f6e-0000-4000-8000-000000000001"
 const SUBJECT = agentStreamFramesSubject(SESSION)
@@ -64,6 +73,7 @@ function harness(
   startAt = 1_000,
   tagFor?: (row: string) => string | undefined,
   isPane = false,
+  runsCommandRow?: (origin: ModAppendOrigin) => boolean,
 ): Harness {
   let clock = startAt
   const now = (): number => clock
@@ -76,6 +86,7 @@ function harness(
     isPane,
     now,
     publisher,
+    ...(runsCommandRow === undefined ? {} : { runsCommandRow }),
     ...(tagFor === undefined ? {} : { tagFor }),
   })
   publisher.noteViewer()
@@ -140,20 +151,28 @@ function appendRow(
   }
 }
 
-/** The echo row Claude Code writes of a slash command a person ran, as 2.1.310 records it: one
- *  text block naming the command, the message it carries and its arguments, newline-separated,
- *  with every tag after the first indented (the transcripts `COMMAND_BOOKKEEPING_TAGS` names in
- *  `../src/claude-rows`). */
-function commandEcho(name: string, args: string, uuid: string): ModEvent {
+/** The echo row Claude Code writes of a slash command, as 2.1.310 records it: one text block
+ *  naming the command, the message it carries and its arguments, newline-separated, with every
+ *  tag after the first indented (the transcripts `COMMAND_BOOKKEEPING_TAGS` names in
+ *  `../src/claude-rows`).
+ *
+ *  `origin` says who ran it. A command a person typed at the session's own terminal carries
+ *  `unclassified`, which is what this writes by default
+ *  (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:178-188`,
+ *  `logs/mod3-q2-310.jsonl:118-119`); a row of a run this plugin asked for carries `plugin` or
+ *  `engine` (`logs/mod2.jsonl:312-321`, `logs/mod2.jsonl:70-72`). */
+function commandEcho(
+  name: string,
+  args: string,
+  uuid: string,
+  origin: ModAppendOrigin = { kind: "unclassified" },
+): ModEvent {
   const text = [
     `<command-name>/${name}</command-name>`,
     `            <command-message>${name}</command-message>`,
     `            <command-args>${args}</command-args>`,
   ].join("\n")
-  return appendRow("command", [{ text, type: "text" }], {
-    origin: { kind: "plugin", name: "claude-envoy" },
-    uuid,
-  })
+  return appendRow("command", [{ text, type: "text" }], { origin, uuid })
 }
 
 test("a streaming step's snapshots stay one message, and its text grows", () => {
@@ -327,6 +346,52 @@ test("a command a person ran shows as the plain command line they typed", () => 
     ["user", "/effort low"],
   ])
   expect(kept[0]?.parts).toEqual([{ text: "/usage", type: "text" }])
+})
+
+// A person's `/` message from Dispatch runs as `$.command.run`, and the row Claude Code writes
+// of it echoes the command it ran rather than the one they sent: `/cost` ran as `/usage`, and
+// `/model anthropic/haiku` as `/model haiku`, both measured live on 2.1.310 (INFRA-1026).
+// Drawn, that row is a second message the person never wrote, beside Dispatch's stored copy of
+// the one they did send, which is what the Agents page shows next to this stream. The rows of a
+// run arrive after the call that asked for it has answered
+// (`/legion/scratch/tmp/infra-1026-spike/logs/mod2.jsonl:35-42`: the result at t=…345207, the
+// echo at …345297), so the run is still outstanding when its rows land and they are known by
+// that rather than by the command they name.
+test("the echo of a command this session ran shows nothing, and one typed at the terminal shows", async () => {
+  const ran = Promise.withResolvers<ModCallResults["command.run"]>()
+  const session = modSession({
+    commandOutputMs: 500,
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "command.run"
+          ? (ran.promise as unknown as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  const live = harness(1_000, undefined, false, (origin) => session.runsCommandRow(origin))
+  // As the runner wires the two (`../src/agent-stream-runner`): the session takes each event,
+  // then the view records it.
+  const feed = (event: ModEvent): void => {
+    session.observe(event)
+    live.feed(event)
+  }
+
+  // The person sent `/cost`, and the result carries its own text: the run is answered before
+  // any row of it has arrived.
+  const printed = session.runCommand("cost", "")
+  ran.resolve({ text: "Total cost:            $0.0993" })
+  expect(await printed).toBe("Total cost:            $0.0993")
+
+  // What Claude Code ran it as, echoed after the call answered, and a `/config` the person
+  // typed at the session's own terminal in the same moment.
+  feed(commandEcho("usage", "", "row-usage", { kind: "engine" }))
+  feed(commandEcho("config", "", "row-config"))
+
+  expect(messages(live.replay()).map((message) => [message.role, textOf(message)])).toEqual([
+    ["user", "/config"],
+  ])
 })
 
 // A Legion pane is named before anything else happens in it: the daemon's bridge writes

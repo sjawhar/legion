@@ -35,7 +35,6 @@ import {
 import type { ContentBlock } from "@legion/pi-shared/pi-types"
 import type { ModContentBlock, ModEffort, ModEvent } from "../hooks/mod-protocol"
 import { CLAUDE_EFFORT_LEVELS, CLAUDE_PROVIDER } from "./agent-stream-claude"
-import { claudeEchoedCommandLine } from "./claude-rows"
 import type { ModSession } from "./mod-session"
 import type { UserTurnState } from "./user-turn-state"
 
@@ -95,9 +94,10 @@ export function thinkingPicked(effort: ModEffort): string {
   return `The session's thinking level is now ${effort}.`
 }
 
-/** A message whose row of the conversation has not arrived yet: what the row will say - the
- *  person's own words, or the command line their `/` message runs as, which is all the row
- *  Claude Code echoes it in says - and the Dispatch message that row is. */
+/** A message whose row of the conversation has not arrived yet: the person's own words, which
+ *  is what the row will say, and the Dispatch message that row is. A `/` message has no such
+ *  row - the only row it writes is the one Claude Code echoes the command it ran in, which the
+ *  live view draws nothing of (`./agent-stream-claude`, `runsCommandRow`). */
 interface AwaitedRow {
   readonly body: string
   readonly messageId: string
@@ -219,13 +219,6 @@ function pickedEffort(value: string): ModEffort | undefined {
   return value !== "" && Number.isFinite(number) ? number : undefined
 }
 
-/** The command line a `/` message runs as, with the spacing a person typed it with settled: the
- *  line `mod-session`'s run of the command carries, and the line the row Claude Code echoes the
- *  command in holds (`claudeEchoedCommandLine`, `./claude-rows`). */
-function commandLine(name: string, value: string): string {
-  return value === "" ? `/${name}` : `/${name} ${value}`
-}
-
 export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRouter {
   const { reply, session, state, warn } = options
   /** Whether this session is a Legion pane, which is exactly the session whose person messages
@@ -245,16 +238,6 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
   const expectRow = (body: string, messageId: string): void => {
     awaited.push({ body, messageId })
     while (awaited.length > AWAITED_ROWS_MAX) awaited.shift()
-  }
-
-  /** Runs one command a person's message asked for, and expects the row Claude Code echoes it
-   *  in: that row is the one the live view draws for their message, and only tagged with the
-   *  message's id does the page hide Dispatch's stored copy beside it (`observe`). Expected
-   *  before the command is handed over, since the echo row reaches this process while the
-   *  command still runs. */
-  const runCommand = async (name: string, value: string, messageId: string): Promise<string> => {
-    expectRow(commandLine(name, value), messageId)
-    return await session.runCommand(name, value)
   }
 
   const record = (row: string, messageId: string): void => {
@@ -380,15 +363,21 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     })
   }
 
-  /** A person's pick of a model, which is their own `/model` message. */
-  const pickModel = async (value: string, messageId: string): Promise<string> => {
+  /**
+   * A person's pick of a model, which is their own `/model` message. Nothing of the run is
+   * expected back as a row: Claude Code echoes the command it ran - `/model haiku` for the
+   * `/model anthropic/haiku` the person sent, measured live on 2.1.310 (INFRA-1026) - and the
+   * live view draws no row of a run of this session's at all, so their own line reaches the
+   * page as the message Dispatch stored and nothing beside it.
+   */
+  const pickModel = async (value: string): Promise<string> => {
     const model = value.startsWith(`${CLAUDE_PROVIDER}/`)
       ? value.slice(CLAUDE_PROVIDER.length + 1)
       : value
     // A pane's Claude Code runs in print mode, where the model is the command's to change; a
     // terminal session's is a `/config` row.
     if (inPane) {
-      await runCommand("model", model, messageId)
+      await session.runCommand("model", model)
       return modelPicked(`${CLAUDE_PROVIDER}/${model}`)
     }
     const stored = await session.setModel(model)
@@ -400,11 +389,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
    * is the reply; a command still running after `waitingMs` is answered twice, the waiting reply
    * first.
    */
-  const runTyped = async (
-    delivery: DispatchDelivery,
-    body: string,
-    messageId: string,
-  ): Promise<void> => {
+  const runTyped = async (delivery: DispatchDelivery, body: string): Promise<void> => {
     const typed = /^\/(\S+)/.exec(body)
     const name = typed?.[1] ?? ""
     const value = body.slice(typed?.[0].length ?? 0).trim()
@@ -430,7 +415,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
     waiting.unref()
     let said: string | undefined
     try {
-      if (name === "model" && value !== "") said = await pickModel(value, messageId)
+      if (name === "model" && value !== "") said = await pickModel(value)
       else if (effort !== undefined) {
         const inForce = (await session.setEffort(effort)) ?? effort
         // The mod puts this effort on every later request from here on, so the header can say
@@ -438,7 +423,9 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
         options.effortPicked(inForce)
         said = thinkingPicked(inForce)
       } else {
-        const output = await runCommand(name, value, messageId)
+        // The person sees this command once, as the message Dispatch stored: the row Claude
+        // Code echoes the run in is drawn nowhere (`pickModel`), so no row is expected for it.
+        const output = await session.runCommand(name, value)
         // A command that printed nothing is answered all the same: `typedInputReply` has
         // nothing to say for an empty output, and silence is what the person was left with.
         const printed = typedInputReply(body, { handled: "command", output })
@@ -491,7 +478,7 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       if (turn.body.startsWith("/")) {
         // The command runs for as long as it runs: the frame is answered now, and its output
         // reaches the person as a reply when it comes.
-        void runTyped(delivery, turn.body, turn.messageId).catch((error: unknown) => {
+        void runTyped(delivery, turn.body).catch((error: unknown) => {
           warn(`a command from Dispatch failed — ${messageFor(error)}`)
         })
         return true
@@ -505,12 +492,11 @@ export function createUserTurnRouter(options: UserTurnRouterOptions): UserTurnRo
       if (event.kind !== "append" || awaited.length === 0) return
       const { message } = event
       if (message.type !== "user" && message.role !== "user") return
-      // A command runs in a row of Claude Code's own bookkeeping, which holds the command line
-      // it echoes and none of the message's words, so that line is what the row says and what
-      // the live view draws of it (`claudeEchoedCommandLine`, `./claude-rows`); every other row
-      // is read as the text it carries.
-      const echoed = claudeEchoedCommandLine(message.content)
-      const text = comparableText(echoed ?? rowText(message.content))
+      // Every row is read as the text it carries. A command a person sent writes no row that
+      // is theirs - Claude Code echoes the command it ran, in a row the live view draws
+      // nothing of (`./agent-stream-claude`, `runsCommandRow`) - so nothing here waits for one
+      // and nothing tags one.
+      const text = comparableText(rowText(message.content))
       const index = awaited.findIndex((row) => comparableText(row.body) === text)
       const row = awaited[index]
       if (row === undefined) return
