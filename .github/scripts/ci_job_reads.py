@@ -36,7 +36,9 @@ they are complete.
 """
 
 import json
+import re
 from pathlib import Path
+from typing import NamedTuple
 
 from ci_filter_coverage import Read, at, exact, gate, run
 
@@ -335,10 +337,6 @@ def go_notices_runs():
 
 # The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
 # simple form, pinned whole.
-UNIT_TEST_STEP = "Unit test envoy Go package"
-UNIT_TEST_SCRIPT = """\
-go test -count=1 -timeout 20m ./internal/dispatch/api
-go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m"""
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
@@ -374,6 +372,190 @@ DAEMON_PLAIN_PATTERN = "/(" + "|".join(DAEMON_RACE_PACKAGES) + ")$"
 DAEMON_PLAIN_SCRIPT = f"""\
 set -o pipefail
 go list ./... | grep -Ev '{DAEMON_PLAIN_PATTERN}' | xargs go test -count=1 -timeout 15m"""
+
+
+# ---------------------------------------------------------------- the envoy race lane
+# The three jobs that run packages/envoy's concurrent packages under the race detector, declared
+# once: each job's step name, its -timeout, and the packages the step names, in the order it names
+# them. Everything the lane decides is built from this list - the three steps' own texts, the
+# envoy-go unit step's `grep -Ev`, which leaves out exactly what the lane runs, and the -run lists
+# of the plain step that runs what a race build cannot (RACE_IMPOSSIBLE_SCRIPT below) - and
+# check-ci-filters.sh fails when ci.yaml's text for any of them differs from the text built here,
+# so a package added to the lane reaches all of them or the check goes red. internal/dispatch/pmdoc
+# is not in the lane: it runs plain only.
+class RacePackage(NamedTuple):
+    """A package of the lane, named under packages/envoy. A `tree` package is the one a step names
+    as `./<name>/...`, that directory and every package under it; any other is `./<name>/`, the
+    package alone."""
+
+    name: str
+    tree: bool = False
+
+
+class RaceJob(NamedTuple):
+    """One job of the lane: the ci.yaml job, its race step's name and -timeout, and its packages."""
+
+    job: str
+    step: str
+    timeout: str
+    packages: tuple
+
+
+ENVOY_RACE_LANE = (
+    RaceJob("envoy-go-race",
+            "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
+            "30m", (RacePackage("internal/dispatch/delivery", tree=True), RacePackage("internal/dispatch/store", tree=True),
+                    RacePackage("internal/bus"), RacePackage("cmd/listener"), RacePackage("internal/store"),
+                    RacePackage("internal/session"), RacePackage("internal/kvwatch", tree=True))),
+    RaceJob("envoy-go-race-api", "Race-test the Dispatch API", "30m", (RacePackage("internal/dispatch/api"),)),
+    RaceJob("envoy-go-race-docs", "Race-test the document service", "60m", (RacePackage("internal/dispatch/docs"),)),
+)
+RACE_JOBS = {job.job: job for job in ENVOY_RACE_LANE}
+
+
+def race_pkgs(job):
+    """The package arguments of a race job's step, in the order it names them."""
+    return [f"./{p.name}/..." if p.tree else f"./{p.name}/" for p in job.packages]
+
+
+def race_step(job):
+    """The one go command of a race job's step, pinned to the text this declaration builds."""
+    text = f"go test -race -timeout {job.timeout} " + " ".join(race_pkgs(job))
+    return step_run(job.job, job.step, text, ENVOY, race_pkgs(job), race=True)
+
+
+# The unit step runs the module less two things: the lane's packages, which the three race jobs
+# run under the detector, and internal/integration, which envoy-go's integration step runs. Its
+# `grep -Ev` is `/integration`, then, in the lane's own order, each package in the form go list's
+# import paths need - a tree matching the package and everything under it, any other the package
+# alone.
+UNIT_TEST_STEP = "Unit test envoy Go package"
+UNIT_TEST_PATTERN = "|".join(
+    ["/integration"] + [f"/{p.name}($|/)" if p.tree else f"/{p.name}$" for job in ENVOY_RACE_LANE for p in job.packages])
+UNIT_TEST_SCRIPT = f"go list ./... | grep -Ev '{UNIT_TEST_PATTERN}' | xargs go test -count=1 -timeout 20m"
+
+
+# A test of a Go file: `go help test`'s Test, Fuzz and Example functions, whose name goes on with
+# no lower-case letter. TestMain is the package's entry point, not a test.
+GO_TEST_FUNC = re.compile(r"^func ((?:Test|Fuzz|Example)(?:[^\Wa-z]\w*)?)\(", re.M)
+GO_BUILD_LINE = re.compile(r"^//go:build +(.+?) *$", re.M)
+RACE_ENABLED = re.compile(r"\braceEnabled\b")
+RACE_ENABLED_DECLARATION = re.compile(r"^const +raceEnabled\b|^\t*raceEnabled +=", re.M)
+
+
+def go_code_only(text: str) -> str:
+    """`text` with every comment, string and rune literal blanked out and its newlines kept, so a
+    name found in what is left is an identifier the compiler reads, at its own offset."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = -1 if end < 0 else end + 2
+        elif text[i] in "\"'`":
+            quote, end = text[i], i + 1
+            while end < n and text[end] != quote:
+                end += 2 if quote != "`" and text[end] == "\\" else 1
+            end = min(end + 1, n)
+        else:
+            out.append(text[i])
+            i += 1
+            continue
+        end = n if end < 0 else end
+        out.append("".join(c if c == "\n" else " " for c in text[i:end]))
+        i = end
+    return "".join(out)
+
+
+def race_impossible_tests_of(path: Path) -> set:
+    """The tests of one _test.go file that only a plain run covers: every test of a file the race
+    build does not compile (`//go:build !race`), and every test whose body reads raceEnabled, the
+    constant behind which a test runs smaller under the detector, so the plain run is its full-size
+    one. The constant's own declaration, and any mention of it in a comment or a string, count for
+    nothing. Raises on a //go:build that names race in a form this does not read, and on a
+    raceEnabled it cannot attribute to a test: an idiom it misreads makes ci-filters red rather
+    than dropping a test from the plain run unseen."""
+    text = path.read_text()
+    found = GO_BUILD_LINE.search(text)
+    constraint = found.group(1) if found else ""
+    if constraint not in ("", "race", "!race") and re.search(r"\brace\b", constraint):
+        raise ValueError(f"{path}: `//go:build {constraint}` names race in a form ci_job_reads.py does not read; "
+                         "teach race_impossible_tests_of() the form, or the plain step loses the file's tests")
+    code = go_code_only(text)
+    # A file the race build alone compiles has no test a plain run can name, so every raceEnabled
+    # of it but the declaration is unattributable, as the empty list below makes it.
+    tests = [] if constraint == "race" else [(m.start(), m.group(1)) for m in GO_TEST_FUNC.finditer(code)
+                                             if m.group(1) != "TestMain"]
+    names = {name for _, name in tests} if constraint == "!race" else set()
+    # Each declaration's own line, read from the declaration rather than from the use, so a file
+    # that declares the constant and also reads it in a test has that read attributed, not passed
+    # over.
+    declarations = [(m.start(), code.find("\n", m.start())) for m in RACE_ENABLED_DECLARATION.finditer(code)]
+    for use in RACE_ENABLED.finditer(code):
+        if any(start <= use.start() < (len(code) if end < 0 else end) for start, end in declarations):
+            continue
+        before = [name for start, name in tests if start < use.start()]
+        if not before:
+            raise ValueError(f"{path}:{code.count(chr(10), 0, use.start()) + 1}: raceEnabled is read where no "
+                             "top-level test precedes it, so ci_job_reads.py cannot say which test runs smaller "
+                             "under the detector; move the read into a test or teach it the idiom")
+        names.add(before[-1])
+    return names
+
+
+def race_lane_packages(root) -> list:
+    """Every package directory the lane's steps run, in the order its steps name them: a package
+    alone for an exact entry, and for a tree its directory and every directory with .go files under
+    it (go's own exclusions: testdata, and a name starting with . or _). Each is (the path under
+    `root`, the directory)."""
+    root, seen, found = Path(root), set(), []
+    for job in ENVOY_RACE_LANE:
+        for package in job.packages:
+            base = root / package.name
+            if not base.is_dir():
+                raise ValueError(f"the race lane names {package.name}, which is no directory under {root}")
+            directories = [base]
+            if package.tree:
+                directories += [d for d in sorted(base.rglob("*"))
+                                if d.is_dir() and any(d.glob("*.go"))
+                                and not any(part == "testdata" or part[0] in "._" for part in d.relative_to(base).parts)]
+            for directory in directories:
+                under = directory.relative_to(root).as_posix()
+                if under not in seen:
+                    seen.add(under)
+                    found.append((under, directory))
+    return found
+
+
+def race_impossible_tests(root) -> dict:
+    """Per package of the lane under `root`, in the lane's own order, the tests only a plain run
+    covers (race_impossible_tests_of). A package that has none is left out."""
+    found = {}
+    for under, directory in race_lane_packages(root):
+        names = set()
+        for path in sorted(directory.glob("*_test.go")):
+            names |= race_impossible_tests_of(path)
+        if names:
+            found[under] = names
+    return found
+
+
+def race_impossible_script(packages) -> str:
+    """envoy-go's plain run of the tests the detector makes impossible: one `go test` per package
+    of `packages` (race_impossible_tests), each naming that package's own tests, anchored and
+    sorted, in its -run."""
+    lines = []
+    for under, names in packages.items():
+        lines.append(f"go test -count=1 -timeout 10m -run '^({'|'.join(sorted(names))})$' ./{under}")
+    return "\n".join(lines)
+
+
+# The step as the lane and packages/envoy's own source make it, so a test added under
+# `//go:build !race` or behind raceEnabled changes this text and ci.yaml stops matching it.
+RACE_IMPOSSIBLE_STEP = "Test what the race build cannot run at all or at full size"
+RACE_IMPOSSIBLE_PACKAGES = race_impossible_tests(ENVOY)
+RACE_IMPOSSIBLE_SCRIPT = race_impossible_script(RACE_IMPOSSIBLE_PACKAGES)
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -640,11 +822,16 @@ GATES = [
         step_run("envoy-go", "Build envoy services", "go build ./cmd/dispatch ./cmd/listener", ENVOY, ["./cmd/dispatch", "./cmd/listener"],
                  mode="build"),
     ], exact=[
-        # The API package first, on its own (582cb2a2: its Postgres-backed tests' cleanup queues
-        # on the service's one checkpointer beside the other package binaries), then ./... but it
-        # and internal/integration, which the integration step tests: counted as all of ./....
+        # One go test per package of the plain run the race lane cannot make (RACE_IMPOSSIBLE_*),
+        # each selecting that package's own tests with -run.
+        pinned_step("envoy-go", RACE_IMPOSSIBLE_STEP, ENVOY, RACE_IMPOSSIBLE_SCRIPT, [
+            (ENVOY, [f"./{under}"], f"go test -run of what the race build cannot run in ./{under}", {})
+            for under in RACE_IMPOSSIBLE_PACKAGES
+        ]),
+        # ./... but the race lane's packages and internal/integration, which the integration step
+        # tests: a Run cannot name "./... but those", so the entry declares the superset ./...,
+        # which over-declares and so keeps this gate's wide patterns justified.
         pinned_step("envoy-go", UNIT_TEST_STEP, ENVOY, UNIT_TEST_SCRIPT, [
-            (ENVOY, ["./internal/dispatch/api"], "go test -count=1 -timeout 20m ./internal/dispatch/api", {}),
             (ENVOY, ["./..."], "go list ./... piped into go test, counted as go test ./...", {}),
         ]),
         # One linux build of the listener per architecture the loop reads from the target list.
@@ -684,24 +871,16 @@ GATES = [
         (f"{ENVOY}/internal/testpg/testpg.go", f"{at('envoy-infra-go', 'Pull the NATS and Postgres test container images')}: const Image"),
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch",
-                 "go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...",
-                 ENVOY, ["./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/",
-                         "./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
-    ], reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
+    # The lane's three jobs: each step's text and packages come from ENVOY_RACE_LANE, which the
+    # envoy-go unit step and its plain companion are built from too.
+    gate("envoy_go_race", "envoy-go-race", runs=[race_step(RACE_JOBS["envoy-go-race"])],
+         reads=setup_go("envoy-go-race", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_api", "envoy-go-race-api", runs=[
-        step_run("envoy-go-race-api", "Race-test the Dispatch API",
-                 "go test -race -timeout 30m ./internal/dispatch/api/",
-                 ENVOY, ["./internal/dispatch/api/"], race=True),
-    ], reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("envoy_go_race_api", "envoy-go-race-api", runs=[race_step(RACE_JOBS["envoy-go-race-api"])],
+         reads=setup_go("envoy-go-race-api", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
-        step_run("envoy-go-race-docs", "Race-test the document service",
-                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
-                 ["./internal/dispatch/docs/"], race=True),
-    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
+    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[race_step(RACE_JOBS["envoy-go-race-docs"])],
+         reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
         step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",

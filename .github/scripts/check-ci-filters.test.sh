@@ -760,4 +760,156 @@ GO
   check "and the file the tags compile in" "$(contains "$out" '::error file=mod/other/other.go::')"
 done
 
+# ci_job_reads.py builds envoy-go's plain step - the tests a race build cannot run at all or at
+# full size - by reading packages/envoy's own source rather than from a list a table could hold,
+# so the cases below run that walk itself, over a tree of this test's making and a lane of its
+# own. What a fixture cannot reach, since each writes a ci_job_reads.py of its own and the walk
+# reads the repository it sits in: the walk's result standing in ci.yaml, so that a test added to
+# packages/envoy under //go:build !race or behind raceEnabled makes check-ci-filters.sh fail
+# naming that step. Only the repository's own tree holds that.
+
+# derived <root> <lane>: the step script ci_job_reads.py's walk builds over <root>, with the race
+# lane replaced by <lane>, a space-separated list of package paths under <root> ("pkg" for the
+# package alone, "pkg/..." for the tree). Echoes "RAISED: <what it refused>" when the walk
+# refuses what it reads.
+derived() {
+  (cd "$script_dir/../.." && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 -c '
+import sys
+
+import ci_job_reads as reads
+
+root, lane = sys.argv[1], sys.argv[2].split()
+reads.ENVOY_RACE_LANE = (reads.RaceJob("a-race-job", "Race-test the packages", "30m", tuple(
+    reads.RacePackage(p.removesuffix("/..."), tree=p.endswith("/...")) for p in lane)),)
+try:
+    print(reads.race_impossible_script(reads.race_impossible_tests(root)))
+except ValueError as refusal:
+    print("RAISED:", refusal)
+' "$1" "$2")
+}
+
+# race_tree: a lane of two packages, one of them a tree, holding every form the walk reads. Echoes
+# its root.
+race_tree() {
+  local root="$work/race-lane"
+  mkdir -p "$root/lane/a/sub" "$root/lane/a/testdata" "$root/lane/b"
+  # Every test of a file the race build does not compile, TestMain (the package's entry point, not
+  # a test) and the helper aside.
+  cat > "$root/lane/a/norace_test.go" <<'GO'
+//go:build !race
+
+package a
+
+import "testing"
+
+func TestMain(m *testing.M)  {}
+func TestAlpha(t *testing.T) {}
+func FuzzBeta(f *testing.F)  {}
+func ExampleGamma()          {}
+func helperDelta()           {}
+GO
+  # The constant's own declaration names no test, and this file has none to name.
+  cat > "$root/lane/a/norace_constant_test.go" <<'GO'
+//go:build !race
+
+package a
+
+const raceEnabled = false
+GO
+  # A file both builds compile: the tests that read raceEnabled run smaller under the detector, so
+  # the plain run is their full-size one. The read in helperZeta is TestEpsilon's, the nearest
+  # top-level test before it; TestEta, after it, reads nothing.
+  cat > "$root/lane/a/plain_test.go" <<'GO'
+package a
+
+import "testing"
+
+// raceEnabled in a comment names no test.
+const notice = "raceEnabled in a string names none either"
+
+func TestEpsilon(t *testing.T) {
+	if raceEnabled {
+		t.Skip(notice)
+	}
+}
+
+func helperZeta() bool {
+	return raceEnabled
+}
+
+func TestEta(t *testing.T) {}
+GO
+  # The race build's own declaration of the constant.
+  cat > "$root/lane/a/race_constant_test.go" <<'GO'
+//go:build race
+
+package a
+
+const raceEnabled = true
+GO
+  cat > "$root/lane/a/sub/sub_test.go" <<'GO'
+//go:build !race
+
+package sub
+
+import "testing"
+
+func TestTheta(t *testing.T) {}
+GO
+  # go reads no package under testdata, and neither does the walk.
+  cat > "$root/lane/a/testdata/ignored_test.go" <<'GO'
+//go:build !race
+
+package testdata
+
+import "testing"
+
+func TestIgnored(t *testing.T) {}
+GO
+  # A package of the lane with no such test is left out of the step.
+  cat > "$root/lane/b/b_test.go" <<'GO'
+package b
+
+import "testing"
+
+func TestIota(t *testing.T) {}
+GO
+  echo "$root"
+}
+
+echo "case: the plain step's -run lists are what the lane's packages hold"
+root=$(race_tree)
+out=$(derived "$root" "lane/a/... lane/b")
+check "names every test of a !race file, sorted, TestMain aside, and the raceEnabled ones" \
+  "$(is "$out" "$(printf '%s\n%s' \
+    "go test -count=1 -timeout 10m -run '^(ExampleGamma|FuzzBeta|TestAlpha|TestEpsilon)\$' ./lane/a" \
+    "go test -count=1 -timeout 10m -run '^(TestTheta)\$' ./lane/a/sub")")"
+check "passes over the testdata package" "$(is "$(contains "$out" 'TestIgnored')" false)"
+check "and leaves out a package with no such test" "$(is "$(contains "$out" './lane/b')" false)"
+
+echo "case: a package the lane names alone does not reach the packages under it"
+out=$(derived "$root" "lane/a")
+check "names the package alone" \
+  "$(is "$out" "go test -count=1 -timeout 10m -run '^(ExampleGamma|FuzzBeta|TestAlpha|TestEpsilon)\$' ./lane/a")"
+
+echo "case: a raceEnabled the walk cannot attribute to a test"
+root="$work/race-unattributable"
+mkdir -p "$root/pkg"
+printf 'package pkg\n\nvar smaller = raceEnabled\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than dropping a test from the step" \
+  "$(contains "$out" 'RAISED: .*x_test.go:3: raceEnabled is read where no top-level test precedes it')"
+
+echo "case: a //go:build that names race in a form the walk does not read"
+root="$work/race-unread-constraint"
+mkdir -p "$root/pkg"
+printf '//go:build !race && !windows\n\npackage pkg\n\nfunc TestKappa(t *testing.T) {}\n' > "$root/pkg/x_test.go"
+out=$(derived "$root" "pkg")
+check "refuses rather than guessing what the race build compiles" \
+  "$(contains "$out" 'RAISED: .*x_test.go: `//go:build !race && !windows` names race in a form ci_job_reads.py does not read')"
+
+echo "case: the lane names a package that is not there"
+out=$(derived "$work/race-unattributable" "pkg/gone")
+check "refuses" "$(contains "$out" 'RAISED: the race lane names pkg/gone, which is no directory under ')"
+
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

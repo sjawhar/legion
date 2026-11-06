@@ -2799,17 +2799,37 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
-      # The API package owns the largest set of Postgres-backed tests. Running it with the other
-      # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
-      # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
-      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
-      # delays.
+      # The tests the race detector makes impossible, which the race job of each of these packages
+      # therefore cannot make, so envoy-go keeps a plain run of exactly them: internal/bus counts
+      # HoldsSeed's allocations, which the race runtime's own allocations would be counted into;
+      # the API's two guards read the module's source, to which the detector adds nothing; and the
+      # documents package measures the heap a room keeps, which the detector's shadow memory and
+      # instrumentation move. Those are out of the race build altogether (//go:build !race), and
+      # the two render-reuse storms run fewer seeds and fewer edits under it (raceEnabled), so this
+      # is their full-size run. It comes before the unit step for the reason the API package's own
+      # run did: run beside the other package binaries, its Postgres-backed tests and the
+      # room-memory measurements queue their per-test database cleanup on the service's one
+      # checkpointer, and the API's live-feed and delivery-hub tests wait for the event log's safe
+      # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
+      # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
+      # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
+      # the ci-filters job naming this step. Measured: the bus 0.06 s, the API 8.7 s, the documents
+      # package 92.2 s, so 10 minutes each is ample.
+      - name: Test what the race build cannot run at all or at full size
+        run: |
+          go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
+          go test -count=1 -timeout 10m -run '^(TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestTheKeyedWriteGuardSeesWhatItGuards)$' ./internal/dispatch/api
+          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/dispatch/docs
+        working-directory: packages/envoy
+      # Everything the three race jobs run is left out here, since they run it under the detector,
+      # and so is internal/integration, which the integration step below tests. The pattern is
+      # built in .github/scripts/ci_job_reads.py from the same list those jobs' own steps are built
+      # from, so what this step leaves out and what the lane runs cannot drift apart. What is left
+      # is the rest of the module, the two longest packages of it (the API's and the documents
+      # service's) now among the ones the lane runs, so its 20 minutes are ample.
       - name: Unit test envoy Go package
         run: |
-          go test -count=1 -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m
+          go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
