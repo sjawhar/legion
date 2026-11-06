@@ -2206,10 +2206,18 @@ func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
 //
 // A claim's own plugin round ends with the relaunch it was opened for: the worker has pushed its
 // work and answered, so the process is replaced now, through the path the stale-plugin lane
-// takes outside a round (relaunchMarked). PluginRelaunchFor records the contract this relaunch
-// is made for, as relaunchStale records it, so a registration that still differs after the
-// relaunch has run is charged rather than relaunched again for free; one that arrives while the
-// relaunch still waits its turn in the wake pacing is neither (staleRegistration).
+// takes outside a round (relaunchMarked). That relaunch marks the claim where its launch starts
+// the replacement, as relaunchStale's does (launchNow), so a registration that still differs
+// after it has run is charged rather than relaunched again for free, and one that arrives while
+// it still waits its turn in the wake pacing is neither (staleRegistration).
+//
+// This end raises its relaunch over a claim whose own launch may already be waiting its turn —
+// the stale-plugin lane relaunches an answered round's claim from a stale registration too
+// (relaunchStale) — and that second launch replaces the waiting wake and takes a token of its
+// own (reserveWake). What it replaces is a launch that was going to do exactly what this one
+// does, and neither has marked the claim, so nothing of the first is lost but its token; the
+// round is cleared here, so the sweep's next end post for this claim decides nothing and no
+// third launch follows.
 //
 // A plugin round ends for nothing while its worker is in a turn, or while its answer is not
 // standing. That end keeps the claim's process and its pod, so what decides it is the claim as
@@ -2232,14 +2240,12 @@ func (m *Machine) takeSlotForUpdate(ctx context.Context, launching bool) error {
 //
 // The relaunch this end makes is the one relaunchStale makes, so it takes that path's own guard
 // before it changes anything: the launch can be refused — a tree lifecycle cleanup already
-// reserved, a moved epoch, a transient store error — and a refusal after the task was dropped,
-// the round cleared and PluginRelaunchFor marked would throw away the worker's answer and the
-// round for a refusal that is nobody's fault. The next StalePlugin post would ask it to push
-// again, and the next stale registration would read the mark as a relaunch that happened and
-// charge the claim toward failed (staleRegistration). So checkLaunch runs first, where no
-// suspension is already held (the case replaceProcess would launch rather than end in a
-// suspension, as relaunchStale reads it), and the round is left exactly as the post found it for
-// the next sweep to end again.
+// reserved, a moved epoch, a transient store error — and a refusal after the task was dropped
+// and the round cleared would throw away the worker's answer and the round for a refusal that is
+// nobody's fault, leaving the next StalePlugin post to ask it to push again. So checkLaunch runs
+// first, where no suspension is already held (the case replaceProcess would launch rather than
+// end in a suspension, as relaunchStale reads it), and the round is left exactly as the post
+// found it for the next sweep to end again.
 func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	ended := ev.(PodUpdateEnded)
 	if m.claim.UpdateRound == "" {

@@ -115,9 +115,9 @@ func CannotAnswerUpdate(c Claim) bool {
 // relaunchStale can refuse the relaunch it starts — a tree lifecycle cleanup already reserved, a
 // moved epoch, a transient store error — so when no suspension is already held (m.held nil, the
 // case replaceProcess would launch rather than end in a suspension) that same check runs there
-// first, before the Warn, the PluginRelaunchFor mark, or interrupted's turn recovery: a refused
-// attempt returns having changed nothing, exactly as stale as it found it, and the orphan sweep's
-// re-post of StalePlugin for it (refreshStalePlugins in internal/daemon) is a true no-op until the
+// first, before the Warn or interrupted's turn recovery: a refused attempt returns having
+// changed nothing, exactly as stale as it found it, and the orphan sweep's re-post of
+// StalePlugin for it (refreshStalePlugins in internal/daemon) is a true no-op until the
 // refusal clears. A held suspension is checked nothing there, since replaceProcess ends it in a
 // suspension (endHeld) rather than a launch, and endHeld makes no launch-path call to refuse.
 // launch rechecks the same thing inside replaceProcess's own call — that second check is the price
@@ -190,10 +190,12 @@ func (m *Machine) holdStaleRelaunch(trigger string) {
 // decision. trigger names the pass that found the claim ("boot", "sweep", "registration"), for
 // the line it logs. refreshPlugin states what the relaunch does and what refuses it.
 //
-// The relaunch and its mark go together (relaunchMarked, markPluginRelaunch), which is what
-// keeps the registration that follows the relaunch from being relaunched again for free
-// (staleRegistration). A registration of the old process that arrives while the launch waits its
-// turn is no such registration, and staleRegistration's own guard is where that is read.
+// The relaunch marks the claim where its launch starts the process that replaces the stale one
+// (relaunchMarked, launchNow), which is what keeps the registration that follows a relaunch that
+// ran from being relaunched again for free (staleRegistration). A registration of the old
+// process that arrives while that launch still waits its turn meets no mark at all, because none
+// is written until the launch starts; staleRegistration's own guard is what answers it, and
+// stops a second relaunch being raised over the wake the first one parked.
 func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 	if m.held == nil {
 		if err := m.checkLaunch(ctx); err != nil {
@@ -207,67 +209,84 @@ func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 }
 
 // relaunchMarked is the stale-plugin relaunch its two deciders share, each having logged what it
-// found first (relaunchStale, endPodUpdate): the claim is marked for this daemon's contract and
-// its process replaced (markPluginRelaunch, replaceProcess). interruption is the sentence the
-// turn this cuts off is recovered with (interrupted).
+// found first (relaunchStale, endPodUpdate): the claim's process is replaced (replaceProcess),
+// and the launch that replaces it is recorded as the stale-plugin relaunch it is, so that the
+// process it starts carries the mark of this daemon's contract (markPluginRelaunch, launchNow).
+// interruption is the sentence the turn this cuts off is recovered with (interrupted).
 //
-// The invariant the mark carries is that it names a relaunch that has happened or is still owed,
-// which is what lets staleRegistration read a registration that still differs after it as the
-// second stale one in a row and charge the claim toward failed. Two steps of this call can leave
-// the relaunch neither: the take-back the replacement makes first, and the lifecycle recheck
-// every launch makes before the wake gate (interrupted, launchAfter's checkLaunch). Each leaves
-// the claim's process where it was with no launch raised, and the error returned here is the
-// whole of what follows — nothing retries it — so the mark goes back to the value it found
-// (unmarkPluginRelaunch), and the next stale-plugin pass raises the relaunch again and marks it
-// anew (refreshPlugin, the daemon's refreshStalePlugins).
+// The invariant the mark carries is that it names a relaunch whose launch has run, which is what
+// lets staleRegistration read a registration that still differs after it as the second stale one
+// in a row and charge the claim toward failed. That is why nothing of the claim is written here.
+// This call can end with no launch at all — the take-back the replacement makes first can fail
+// (interrupted), the lifecycle recheck every launch makes can refuse it (launchAfter's
+// checkLaunch), and a held suspension ends it in a suspension instead (endHeld) — and the launch
+// it does raise can wait tens of minutes for its turn in the wake pacing and be abandoned at
+// that turn (reserveWake, runWake). Each of those leaves the claim's process where it was, or
+// suspended, with nothing relaunched and the mark exactly as it found it, and the next
+// stale-plugin pass raises the relaunch again (refreshPlugin, the daemon's refreshStalePlugins).
+// The mark costs no write of its own either: the launch that commits it writes the claim as it
+// starts (launchNow).
 //
-// A relaunch that did reach the gate keeps the mark, whatever becomes of it: the turn a parked
-// launch waits for still owes it (reserveWake), a launch the runtime refused has run and is
-// charged for, and a launch whose write failed is tried again (relaunchLater). The gate takes
-// the kept value onto the wake it parks, because the refusal can come at that turn as well, with
-// this frame long gone (runWake). So does a relaunch a held suspension ends in a suspension
-// instead (endHeld): that claim's process is stopped and the resume launches it onto this
-// daemon's plugin, which is the relaunch the mark names (revive).
+// The intent is dropped on the way out so that it names one launch and no other: a later launch
+// of this machine, raised by something else, marks nothing for this relaunch. The launch that
+// took it holds it by then — the gate takes it onto the wake it parks, and launchNow consumes it
+// where no gate held it (takePluginRelaunch).
+//
+// One relaunch ends with no mark: the one a held suspension ends in a suspension (endHeld). The
+// resume of that claim raises a launch of its own from the top, where the operator or the rule
+// asks for it (revive, launchAfter), rather than carrying this one on, and it can come hours
+// later or after a restart, which no intent of this machine outlives. So that claim comes back
+// unmarked, and a resumed process that still speaks another contract is relaunched once more
+// uncharged. That is one relaunch, not a loop: the relaunch that follows marks the claim where
+// it starts its process, and the registration after it is the second in a row.
 func (m *Machine) relaunchMarked(ctx context.Context, interruption string) error {
 	m.markPluginRelaunch()
 	err := m.replaceProcess(ctx, interruption, ordinaryEnd)
-	if before := m.takePluginMark(); err != nil {
-		m.unmarkPluginRelaunch(before)
-	}
+	m.takePluginRelaunch()
 	return err
 }
 
-// markPluginRelaunch records in PluginRelaunchFor the contract the relaunch now being raised is
-// made for, keeping what the mark held before on the machine (pluginMarkBefore). The mark is
-// written with the relaunch decided rather than with the process started, because the launch it
-// makes can wait its turn in the wake pacing over the process it replaces (reserveWake).
+// markPluginRelaunch records that the launch this decision is raising is a stale-plugin relaunch
+// for this daemon's contract. It writes nothing of the claim: PluginRelaunchFor is written where
+// that launch starts the process the stale one is replaced with (launchNow,
+// commitPluginRelaunch), so the mark names a relaunch that has run rather than one that was
+// decided. That is what leaves nothing to put back when a relaunch is abandoned — by a refusal
+// at its turn, by a take-back the store refused, by a suspension that ended it, or by a second
+// relaunch raised over the wake it parked.
 func (m *Machine) markPluginRelaunch() {
-	before := m.claim.PluginRelaunchFor
-	m.pluginMarkBefore = &before
-	m.claim.PluginRelaunchFor = m.deps.PluginContract
+	contract := m.deps.PluginContract
+	m.pluginRelaunch = &contract
 }
 
-// takePluginMark hands the kept value on and leaves the machine none, so that exactly one holder
-// can put the mark back for one relaunch: the wake gate takes it for the wake it parks
-// (reserveWake), and the relaunch's own decider takes it where the launch never reached that
-// gate (relaunchMarked). It answers nil for every launch no stale-plugin relaunch raised.
-func (m *Machine) takePluginMark() *int {
-	before := m.pluginMarkBefore
-	m.pluginMarkBefore = nil
-	return before
+// takePluginRelaunch hands the intent on and leaves the machine none, so that exactly one launch
+// can commit one relaunch's mark: the wake gate takes it onto the wake it parks (reserveWake),
+// the launch commits it as it starts (commitPluginRelaunch), and the relaunch's own decider
+// drops whatever neither took (relaunchMarked). It answers nil for every launch no stale-plugin
+// relaunch raised.
+func (m *Machine) takePluginRelaunch() *int {
+	mark := m.pluginRelaunch
+	m.pluginRelaunch = nil
+	return mark
 }
 
-// unmarkPluginRelaunch puts PluginRelaunchFor back to what the relaunch that abandoned it found,
-// where the mark still names what that relaunch wrote. A registration that recorded this daemon's
-// own contract while the launch waited its turn has already cleared the mark (register,
-// reregister), and that claim is current: nothing of an abandoned relaunch is put back over it.
-// before is nil where no stale-plugin relaunch raised the launch, which marked nothing and so has
-// nothing to put back.
-func (m *Machine) unmarkPluginRelaunch(before *int) {
-	if before == nil || m.claim.PluginRelaunchFor != m.deps.PluginContract {
-		return
+// holdPluginRelaunch puts the intent a parked wake carries back on the machine, for the launch
+// that turn is about to run to commit (runWake, commitPluginRelaunch). mark is nil for every wake
+// no stale-plugin relaunch raised, and the machine is then left holding none, which is what it
+// held before the turn.
+func (m *Machine) holdPluginRelaunch(mark *int) {
+	m.pluginRelaunch = mark
+}
+
+// commitPluginRelaunch writes the mark of the stale-plugin relaunch whose launch is starting now:
+// PluginRelaunchFor names the contract that relaunch was made for, which is what lets
+// staleRegistration read the next registration that still differs as the second stale one in a
+// row and charge it toward failed. Its one caller is launchNow, before the write that records the
+// launch, so the mark reaches the store with that write and a restart reads a mark whose relaunch
+// did start a process. It writes nothing for a launch no stale-plugin relaunch raised.
+func (m *Machine) commitPluginRelaunch() {
+	if mark := m.takePluginRelaunch(); mark != nil {
+		m.claim.PluginRelaunchFor = *mark
 	}
-	m.claim.PluginRelaunchFor = *before
 }
 
 // openPluginUpdate opens this claim's own update round for the plugin contract it is behind: the
@@ -365,16 +384,17 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 //
 // A registration that arrives while a launch the pacing holds waits over the process it comes
 // from relaunches nothing and is charged nothing. PluginRelaunchFor is written where the
-// relaunch is decided (relaunchStale, endPodUpdate), and the pacing can hold that relaunch over
-// the live old process for tens of minutes (reserveWake, parkWake); a process that reconnects
-// and re-registers on the old contract inside that wait would otherwise be read here as the
-// second stale registration in a row and walked toward failed for a relaunch that has not run
-// yet. The invariant the charged path rests on is that the mark names a relaunch that has
-// happened, and while launchWaits is true it names one that is still waiting its turn. The
-// registration is still refused, as every stale one is, so the agent exits rather than take
-// work on a contract this daemon does not speak, and the launch's turn replaces its process
-// (wakeNow). It is the guard judge makes of every observation of that same process, for the one
-// report that reaches a decision of its own instead.
+// relaunch starts the process that replaces the stale one (launchNow, commitPluginRelaunch),
+// never where that relaunch is decided, so a relaunch the pacing holds over the live old
+// process for tens of minutes (reserveWake, parkWake) has marked nothing yet, and the charged
+// branch below reads a mark that names a relaunch that did run. What the guard adds is the rest
+// of the answer: without it a process that reconnects and re-registers on the old contract
+// inside that wait would be relaunched here, which raises a second relaunch over the one still
+// waiting, replaces its wake and takes a second token for the launch that wake was already
+// going to make (reserveWake). The registration is still refused, as every stale one is, so the
+// agent exits rather than take work on a contract this daemon does not speak, and the launch's
+// turn replaces its process (wakeNow). It is the guard judge makes of every observation of that
+// same process, for the one report that reaches a decision of its own instead.
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)

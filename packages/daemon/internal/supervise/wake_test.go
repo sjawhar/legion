@@ -876,30 +876,31 @@ func TestATakeBackTheStoreRefusesAtTheTurnRetiresNoTask(t *testing.T) {
 	}
 }
 
-// The mark of a relaunch that same refused take-back abandons goes back with it. A stale-plugin
-// relaunch marks the claim for this daemon's contract where it is decided, before its launch
-// waits its turn (relaunchStale, markPluginRelaunch), and the turn that cannot take the
-// confirmed turn back starts nothing: the process the claim records is kept, the wake is spent
-// and nothing is left to run that launch, so the mark names a relaunch that neither happened
-// nor is owed. Left standing, it would make the next registration of that very process the
-// second stale one in a row and charge it toward failed for a relaunch that never ran
-// (staleRegistration). Put back, that registration is the first this claim has had relaunched,
-// so it is relaunched for free and marked anew.
+// A relaunch that same refused take-back abandons leaves no mark. A stale-plugin relaunch marks
+// nothing where it is decided: the launch it raises writes PluginRelaunchFor as it starts the
+// process that replaces the stale one (markPluginRelaunch, launchNow), so the mark waits in the
+// wake while the pacing holds that launch. The turn that cannot take the confirmed turn back
+// starts nothing — the process the claim records is kept, the wake is spent and nothing is left
+// to run that launch — so no mark is written at all. A mark there would make the next
+// registration of that very process the second stale one in a row and charge it toward failed
+// for a relaunch that never ran (staleRegistration); with none, that registration is the first
+// this claim has had relaunched, so it is relaunched for free.
 //
-// The negative control is the restore reverted in that branch alone (runWake's
-// unmarkPluginRelaunch beside interrupted): the claim then names this daemon's contract for a
-// relaunch that never ran and the re-registration takes the charged path, which this test
-// reads at the mark and at the budgets.
+// The negative control is the mark written where the relaunch is decided again, as the shape
+// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
+// m.deps.PluginContract`): the claim then names this daemon's contract for a relaunch that
+// never ran and the re-registration takes the charged path, which this test reads at the mark
+// and at the budgets.
 func TestATakeBackTheStoreRefusesAtTheTurnLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
 	h.m.deps.PluginContract = 25
 	h.m.deps.PluginRelaunchable = true
 
-	// The agent acknowledges a task, the sweep finds the claim's plugin stale and marks the
-	// relaunch it raises, and that launch waits its turn over the process the agent is on. The
-	// turn of the task starts and ends inside the wait, with Oh My Pi's result still to come,
-	// so the launch's turn finds a confirmed task to take back.
+	// The agent acknowledges a task, the sweep finds the claim's plugin stale and raises the
+	// relaunch, and that launch waits its turn over the process the agent is on. The turn of the
+	// task starts and ends inside the wait, with Oh My Pi's result still to come, so the launch's
+	// turn finds a confirmed task to take back.
 	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan", ID: "outbox:7", Row: 7, Generation: 7})
 	sent := h.pending().ID
 	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
@@ -907,8 +908,8 @@ func TestATakeBackTheStoreRefusesAtTheTurnLeavesNoMarkBehind(t *testing.T) {
 	h.must(StreamTurnStart{Claim: h.token, DeliveryID: sent})
 	h.mustQuiet(StreamTurnEnd{Claim: h.token})
 
-	if got := h.claim(); got.State != StateIdle || got.PluginRelaunchFor != 25 {
-		t.Fatalf("the claim whose stale-plugin relaunch waits is %s marked for %d, want %s marked for 25",
+	if got := h.claim(); got.State != StateIdle || got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is %s marked for %d, want %s marked for 0: its launch has not run",
 			got.State, got.PluginRelaunchFor, StateIdle)
 	}
 
@@ -932,6 +933,13 @@ func TestATakeBackTheStoreRefusesAtTheTurnLeavesNoMarkBehind(t *testing.T) {
 	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
 		t.Fatalf("the re-registration after the refused take-back = %v, want the stale-plugin refusal naming 24 and 25", err)
 	}
+	h.wantBudgets(Budgets{})
+
+	// That relaunch waits its turn like the first, and marks the claim where it runs.
+	again := h.wantWaitingWake(WakeLaunch)
+	h.advance(again.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 2)
 	h.wantBudgets(Budgets{})
 	if got := h.claim(); got.PluginRelaunchFor != 25 {
 		t.Errorf("the claim after the relaunch that registration raised is marked for %d, want 25", got.PluginRelaunchFor)
@@ -1385,18 +1393,21 @@ func TestARefusalOutsideAWakeArmsNoTimerTheFenceHasFired(t *testing.T) {
 	}
 }
 
-// The other half of the same refusal: the mark a stale-plugin relaunch leaves goes with the
-// relaunch it names. PluginRelaunchFor says what contract the last relaunch was made for, and a
-// registration that still differs once it has run is the second in a row, charged toward failed
-// (relaunchStale, staleRegistration). A relaunch the lifecycle recheck refuses at its turn has
-// not run and nothing is left to run it — the error goes back to whoever asked — so the mark
-// goes back to what that relaunch found it holding, which for this claim is none at all
-// (runWake, unmarkPluginRelaunch), and the old process registering afterwards is relaunched for
-// free, as the first stale registration of any claim is.
+// The other half of the same refusal: a stale-plugin relaunch the lifecycle recheck refuses at
+// its turn marks nothing. PluginRelaunchFor says what contract the last relaunch that ran was
+// made for, and a registration that still differs once such a relaunch has run is the second in
+// a row, charged toward failed (relaunchStale, staleRegistration). The mark is written where
+// the launch starts the process that replaces the stale one (launchNow), and a relaunch refused
+// at its turn starts none and has nothing left to run it — the error goes back to whoever asked
+// — so the claim is left marked exactly as the relaunch found it, which for this claim is not
+// at all, and the old process registering afterwards is relaunched for free, as the first stale
+// registration of any claim is.
 //
-// The negative control is the restore reverted (runWake's unmarkPluginRelaunch): the claim then
-// names this daemon's contract for a relaunch that never ran, and the re-registration takes the
-// charged path, which this test reads at the mark and at the budgets.
+// The negative control is the mark written where the relaunch is decided again, as the shape
+// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
+// m.deps.PluginContract`): the claim then names this daemon's contract for a relaunch that
+// never ran, and the re-registration takes the charged path, which this test reads at the mark
+// and at the budgets.
 func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -1407,8 +1418,8 @@ func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 
 	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
 	waiting := h.wantWaitingWake(WakeLaunch)
-	if got := h.claim(); got.PluginRelaunchFor != 25 {
-		t.Fatalf("the claim whose stale-plugin relaunch waits is marked for %d, want 25", got.PluginRelaunchFor)
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is marked for %d, want 0: its launch has not run", got.PluginRelaunchFor)
 	}
 
 	store.failing = true
@@ -1417,7 +1428,7 @@ func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 	h.wantState(StateReady)
 	h.wantStarts(h.token, 1)
 	if got := h.claim(); got.PluginRelaunchFor != 0 {
-		t.Fatalf("the claim is marked for %d after its relaunch was refused, want 0: the relaunch found no mark and put none back", got.PluginRelaunchFor)
+		t.Fatalf("the claim is marked for %d after its relaunch was refused, want 0: that relaunch started no process", got.PluginRelaunchFor)
 	}
 
 	// The agent of the process that was never replaced registers again, on the contract it is
@@ -1440,6 +1451,9 @@ func TestAStalePluginRelaunchRefusedAtItsTurnLeavesNoMarkBehind(t *testing.T) {
 
 	h.wantStarts(h.token, 2)
 	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim after the relaunch that ran is marked for %d, want 25", got.PluginRelaunchFor)
+	}
 }
 
 // The mark of a relaunch that did run is not one a later refusal touches. A claim relaunched
@@ -1977,18 +1991,21 @@ func TestADeliveryTheTableIgnoresRunsNoParkedLaunch(t *testing.T) {
 	h.wantWakeDueAt(waiting)
 }
 
-// A registration of the process a stale-plugin relaunch waits over is charged nothing. The mark
-// that relaunch leaves (PluginRelaunchFor) says what contract it was made for, and a registration
-// that still differs once it has run is the second in a row and is charged toward failed
-// (staleRegistration). The pacing puts a wait between the mark and the relaunch, and a process
-// that reconnects inside that wait registers again on the contract it is still running: that is
-// not the second relaunch in a row, it is the first one still waiting its turn, so nothing is
-// relaunched and nothing is charged. The registration is refused all the same, as every stale one
-// is, and the turn replaces the process.
+// A registration of the process a stale-plugin relaunch waits over raises nothing and is
+// charged nothing. The mark a relaunch leaves (PluginRelaunchFor) names the contract it was
+// made for, written where its launch starts the replacement (launchNow), and a registration
+// that still differs once such a relaunch has run is the second in a row and is charged toward
+// failed (staleRegistration). The pacing puts a wait between the decision and the launch, and a
+// process that reconnects inside that wait registers again on the contract it is still running:
+// the claim carries no mark yet, so what the guard stops is a second relaunch over the one
+// already waiting, which would replace its wake and take a second token for the same launch.
+// The registration is refused all the same, as every stale one is, and the turn replaces the
+// process and marks the claim.
 //
 // The negative control is the guard reverted (staleRegistration's launchWaits): the
-// re-registration then takes the charged path and the budgets read a launch failure this claim
-// never had, which this test reads at the budgets.
+// re-registration then raises a relaunch of its own, which replaces the wake this claim holds
+// with one due a whole interval later and takes a second token for the launch that wake was
+// already going to make, which this test reads at the wake the claim still holds.
 func TestAReRegistrationInsideAStalePluginRelaunchsWaitIsChargedNothing(t *testing.T) {
 	h := pacedHarness(t, wakeRate)
 	h.reach(StateReady)
@@ -1998,8 +2015,8 @@ func TestAReRegistrationInsideAStalePluginRelaunchsWaitIsChargedNothing(t *testi
 	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
 
 	waiting := h.wantWaitingWake(WakeLaunch)
-	if got := h.claim(); got.State != StateReady || got.PluginRelaunchFor != 25 {
-		t.Fatalf("the claim whose stale-plugin relaunch waits is %s marked for %d, want %s marked for 25",
+	if got := h.claim(); got.State != StateReady || got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is %s marked for %d, want %s marked for 0: its launch has not run",
 			got.State, got.PluginRelaunchFor, StateReady)
 	}
 
@@ -2021,6 +2038,228 @@ func TestAReRegistrationInsideAStalePluginRelaunchsWaitIsChargedNothing(t *testi
 	h.wantState(StateLaunching)
 	h.wantStarts(h.token, 2)
 	h.wantBudgets(Budgets{})
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim after the turn that replaced its process is marked for %d, want 25", got.PluginRelaunchFor)
+	}
+}
+
+// The mark itself: a stale-plugin relaunch that runs says so, and what that saying buys is the
+// charge on the registration after it. PluginRelaunchFor is written where the launch starts the
+// process that replaces the stale one (launchNow, commitPluginRelaunch), with that launch's own
+// write, so a claim whose relaunch is still waiting its turn carries no mark and the claim whose
+// turn has come carries one the store holds. The process that relaunch starts is the one the
+// mark is for: a registration of it that still speaks the old contract means the plugin the
+// relaunch put it on is itself behind this daemon, which is the second stale registration in a
+// row — charged toward failed rather than relaunched for free, which is the loop the mark exists
+// to stop (staleRegistration, relaunchAfterFailure).
+//
+// The negative control is the commit removed (launchNow's commitPluginRelaunch): the claim is
+// marked for nothing after the relaunch that ran, and the registration of the process that
+// relaunch started is relaunched free, which this test reads at the mark, at the stored claim
+// and at the budgets.
+func TestAStalePluginRelaunchThatRunsMarksTheClaim(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim whose stale-plugin relaunch waits is marked for %d, want 0: its launch has not run", got.PluginRelaunchFor)
+	}
+
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 2)
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim after the relaunch that replaced its process is marked for %d, want 25", got.PluginRelaunchFor)
+	}
+	if stored := h.store.load(h.token); stored.PluginRelaunchFor != 25 {
+		t.Fatalf("the store holds the claim marked for %d, want 25: the launch's own write carries the mark",
+			stored.PluginRelaunchFor)
+	}
+
+	// The process that relaunch started speaks the old contract too — the plugin it was put on
+	// is itself behind this daemon — so its registration is the second stale one in a row.
+	h.connect()
+	err := h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	var refusal claim.Refusal
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the registration of the relaunched process = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+}
+
+// Two stale-plugin relaunches raised over one claim, the second replacing the wake the first
+// parked, leave the mark where they found it when neither runs. The daemon's sweep posts the end
+// of an answered plugin round at every tick for a claim that is not working, and the stale lane
+// relaunches that same claim from a registration of its old process, so the two meet: the
+// registration's relaunch parks a wake, and the round's end raises a relaunch of its own over it
+// (relaunchStale, endPodUpdate, reserveWake). Neither has marked the claim — the mark is written
+// where a launch starts a process (launchNow) — so a refusal at the second wake's turn leaves
+// the claim exactly as the first relaunch found it, and the next stale registration is the first
+// this claim has had relaunched: relaunched for free rather than walked toward failed.
+//
+// The negative control is the mark written where the relaunch is decided again, as the shape
+// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
+// m.deps.PluginContract`): the second relaunch then marks the claim for this daemon's contract
+// and nothing takes it back, so the next stale registration takes the charged path, which this
+// test reads at the mark and at the budgets.
+func TestASecondStalePluginRelaunchOverAParkedOneLeavesNoMarkBehind(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateIdle)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+	h.m.deps.PodUpdateRetask = testPodUpdateRetask
+	store := &unansweredCheckLaunchStore{memStore: h.store}
+	h.m.deps.Store = store
+
+	// The claim's own plugin round, answered by its worker: from here the daemon's sweep posts
+	// its end at every tick until the end decides something (reconcilePluginUpdate).
+	round := PluginRound(25)
+	h.openUpdate(round, testReasons)
+	h.signalUpdate("c0ffee")
+
+	// The old process re-registers on the old contract inside that round. No launch waits yet,
+	// so the stale lane relaunches it, and that launch waits its turn.
+	err := h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	var refusal claim.Refusal
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the stale re-registration = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	first := h.wantWaitingWake(WakeLaunch)
+
+	// The sweep's next end post for the answered round raises a relaunch of its own, which
+	// replaces that wake.
+	h.must(PodUpdateEnded{Claim: h.token, Round: round})
+
+	second := h.wantWaitingWake(WakeLaunch)
+	if !second.At.After(first.At) {
+		t.Fatalf("the round's end left the claim holding the wake due at %s, want the one its own relaunch took after %s",
+			second.At, first.At)
+	}
+
+	// The second relaunch is refused at its turn, as the first would have been: neither ran.
+	store.failing = true
+	h.advance(second.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 1)
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim is marked for %d after both relaunches were abandoned, want 0: neither started a process",
+			got.PluginRelaunchFor)
+	}
+
+	// The process neither relaunch replaced registers again, still on the old contract: the
+	// first stale registration this claim has had relaunched, so it is relaunched for free.
+	store.failing = false
+	err = h.handle(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 24})
+
+	if !errors.As(err, &refusal) || refusal != claim.StalePluginContract(24, 25) {
+		t.Fatalf("the re-registration after both abandoned relaunches = %v, want the stale-plugin refusal naming 24 and 25", err)
+	}
+	h.wantBudgets(Budgets{})
+}
+
+// A stale-plugin relaunch a held suspension ends in a suspension marks nothing, whether or not
+// the write of that suspension lands. The relaunch replaces no process there: replaceProcess
+// stops it and suspends the claim instead (endHeld, suspendedFor), and the resume that follows
+// is a launch of its own, raised from the top where the operator or the rule asks for it
+// (revive). So the claim comes back from the suspension unmarked, and a resumed process that
+// still speaks another contract is relaunched once more for free before the mark that charges it
+// is there — one relaunch, since that one marks the claim where it starts its process.
+//
+// The suspension's own write is what the reviewer's reproduction failed: the claim is suspended
+// in memory whether or not it lands (suspended's letGo and persist), so the mark must read the
+// same either way, and here it does — none was written to put back or to leave standing.
+//
+// The negative control is the mark written where the relaunch is decided again, as the shape
+// before this one wrote it (markPluginRelaunch's `m.claim.PluginRelaunchFor =
+// m.deps.PluginContract`): the suspended claim then carries the mark of a relaunch that replaced
+// nothing, which this test reads at the mark.
+func TestAStalePluginRelaunchAHeldSuspensionEndsMarksNothing(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+
+	// The operator's suspend arrives in a turn and is held for that turn's end, and the stop the
+	// end runs is refused by the runtime, so the hold stands over a claim that still records its
+	// process (holdSuspension, suspendHeld).
+	if err := h.handle(RequestSuspend{Claim: h.token, By: SuspendedByOperator}); !suspensionHeld(err) {
+		t.Fatalf("the suspend of a claim in a turn = %v, want the hold", err)
+	}
+	h.rt.FailSuspend(errBoom)
+	if err := h.handleQuiet(StreamTurnEnd{Claim: h.token}); err == nil {
+		t.Fatal("the turn's end ran the held suspension; this test needs a stop the runtime refuses")
+	}
+	if h.m.held == nil {
+		t.Fatal("the suspension is no longer held; this test needs one held over a live process")
+	}
+
+	// The sweep finds the claim's plugin stale. The relaunch ends the held suspension rather
+	// than launching, and the write of that suspension fails.
+	h.store.fail("PutClaim", errBoom)
+	if err := h.handle(StalePlugin{Claim: h.token, Trigger: "sweep"}); !errors.Is(err, errBoom) {
+		t.Fatalf("the stale-plugin relaunch whose suspension could not be written = %v, want the store's refusal", err)
+	}
+	h.store.fail("PutClaim", nil)
+
+	got := h.claim()
+	if got.State != StateSuspended || got.Locator != nil {
+		t.Fatalf("the claim is %s recording %+v, want suspended with its process let go", got.State, got.Locator)
+	}
+	if got.PluginRelaunchFor != 0 {
+		t.Fatalf("the suspended claim is marked for %d, want 0: its relaunch replaced no process", got.PluginRelaunchFor)
+	}
+	h.wantCalls("Resume", 0)
+}
+
+// A registration that clears the mark while a relaunch waits does not unsay the relaunch that
+// then runs. The mark is cleared by a registration that records this daemon's own contract
+// (register, reregister), and the launch the pacing holds goes on to replace that process at its
+// turn: it did relaunch, so it marks the claim where it starts, and the next registration that
+// still differs is read against it (staleRegistration). Nothing of the mark the relaunch found
+// is put back over the claim either — there is nothing to put back, because the decision wrote
+// nothing.
+//
+// The negative control is the commit removed (launchNow's commitPluginRelaunch): the claim ends
+// marked for nothing after a relaunch that did replace its process, which this test reads at the
+// mark and at the stored claim.
+func TestARegistrationInsideTheWaitDoesNotUnsayTheRelaunchThatRuns(t *testing.T) {
+	h := pacedHarness(t, wakeRate)
+	h.reach(StateReady)
+	h.m.deps.PluginContract = 25
+	h.m.deps.PluginRelaunchable = true
+	// The mark an earlier relaunch of this claim left, for the registration below to clear.
+	h.m.claim.PluginRelaunchFor = 25
+
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	waiting := h.wantWaitingWake(WakeLaunch)
+
+	// The shim reconnects inside the wait and the agent registers on this daemon's own contract,
+	// which clears the mark.
+	h.must(RequestRegister{Claim: h.token, Generation: h.generation(), Session: session,
+		SessionFile: sessionFile, CapabilityHash: []byte("capability"), PluginContract: 25})
+	if got := h.claim(); got.PluginRelaunchFor != 0 {
+		t.Fatalf("the claim after a current registration is marked for %d, want 0", got.PluginRelaunchFor)
+	}
+
+	h.advance(waiting.At.Sub(h.clock.Now()))
+
+	h.wantStarts(h.token, 2)
+	if got := h.claim(); got.PluginRelaunchFor != 25 {
+		t.Fatalf("the claim after the turn that replaced its process is marked for %d, want 25: that relaunch ran",
+			got.PluginRelaunchFor)
+	}
+	if stored := h.store.load(h.token); stored.PluginRelaunchFor != 25 {
+		t.Fatalf("the store holds the claim marked for %d, want 25", stored.PluginRelaunchFor)
+	}
 }
 
 // suspendHeld is whether err is the answer a suspension held for later gives its caller.

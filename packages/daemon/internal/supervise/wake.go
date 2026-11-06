@@ -114,12 +114,14 @@ type wake struct {
 	// again, which reserveWake states. It is set for a launch wake alone: a plugin task's turn
 	// makes no lifecycle check, since it starts no process (openPluginUpdateIfStale).
 	again func(context.Context) error
-	// pluginMark is what PluginRelaunchFor held before the stale-plugin relaunch this wake holds
-	// marked it (markPluginRelaunch), and nil for every launch no such relaunch raised. The turn
-	// puts it back where the lifecycle recheck refuses that relaunch, which is the one refusal
-	// that leaves it neither run nor owed (runWake, unmarkPluginRelaunch). It travels on the wake
-	// because the turn comes tens of minutes after the frame that marked it, and because a wake
-	// that is dropped or replaced takes the restore it owns with it.
+	// pluginMark is the intent of the stale-plugin relaunch this wake holds: the contract that
+	// relaunch is made for, which the launch writes to PluginRelaunchFor when it starts the
+	// process at this wake's turn (markPluginRelaunch, launchNow, commitPluginRelaunch). It is
+	// nil for every wake no such relaunch raised. It travels on the wake because the turn comes
+	// tens of minutes after the frame that decided the relaunch, and because the mark belongs to
+	// the launch and to no other: a wake that is dropped or replaced takes the intent with it,
+	// and nothing of the relaunch it held is written, which is right — that relaunch never
+	// replaced anything.
 	pluginMark *int
 }
 
@@ -143,19 +145,20 @@ type wake struct {
 // no request at all, and the controller is the one session the operator's own read of a running
 // wave relies on. An exempt wake is charged nothing and writes its line as it goes.
 //
-// A second launch raised over a claim whose wake still waits replaces that wake and takes a token
-// of its own; the one the first took is spent either way, since the limiter charges on the
-// reserve. No paced request reaches here twice over a parked claim: the table answers a second
-// start of a claim at launching without launching anything, and a claim already holding a wake
-// takes no second one from the stale-plugin lane (refreshPlugin).
+// A second launch raised over a claim whose wake still waits replaces that wake and takes a
+// token of its own; the one the first took is spent either way, since the limiter charges on
+// the reserve. The replaced wake's work is the same launch the new one makes, and the intent of
+// a stale-plugin relaunch it carried goes with it unwritten, so nothing of the first relaunch
+// is left to put right (wake.pluginMark). Two of the three stale-plugin lanes raise no such
+// second launch at all: refreshPlugin returns over a claim that already holds a wake of any
+// kind, and staleRegistration over one whose launch waits. The third does — a plugin round
+// whose end comes while the claim's own relaunch waits its turn replaces that wake (endPodUpdate)
+// — and a paced request reaches here twice over a parked claim for no other reason, since the
+// table answers a second start of a claim at launching without launching anything.
 //
 // again is the launch raised anew, for the turn to retry with when its own lifecycle recheck is
 // unanswered; nil for a kind whose turn makes no such check (wake.again).
 func (m *Machine) reserveWake(ctx context.Context, kind WakeKind, exempt bool, run, again func(context.Context) error) error {
-	// Past this gate the launch is raised, so the mark a stale-plugin relaunch made stands
-	// whatever becomes of it, and the only refusal that can still give it back is the parked
-	// wake's own turn (markPluginRelaunch, runWake).
-	mark := m.takePluginMark()
 	exempt = exempt || claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
 	reserve := m.deps.WakePace.Reserve
 	if exempt || reserve == nil {
@@ -175,7 +178,12 @@ func (m *Machine) reserveWake(ctx context.Context, kind WakeKind, exempt bool, r
 		m.wakeRan(kind, true, 0)
 		return run(ctx)
 	}
-	return m.parkWake(ctx, &wake{at: at, reserved: now, kind: kind, state: m.claim.State, run: run, again: again, pluginMark: mark}, at.Sub(now))
+	// The intent of a stale-plugin relaunch travels with the launch it names, so the wake that
+	// holds that launch holds the intent while it waits and gives it back at its turn
+	// (markPluginRelaunch, runWake, wake.pluginMark). A launch that runs above leaves it on the
+	// machine, where the launch itself commits it (launchNow, commitPluginRelaunch).
+	return m.parkWake(ctx, &wake{at: at, reserved: now, kind: kind, state: m.claim.State, run: run, again: again,
+		pluginMark: m.takePluginRelaunch()}, at.Sub(now))
 }
 
 // parkWake is the park the gate and the re-park share (reserveWake, reparkWake): waiting waits on
@@ -213,6 +221,9 @@ func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Durati
 // token — its reservation was taken once, before it waited. A suspension held meanwhile ends here
 // instead of in a launch, exactly as relaunchAgain ends one, and the process the claim records is
 // stopped first, as the relaunch this wake holds would have stopped it (replaceProcess, endHeld).
+// A stale-plugin relaunch that ends this way marks nothing, as one a held suspension ends at its
+// decision marks nothing: the intent the wake carries is dropped with the wake, no process was
+// replaced, and the resume raises a launch of its own (wake.pluginMark, relaunchMarked, revive).
 //
 // Every hold a launch's turn finds here is over a process that still runs: the suspend of a claim
 // in a turn (holdSuspension) and the suspend of a launch that did start a process
@@ -239,8 +250,10 @@ func (m *Machine) parkWake(ctx context.Context, waiting *wake, after time.Durati
 //     the tree's claims, so a wake that fires between the two would launch into a tree whose
 //     cleanup is reserved. The refusal goes where launchAfter's own goes (relaunchRefused), and
 //     the turn gives back what its own park took before it does: the watch of the process this
-//     turn keeps (watchAgain) and the mark a stale-plugin relaunch made (unmarkPluginRelaunch).
-//     The retry the refusal may leave waiting re-enters the gate (wake.again).
+//     turn keeps (watchAgain), and the retry that refusal may leave waiting re-enters the gate
+//     (wake.again). Nothing of a stale-plugin relaunch is put right there, because nothing was
+//     written for it: its mark travels as the intent the wake carries, and only a launch that
+//     starts a process writes it (wake.pluginMark, launchNow).
 //   - A turn the process it replaces may have started is taken back first (interrupted), exactly
 //     as replaceProcess takes one back before it relaunches. The gate let this wake park over a
 //     live process, and that process can have confirmed a task since: letting it go without the
@@ -275,36 +288,41 @@ func wakeNow(m *Machine, ctx context.Context, _ Event) error {
 // a request pulled forward, how long it had been held when that request arrived.
 //
 // Both steps can end the wake's work with the process the claim records kept and the wake
-// spent, and each gives back exactly what it left standing. The plugin mark goes back either
-// way (unmarkPluginRelaunch): a stale-plugin relaunch abandoned with its process still running
-// has neither happened nor is owed, whichever step abandoned it, and a mark left over one would
-// make the next registration of that same process the second stale one in a row and charge it
-// (staleRegistration). The watch is the first step's alone (watchAgain). The difference is what
-// the store is reached for: only a delivery a turn has confirmed is taken back (interrupted), a
-// turn is confirmed in a ready or idle claim alone, and the confirmation itself leaves that
-// claim working — the table ignores a turn start in every state a process is still coming up in
-// (turnStarted, unready), and no live claim goes back to one of them (helloed). So the claim at
-// the second step's return is working or idle, which calls for neither the boot interval nor
-// the registration deadline a park takes from a claim still coming up; its confirmed task waits
-// on no turn bound, because the confirmation disarms that bound where it sets ConfirmedAt
-// (confirm); and the probe interval an uncertain answer may have armed is one the sweep's next
-// observation arms again (observe, judge). What such a claim is left without is the relaunch
-// this wake held, which is what the lifecycle refusal leaves owing too: the next report of the
-// process, or the sweep's own stale-plugin pass, raises one again and marks it anew.
+// spent, and each gives back exactly what it left standing. The watch is the first step's alone
+// (watchAgain). Neither gives a plugin mark back, because a wake that is abandoned writes none:
+// the intent of the stale-plugin relaunch this wake holds is handed to the launch below and
+// written by it where it starts the process that replaces the stale one (wake.pluginMark,
+// holdPluginRelaunch, launchNow). A relaunch abandoned at either step started nothing, so the
+// claim keeps the mark of whatever relaunch last did run, and the next registration of this
+// same process is read against that one (staleRegistration).
+//
+// The difference between the two steps is what the store is reached for: only a delivery a turn
+// has confirmed is taken back (interrupted), a turn is confirmed in a ready or idle claim
+// alone, and the confirmation itself leaves that claim working — the table ignores a turn start
+// in every state a process is still coming up in (turnStarted, unready), and no live claim goes
+// back to one of them (helloed). So the claim at the second step's return is working or idle,
+// which calls for neither the boot interval nor the registration deadline a park takes from a
+// claim still coming up; its confirmed task waits on no turn bound, because the confirmation
+// disarms that bound where it sets ConfirmedAt (confirm); and the probe interval an uncertain
+// answer may have armed is one the sweep's next observation arms again (observe, judge). What
+// such a claim is left without is the relaunch this wake held, which is what the lifecycle
+// refusal leaves owing too: the next report of the process, or the sweep's own stale-plugin
+// pass, raises one again.
 func (m *Machine) runWake(ctx context.Context, waiting *wake, paced bool) error {
 	if waiting.kind == WakeLaunch {
 		if err := m.checkLaunch(ctx); err != nil {
-			m.unmarkPluginRelaunch(waiting.pluginMark)
 			m.watchAgain()
 			return m.relaunchRefused(ctx, waiting.again, err)
 		}
 		if m.claim.Locator != nil {
 			if err := m.interrupted(ctx, "the process this launch replaces is let go now that its turn has come", ordinaryEnd); err != nil {
-				m.unmarkPluginRelaunch(waiting.pluginMark)
 				return err
 			}
 		}
 	}
+	// Past both steps the launch runs, so the intent this wake carried goes back to the machine
+	// for that launch to commit as it starts (holdPluginRelaunch, launchNow).
+	m.holdPluginRelaunch(waiting.pluginMark)
 	m.wakeRan(waiting.kind, paced, m.deps.Clock.Now().Sub(waiting.reserved))
 	return waiting.run(ctx)
 }

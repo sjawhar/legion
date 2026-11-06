@@ -54,14 +54,18 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 // goes back to whoever asked for it, and this writes nothing, arms nothing and starts nothing.
 //
 // What one refused relaunch leaves behind is put right by the caller that left it, never here.
-// Two things a relaunch can leave are the watch its park took off the process it was to replace
-// and the plugin mark it made, and both belong to the launch the wake pacing held: its turn is
-// where they are given back (runWake, watchAgain, unmarkPluginRelaunch). This is the refusal of
-// every launch there is — launchAfter's own pre-check, a relaunch after a failure, a refused
-// retry or resume over a claim that runs no process — and those launches park nothing and mark
-// nothing, so arming a timer for one would arm what the fence has just fired, and clearing the
-// mark for one would clear a mark that names another relaunch, which is what the charged second
-// stale registration in a row rests on (staleRegistration).
+// The one such thing is the watch a park took off the process the relaunch was to replace, and
+// it belongs to the launch the wake pacing held: that turn is where it is armed again (runWake,
+// watchAgain). This is the refusal of every launch there is — launchAfter's own pre-check, a
+// relaunch after a failure, a refused retry or resume over a claim that runs no process — and
+// those launches park nothing, so arming a timer for one would arm what the fence has just
+// fired.
+//
+// No plugin mark is touched here, by this refusal or by any other. A stale-plugin relaunch
+// writes PluginRelaunchFor where its launch starts the process that replaces the stale one
+// (launchNow, commitPluginRelaunch), so a refused relaunch has written none, and the mark the
+// claim carries names the relaunch that did run — which is what the charged second stale
+// registration in a row rests on (staleRegistration).
 //
 // A live claim that records none has already let its process go: a retirement's relaunch whose
 // stop already ended the process (the registration deadline and a prompt retirement check before
