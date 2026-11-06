@@ -2421,8 +2421,8 @@ jobs:
     #   every other step summed             199 s   221 s   232 s
     #   the whole job                      1715 s  1875 s  2348 s
     #
-    # The install step has one reading at this head's package set, not a distribution: 33 s, in
-    # job 128196725293 of this pull request. A distribution at the restored set can only be read
+    # The install step has one reading at this head's package set, not a distribution: 30 s, in
+    # job 128209099649 of this pull request. A distribution at the restored set can only be read
     # on main after the merge, when jobs of this name run that list.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
@@ -2574,12 +2574,12 @@ jobs:
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
       # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
       # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
-      # lib/coreBundle.js. Measured in job 128196725293 of this pull request: Playwright's 79
-      # names and gstreamer1.0-tools resolve, with their dependencies, to 182 packages and 114 MB
-      # of archives (`0 upgraded, 182 newly installed, 0 to remove and 27 not upgraded.` and
-      # `Need to get 114 MB of archives.`), and the `apt-get update` before them fetched 13.0 MB
-      # of indexes (`Fetched 13.0 MB in 1s (9291 kB/s)`). Nothing is left out of the list, so
-      # there is no reduced set beside it and no split to measure.
+      # lib/coreBundle.js. Measured in job 128209099649, this pull request's own at this head:
+      # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
+      # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
+      # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
+      # them fetched 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left
+      # out of the list, so there is no reduced set beside it and no split to measure.
       #
       # `step_tools` below is the one package this step installs that Playwright's list does not
       # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
@@ -2607,28 +2607,32 @@ jobs:
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
-      # origin's indexes and a third 300 s download attempt, then the unpack, the decoder guard,
-      # the browser download and the one apt simulation of the list check, none of which touch
-      # the Ubuntu mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded
-      # apt, 17.4 s of unpack, 2.1 s of decoder guard, about 90 s for the browsers and 1.6 s for
-      # the list check: 1170 + 17.4 + 2.1 + 90 + 1.6 = 1281.1 s, rounded up to 22 min. The budget
-      # has to carry the fallback's own update, because the path that needs every one of those
-      # bounds is the path on which the step still succeeds.
+      # origin's indexes and a third 300 s download attempt, then the unpack, the keeping of the
+      # archives for the cache, the decoder guard, the browser download and the one apt
+      # simulation of the list check, none of which touch the Ubuntu mirror. So the arithmetic is
+      # 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, 13.6 s of unpack, 1.1 s of keeping,
+      # 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the list check:
+      # 1170 + 13.6 + 1.1 + 0.4 + 90 + 1.6 = 1276.7 s, rounded up to 22 min. The budget has to
+      # carry the fallback's own update, because the path that needs every one of those bounds is
+      # the path on which the step still succeeds.
       #
-      # The four readings after the bounded apt are job 128196725293's, this pull request's own,
-      # at this head's 182 packages. The unpack is the 17.4 s from `Download complete and in
-      # download only mode` at 22:43:13.177 to the last line of the unbounded install at
-      # 22:43:30.528. The decoder guard is the 2.1 s from there to `the decoders WebKit plays
-      # through are in the registry: ...` at 22:43:32.595. The browsers and the list check
-      # together are the 1.6 s from there to `The pinned list is current: ...` at 22:43:34.152 -
-      # but that job restored its browsers from the Actions cache (`Cache hit for:
-      # playwright-Linux-7f68fc...`, 482 MB, at 22:42:58), so that 1.6 s is no reading of the
-      # cold browser download and the budget has to carry the cold case. That is what the 90 s
-      # term is: the step's existing derivation for the cold browsers, which this change does
-      # not invalidate, because the package set does not reach the browser download. The list
-      # check, which this block used to put at about 30 s, is measured inside that 1.6 s, so
-      # 1.6 s is the term the reading supports for it. The whole step took 33 s in that job,
-      # 22:43:01 to 22:43:34: one reading at this head's package set, not a distribution.
+      # The five readings after the bounded apt are job 128209099649's, this pull request's own
+      # at this head, at its 182 packages. The unpack is the 13.6 s from `Download complete and
+      # in download only mode` at 23:14:13.884 to the last line of the unbounded install at
+      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping
+      # 182` at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above.
+      # The decoder guard is the 0.4 s to `the decoders WebKit plays through are in the
+      # registry: ...` at 23:14:28.984. The browsers and the list check together are the 1.6 s
+      # to `The pinned list is current: ...` at 23:14:30.540 - but that job restored its
+      # browsers from the Actions cache (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at
+      # 23:13:54), so that 1.6 s is no reading of the cold browser download and the budget has
+      # to carry the cold case. That is what the 90 s term is: the step's existing derivation
+      # for the cold browsers, which this change does not invalidate, because the package set
+      # does not reach the browser download. The list check, which this block used to put at
+      # about 30 s, is measured inside that 1.6 s, so 1.6 s is the term the reading supports for
+      # it. The whole step took 30 s in that job, 23:14:00 to 23:14:30: one reading at this
+      # head's package set, not a distribution. Each is one reading, so each moves a little from
+      # run to run; the margin the sum leaves under 22 min is what carries that.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the head's fetch of 13.0 MB of indexes and 114 MB of packages. The population
@@ -2674,14 +2678,14 @@ jobs:
       #
       # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
       # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
-      # after it asks only for the rest. Job 128196725293 measured that at this head: after the
+      # after it asks only for the rest. Job 128209099649 measured that at this head: after the
       # download phase had fetched all 114 MB, the install call after it asked for
       # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
       # not fetch again. Measured separately, the partial is resumed across the origin switch
       # too, since the two mirrors serve the same file and the server answers a byte-range
       # request. Where the fallback's snapshot holds a different version the filename differs,
       # the partial is not reused and that attempt carries the full 114 MB, which that job
-      # fetched in 4 s at 28.5 MB/s.
+      # fetched in 8 s at 14.7 MB/s.
       #
       # Why the third attempt changes origin rather than the bound being raised: a longer bound
       # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
