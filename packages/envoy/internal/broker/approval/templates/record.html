@@ -50,6 +50,24 @@
 <dt>State</dt>
 <dd class="state">{{$r.State}}{{if $r.DecidedBy}} by {{$r.DecidedBy}}{{end}}{{if $r.DecidedAt}} at {{$r.DecidedAt}}{{end}}{{if $r.Detail}} ({{$r.Detail}}){{end}}</dd>
 </dl>
+{{- with $r.Peer}}
+<section class="kernel">
+<h3>What the kernel says about the asking process</h3>
+<p class="note">Read from the kernel through the handle the agent-secrets helper pinned, at {{.ReadAt}}, and signed with the session's key. On a machine session the helper runs, the asking process never holds that key.</p>
+<dl>
+<dt>Process ID</dt>
+<dd>{{.PID}}</dd>
+<dt>Executable</dt>
+<dd><code>{{.Executable}}</code></dd>
+<dt>Working directory</dt>
+<dd><code>{{.WorkingDir}}</code></dd>
+<dt>Started</dt>
+<dd>{{.StartedAt}}</dd>
+<dt>Control group</dt>
+<dd><code>{{.Cgroup}}</code></dd>
+</dl>
+</section>
+{{- end}}
 {{- if not $r.MachineLogin}}
 <p class="note">Approve gives this session the value of these secrets {{$r.Lifetime}}.</p>
 <p class="note">Deny refuses them, and so does leaving the request until it expires.</p>

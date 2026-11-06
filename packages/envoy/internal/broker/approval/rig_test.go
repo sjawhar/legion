@@ -261,11 +261,25 @@ type pending struct{ requestID, recordID string }
 // the request's own session claim (none when empty), and answers the pending request it opened.
 func (r *rig) request(t *testing.T, enrollmentID string, key *ecdsa.PrivateKey, reason string, lifetime *int, sessionClaim string, names ...string) pending {
 	t.Helper()
+	return r.open(t, enrollmentID, key, reason, lifetime, sessionClaim, names, nil)
+}
+
+// requestPeer has the session ask for names with facts signed into its request object, as a
+// machine session's helper signs what the kernel answered about the process that asked.
+func (r *rig) requestPeer(t *testing.T, enrollmentID string, key *ecdsa.PrivateKey, facts record.PeerFacts, names ...string) pending {
+	t.Helper()
+	return r.open(t, enrollmentID, key, "", nil, "", names, []record.SignOption{record.WithPeerFacts(facts)})
+}
+
+// open signs a request for names with opts and sends it, and answers the pending request the
+// broker opened.
+func (r *rig) open(t *testing.T, enrollmentID string, key *ecdsa.PrivateKey, reason string, lifetime *int, sessionClaim string, names []string, opts []record.SignOption) pending {
+	t.Helper()
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, r.url, details, reason, "", lifetime, time.Now())
+	compact, err := record.Sign(key, r.url, details, reason, "", lifetime, time.Now(), opts...)
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}

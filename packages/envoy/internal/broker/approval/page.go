@@ -62,6 +62,27 @@ type recordView struct {
 	// Buttons is whether the page offers Approve and Deny for it: a pending agent_secret record
 	// the person may decide.
 	Buttons bool
+	// Peer is what the kernel answered about the process that asked, nil when the record carries
+	// no such claim: a machine login, a request no helper signed, and every record made before
+	// the claim existed.
+	Peer *peerView
+}
+
+// peerView is a record's peer claim as the page prints it: what the kernel said about the process
+// that asked, read by the agent-secrets helper through the pidfd it had pinned and signed with
+// the enrolled session's key.
+//
+// The page keeps these apart from the two session rows above them, which are what the asking
+// process and its enrollment state about themselves. Both instants are printed absolute, as every
+// other instant on this page is: a working directory read two hours ago is honest only while the
+// page says when it was read.
+type peerView struct {
+	PID        int
+	Executable string
+	WorkingDir string
+	Cgroup     string
+	StartedAt  string
+	ReadAt     string
 }
 
 // tokenFields are the hidden fields every decision form carries: the records the page printed with
@@ -101,9 +122,11 @@ type pageView struct {
 // Approve and Deny for each the person may decide and one "Approve all N shown" when N is two or
 // more, and, after a decision, one outcome line per decided record, read from the broker's own
 // record now. Each secret request is printed with two sentences of its own: what Approve gives
-// and for how long, and what Deny and the expiry do. A machine login's record is printed with
-// the note that its typed code is decided on Dispatch's machine-login page, and offers no
-// button.
+// and for how long, and what Deny and the expiry do. A record whose request carries a peer claim
+// is printed with one group more, "What the kernel says about the asking process" (peerView),
+// below the facts the broker recorded and the two session rows those processes stated for
+// themselves. A machine login's record is printed with the note that its typed code is decided
+// on Dispatch's machine-login page, and offers no button.
 func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session) {
 	id := r.PathValue("record")
 	if !record.ValidID(id) {
@@ -221,6 +244,14 @@ func (p *Page) recordView(d requests.RecordDetail, login string, now time.Time) 
 	}
 	if d.Decided != nil {
 		v.DecidedBy, v.DecidedAt, v.Detail = d.Decided.Login, d.Decided.At.UTC().Format(timeLayout), d.Decided.Detail
+	}
+	if d.Peer != nil {
+		v.Peer = &peerView{
+			PID: d.Peer.PID, Executable: d.Peer.Executable, WorkingDir: d.Peer.WorkingDir,
+			Cgroup:    d.Peer.Cgroup,
+			StartedAt: time.Unix(d.Peer.StartedAt, 0).UTC().Format(timeLayout),
+			ReadAt:    time.Unix(d.Peer.ReadAt, 0).UTC().Format(timeLayout),
+		}
 	}
 	v.Pending = d.State == "pending" && d.ExpiresAt.After(now)
 	if d.State == "pending" && !v.Pending {

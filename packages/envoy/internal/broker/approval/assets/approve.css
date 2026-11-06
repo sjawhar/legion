@@ -75,6 +75,17 @@ h2.others {
   margin-top: 2rem;
 }
 
+/* The kernel group sits inside a record, under the facts the broker itself recorded, so its
+   heading is smaller than the record's own and its own grid carries no bottom margin. */
+.kernel h3 {
+  font-size: 1rem;
+  margin: 0 0 0.25rem;
+}
+
+.kernel dl {
+  margin: 0.5rem 0 1rem;
+}
+
 .record,
 .outcomes {
   border: 1px solid var(--line);
