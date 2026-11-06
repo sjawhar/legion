@@ -282,6 +282,10 @@ export function useEventFeed({
         if (cursor === null) {
           cursor = eventPosition(since);
         }
+        // NEGATIVE CONTROL, not for merge: every resumed feed, a rotation's among them, reads
+        // the issue again though no event asked for it, which is exactly the extra request the
+        // rotation row refuses.
+        void queryClient.invalidateQueries({ queryKey: ["issue"] });
         if (!afterGap) {
           return;
         }

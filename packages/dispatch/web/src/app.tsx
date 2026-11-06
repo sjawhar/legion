@@ -683,7 +683,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             status the page can read, so nothing in the pill is terminal: once reconnecting has
             gone on for two minutes it offers a reload, and the page keeps trying underneath. */}
         <div
-          className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto"
+          /* NEGATIVE CONTROL, not for merge: the corner ignores the composer's own height and
+             pins itself one rem off the bottom, over the composers a phone thread shows. */
+          className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-4 *:pointer-events-auto"
           ref={statusCornerRef}
         >
           <PendingWritesIndicator />
