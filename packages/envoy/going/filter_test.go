@@ -683,6 +683,35 @@ var linkProbes = []linkProbe{
 		linked:  "user@evil.com",
 		dropped: 1,
 	},
+	{
+		// An image is dropped and its alt text is what a reader is left with, so the alt joins
+		// what stood on the image's two sides exactly as a reduced link's text does. linked is
+		// the piece the alt runs into, as it is for the reduced links above, since the model's
+		// own bytes carry the host in no other form.
+		name:    "an image the server dropped, whose alt text joins a www host",
+		answer:  "Host ![ww](https://a.example/p.png)w.evil.com now.",
+		want:    escaped("Host ") + escaped(" now."),
+		linked:  "w.evil.com",
+		dropped: 2,
+	},
+	{
+		// The autolink is dropped whole, and the word its two sides make is the one a reader
+		// would have linked; the tag cases above cover the same join through another drop.
+		name:    "an autolink the server dropped, whose neighbours join a www host",
+		answer:  "Host www<https://a.example>.evil.com now.",
+		want:    escaped("Host ") + escaped(" now."),
+		linked:  "www.evil.com",
+		dropped: 2,
+	},
+	{
+		// A comment renders as nothing at all, so the bytes on its two sides are adjacent to
+		// a reader even before the server drops it.
+		name:    "a comment the server dropped, whose neighbours join an address",
+		answer:  "Mail user<!--x-->@evil.com now.",
+		want:    escaped("Mail ") + escaped(" now."),
+		linked:  "user@evil.com",
+		dropped: 2,
+	},
 }
 
 // TestFilterEmitsNoLinkInATextFrame: every form a renderer makes a link of, reduced to the text

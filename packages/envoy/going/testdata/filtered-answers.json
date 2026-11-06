@@ -142,6 +142,21 @@
       "filtered": "Write to  Thanks"
     },
     {
+      "probe": "an image the server dropped, whose alt text joins a www host",
+      "answer": "Host ![ww](https://a.example/p.png)w.evil.com now.",
+      "filtered": "Host  now\\."
+    },
+    {
+      "probe": "an autolink the server dropped, whose neighbours join a www host",
+      "answer": "Host www\u003chttps://a.example\u003e.evil.com now.",
+      "filtered": "Host  now\\."
+    },
+    {
+      "probe": "a comment the server dropped, whose neighbours join an address",
+      "answer": "Mail user\u003c!--x--\u003e@evil.com now.",
+      "filtered": "Mail  now\\."
+    },
+    {
       "probe": "The order is [not a link] here.",
       "answer": "The order is [not a link] here.",
       "filtered": "The order is \\[not a link\\] here\\."
