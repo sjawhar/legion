@@ -2553,13 +2553,16 @@ jobs:
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
-          # Has the pinned list fallen behind Playwright? That check lives in
-          # .github/scripts/playwright-deps-current.sh now, which the four dropped package names
-          # moved into with it. It is run here, after the install above, so Playwright's missing
-          # set and the apt closure it is held against are read from the same state. The step's
+          # Has the pinned list fallen behind Playwright?
+          # .github/scripts/playwright-deps-current.sh answers that, against the list it is given
+          # here: $packages, unquoted so it splits into words, as apt takes it above. It holds
+          # every package Playwright asks for against that list and the four media packages this
+          # step drops. It runs after the install, so Playwright's list, its missing set and the
+          # apt closure they are held against are read from the same state. The step's
           # working-directory is packages/dispatch, so the script is reached through
-          # $GITHUB_WORKSPACE, the checkout root GitHub sets.
-          "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh"
+          # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves this
+          # suite's Playwright.
+          "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
         working-directory: packages/dispatch
       # Beside the install, not at the end of the job: it keeps what the install just downloaded,
       # so a job that installs the browsers and then fails a row does not throw the install away.
