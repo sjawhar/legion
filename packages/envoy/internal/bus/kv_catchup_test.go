@@ -131,12 +131,10 @@ type raiseWatcher struct {
 	nats.JetStreamContext
 	replicas int
 	behind   int
-	infos    int
 }
 
 func (r *raiseWatcher) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
 	info, err := r.JetStreamContext.StreamInfo(stream, opts...)
-	r.infos++
 	if err != nil || info.Config.Replicas != r.replicas || r.behind == 0 || info.Cluster == nil || len(info.Cluster.Replicas) == 0 {
 		return info, err
 	}
@@ -181,22 +179,28 @@ func TestARaiseAnswersOnlyOnceTheCopiesAreCurrent(t *testing.T) {
 	}
 }
 
-// A start that raises nothing waits for nothing and reads the bucket's stream once, the read
-// raiseReplicas makes to see the copies it already has: the common start, every start after the
-// first, pays no round trip for the wait above.
-func TestAStartThatRaisesNothingMakesNoExtraStreamRead(t *testing.T) {
+// A start that raises nothing waits for nothing: the common start, every start after the first,
+// comes up at the speed of the bucket it found. The copies here are already the deployment's, so
+// the raise leaves the bucket alone, and the stream reads answer as a cluster with a copy that
+// never catches up does, for more reads than any run could take. A wait that ran whether or not
+// the raise raised would therefore run out at bucketAppliedDeadline and fail the start; this row
+// asks only that the start answer well inside that, which is what "no wait" looks like from the
+// outside and what no count of requests can say.
+func TestAStartThatRaisesNothingWaitsForNothing(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	conn, js := memberJetStream(t, cluster, 0)
 	config := &nats.KeyValueConfig{Bucket: catchupBucket, Storage: nats.FileStorage, Replicas: 3}
 	if _, err := EnsureKeyValue(conn, js, config); err != nil {
 		t.Fatalf("create the three-copy bucket: %v", err)
 	}
-	watcher := &raiseWatcher{JetStreamContext: js, replicas: 3}
+	watcher := &raiseWatcher{JetStreamContext: js, replicas: 3, behind: 1 << 30}
+	start := time.Now()
 	if _, err := EnsureKeyValue(conn, watcher, config); err != nil {
 		t.Fatalf("ensure the bucket a start raises nothing on: %v", err)
 	}
-	if watcher.infos != 1 {
-		t.Fatalf("the start that raised nothing read the stream %d times, want 1: the copies it already has", watcher.infos)
+	waited := time.Since(start)
+	if within := bucketAppliedDeadline / 2; waited >= within {
+		t.Fatalf("the start that raised nothing took %s, want it answered within %s: it waits for no copy", waited.Round(time.Millisecond), within)
 	}
 }
 
