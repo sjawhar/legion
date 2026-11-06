@@ -1278,9 +1278,23 @@ cmd_judge_omp() {
   local extra=() word
   for word in ${SKILL_SCENARIOS_JUDGE_ENV:-}; do extra+=(-e "$word"); done
   # Pulled here, quietly, so a first run's pull progress never lands in the judge's out.txt, and a
-  # failed pull names itself.
-  docker image inspect "$judge_image" >/dev/null 2>&1 || docker pull --quiet "$judge_image" >/dev/null ||
-    fail "judge-omp: docker could not pull $judge_image"
+  # failed pull names itself. The registry answers one request of a batch badly now and then (a
+  # token it refuses to mint, a manifest GET it drops) and serves the next, so the pull is asked
+  # three times a couple of seconds apart before the rig refuses. Only the last attempt's own
+  # words are kept, and only for the refusal: an attempt the next one makes good says nothing.
+  if ! docker image inspect "$judge_image" >/dev/null 2>&1; then
+    local attempt=1 pulled='' pull_error=''
+    while :; do
+      pull_error=$(docker pull --quiet "$judge_image" 2>&1 >/dev/null) && {
+        pulled=1
+        break
+      }
+      [ "$attempt" -lt 3 ] || break
+      attempt=$((attempt + 1))
+      sleep 2
+    done
+    [ -n "$pulled" ] || fail "judge-omp: docker could not pull $judge_image in 3 attempts: $pull_error"
+  fi
   docker run --rm --init --cpus 2 --memory 4g --user "$(id -u):$(id -g)" --read-only \
     --tmpfs /tmp:exec,mode=1777 --tmpfs "$h:exec,uid=$(id -u),gid=$(id -g)" \
     -v "$(dirname "$omp"):/opt/omp:ro" -v "$agent:/opt/profile:ro" \
