@@ -5981,8 +5981,7 @@ describe("the model fallback", () => {
   // What the host actually hands a command: a `CommandContext` and nothing of a session's — no
   // `models`, no `modelRegistry`, no `setTimeout`. Arming a branch that already sits on a
   // fallback reads the branch alone, so a claim command's own context is enough for it, and
-  // `CommandContext.sessionManager` types the branch read it makes
-  // (`@legion/pi-shared/pi-types`:464-467).
+  // `CommandContext.sessionManager` types the branch read it makes.
   test("/legion-claim-controller arms the fallback from a context with a command's members alone", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_command" });
     controller.models.current = SONNET;
@@ -6003,8 +6002,8 @@ describe("the model fallback", () => {
     };
 
     // Envoy's role bridge claims through the session it saw start, which a command context is
-    // never one of (`src/controller-session.ts:300`), and the operator's controller arms nothing
-    // at startup: the claim command below is the only read of this branch.
+    // never one of (`createControllerSession`'s `envoyContext`), and the operator's controller
+    // arms nothing at startup: the claim command below is the only read of this branch.
     await controller.handlers.get("session_start")?.(
       {},
       controllerFallbackSession(controller, "ses_controller_command")
