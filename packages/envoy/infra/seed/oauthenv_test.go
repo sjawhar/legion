@@ -31,14 +31,23 @@ func snapshotStartupOAuthToken() {
 // The whole of this name is provable here, unlike the daemon's cmd/legion reader: no package
 // this one imports unsets GOOGLE_OAUTH_ACCESS_TOKEN in an init, so the snapshot holds whatever
 // the operator's shell gave the binary, and only a test could take it away.
+//
+// No failure below prints the variable's value, nor any part of one: the variable holds an
+// operator's access token, and a test's failure message is read in the run's output, in CI's
+// logs and in every transcript that carries them. Each message says whether the variable is set
+// and how many bytes its value holds, and nothing more. The comparison is still of the values
+// themselves, in memory, which is what this test is for.
 func TestTheAccessTokenTheBinaryStartedWithIsBackOnceTheTestsThatClearItEnd(t *testing.T) {
 	value, set := os.LookupEnv("GOOGLE_OAUTH_ACCESS_TOKEN")
 	switch {
 	case startupOAuthToken.set && !set:
-		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN is unset; the binary started with it %q", startupOAuthToken.value)
+		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN is unset; the binary started with it set, to a value of %d bytes",
+			len(startupOAuthToken.value))
 	case !startupOAuthToken.set && set:
-		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN is %q; the binary started without it", value)
+		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN is set, to a value of %d bytes; the binary started without it at all",
+			len(value))
 	case value != startupOAuthToken.value:
-		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN is %q; the binary started with %q", value, startupOAuthToken.value)
+		t.Errorf("GOOGLE_OAUTH_ACCESS_TOKEN holds a different value from the one the binary started with: %d bytes now against %d at the start; where those two counts are equal the value still changed, keeping its length",
+			len(value), len(startupOAuthToken.value))
 	}
 }

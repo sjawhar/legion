@@ -413,8 +413,16 @@ func (r *idleWakeRig) boot() {
 	r.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	// The log's writer is taken here, on the test's own goroutine, and not in the goroutine
+	// below. Taking it registers the cleanup that prints the log's tail, and cleanups run in the
+	// reverse of the order they were registered in: registered before r.stopDaemon below, the
+	// tail is printed after the daemon has stopped, so it carries the shutdown's own lines and it
+	// sees a failure the stop itself raised. Taken in the goroutine, it would usually be
+	// registered after r.stopDaemon and so run before it, printing a log that ends where the
+	// shutdown begins, or none at all when the stop is what failed.
+	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug}))
 	go func() {
-		done <- run(ctx, r.cfg, Build{}, slog.New(slog.NewJSONHandler(io.MultiWriter(r.logs, r.logFile()), &slog.HandlerOptions{Level: slog.LevelDebug})), overrides{
+		done <- run(ctx, r.cfg, Build{}, logger, overrides{
 			listen: heldListen, runtime: r.newRuntime, clock: stillClock{}, idleTick: idleRigTick,
 			workflowTokens: idleRigAppTokens{workflowTokenRecorder: &workflowTokenRecorder{}}, githubAPI: repositoriesGitHub(r.t),
 		})
@@ -435,7 +443,8 @@ func (r *idleWakeRig) boot() {
 // leaves no log behind. The file is still worth naming while the test runs, and the cleanup
 // closes it and, when the test failed, prints the end of it into the test's own output, which Go
 // shows for a failing test. That is where a failure's diagnosis is read now, the file itself
-// being gone by the time anyone looks.
+// being gone by the time anyone looks. It is called on the test's own goroutine, because the
+// order its cleanup runs in is the order that call is made in (boot).
 func (r *idleWakeRig) logFile() io.Writer {
 	r.t.Helper()
 	if r.daemonLog == nil {
