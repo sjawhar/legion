@@ -10,9 +10,9 @@ import {
   writeUnderKey,
 } from "./keyed-write";
 
-/** A v7 key minted at `MINTED_AT`: its first twelve hex digits are that millisecond. */
+/** A v7 key minted at `MINTED_AT`, as `newSendKey` mints one (`keyMinted`). */
 const MINTED_AT = 1_700_000_000_000;
-const V7_KEY = "018bcfe5-6800-7abc-9def-0123456789ab";
+const V7_KEY = keyMinted(MINTED_AT);
 
 test("a key is spent once Dispatch's whole key lifetime has passed since it was minted", () => {
   expect(keyExpired(V7_KEY, MINTED_AT + IDEMPOTENCY_KEY_TTL_MS)).toBe(true);

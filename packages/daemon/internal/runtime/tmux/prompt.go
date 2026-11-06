@@ -11,11 +11,12 @@ import (
 // (runtime-tmux.ts:414-431).
 //
 // `--model @default` rides every launch, not the resuming one alone: @default is Oh My Pi's name
-// for the `default` model role, which every pod's operator overlay sets, and a resumed session
-// otherwise runs the model its first launch saved for ever. A launch under the flag writes no
-// `model_change` entry of its own, so the saved pin stays in the session file and a later launch
-// without the flag would read it again. A settings set with no `default` role is not refused
-// here: Oh My Pi launches silently on a built-in model instead
+// for the `default` model role, which the settings of the profile the pane launches under set -
+// the launch prefix picks that profile (`omp_launch_prefix`, `env OMP_PROFILE=… --`) - and a
+// resumed session otherwise runs the model its first launch saved for ever. A launch under the
+// flag writes no `model_change` entry of its own, so the saved pin stays in the session file and
+// a later launch without the flag would read it again. A settings set with no `default` role is
+// not refused here: Oh My Pi launches silently on a built-in model instead
 // (deploy/kubernetes/operator-route/README.md, "Changing a role's model").
 func innerCommand(prefix []string, invocation, resumeSessionFile string, parts runtime.PromptParts) string {
 	resume := ""

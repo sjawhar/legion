@@ -429,10 +429,13 @@ export class Writes {
       this.#kept.forget(old);
       const { file } = entry;
       const { login } = entry.write;
-      // The file is kept under the key its attempt carries, so it moves to the new one. The old
-      // row goes only once the new one is in, so a reload between the two finds the file under
-      // one key or the other and never under neither. The put stamps the new row with the time
-      // it was made, which is the age `keepOnly` measures, so the file's day and its key's run
+      // The file is kept under the key its attempt carries, so it moves to the new one: the new
+      // row goes in before the old one goes out. The delete runs whatever the put did, because
+      // `put` answers an IndexedDB failure with nothing kept and no error (`kept-files.ts`), and
+      // a put that failed leaves the file under neither key - the write's key is the new one by
+      // then, so the old row is one no reload would read anyway, and the upload is let go as one
+      // a page with no IndexedDB at all is. The put stamps the new row with the time it was
+      // made, which is the age `keepOnly` measures, so the file's day and its key's run
       // together.
       if (file !== undefined && login !== undefined) {
         void this.#files.put(key, login, file).then(() => this.#files.delete(old));

@@ -4,6 +4,7 @@ import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import type { Event } from "../web/src/api/types";
+import { expiredRetryNote } from "../web/src/features/writes/keyed-write";
 import {
   baseUrl,
   createAsk,
@@ -252,17 +253,15 @@ test("a write whose key has expired stops and offers a new write", async ({ brow
     // waiting out a backoff on a page timer the jump fires; the one that follows it is refused
     // before it goes out, so this count is the last.
     const spent = attempts.length;
-    const expired =
-      "Its key is 24 hours old or more, so Dispatch no longer holds it: a Retry is a new write,";
     await runClockUntil(
       page,
       expect(indicator).toContainText(`Not saved: ${issue.key} set to todo`)
     );
 
-    await expect(indicator).toContainText(`${expired} which can be saved a second time if`);
+    await expect(indicator).toContainText(expiredRetryNote("saved"));
     await expect(indicator.getByRole("button", { exact: true, name: "Retry" })).toBeVisible();
     await expect(indicator.getByRole("button", { exact: true, name: "Discard" })).toBeVisible();
-    await expect(composer).toContainText(`${expired} which can be delivered a second time if`);
+    await expect(composer).toContainText(expiredRetryNote("delivered"));
     await expect(composer.getByRole("button", { exact: true, name: "Retry" })).toBeVisible();
     await expect(composer.getByRole("button", { name: "Discard draft" })).toBeVisible();
     // Nothing more went out under either key, and nothing of either write was made. Running the

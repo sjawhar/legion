@@ -155,8 +155,9 @@ func diagnoseHolders(ctx context.Context, dial func(context.Context) (*pgx.Conn,
 	if err != nil {
 		return []string{"diagnosis not collected: " + err.Error()}
 	}
-	// The rollback ends the transaction before the close, the order the connection's own defers
-	// ran them in, and both run on one context of their own (diagnosisCleanupTimeout).
+	// The rollback goes first and the close second: the rollback needs the connection the close
+	// ends. Both run on one context of their own (diagnosisCleanupTimeout), which bounds the two
+	// together.
 	var tx pgx.Tx
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), diagnosisCleanupTimeout)

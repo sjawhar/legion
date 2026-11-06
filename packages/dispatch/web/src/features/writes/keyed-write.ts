@@ -103,7 +103,7 @@ export class SendInterruptedError extends SendStoppedError {
   }
 }
 
-/** A write whose key Dispatch no longer holds (`keyExpired`): it was minted more than
+/** A write whose key Dispatch no longer holds (`keyExpired`): it was minted at least
  *  `IDEMPOTENCY_KEY_TTL_MS` ago, so no attempt under it would be a repeat of the first - Dispatch
  *  would run it as a new write. It ends as a stopped write does, so it offers what a stopped
  *  write offers - Retry and Discard - and that Retry goes under a new key
