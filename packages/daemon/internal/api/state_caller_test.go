@@ -164,15 +164,16 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys
 			// gone, with the three memory keys gone too, since a pod below this contract's own
-			// reader refuses those as well (memory_test.go holds that half), and with the three
-			// fields contract 50 added gone, which such a pod refuses the same way
-			// (state_sources_contract_test.go holds that half). What is expected of it is read
-			// from the state those three leave rather than by deleting the keys they write by
-			// name.
+			// reader refuses those as well (memory_test.go holds that half), with contract 51's
+			// two tree keys — `admission.trees` and each issue's `tree` — gone (tree_test.go
+			// holds that half), and with the three fields contract 52 added gone, which such a
+			// pod refuses the same way (state_sources_contract_test.go holds that half). What is
+			// expected of it is read from the state those four leave rather than by deleting the
+			// keys they write by name.
 			if carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body) {
-				t.Errorf("the state %s carries a field contract 50 added, which a reader before it refuses", body)
+				t.Errorf("the state %s carries a field contract 52 added, which a reader before it refuses", body)
 			}
-			wantJSON, err := json.Marshal(withoutSettingSources(withoutMemory(withoutUpdateRounds(populatedState(t)))))
+			wantJSON, err := json.Marshal(withoutSettingSources(withoutTrees(withoutMemory(withoutUpdateRounds(populatedState(t))))))
 			if err != nil {
 				t.Fatal(err)
 			}

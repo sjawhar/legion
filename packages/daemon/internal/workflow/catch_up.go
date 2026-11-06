@@ -123,7 +123,7 @@ func treeCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config
 			listed.Parent = *issue.Parent
 		}
 		catchUp.Issues = append(catchUp.Issues, listed)
-		if issue.Phase == phase.Accepting && InWorkflow(issue) {
+		if issue.Phase == phase.Accepting && record.InWorkflow(issue) {
 			awaiting = append(awaiting, issue.Key)
 		}
 	}

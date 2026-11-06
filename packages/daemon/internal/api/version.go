@@ -543,7 +543,37 @@ package api
 // was unmerged; main landed it as 48, so this branch takes the number above it, as the collision
 // note says.)
 //
-// 50: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
+// 51: dispatch://INFRA-980 -- the admission cap counts the issues at work rather than the trees,
+// so `api.Admission` on GET /legion/v1/state changes shape with it. `active` and `waiting` name
+// issues, a child as much as a root: a tree with three working children holds three slots, and a
+// tree whose issues only wait holds none. `trees` is new, the root of every live tree
+// (record.TreeLive), always emitted and never null, because a running tree may now hold no slot
+// and `active` alone no longer says which trees run — the controller reads it where it read
+// `active` as the running trees. Each issue record gains `tree`, the root of its tree, absent only
+// on an issue the workflow does not record, so a reader tells a child from a root and finds the
+// members of a tree that lingers. A plugin before 51 reads the state with a strict schema that
+// knows neither key and refuses the whole body for either, so the route serves `admission.trees`
+// and the issues' `tree` only to a caller whose pod records this contract, and serves a pod below
+// it the body its plugin reads (api's stateFor, withoutTrees), as it serves the memory group only
+// from 49 on; a caller the daemon cannot place in a pod — the operator's `legion state` — is
+// served both. One change no gating can carry is the meaning `active` and `waiting` lost: they
+// keep their names and name issues where they named trees, so a plugin below 51 reading a 51
+// daemon's state reads a tree's working children as that many running trees and miscounts them,
+// and its controller takes `active` for the trees at work. What protects against that is the
+// pair, not the stripping: the boot gate and `legion probe-image` refuse a daemon and a plugin
+// that declare different contracts, so no plugin below 51 is left reading a 51 daemon. The
+// stripping is for the one window that pairing leaves open — a pod of the contract before this
+// one still being replaced, whose roles go on reading the state through the plugin their image
+// was built with. This change's store migrations are
+// named for the UTC moments they were written, 20261103183833 and 20261104004500, since the
+// numbered series is closed. (This branch took 47 while sjawhar/legion#2731 held that number
+// open and unmerged; main has since reached 49 — 47 is sjawhar/legion#2539's, the idle release
+// landed as 48 and the memory group as 49 — and sjawhar/legion#2731, dispatch://INFRA-1077, has
+// since taken 50 on its own branch, so this change takes the number above them all, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+//
+// 52: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
 // commit ships (`packages/contracts/src/legion-api.ts` mirrors all three), so a plugin built
 // from here refuses a state an older daemon sends. The `daemon` block names the commit the
 // daemon was built from (`commit`, the release build's own revision, empty in a build that is
@@ -556,10 +586,12 @@ package api
 // ones `settings` withholds among them, so a rotated credential is visible without the
 // credential. `settings` itself is untouched, and stays the loose object it was. `GET
 // /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a contract
-// below 50 is served the state without all three (api's stateFor, withoutSettingSources), as a
-// caller below 49 is served it without the memory group and one below 46 without the claim
-// views' update rounds: every schema of `packages/contracts/src/legion-api.ts` was strict until
-// INFRA-1048, so such a plugin refuses a whole state for one key it does not know. (This branch
-// took 47 while main's idle release and memory group were unmerged; main landed them as 48 and
-// 49, so this branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 50
+// below 52 is served the state without all three (api's stateFor, withoutSettingSources), as a
+// caller below 51 is served it without the admission trees, one below 49 without the memory
+// group and one below 46 without the claim views' update rounds: every schema of
+// `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so such a plugin refuses a
+// whole state for one key it does not know. (This branch took 47 while main's idle release and
+// memory group were unmerged; main landed them as 48 and 49, so this branch took 50; main then
+// landed INFRA-980's admission cap at 51, without these shapes, so this branch takes the number
+// above it, as the collision note says.)
+const DaemonAPIVersion = 52

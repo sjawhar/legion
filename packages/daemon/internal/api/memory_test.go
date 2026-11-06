@@ -123,16 +123,17 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			}
 
 			// Nothing else of the body differs: it is the full state with the stripped keys
-			// gone. A pod below memoryContract is below settingSourcesContract too, so the three
-			// fields that contract added are off its body as well (withoutSettingSources), and
-			// what is expected of it is read from the state those two leave rather than by
-			// deleting the keys they write by name.
+			// gone. A pod below memoryContract is below treeContract and settingSourcesContract
+			// too, so `admission.trees`, the issues' `tree` and the three fields contract 52
+			// added are off its body as well (withoutTrees, withoutSettingSources), and what is
+			// expected of it is read from the state those three leave rather than by deleting
+			// the keys they write by name.
 			if !tc.memory && (carriesSettingSources(t, body) || carriesCommit(t, body) || carriesRequiresChecks(t, body)) {
-				t.Errorf("the state %s carries a field contract 50 added, which a reader before it refuses", body)
+				t.Errorf("the state %s carries a field contract 52 added, which a reader before it refuses", body)
 			}
 			want := populatedState(t)
 			if !tc.memory {
-				want = withoutSettingSources(withoutMemory(want))
+				want = withoutSettingSources(withoutTrees(withoutMemory(want)))
 			}
 			if !tc.rounds {
 				want = withoutUpdateRounds(want)

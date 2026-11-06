@@ -197,7 +197,10 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 		if err := records.PutIssue(ctx, tx, running); err != nil {
 			return err
 		}
-		return records.PutSlot(ctx, tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()})
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return openTreeTx(ctx, tx, "CAPTURE", tree)
 	}); err != nil {
 		t.Fatalf("seed the running tree: %v", err)
 	}
@@ -238,8 +241,12 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 		if err != nil {
 			return err
 		}
-		for _, issue := range record.Waiting(issues, slots) {
-			waiting = append(waiting, issue.Key)
+		facts, err := record.ReadLineFacts(ctx, tx, records, "CAPTURE", issues)
+		if err != nil {
+			return err
+		}
+		for _, issue := range record.Waiting(issues, slots, facts) {
+			waiting = append(waiting, issue.Issue.Key)
 		}
 		for _, slot := range slots {
 			slotted = append(slotted, slot.Issue)
@@ -276,9 +283,12 @@ func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, recordedOn(tree, tree, "in_progress"))
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return records.PutSlot(ctx, tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()})
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return openTreeTx(ctx, tx, "LEGION", tree)
 	}); err != nil {
-		t.Fatalf("seed the running tree's slot: %v", err)
+		t.Fatalf("seed the running tree: %v", err)
 	}
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
@@ -351,9 +361,12 @@ func newAncestryLine(t *testing.T, tree string, recorded ...record.Issue) *ances
 		putOutboxIssue(t, pool, records, issue)
 	}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutSlot(context.Background(), tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()})
+		if err := records.PutSlot(context.Background(), tx, record.Slot{Issue: tree, Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return openTreeTx(context.Background(), tx, "LEGION", tree)
 	}); err != nil {
-		t.Fatalf("seed the running tree's slot: %v", err)
+		t.Fatalf("seed the running tree: %v", err)
 	}
 	repos := newRepositories("LEGION", ghrepo.Renames{})
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
@@ -414,7 +427,11 @@ func (l *ancestryLine) waiting(key string) bool {
 			return err
 		}
 		slots, err := l.records.Slots(context.Background(), tx)
-		waiting = slices.ContainsFunc(record.Waiting(issues, slots), func(issue record.Issue) bool { return issue.Key == key })
+		if err != nil {
+			return err
+		}
+		facts, err := record.ReadLineFacts(context.Background(), tx, l.records, "LEGION", issues)
+		waiting = slices.ContainsFunc(record.Waiting(issues, slots, facts), func(entry record.LineEntry) bool { return entry.Issue.Key == key })
 		return err
 	}); err != nil {
 		l.t.Fatalf("read the waiting line: %v", err)
@@ -544,7 +561,10 @@ func TestAStaleEventOfAMovedAncestorBringsBackNoAncestryHold(t *testing.T) {
 	const tree, other, member, parent, child = "LEGION-168", "LEGION-190", "LEGION-170", "LEGION-169", "LEGION-214"
 	line := newAncestryLine(t, tree, parkedIn(member, tree), recordedOn(other, other, "in_progress"))
 	if err := pgx.BeginFunc(context.Background(), line.pool, func(tx pgx.Tx) error {
-		return line.records.PutSlot(context.Background(), tx, record.Slot{Issue: other, Index: 1, AdmittedAt: time.Now()})
+		if err := line.records.PutSlot(context.Background(), tx, record.Slot{Issue: other, Index: 1, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return openTreeTx(context.Background(), tx, "LEGION", other)
 	}); err != nil {
 		t.Fatalf("fill the second slot: %v", err)
 	}

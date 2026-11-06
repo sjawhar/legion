@@ -1878,9 +1878,13 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 
 	// The architect retries the held phase, and the outbox relaunches the implementer's session.
+	// The retry puts the issue back at work, so admission's own pass gives it the slot its worker
+	// needs (holdSlot); without it the start carrying the retry task would wait in the outbox for
+	// one and never be the row this test watches being retried.
 	if _, err := intake.ApplyFact(ctx, pool, "api", "retry:LEGION-208", intake.RetryOrEscalate{Issue: issue.Key, Decision: intake.RetryDecision}, engine); err != nil {
 		t.Fatalf("apply the retry: %v", err)
 	}
+	holdSlot(t, pool, issue.Key)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the retry's start: %v", err)
 	}
@@ -1976,6 +1980,10 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			ctx := context.Background()
 			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
 			putOutboxIssue(t, pool, records, issue)
+			// The issue is at work in every phase this drives — reviewing, implementing, testing,
+			// retro — so it holds its admission slot throughout and each start is delivered as
+			// soon as the drain reaches it.
+			holdSlot(t, pool, issue.Key)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
@@ -2345,6 +2353,58 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 	}); err != nil {
 		t.Fatalf("put workflow issue: %v", err)
 	}
+}
+
+// holdSlot gives each of issues the admission slot its promotion grants it (admit's promoteHolds).
+// A start of a phase worker now queues the row that carries the task with NeedsSlot set, and that
+// row stays unclaimable while no slots row names its issue (record.Store's outboxInOrder), so a
+// fixture whose issue has a worker at work grants it the slot that worker's task is delivered
+// under. Each slot takes the next free index, as the promotion does: the column is unique across
+// every project's slots.
+func holdSlot(t *testing.T, pool *pgxpool.Pool, issues ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		records := record.NewStore()
+		slots, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for index, issue := range issues {
+			if err := records.PutSlot(ctx, tx, record.Slot{Issue: issue, Index: len(slots) + index, AdmittedAt: time.Now().UTC()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("give %v the admission slots their work holds: %v", issues, err)
+	}
+}
+
+// openTree opens tree's lifecycle under the workflow's authority, as admission's promotion of a
+// root does in the transaction that admits it. That row, and not a slot, is what says a tree runs
+// (record.TreeLive) now that a slot counts one issue at work rather than one tree, so every
+// fixture that seeds a running tree opens it as well as granting whatever slots its issues hold.
+// project is the Dispatch project key its issues are recorded under; the lifecycle is keyed by
+// the claim token of it, as every claim and runtime key is.
+func openTree(t *testing.T, pool *pgxpool.Pool, project, tree string) {
+	t.Helper()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return openTreeTx(context.Background(), tx, project, tree)
+	}); err != nil {
+		t.Fatalf("open the tree lifecycle of %s: %v", tree, err)
+	}
+}
+
+// openTreeTx is openTree inside a transaction the caller owns, for a fixture that seeds a tree's
+// record, its slots and its lifecycle in one write as the promotion does.
+func openTreeTx(ctx context.Context, tx pgx.Tx, project, tree string) error {
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return fmt.Errorf("project token of %s: %w", project, err)
+	}
+	_, err = record.NewStore().OpenTreeLifecycle(ctx, tx, token, tree, treelifecycle.AuthorityWorkflow)
+	return err
 }
 
 // outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it
