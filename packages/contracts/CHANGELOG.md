@@ -1,5 +1,24 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Added
+
+- `src/envoy-session.ts` declares the six timings of Envoy session registration once:
+  `SESSION_HEARTBEAT_MS` (90000), how often a pane refreshes its listener registration,
+  `SESSION_LIVE_WINDOW_MS` (300000), how long a session's last registration keeps it live to the
+  listener, `SESSION_CLAIM_STALE_MS` (300000), how long a role claim may go unrefreshed before a
+  reader treats its holder as gone, and `LISTENER_CALL_TIMEOUT_MS` (5000),
+  `LISTENER_CALL_RETRY_DELAY_MS` (250) and `LISTENER_CALL_ATTEMPTS` (2), what one whole listener
+  call costs. `scripts/gen-go.ts` emits each as `contracts.SessionHeartbeat`,
+  `contracts.SessionLiveWindow`, `contracts.SessionClaimStale`,
+  `contracts.ListenerCallTimeout`, `contracts.ListenerCallRetryDelay` and
+  `contracts.ListenerCallAttempts`, which the Envoy listener reads and the Legion daemon reads
+  through `github.com/sjawhar/envoy/sessiontiming`. No value changed.
+
 ## [main@c5c94dbd542d] - 2026-11-05
 
 ### Added

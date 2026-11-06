@@ -48,6 +48,14 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
+import {
+  LISTENER_CALL_ATTEMPTS,
+  LISTENER_CALL_RETRY_DELAY_MS,
+  LISTENER_CALL_TIMEOUT_MS,
+  SESSION_CLAIM_STALE_MS,
+  SESSION_HEARTBEAT_MS,
+  SESSION_LIVE_WINDOW_MS,
+} from "../src/envoy-session";
 import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -284,6 +292,31 @@ const IdempotencyAnswerNotKept = ${JSON.stringify(IDEMPOTENCY_ANSWER_NOT_KEPT)}
 // the clients' account of them cannot drift apart.
 const IdempotencyKeyTTL = ${IDEMPOTENCY_KEY_TTL_MS} * time.Millisecond
 const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
+
+// SessionHeartbeat is how often a pane's pi-envoy plugin refreshes its listener registration, and
+// SessionLiveWindow how long a session's last registration keeps it live to the listener. Three
+// heartbeats plus one whole listener call fit inside the live window, so two refreshes may fail
+// and the third still completes before the session stops reading live. Generated from
+// SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS in packages/contracts, whose doc comments state
+// that arrangement, so the pane's refresh and the listener's window cannot drift apart.
+const SessionHeartbeat = ${SESSION_HEARTBEAT_MS} * time.Millisecond
+const SessionLiveWindow = ${SESSION_LIVE_WINDOW_MS} * time.Millisecond
+
+// SessionClaimStale is how long a session's role claim may go unrefreshed before a reader treats
+// the process that wrote it as gone, which allows three missed heartbeats at SessionHeartbeat.
+// Generated from SESSION_CLAIM_STALE_MS in packages/contracts so session.ClaimStaleAfter and the
+// Legion daemon's copy of it, which times its last re-hold of a notice, are one number.
+const SessionClaimStale = ${SESSION_CLAIM_STALE_MS} * time.Millisecond
+
+// ListenerCallTimeout is how long one attempt of an envoy-client call waits for the listener,
+// ListenerCallRetryDelay the pause before the next attempt, and ListenerCallAttempts how many
+// attempts one call makes. Together they are a whole call's budget, which the heartbeat interval
+// is set to leave room for. Generated from LISTENER_CALL_TIMEOUT_MS, LISTENER_CALL_RETRY_DELAY_MS
+// and LISTENER_CALL_ATTEMPTS in packages/contracts so the client's cost and every check of that
+// budget are computed from one set of numbers.
+const ListenerCallTimeout = ${LISTENER_CALL_TIMEOUT_MS} * time.Millisecond
+const ListenerCallRetryDelay = ${LISTENER_CALL_RETRY_DELAY_MS} * time.Millisecond
+const ListenerCallAttempts = ${LISTENER_CALL_ATTEMPTS}
 
 // DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
 // of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller

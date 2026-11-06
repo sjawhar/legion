@@ -17,7 +17,7 @@ import (
 // AGENT_SECRETS_URL redact.URL will not print, it names the URL as redact.NotPrinted and the
 // failure's class alone; for a clean one, it reads as net/http wrote it.
 func TestABrokerCallErrorNamesNoCredentialTheURLCarries(t *testing.T) {
-	s, err := newSession(1, 1, "runtime", nil)
+	s, err := newSession(1, 1, "runtime", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestABrokerCallErrorNamesNoCredentialTheURLCarries(t *testing.T) {
 	} {
 		t.Run(row.base, func(t *testing.T) {
 			b := &Broker{URL: row.base, HTTP: &http.Client{Timeout: 5 * time.Second}}
-			_, err := b.Renew(context.Background(), s)
+			_, _, err := b.Renew(context.Background(), s)
 			if err == nil {
 				t.Fatal("renew against a broker that never answers succeeded")
 			}

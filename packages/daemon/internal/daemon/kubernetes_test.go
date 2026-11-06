@@ -512,6 +512,34 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 	}
 }
 
+// runtime.kubernetes.skills_repository reaches sandbox.Options unchanged: every issue pod then runs
+// the skills init container and every role installs from the volume it fills, while leaving the
+// setting out keeps the runtime skills-free.
+func TestKubernetesSkillsRepositoryReachesTheSandboxRuntime(t *testing.T) {
+	cfg := config.Config{Project: "TEST", Projects: map[string]config.Project{"TEST": {}}}
+	k := config.Kubernetes{
+		Namespace: "legion", Image: "ghcr.io/cybermonklabs/legion-worker@sha256:" + strings.Repeat("a", 64),
+		StorageClass: "gp2", IssueVolume: "20Gi", Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
+	}
+	k.SkillsRepository = ghrepo.MustParse("theorem-labs/verification-skills")
+	opts, err := sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if opts.SkillsRepository != k.SkillsRepository {
+		t.Errorf("Options.SkillsRepository = %v, want %v", opts.SkillsRepository, k.SkillsRepository)
+	}
+
+	k.SkillsRepository = ghrepo.Repository{}
+	opts, err = sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions without a skills repository: %v", err)
+	}
+	if !opts.SkillsRepository.IsZero() {
+		t.Errorf("Options.SkillsRepository = %v without runtime.kubernetes.skills_repository, want none", opts.SkillsRepository)
+	}
+}
+
 // runtime.kubernetes.setup reaches sandbox.Options unchanged: every role's launcher receives this
 // argv, while leaving the setting out keeps the runtime setup-free.
 func TestKubernetesSetupReachesTheSandboxRuntime(t *testing.T) {
