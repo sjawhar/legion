@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/redirects"
 )
 
 // The route and api-version AzureClient posts to, held here alone because INFRA-399's live probe
@@ -65,7 +67,7 @@ type AzureConfig struct {
 	// Tokens is the keyless form of credential, each token sent as a bearer.
 	Tokens TokenSource
 	// HTTPClient replaces http.DefaultClient; a test injects one. It is never mutated: the
-	// client this one calls on is a copy of it that refuses redirects (withoutRedirects).
+	// client this one calls on is a copy of it that refuses redirects (redirects.Refused).
 	HTTPClient *http.Client
 }
 
@@ -104,7 +106,7 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 	if (cfg.APIKey == "") == (cfg.Tokens == nil) {
 		return nil, errors.New("embed: azure needs exactly one credential: an API key or a token source")
 	}
-	client := withoutRedirects(cmp.Or(cfg.HTTPClient, http.DefaultClient))
+	client := redirects.Refused(cmp.Or(cfg.HTTPClient, http.DefaultClient))
 	target := *endpoint
 	target.Path = strings.TrimRight(endpoint.Path, "/") + azureEmbeddingsRoute
 	target.RawPath = ""
@@ -127,24 +129,6 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 		tokens: cfg.Tokens,
 		http:   client,
 	}, nil
-}
-
-// withoutRedirects is client with redirects refused, which is what every call carrying an Azure
-// credential is made on - this client's api-key or bearer, and the Entra exchange's assertion.
-// net/http strips Authorization on a redirect to another domain but strips api-key and
-// x-api-key from neither, and a transport that sets Authorization itself puts it back after the
-// strip, so a service answering 3xx - or anyone who can answer for it - would otherwise have
-// this process present the deployment's credential to a host it was never configured with. The
-// last response is handed back instead, which each caller reads as the non-2xx it is.
-//
-// It is a copy and never the caller's own client: the HTTPClient a config carries belongs to
-// whoever passed it (a test passes httptest's), and a CheckRedirect written onto it would
-// change how that caller's other calls behave. The copy shares the transport, so it shares the
-// connection pool and costs nothing.
-func withoutRedirects(client *http.Client) *http.Client {
-	refusing := *client
-	refusing.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &refusing
 }
 
 // Identity is "azure:<endpoint host>/<deployment>": the place belongs in the identity, so a

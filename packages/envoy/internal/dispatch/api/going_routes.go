@@ -286,8 +286,10 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	// The whole credential, through model.Actor.SameCredential and never SameAs alone, which
 	// would make any two personal tokens one writer: a run is read by the credential that
-	// asked it, and a run whose author names nobody at all is nobody's to read. Rows recorded
-	// before the POST refused such a credential are still held here.
+	// asked it. A run whose author names nobody is read by nobody, and that is a test of its
+	// own because SameCredential calls two credentials that name nobody the one credential:
+	// without it, such a row would be served to every holder of the deployment's shared token,
+	// which resolves as {} exactly as that author does.
 	if !goingActorNamesSomebody(request.Author) || !request.Author.SameCredential(actor) {
 		writeGoingRequestNotFound(w)
 		return
@@ -364,9 +366,14 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 // id, the person a personal token belongs to, or the workload a service-account token proved. A
 // credential that names none of them - the deployment's shared token, which resolves as {} -
 // is nobody: comparing identities cannot tell two holders of that one token apart, so a run it
-// asked for would be a run every holder could claim and none is served. The POST refuses such
-// a caller (codeGoingAskerNamesNobody), and the stream answers a row an earlier build recorded
-// under one with codeGoingRequestNotFound, as it answers an unknown id.
+// asked for would be a run every holder could claim and none is served.
+//
+// It is asked twice, of the asker and of the run's author. The POST refuses an asker that
+// names nobody (codeGoingAskerNamesNobody) before anything is recorded, so no row this route
+// writes has such an author. The stream asks it of the author it read all the same, because
+// model.Actor.SameCredential reports two credentials that name nobody as one: that comparison
+// alone would serve a row authored by {} to every holder of the shared token, and the stream
+// serves a run to the credential that asked it and to no other.
 func goingActorNamesSomebody(actor model.Actor) bool {
 	return actor.ID != "" || actor.Owner != nil || actor.Service != nil
 }

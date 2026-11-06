@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/redirects"
 )
 
 // The route HTTPClient posts to, held here alone: it is appended to the configured endpoint,
@@ -133,7 +134,7 @@ type HTTPConfig struct {
 	// Azure sign-in.
 	Tokens TokenSource
 	// HTTPClient replaces http.DefaultClient; a test injects one. It is never mutated: the
-	// client this one calls on is a copy of it that refuses redirects (withoutRedirects).
+	// client this one calls on is a copy of it that refuses redirects (redirects.Refused).
 	HTTPClient *http.Client
 }
 
@@ -182,26 +183,8 @@ func NewHTTPClient(cfg HTTPConfig) (*HTTPClient, error) {
 		identity: cfg.Place + ":" + strings.ToLower(endpoint.Host) + "/" + cfg.Model,
 		model:    cfg.Model,
 		tokens:   cfg.Tokens,
-		http:     withoutRedirects(cmp.Or(cfg.HTTPClient, http.DefaultClient)),
+		http:     redirects.Refused(cmp.Or(cfg.HTTPClient, http.DefaultClient)),
 	}, nil
-}
-
-// withoutRedirects is client with redirects refused, which is what every call carrying the
-// provider's credential is made on. net/http strips Authorization on a redirect to another
-// domain but strips neither x-api-key nor api-key, and a transport that sets Authorization
-// itself puts it back after the strip, so a model service answering 3xx - or anyone who can
-// answer for it - would otherwise have this process present the deployment's credential to a
-// host it was never configured with. The last response is handed back instead, which Chat
-// reads as the non-2xx it is.
-//
-// It is a copy and never the caller's own client: HTTPConfig.HTTPClient belongs to whoever
-// passed it (a test passes httptest's), and a CheckRedirect written onto it would change how
-// that caller's other calls behave. The copy shares the transport, so it shares the connection
-// pool and costs nothing.
-func withoutRedirects(client *http.Client) *http.Client {
-	refusing := *client
-	refusing.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &refusing
 }
 
 // Identity is "<place>:<endpoint host>/<model>", as embed.AzureClient's is, for the one line the

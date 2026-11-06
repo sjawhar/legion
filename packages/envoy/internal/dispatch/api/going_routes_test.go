@@ -641,10 +641,13 @@ func TestGoingRequestRefusesAnAskerThatNamesNobody(t *testing.T) {
 	}
 }
 
-// A run whose recorded author names nobody is nobody's to read: a row an earlier build recorded
-// under the deployment's shared token, which resolves as {}, and a pod's run, {Service:
-// &subject}, which carries the same empty kind and id - so a comparison of those two alone
-// would serve the pod's run to the shared token.
+// A run whose recorded author names nobody is nobody's to read: model.Actor.SameCredential
+// calls two credentials that name nobody the one credential, so that comparison alone would
+// serve a row authored by {} to the deployment's shared token, which resolves as {} too. The
+// POST refuses an asker that names nobody and records nothing, so the row is written straight
+// to the record here. The pod's run that follows is what the rest of the same comparison
+// rests on: {Service: &subject} carries the same empty kind and id as {}, so comparing kind
+// and id alone - SameAs - would serve the pod's run to the shared token.
 func TestGoingStreamRefusesARunWhoseAuthorNamesNobody(t *testing.T) {
 	rig := newGoingRoutesRig(t, nil)
 
