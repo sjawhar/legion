@@ -4496,7 +4496,7 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
 describe("the literal grammar, widened to forms with no expansion", () => {
   // A stand-in `dispatch` that prints the argv it gets as one JSON line, so real bash shows what
   // the CLI would receive for each form.
-  const root = fs.mkdtempSync(path.join(tmpdir(), "askgate-argv-"));
+  const root = temporaryDirectory("askgate-argv");
   const bin = path.join(root, "bin");
   // A home of the test's own: no child here reads the caller's.
   const home = path.join(root, "home");
@@ -4507,7 +4507,6 @@ describe("the literal grammar, widened to forms with no expansion", () => {
     `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
     { mode: 0o755 }
   );
-  afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
   /** The argv real bash gives the stand-in for `command`. */
   const bashArgv = (command: string): unknown => {
     const run = Bun.spawnSync(["bash", "-c", command], {

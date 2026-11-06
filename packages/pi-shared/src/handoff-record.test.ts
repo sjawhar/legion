@@ -337,7 +337,7 @@ test("a pane whose Dispatch is the broker's reads the record under its own sessi
 // with no jj runs neither row and says so, once for the file. The jj the rows below run is the one
 // this walk found, so no spawn of theirs walks PATH again.
 const jjProgram = hostTool("jj");
-const withoutJj = skipWithout(...(jjProgram === null ? ["jj"] : []));
+const withoutJj = skipWithout("jj");
 
 // `isolatedHome` puts these on the test process as well, so the jj that the code under test
 // (`pathJj`) starts reads the test's home rather than the developer's.

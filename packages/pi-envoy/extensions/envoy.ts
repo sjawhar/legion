@@ -297,6 +297,13 @@ export function setNatsConnectForTests(dial: typeof connect): void {
   natsConnectStore[NATS_CONNECT] = dial;
 }
 
+// The slot outlives every instance of this entry in the process, so a file that set a stand-in
+// clears it when it ends; otherwise every later file of the same `bun test` process dials that
+// file's stand-in, with that file's state. Production callers never call this.
+export function resetNatsConnectForTests(): void {
+  delete natsConnectStore[NATS_CONNECT];
+}
+
 const NATS_RETRY_INTERVAL_MS = 15_000;
 /** How long a delivery waits for the pictures it embeds before it goes out as text alone. */
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;

@@ -22,7 +22,10 @@ const registered: Record<string, unknown> = JSON.parse(
 // The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
 // that entry is loaded below. The `nats` module itself stays as it is, so
 // `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
-// and every other file in this `bun test` process reads the real module.
+// and every other file in this `bun test` process reads the real module. The dial is not the
+// module: the setter writes a slot of the process, not of one entry instance, so the `afterAll`
+// below puts that slot back with `resetNatsConnectForTests` and no later file dials this
+// stand-in.
 const natsStandInConnect = async () => ({
   isClosed: () => false,
   close: async () => undefined,
@@ -73,12 +76,16 @@ delete process.env.PI_CODING_AGENT_DIR;
 // reached by path: this test is the one place the two entries meet in one process. Its NATS dial
 // is the stand-in above, handed over as soon as the entry is loaded and before any pane here
 // starts a session.
-const { default: envoyExtension, setNatsConnectForTests } = await import(
-  "../../pi-envoy/extensions/envoy.ts?envoy-entry"
-);
+const {
+  default: envoyExtension,
+  resetNatsConnectForTests,
+  setNatsConnectForTests,
+} = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
 setNatsConnectForTests(natsStandInConnect);
 afterAll(() => {
   restoreEntryEnvironment();
+  // The next file of this `bun test` run gets nats.js's own `connect` back.
+  resetNatsConnectForTests();
   rmSync(envoyConfigDirectory, { recursive: true, force: true });
 });
 const { default: legionExtension, setLegionCapabilityHostForTests } = await import(

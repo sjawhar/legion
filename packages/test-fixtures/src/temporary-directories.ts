@@ -30,11 +30,17 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
 /**
  * Registers the removal of every directory the returned maker makes, and returns the maker.
  *
- * Call it at the test file's module scope or in a `describe` body, never from inside a test body:
- * it registers an `afterEach` or `afterAll` hook where it is called, and `bun:test` takes the scope
- * of a hook from the point of the call. The fixture's own module body registers nothing, because
- * Bun evaluates an imported module once per process: a hook there would land in the scope of the
- * first file that imported it, and every later file would leave its directories behind.
+ * Call it at the test file's module scope, or in the body of a `describe` that is never skipped;
+ * never from inside a test body. It registers an `afterEach` or `afterAll` hook where it is
+ * called, and `bun:test` takes the scope of a hook from the point of the call. Bun runs the body
+ * of a `describe.skipIf(true)` and none of the hooks that body registered, so a directory made
+ * there is left behind — the maker makes it at the call, before any row is skipped. A `describe`
+ * whose rows are all skipped, and a file whose rows are all skipped, each still run their
+ * `afterAll`: it is the skipped `describe` alone that keeps what it made.
+ *
+ * The fixture's own module body registers nothing, because Bun evaluates an imported module once
+ * per process: a hook there would land in the scope of the first file that imported it, and every
+ * later file would leave its directories behind.
  *
  * The maker is synchronous, so a test body uses it without `await`.
  */
@@ -60,8 +66,10 @@ export function temporaryDirectories(
  * path: the one-shot form of {@link temporaryDirectories}, for a test file or a `describe` body
  * that needs a single scratch directory every one of its tests reads.
  *
- * Call it where {@link temporaryDirectories} is called — at module scope or in a `describe` body,
- * never inside a test body — for the same reason: it registers the hook where it is called.
+ * Call it where {@link temporaryDirectories} is called — at module scope, or in the body of a
+ * `describe` that is never skipped, never inside a test body — for the same reason: it registers
+ * the hook where it is called, and a `describe.skipIf(true)` runs its body without ever running
+ * that hook, so the directory this made would be left behind.
  */
 export function temporaryDirectory(
   prefix: string,

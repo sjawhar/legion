@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { stageSkills } from "@legion/pi-shared/test/skills-guard";
+import { temporaryDirectory } from "@legion/test-fixtures/temporary-directories";
 
 const PACKAGE_ROOT = path.resolve(import.meta.dir, "..");
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
@@ -99,7 +99,7 @@ describe("the dispatch CLI the package ships", () => {
     // installed plugin unpacks.
     const dist = path.join(PACKAGE_ROOT, "dist");
     let distWasBuilt = false;
-    let work = "";
+    const work = temporaryDirectory("pi-envoy-pack");
     let tarball = "";
     let unpacked = "";
 
@@ -108,7 +108,6 @@ describe("the dispatch CLI the package ships", () => {
       // left behind: a checkout that had none must have none again. A developer who had already
       // run `bun run build` keeps theirs.
       distWasBuilt = existsSync(dist);
-      work = await mkdtemp(path.join(tmpdir(), "pi-envoy-pack-"));
       const pack = Bun.spawnSync(
         [
           "bash",
@@ -130,8 +129,7 @@ describe("the dispatch CLI the package ships", () => {
       ).toBe(0);
     }, 120_000);
 
-    afterAll(async () => {
-      await rm(work, { recursive: true, force: true });
+    afterAll(() => {
       if (!distWasBuilt) rmSync(dist, { recursive: true, force: true });
     });
 

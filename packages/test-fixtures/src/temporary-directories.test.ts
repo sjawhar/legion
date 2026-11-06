@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { temporaryDirectories, temporaryDirectory } from "./temporary-directories";
@@ -105,4 +105,36 @@ test("removed the one-shot directory when its suite ended", () => {
 test("removed the suite's directory when that suite ended", () => {
   expect(fromTheDescribe).not.toBe("");
   expect(existsSync(fromTheDescribe)).toBe(false);
+});
+
+/** The path the skipped describe below made, which no hook of that describe removes. */
+let fromTheSkippedDescribe = "";
+/** The path the describe whose rows are all skipped made, which its own `afterAll` removes. */
+let fromTheSkippedRows = "";
+
+// Bun runs the body of a skipped describe, and never a hook that body registered: the fixture
+// makes its directory at the call, so the directory outlives the suite. The row below reads that
+// path and removes it, since nothing else will — which is what the fixture's doc comment tells a
+// caller to avoid by calling it where it is never skipped.
+describe.skipIf(true)("a describe that is skipped whole", () => {
+  fromTheSkippedDescribe = temporaryDirectory("test-fixtures-skipped-describe");
+  test("never runs", () => {
+    throw new Error("a skipped describe runs no row of its own");
+  });
+});
+
+describe("a describe whose rows are all skipped", () => {
+  fromTheSkippedRows = temporaryDirectory("test-fixtures-skipped-rows");
+  test.skip("does not run", () => undefined);
+});
+
+test("kept the directory a skipped describe made, because its afterAll never ran", () => {
+  expect(fromTheSkippedDescribe).not.toBe("");
+  expect(existsSync(fromTheSkippedDescribe)).toBe(true);
+  rmSync(fromTheSkippedDescribe, { recursive: true, force: true });
+});
+
+test("removed the directory of a describe whose rows were all skipped", () => {
+  expect(fromTheSkippedRows).not.toBe("");
+  expect(existsSync(fromTheSkippedRows)).toBe(false);
 });

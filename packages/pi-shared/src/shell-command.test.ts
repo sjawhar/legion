@@ -7,7 +7,7 @@ import { dispatchCommandHead } from "./shell-command";
  * runs the test not at all and says so, once for the file: a call per row would print the warning
  * per row. */
 const bash = hostTool("bash");
-const withoutBash = skipWithout(...(bash === null ? ["bash"] : []));
+const withoutBash = skipWithout("bash");
 
 /** Whether a real non-interactive bash, fed `command` and then `echo NEXT` over a pipe as the
  * `bash` tool's persistent shell is fed, runs exactly one command and then NEXT. `dispatch` is a

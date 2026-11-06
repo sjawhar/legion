@@ -396,8 +396,13 @@ let configDirectory = "";
 // below the `original*` captures because loading the entry sets `PATH`, `DISPATCH_HOST` and
 // `ENVOY_CONFIG_FILE` as every row's own load does, which `afterEach` puts back to what was
 // captured.
-const { setNatsConnectForTests } = await import("./envoy.ts?nats-stand-in");
+const { resetNatsConnectForTests, setNatsConnectForTests } = await import(
+  "./envoy.ts?nats-stand-in"
+);
 setNatsConnectForTests(natsStandInConnect);
+// The slot the setter writes is the process's, not this file's: without this the next file of
+// the same `bun test` run would dial the stand-in above, with this file's state.
+afterAll(() => resetNatsConnectForTests());
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on

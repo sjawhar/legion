@@ -23,8 +23,16 @@ export function captureEnvironment(names: readonly string[]): EnvironmentRestore
 /**
  * Captures the value of each name now and puts them back in `afterEach` and in `afterAll`, so a
  * test that sets one of them needs no save and restore of its own, and a test that throws still
- * leaves the next file the caller's own environment. The `afterAll` covers a name the file's module
- * scope or a `describe` body set, which no `afterEach` would reach.
+ * leaves the next file the caller's own environment.
+ *
+ * The `afterEach` undoes what a test set, after every test. The `afterAll` is for what no
+ * `afterEach` runs after: a file whose module scope set one of the names and whose tests were all
+ * skipped, and anything set once the last test's `afterEach` has run.
+ *
+ * A name a `describe` sets for its own tests — in its body or in its `beforeAll` — must not be in
+ * the captured list: the `afterEach` puts the captured value back after that describe's first
+ * test, and every test of it after the first would run without the value the describe set. Such a
+ * name is the describe's own to set, in a `beforeEach` of its own.
  *
  * Call it at the test file's module scope, before anything sets the names: it registers its hooks
  * where it is called, and it captures what the names hold at the moment of the call.

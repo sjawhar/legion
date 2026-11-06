@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { hostTool, skipWithout } from "./host-tools";
+import { temporaryDirectories } from "./temporary-directories";
+
+const makeDirectory = temporaryDirectories("test-fixtures-host-tools");
 
 /** Names no host carries a program under. */
 const ABSENT = "legion-test-fixtures-no-such-program";
@@ -59,4 +63,21 @@ test("skipWithout is true and prints one warning, of the missing programs and th
   const warning = warnings[0] ?? "";
   expect(warning).toContain(`does not have: ${ABSENT}, ${ABSENT_TOO}.`);
   expect(warning).toContain(import.meta.path);
+});
+
+test("the warning names the calling file under a path that holds a space", () => {
+  // The caller is read from the stack, and a frame's path is not quoted there: a checkout under
+  // `…/my repo/…` must still be named whole. It is measured in a process of its own, since the
+  // path of this file is the one this process's stack carries.
+  const root = join(makeDirectory("spaced"), "my repo");
+  mkdirSync(root);
+  const caller = join(root, "a.test.ts");
+  writeFileSync(
+    caller,
+    `import { skipWithout } from ${JSON.stringify(join(import.meta.dir, "host-tools.ts"))};\n` +
+      `skipWithout(${JSON.stringify(ABSENT)});\n`
+  );
+  const run = Bun.spawnSync([process.execPath, caller], { stdout: "pipe", stderr: "pipe" });
+  expect(run.exitCode).toBe(0);
+  expect(run.stderr.toString()).toContain(`Skipped the tests in ${caller}.`);
 });

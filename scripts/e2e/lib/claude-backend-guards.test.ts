@@ -26,10 +26,10 @@ const dir = mkdtempSync(join(tmpdir(), "claude-backend-guards-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 // The stand-in processes are copies of two real programs, so a host without them has nothing to
 // start and every row here is skipped.
-// Each program is walked once: `found` holds its real binary, or null, and only a name with none
-// reaches the gate, which would otherwise walk both again.
+// The gate is given both names: it walks each one and names the missing ones in its warning.
+// `found` is the run's own walk, whose real binaries the stand-ins below are copies of.
 const found = new Map(["bash", "sleep"].map((name) => [name, hostTool(name)] as const));
-const skip = skipWithout(...[...found.keys()].filter((name) => found.get(name) === null));
+const skip = skipWithout("bash", "sleep");
 function tool(name: string): string {
   const path = found.get(name) ?? null;
   if (path === null) throw new Error(`${name} is not on PATH`);

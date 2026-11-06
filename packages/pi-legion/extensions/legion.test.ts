@@ -46,7 +46,10 @@ import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import { skipWithout } from "@legion/test-fixtures/host-tools";
-import { temporaryDirectories } from "@legion/test-fixtures/temporary-directories";
+import {
+  temporaryDirectories,
+  temporaryDirectory,
+} from "@legion/test-fixtures/temporary-directories";
 import { versionControlEnvironment } from "@legion/test-fixtures/version-control-environment";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ConnectionOptions, NatsConnection } from "nats";
@@ -85,7 +88,10 @@ function recordWidget(key: string, lines: string[] | undefined): void {
 // The dial the Envoy entry opens NATS with, handed to it through `setNatsConnectForTests` once
 // that entry is loaded below. The `nats` module itself stays as it is, so
 // `@legion/envoy-client/nats-connection` resolves the NATS credential with the real nkey exports,
-// and every other file in this `bun test` process reads the real module.
+// and every other file in this `bun test` process reads the real module. The dial is not the
+// module: the setter writes a slot of the process, not of one entry instance, so the cleanup
+// below puts that slot back with `resetNatsConnectForTests` and no later file dials this
+// stand-in.
 const natsStandInConnect = async (options: ConnectionOptions = {}): Promise<NatsConnection> => {
   const name = options.name ?? "";
   await natsConnectGates.get(name)?.();
@@ -186,11 +192,14 @@ restoreEnvironment([...environmentKeys, ...entryEnvironmentKeys]);
 // first test runs, and a list of names that forgot one would compare that name with itself.
 //
 // `bun test` runs a package's files in one process and `afterAll` hooks run in the order they
-// were registered, so this one runs after the restore above and sees what the next file would
-// read. It is registered here, and not in a file of its own, because Bun runs a directory's test
-// files in the order the filesystem lists them, which no file name decides: in
-// packages/pi-legion/extensions, eight files named a- to h- ran in the order e, d, c, h, a, f, b,
-// g, which is what `readdirSync` returns there.
+// were registered, so the hook below is registered under this file's cleanup hook: it still runs
+// after the restore above and sees what the next file would read, and Bun stops at the first
+// `afterAll` that throws, so a hook registered above the cleanup would leak this file's
+// temporary directories on the one run the probe exists to report. The probe is in this file,
+// and not in a file of its own, because Bun runs a directory's test files in the order the
+// filesystem lists them, which no file name decides: in packages/pi-legion/extensions, eight
+// files named a- to h- ran in the order e, d, c, h, a, f, b, g, which is what `readdirSync`
+// returns there.
 const startingEnvironment = readStartingEnvironment();
 if (startingEnvironment === undefined) {
   console.warn(
@@ -198,17 +207,6 @@ if (startingEnvironment === undefined) {
       "which is the one record of what this process started with. Run the tests on Linux for it."
   );
 }
-
-afterAll(() => {
-  if (startingEnvironment === undefined) return;
-  const changed = [...startingEnvironment]
-    .filter(([name, value]) => process.env[name] !== value)
-    .map(
-      ([name, value]) =>
-        `${name} started as ${JSON.stringify(value)} and now holds ${JSON.stringify(process.env[name])}`
-    );
-  expect(changed).toEqual([]);
-});
 
 /** Each name this process started with and its value, or undefined where the host keeps no such
  *  record. An entry with no `=`, and the empty entry a trailing separator leaves, are no name. */
@@ -241,9 +239,11 @@ delete process.env.PI_CODING_AGENT_DIR;
 // is the sibling plugin's, reached by path: these panes run both, as a Legion pane does. Its NATS
 // dial is the stand-in above, handed over as soon as the entry is loaded and before any pane here
 // starts a session.
-const { default: envoyExtension, setNatsConnectForTests } = await import(
-  "../../pi-envoy/extensions/envoy"
-);
+const {
+  default: envoyExtension,
+  resetNatsConnectForTests,
+  setNatsConnectForTests,
+} = await import("../../pi-envoy/extensions/envoy");
 setNatsConnectForTests(natsStandInConnect);
 const {
   default: legionExtension,
@@ -297,7 +297,7 @@ const controllerStateDirectory = temporaryDirectories("legion-controller");
 
 /** The home the suite's one `jj git init` runs under, so no configuration of the developer's
  * decides what the template holds. */
-const jjHomeDirectory = temporaryDirectories("legion-jj-home", { scope: "suite" });
+const jjHomeDirectory = temporaryDirectory("legion-jj-home");
 
 /** The repository every workspace in this file is a copy of: one `jj git init` before the tests.
  * A copy spawns no process, so a test's workspace costs none of bun's 5 s test timeout, which a
@@ -306,8 +306,9 @@ let jjTemplate = "";
 
 // The template the beforeAll below builds is `jj git init`'s, and every workspace a row here runs
 // in is a copy of it, so a host with no jj builds nothing and runs none of them. Read once, at
-// module scope: a call per row would print the warning per row. The environment probe above is
-// registered before this gate and still runs when the rows do not.
+// module scope: a call per row would print the warning per row. The environment probe's hook,
+// registered below the cleanup, still runs when the rows do not: this gate skips tests, never a
+// hook.
 const skip = skipWithout("jj");
 
 beforeAll(async () => {
@@ -316,7 +317,7 @@ beforeAll(async () => {
   const child = Bun.spawn(["jj", "git", "init", jjTemplate], {
     stdout: "ignore",
     stderr: "pipe",
-    env: { PATH: process.env.PATH ?? "", ...versionControlEnvironment(jjHomeDirectory()) },
+    env: { PATH: process.env.PATH ?? "", ...versionControlEnvironment(jjHomeDirectory) },
   });
   const exitCode = await child.exited;
   if (exitCode !== 0) {
@@ -334,6 +335,22 @@ afterAll(async () => {
   // The template was never built when the file skipped, and there is nothing to remove.
   if (jjTemplate !== "") await rm(jjTemplate, { force: true, recursive: true });
   await rm(envoyConfigDirectory, { force: true, recursive: true });
+  // The stand-in dial is the process's, not this file's: the next file of this `bun test` run
+  // gets nats.js's own `connect` back.
+  resetNatsConnectForTests();
+});
+
+// The environment probe's hook; what it compares is read at the top of this file, where the
+// comment says why it is registered here and not there.
+afterAll(() => {
+  if (startingEnvironment === undefined) return;
+  const changed = [...startingEnvironment]
+    .filter(([name, value]) => process.env[name] !== value)
+    .map(
+      ([name, value]) =>
+        `${name} started as ${JSON.stringify(value)} and now holds ${JSON.stringify(process.env[name])}`
+    );
+  expect(changed).toEqual([]);
 });
 
 beforeEach(async () => {

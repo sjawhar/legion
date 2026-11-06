@@ -81,10 +81,10 @@ const tools = [
   "ps",
   "sha256sum",
 ];
-// Each name is walked once: `found` holds its real binary, or null, and only the names with none
-// reach the gate, which would otherwise walk every one of them again.
+// The gate is given every name: it walks each one and names the missing ones in its warning.
+// `found` is the run's own walk, whose real binaries the stand-in PATH below is built from.
 const found = new Map(tools.map((name) => [name, hostTool(name)] as const));
-const skip = skipWithout(...tools.filter((name) => found.get(name) === null));
+const skip = skipWithout(...tools);
 
 // Nothing below is read by a run that will not happen, so a host that skips builds none of it.
 if (!skip) {

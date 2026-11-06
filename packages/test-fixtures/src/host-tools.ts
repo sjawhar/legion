@@ -28,11 +28,17 @@ export function skipWithout(...names: string[]): boolean {
  * The file that called `skipWithout`: the first frame of the stack that is not this module's own.
  * Without it the warning says only which programs are missing, and a reader of a run of hundreds of
  * files cannot tell whose tests did not run.
+ *
+ * A frame is `at <name> (<path>:<line>:<col>)`, or `at <path>:<line>:<col>` where it has no name.
+ * The path is read whole, from the parenthesis or from `at ` up to the last `:<line>:<col>` of the
+ * frame, so a checkout under a directory whose name holds a space — `/home/u/my repo/pkg/a.test.ts`
+ * — is named as it is rather than cut at the space.
  */
 function callerFile(stack: string | undefined): string | undefined {
   if (stack === undefined) return undefined;
   for (const line of stack.split("\n")) {
-    const file = /(\/[^\s():]+):\d+:\d+/.exec(line)?.[1];
+    const frame = line.trimEnd();
+    const file = /\((.+):\d+:\d+\)$/.exec(frame)?.[1] ?? /^\s*at (.+):\d+:\d+$/.exec(frame)?.[1];
     if (file !== undefined && file !== import.meta.path) return file;
   }
   return undefined;
