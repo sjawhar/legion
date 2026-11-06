@@ -1,6 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { cleanup, waitFor, within } from "@testing-library/react";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -147,6 +148,7 @@ function stubReads(readVersion: number | null) {
 }
 
 test("the Spec tab marks stale and changed blocks through the editor, names the changed sections, then records the version it shows", async () => {
+  jest.useFakeTimers();
   const reads = stubReads(2);
   const { editors, sync, view } = renderProofDocument({
     document: spec,
@@ -183,13 +185,14 @@ test("the Spec tab marks stale and changed blocks through the editor, names the 
     expect(reads.putRead.mock.calls[0]?.slice(0, 2)).toEqual(["artifact-1", { version: 4 }]);
 
     // The marks stay for the visit, though the person's read version is now the latest.
-    await Bun.sleep(20);
+    await tick(20);
     expect(screen.getByText("Changed since you last read version 2: Rollout")).toBeDefined();
     expect(editor.blockMarks.at(-1)).toEqual([
       { blockId: "p-plan", className: staleBlockMark, title: STALE_BLOCK_TITLE },
       { blockId: "p-rollout", className: changedSinceReadMark },
     ]);
   } finally {
+    realClock();
     cleanup();
     reads.restore();
   }

@@ -1,8 +1,9 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { api } from "../../api/client";
 import type { Suggestions, WriteSuggestion } from "../../api/types";
 import { RelatedItems } from "./RelatedItems";
@@ -173,21 +174,26 @@ test("a failed check says so and offers Retry", async () => {
 });
 
 test("a title below the floor and a dialog with no project ask nothing", async () => {
-  const short = renderRelated(async () => ({ outcome: "none", related: [] }), "CORE", "a");
+  jest.useFakeTimers();
   try {
-    // Past the debounce, with real time: the component waits that long before it asks at all.
-    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
-    expect(short.relatedItems).toHaveBeenCalledTimes(0);
-  } finally {
-    short.unmount();
-  }
+    const short = renderRelated(async () => ({ outcome: "none", related: [] }), "CORE", "a");
+    try {
+      // Past the debounce: the component waits that long before it asks at all.
+      await tick(RELATED_DEBOUNCE_MS + 200);
+      expect(short.relatedItems).toHaveBeenCalledTimes(0);
+    } finally {
+      short.unmount();
+    }
 
-  const noProject = renderRelated(async () => ({ outcome: "none", related: [] }), "");
-  try {
-    // Past the debounce, with real time: the component waits that long before it asks at all.
-    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
-    expect(noProject.relatedItems).toHaveBeenCalledTimes(0);
+    const noProject = renderRelated(async () => ({ outcome: "none", related: [] }), "");
+    try {
+      // Past the debounce: the component waits that long before it asks at all.
+      await tick(RELATED_DEBOUNCE_MS + 200);
+      expect(noProject.relatedItems).toHaveBeenCalledTimes(0);
+    } finally {
+      noProject.unmount();
+    }
   } finally {
-    noProject.unmount();
+    realClock();
   }
 });

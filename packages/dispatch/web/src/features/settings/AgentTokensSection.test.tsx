@@ -1,6 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { AgentToken, DispatchScope } from "../../api/types";
@@ -286,6 +287,7 @@ function confirmFor(made: AgentToken): string {
 // since the press - never an older one of the same label - is offered for revoking, and the
 // reader confirms it by its label and when it was made before it is revoked and another minted.
 test("a mint answered KEY_COMMITTED offers the one token made since the press, confirmed first", async () => {
+  jest.useFakeTimers();
   const older = madeAt("older", "reviewer", -86_400_000);
   const lost = madeAt("lost", "reviewer", 60_000);
   const page = await mintLostWith([lost, older, token], [false, true]);
@@ -297,14 +299,14 @@ test("a mint answered KEY_COMMITTED offers the one token made since the press, c
     expect(page.label.value).toBe("");
     expect(screen.queryByRole("alert")).toBeNull();
     fireEvent.submit(page.label.closest("form") as HTMLFormElement);
-    await Bun.sleep(20);
+    await tick(20);
     expect(page.createAgentToken).toHaveBeenCalledTimes(1);
 
     const replace = await screen.findByRole("button", { name: "Revoke it and mint another" });
     // Cancelled: nothing revoked.
     fireEvent.click(replace);
     expect(page.asked).toEqual([confirmFor(lost)]);
-    await Bun.sleep(20);
+    await tick(20);
     expect(page.revokeAgentToken).not.toHaveBeenCalled();
 
     fireEvent.click(replace);
@@ -319,6 +321,7 @@ test("a mint answered KEY_COMMITTED offers the one token made since the press, c
     expect(screen.queryByTestId("landed-without-answer")).toBeNull();
     expect(page.revokeAgentToken).toHaveBeenCalledTimes(1);
   } finally {
+    realClock();
     page.restore();
   }
 });
