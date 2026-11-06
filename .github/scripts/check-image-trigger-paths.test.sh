@@ -150,6 +150,26 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names a negated file" "$(contains "$out" 'packages/app/src/')"
 
+# That an event with no path filter covers everything is workflow_paths.test.sh's rule; what this
+# asserts is this checker's verdict on such a workflow, which is that it owes nothing.
+echo "case: an event without a path filter covers everything"
+root=$(fixture unfiltered)
+cat > "$root/.github/workflows/image.yaml" <<'YAML'
+name: Image
+on:
+  push:
+    branches: [main]
+jobs:
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          file: docker/Dockerfile
+YAML
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+
 echo "case: paths-ignore naming an input"
 root=$(fixture ignored)
 sed -i '/^    paths:$/,/^  workflow_dispatch:$/{/^  workflow_dispatch:$/!d}' "$root/.github/workflows/image.yaml"
@@ -338,6 +358,14 @@ callers "$root" "$all_inputs"
 sed -i "s#^        with:\$#&\n          predicate-quantifier: 'some-with-excludes'#" "$root/.github/workflows/release.yaml"
 run_check "$root"
 check "predicate-quantifier: some-with-excludes on filters with no ! pattern passes" "$(is "$status" 0)"
+
+# That a paths-filter pattern keeps picomatch's `?` is workflow_paths.test.sh's rule; what this
+# asserts is that this checker reads a caller's filter that way and owes nothing for it.
+echo "case: a paths-filter pattern keeps picomatch's ?"
+root=$(fixture called-dorny-question)
+callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.jso?'|")"
+run_check "$root"
+check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
 echo "case: a workflow_call input tested == '' is a call mode, not a path filter"
 # call_modes <root> <docker job if line> <calling job if line> [extra release.yaml on: line]:
