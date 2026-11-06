@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # Posts one completed check run on a commit as this workflow's GITHUB_TOKEN, which is the GitHub
 # Actions App (integration 15368, the source main's ruleset names for its required checks): the
-# way ci.yaml's lint job reports pr-title, and the way ci-ok-report.sh reports the failing ci-ok
-# of a merge-group run one job's result has already decided, each from a step of a job that
-# already holds a runner. A check run posted this way joins the Actions App's first check suite
-# at that commit rather than the posting run's (ci-ok-report.sh's header holds the measurement),
-# so no check whose suite must be its run's own is posted here: ci-ok's verdict is a job of
-# ci.yaml, whose own check run carries it. The job needs `checks: write`.
+# way ci-ok-report.sh reports the failing ci-ok of a merge-group run one job's result has already
+# decided, from a step of a job that already holds a runner. It is the one script here that posts
+# a check run, so the measurement that decides what may be posted at all is kept whole in this
+# header and the callers point at it.
+#
+# A check run POSTed with POST /repos/.../check-runs joins the Actions App's first check suite at
+# that commit rather than the posting run's, measured four times: on probe branch
+# probe/infra1066-ciok at 365e2766, where the posting job ran in suite 114285918850 and the check
+# run it created landed in 114285918626, the other workflow's; on pull request #2860 at 57182d42,
+# where CI's ci-ok landed in the suite of "Rebuild Claude Envoy plugin" (114301219205) rather
+# than in CI's own (114301219822); on #2847, where it landed in PR Title's suite (114222733751
+# against CI's 114222734375, created in the same second), the rollup reported the required ci-ok
+# under workflow "PR Title" and the merge queue refused to enqueue with `Required status check
+# "ci-ok" is expected` while that ci-ok was green; and at head 44af468c, where the pr-title lint
+# posted landed in the suite of "Fold Changelog Fragments" (check run 127894229103, suite
+# 114391379333). So no check whose suite must be its run's own is posted here: both checks that
+# ruleset requires are jobs of ci.yaml, ci-ok and pr-title, and a job's own check run is in its
+# run's own suite by construction. The job needs `checks: write`.
 #
 # Its inputs, from the step's env:
 #   GH_TOKEN           the job's github.token.
@@ -19,9 +31,17 @@
 #   SUMMARY_FILE       a file whose text is the check's summary (markdown), cut to GitHub's limit.
 #   DETAILS_URL        where the check links: the job that decided it.
 #   EXTERNAL_ID        the posted check run's `external_id`: the one field that tells a check run
-#                      posted here from a job's own check run of the same name, which carries
-#                      none, so a step reading a head's check runs can see which of them a job
-#                      posted. ci-ok-reconcile.sh reads it to decide which ci-ok it may rewrite.
+#                      posted here from a job's own check run of the same name, which
+#                      ci-ok-reconcile.sh reads to decide which ci-ok it may rewrite. It has
+#                      three shapes. A `ci-ok-post:<the posting run's id>` prefix is a post of
+#                      this release, which every ci-ok posted here carries. An empty field is a
+#                      post of the release before that marker existed. A UUID is a job's own
+#                      check run, which GitHub writes and GitHub alone concludes: measured on
+#                      both job check runs of INFRA-1066's k28 probe head and on
+#                      4a53aeee-0d45-5854-8639-11c4a3f4d78f, the ci-ok job's own check run
+#                      127905818541 of the run that read them (2026-11-06). A job's own check run
+#                      therefore carries one, so the prefix rather than the field's presence is
+#                      the test.
 #   GH_RETRY_SECONDS   optional: a refused or failed post is retried twice on gh-read.sh's one
 #                      ladder, this many seconds and then twice as many apart (10 by default; the
 #                      tests set 0), then fails the step.

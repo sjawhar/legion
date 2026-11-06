@@ -874,7 +874,8 @@ GATES = [
 
     # This check itself: it lists every module's packages (vet mode: each package directory, its
     # dependencies' and the test files, without the files tests read), reads the target lists
-    # the runs above expand, and is its own script, engine, data, rules and path model.
+    # the runs above expand, reads every workflow of .github/workflows, and is its own script,
+    # engine, data, rules and path model.
     gate("ci_filters", "ci-filters", runs=[
         run(DAEMON, ["./..."], f"{at('ci-filters', CHECK_STEP)}: go list over the daemon module", mode="vet", step=CHECK_STEP,
             text=".github/scripts/check-ci-filters.sh"),
@@ -895,6 +896,8 @@ GATES = [
         (INFRA_TARGETS, "ci_job_reads.py expands the notices runs over it"),
         (DOCS_SITE, "ci_filter_coverage.py looks the docs gate's step citations up in it"),
         (CACHE_WORKFLOW, "ci_workflow_rules.py holds its cache saves to ci.yaml's restores"),
+        (".github/workflows/**", "ci_workflow_rules.check_one_merge_group_workflow reads every workflow of the "
+                                 "directory, and a rule that refuses a new one has to run on the change that adds it"),
     ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
                 for name, path in PUSH_WORKFLOWS.items()))
       + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),

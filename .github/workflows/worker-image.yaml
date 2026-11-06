@@ -125,7 +125,8 @@ jobs:
     # that fails closed.
     # On a pull request, the run that reaches the group last wins, and GitHub does not guarantee
     # arrival order: two pushes seconds apart, or a re-run of an older head's run, can cancel the
-    # newest head's build, and ci.yaml's ci-ok then fails, or is never posted, for that run.
+    # newest head's build, and ci.yaml's `ci-ok` job then fails for that run — the worker-image
+    # job it needs ended cancelled, which is no success to ci-ok.sh.
     # `gh run rerun` of the newest head's run restores it, so re-run an older head's run only after
     # the newest head's build has completed. The job has no draft or closed `if:`: its only
     # pull_request run is ci.yaml's call, which never runs on a draft (ci.yaml's `changes` skips
@@ -283,18 +284,27 @@ jobs:
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ci.yaml's pull_request call only: this job's result, and ci-ok itself when this job is that
-      # run's last, from the step every ci.yaml job ends with. The build checked out the pull
-      # request's head, which may predate that step, so the workspace is first checked out again,
-      # .github only, at the commit the run itself checked out (github.sha), whose ci.yaml and report
-      # step the rest of the run reads. The image is pushed by now, so nothing reads the build's tree.
+      # ci.yaml's pull_request call only, and inert there. The router asks the job of every
+      # workflow it calls to end with the report step, and check-ci-filters.sh holds it there:
+      # the step exists so that a merge-group run this job's result decides gets its failing
+      # ci-ok at once rather than at the end of the run. ci.yaml's worker-image job runs on a
+      # pull request alone, though, and ci-ok-report.sh posts on a merge_group run and nowhere
+      # else, so on the one event this step runs on it prints what it saw and exits 0 before any
+      # GitHub call. It stays because the rule is about the shape rather than about which events
+      # the calling job happens to admit today; the verdict a pull request's run gets is
+      # ci.yaml's `ci-ok` job's own check run.
+      # The checkout before it is what lets `uses: ./.github/actions/ci-ok-report` resolve: the
+      # build checked out the pull request's head, which may predate the action, so the workspace
+      # is checked out again, .github only, at the commit the run itself checked out
+      # (github.sha), whose ci.yaml and report step the rest of the run reads. The image is
+      # pushed by now, so nothing reads the build's tree.
       - if: always() && github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           sparse-checkout: .github
           persist-credentials: false
-      - name: Report ci-ok when this is the run's last job
+      - name: Report ci-ok when this job decides a merge-group run
         if: always() && github.event_name == 'pull_request'
         uses: ./.github/actions/ci-ok-report
         with:

@@ -10,8 +10,8 @@ name: CI
 # and fails when .github/scripts/ci-ok.sh's verdict over their results is failure, so the
 # verdict rides on that job's own check run — a job's check run is in its run's own check suite,
 # where a check run posted with POST /repos/.../check-runs joins the Actions App's first suite
-# at that commit, which is another workflow's as often as not (ci-ok-report.sh's header holds
-# the measurement and what it cost). Every job but `changes` and those CI_OK_EXEMPT names still
+# at that commit, which is another workflow's as often as not (.github/scripts/post-check-run.sh's
+# header holds the measurement). Every job but `changes` and those CI_OK_EXEMPT names still
 # ends with the ci-ok-report step (.github/actions/ci-ok-report), which posts a failing ci-ok
 # at once when that job's own result decides a merge-group run, so the queue drops a doomed
 # group at the first failure rather than at the end of the run; the ci-ok job's last step then
@@ -197,9 +197,10 @@ jobs:
   # when it is added again, and a merge-group run `cancel-started` or
   # .github/workflows/dequeued.yaml force-cancelled tests a group the queue has thrown away, so
   # a passing re-run of it would put a ci-ok on a head no queue entry waits for. A re-run must
-  # therefore test nothing and post nothing; the one job of it that does run is the `ci-ok` job,
-  # which cannot be skipped without leaving that passing ci-ok behind and so concludes failure
-  # instead (the comment above its `if:` says why).
+  # therefore test nothing and post nothing; the jobs of it that do run are `ci-ok` and
+  # `pr-title`, neither of which can be skipped without leaving a passing required check behind,
+  # and each concludes the failure such an attempt must get in a step instead (the comment above
+  # each one's `if:` says why).
   changes:
     if: ${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}
     runs-on: ubuntu-24.04
@@ -1580,9 +1581,16 @@ jobs:
             # check-ci-filters.sh, which holds every filter above to what its job reads: every file
             # whose change can move a Go closure (Go code anywhere, the modules' embedded files and
             # testdata, every module and workspace file, the target lists the go commands expand
-            # over), this file, and the check's own script, engine, data, rules and path model.
+            # over), every workflow file, and the check's own script, engine, data, rules and path
+            # model.
             ci_filters:
-              - '.github/workflows/ci.yaml'
+              # The directory rather than the four workflows the check names one by one (this
+              # file, docs-pages.yaml, docs-site.yaml and ci-caches.yaml): its rules read every
+              # workflow of it - ci_workflow_rules.check_one_merge_group_workflow refuses any but
+              # this one that runs on merge_group - and a rule that refuses a new workflow has to
+              # run on the change that adds one, which a list of the names already there cannot
+              # select.
+              - '.github/workflows/**'
               - '.github/scripts/check-ci-filters.sh'
               - '.github/scripts/ci_filter_coverage.py'
               - '.github/scripts/ci_job_reads.py'
@@ -1591,12 +1599,6 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
-              # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
-              # reads docs-site.yaml to find the steps the docs gate cites.
-              - '.github/workflows/docs-pages.yaml'
-              - '.github/workflows/docs-site.yaml'
-              # It holds ci-caches.yaml's cache saves to this file's restores.
-              - '.github/workflows/ci-caches.yaml'
               - '**/*.go'
               - '**/go.mod'
               - '**/go.sum'
@@ -1625,8 +1627,8 @@ jobs:
     timeout-minutes: 30
     # The ci-ok-report step is the whole of this job's GitHub writing: it posts a failing ci-ok
     # with `checks: write` and names the run's jobs in it with `actions: read`. `contents: read`
-    # is the checkout's. The pull request's text is checked in the `pr-title` job now, which
-    # declares the scopes its own routes read.
+    # is the checkout's. The pull request's text is the `pr-title` job's, which declares the
+    # scopes its own routes read.
     permissions:
       contents: read
       actions: read
@@ -1808,8 +1810,8 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # lint, typecheck and test are jobs ci-ok condenses; their names are no longer checks the ruleset
-  # requires. Each covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when
+  # lint, typecheck and test are jobs ci-ok condenses; main's ruleset requires none of their
+  # names. Each covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when
   # `changes` did not succeed, typecheck and test run rather than skip. ci-ok fails then anyway
   # (ci-ok.sh), so this buys signal: their results while `changes` is broken. A re-run of only the
   # failed jobs can leave the jobs `changes` then selects skipped, and ci-ok fails a selected job
@@ -3192,10 +3194,11 @@ jobs:
   # as its own job's, and leaves the others' numbers standing when one is red.
   #
   # Only pmdoc installs Bun: its tests shell out to the generated TypeScript fixtures under
-  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), and
-  # render_readback_test.go refuses to run without bun in CI. Not that freshness check itself - a
-  # stale fixture is envoy-go's failure to catch, not a race. delivery's and the bus's NATS runs in
-  # the test process (internal/testnats), so no job here needs a container runtime of its own.
+  # internal/dispatch/pmdoc/gen (envoy-go-checks' "Check pmdoc fixtures are up to date" step),
+  # and render_readback_test.go refuses to run without bun in CI. Not that freshness check itself
+  # - a stale fixture is envoy-go-checks' failure to catch, not a race. delivery's and the bus's
+  # NATS runs in the test process (internal/testnats), so no job here needs a container runtime
+  # of its own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
   # kvwatch share this runner. The Dispatch store's tests (store_test.go:28, storetest.go:44) and
@@ -3926,21 +3929,19 @@ jobs:
   # draft is marked ready, and on the merge queue's group.
   #
   # It posts nothing: pr-title is this job's own check run, which GitHub puts in this run's own
-  # check suite. A check run created with POST /repos/.../check-runs under GITHUB_TOKEN joins the
-  # Actions App's first suite at that commit instead (the comment above `ci-ok` holds what that
-  # cost and where it was measured), and the pr-title lint posted did exactly that: at head
-  # 44af468c it landed in the suite of "Fold Changelog Fragments" (check run 127894229103, suite
-  # 114391379333), the shape that made the queue refuse to enqueue #2847 with
-  # `Required status check "ci-ok" is expected` while that check was green. So no step here calls
-  # .github/scripts/post-check-run.sh, and the job holds no `checks: write`.
+  # check suite, where a check run created with POST /repos/.../check-runs under GITHUB_TOKEN
+  # joins the Actions App's first suite at that commit instead, which has left a required check
+  # green in another workflow's suite and the merge queue refusing to enqueue
+  # (.github/scripts/post-check-run.sh's header holds those measurements). So no step here calls
+  # that script, and the job holds no `checks: write`.
   #
   # A merge group carries no pull request, only the queue branch it runs on, so
   # find-pr-payload.sh reads the pull request that branch names and writes it in the shape
-  # check-pr-text.sh wants; pr-title.yaml finds its payload with the same script, so neither
-  # workflow holds a copy of that logic. pr-title.yaml runs on an edit and a review alone, so a
-  # pull request that is opened, reopened or pushed to gets its pr-title from this job, and a
-  # fork's head gets one too: a job's check run costs no token scope, where the post this job
-  # replaced was guarded off on a fork, whose GITHUB_TOKEN is read-only. A dispatched run carries
+  # check-pr-text.sh wants. pr-title.yaml runs on an edit and a review alone, whose payloads
+  # carry the pull request, so a pull request that is opened, reopened or pushed to gets its
+  # pr-title from this job, and a fork's head gets one too: a job's check run costs no token
+  # scope, where a POST needs `checks: write`, which a fork's run's read-only GITHUB_TOKEN does
+  # not carry. A dispatched run carries
   # neither a pull request nor a group and has no text to check, which is why the `if:` names the
   # two events this job runs on rather than excluding the draft alone.
   pr-title:
@@ -4072,27 +4073,19 @@ jobs:
   # outside ci-ok's accounting), runs under `always()` so that a failed, skipped or cancelled job
   # still reaches a verdict, and fails when .github/scripts/ci-ok.sh's verdict over `toJSON(needs)`
   # is failure. ci-ok is therefore this job's own check run, which GitHub puts in this run's own
-  # check suite. A check run created with POST /repos/.../check-runs under GITHUB_TOKEN joins the
-  # Actions App's first suite at that commit instead, measured twice: on pull request #2860 at
-  # 57182d42 CI's posted ci-ok landed in the suite of "Rebuild Claude Envoy plugin"
-  # (114301219205) rather than in CI's own (114301219822), and on #2847 it landed in PR Title's,
-  # where the rollup read the required ci-ok under another workflow and the queue refused to
-  # enqueue with `Required status check "ci-ok" is expected` while that ci-ok was green.
+  # check suite, where a check run created with POST /repos/.../check-runs under GITHUB_TOKEN
+  # joins the Actions App's first suite at that commit instead, which is another workflow's as
+  # often as not (.github/scripts/post-check-run.sh's header holds that measurement).
   #
-  # A job of its own waits for a runner, and that wait is the cost of this shape. The figure once
-  # written here - a median of 8 seconds over the 25 newest completed pull_request runs - measured
-  # each run's longest wait among jobs that are created with the run and queue together, which is
-  # another question: this job is created then too but starts only once the last of its 32 needs
-  # has ended, when the pool is busiest with the next wave. The one reading of the right thing is
-  # the probe of 2026-11-06 for dispatch://INFRA-1066's k27, whose ci-ok job was created at
-  # 10:16:21Z with every other job of its run finished and had not started 30 minutes later. It is
-  # kept because a late verdict is right and one in another workflow's suite blocks the head until
-  # a person re-runs it; k7 and k23 of that issue measure after the merge whether the wait
-  # matters. What this job cannot do, and the ci-ok-report
-  # step every other job ends with still does, is post the failing ci-ok of a merge-group run one
-  # job's result has already decided: this job waits for every job of the run, and a group that
-  # can no longer merge should leave the queue at the first failure rather than at the last job's
-  # end.
+  # A job of its own waits for a runner, and that wait is the cost of this shape: it is created
+  # with the run but starts only once the last of its needs has ended, when the pool is busiest
+  # with the next wave. docs/solutions/github/join-a-job-to-the-ci-router.md holds every reading
+  # of it. The shape is kept because a late verdict is right while one in another workflow's
+  # suite blocks the head until a person re-runs it. What this job cannot do, and the
+  # ci-ok-report step every other job ends with still does, is post the failing ci-ok of a
+  # merge-group run one job's result has already decided: this job waits for every job of the
+  # run, and a group that can no longer merge should leave the queue at the first failure rather
+  # than at the last job's end.
   #
   # The draft term is `changes`' own: every job skips on a draft pull request, and a verdict over
   # nothing but skips would put a failing ci-ok on a head nobody has asked to test. It is safe to

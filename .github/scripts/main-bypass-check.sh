@@ -86,10 +86,10 @@
 #                 the default page holds the 30 newest check runs of the commit, and a commit the
 #                 queue tested more than once can carry more than that.
 #
-# What it no longer reads: the push's other commits, the merge-group runs and ci-ok check runs at
-# each of them, and the compare API, which the walk fell back to for a payload GitHub had cut at
-# its documented 2048-commit cap. The head answers for all of them, so the check costs two API
-# calls per push where the walk cost two per commit.
+# What it reads is the push's head and nothing else: no other commit of the push, no merge-group
+# run or ci-ok check run at one, and no compare route for a payload GitHub cut at its documented
+# 2048-commit cap. The head answers for all of them, so the check costs two API calls per push
+# however many commits the push carries.
 #
 # It prints one line on stdout, `dispatch <sha>`, naming the head when it reached main untested;
 # a head the queue tested, or one carrying a skip marker, prints nothing. The reasoning — what

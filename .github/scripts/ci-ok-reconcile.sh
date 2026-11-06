@@ -4,20 +4,18 @@
 #
 # Why there can be another one at all. ci-ok-report.sh posts a failing ci-ok from the job whose
 # result decides a merge-group run, with POST /repos/.../check-runs, and such a check run joins
-# the Actions App's first check suite at that commit rather than the posting run's: measured on
-# pull request #2860 at 57182d42, where CI's ci-ok landed in the suite of "Rebuild Claude Envoy
-# plugin" (114301219205) rather than in CI's own (114301219822). Two things follow. A posted
-# ci-ok is not the ci-ok job's own check run, so GitHub never replaces it on a re-run: a run that
-# failed, was posted a failing ci-ok and was then re-run green would keep that failing check run
-# on the head for ever. A re-run's own job check run is different, and measured on the k28 probe
-# of INFRA-1066 (2026-11-06, head ee30dee4): attempt 1's failing ci-ok job check run
+# the Actions App's first check suite at that commit rather than the posting run's
+# (post-check-run.sh's header holds the measurement). Two things follow. A posted ci-ok is not
+# the ci-ok job's own check run, so GitHub never replaces it on a re-run: a run that failed, was
+# posted a failing ci-ok and was then re-run green would keep that failing check run on the head
+# for ever. And it can sit in another workflow's check suite, where no re-run of this workflow
+# reaches it at all. A re-run's own job check run needs nothing from this step, measured on the
+# k28 probe of INFRA-1066 (2026-11-06, head ee30dee4): attempt 1's failing ci-ok job check run
 # (127883400181) stays on the head under filter=all, but the default `latest` filter returns
 # attempt 2's alone (127889647834) and GitHub's statusCheckRollup reads SUCCESS with one ci-ok
-# context, so a later attempt of the same job supersedes its own earlier one and nothing here
-# need touch it. A posted ci-ok is the case that does not supersede, and it can also sit in
-# another workflow's check suite, where no re-run of this workflow reaches it at all.
-# PATCHing each of them to this job's conclusion closes both: whatever a head carries under the
-# name ci-ok that a job of a run posted, it says what this attempt decided.
+# context, so a later attempt of the same job supersedes its own earlier one. PATCHing each
+# posted ci-ok to this job's conclusion closes both cases: whatever a head carries under the name
+# ci-ok that a job of a run posted, it says what this attempt decided.
 #
 # Why it is not every other ci-ok on the head. One of them can be another workflow run's own
 # ci-ok job check run: main-bypass-check.yaml starts this workflow with `gh workflow run ci.yaml
@@ -30,20 +28,24 @@
 # costs is the whole retry ladder against a call that cannot succeed, under this job's
 # timeout-minutes, and a warning saying a verdict stands that was never this step's to change.
 #
-# The marker is what separates the two, by what wrote the check run rather than by what it says.
-# post-check-run.sh sends an external_id of `ci-ok-post:<the posting run's id>` with every ci-ok
-# it posts. A job's own check run carries an external_id too - the same probe read a UUID on each
-# of that head's two job check runs - so the test is the ci-ok-post: prefix, not the field's
-# presence. This step PATCHes only the check runs carrying that prefix, and sends a marker back,
-# so a later attempt's read of this head still finds one.
+# The external_id is what separates the two, by what wrote the check run rather than by what it
+# says, and post-check-run.sh's header gives its three shapes. This step PATCHes a
+# `ci-ok-post:<run id>` prefix and an absent marker (`-` in the read below) alike, and sends a
+# prefix back, so a later attempt's read of this head still finds one; it leaves a UUID alone,
+# which is a job's own check run and which GitHub refuses to let this token PATCH in any case.
+# The absent ones are the posts of the release before the marker existed, and they sit on open
+# heads today: 126296045537 on pull request #2726 at 4a878981 and 127791633790 on #2860 at
+# 57182d42, both `success`, both with an empty external_id, measured on 2026-11-06. No title is
+# tested beside the field: every job's own ci-ok check run carries a UUID, so the external_id
+# alone decides which is which.
 #
 # What it leaves alone: this job's own check run (CHECK_RUN_ID, `job.check_run_id`), which GitHub
 # concludes itself; a check run that already carries this conclusion, since a PATCH that changes
 # nothing is still a write; one that is not completed, which belongs to a run still deciding
 # — its own job writes its conclusion, and completing it here would overwrite a verdict that is
-# still being made; and one whose external_id carries no ci-ok-post: prefix, which no job of a
-# run posted, so GitHub answers a PATCH of it with that refusal and the check run is in any case
-# the business of the run whose job GitHub concluded it for.
+# still being made; and one whose external_id is a UUID, which no job of a run posted, so GitHub
+# answers a PATCH of it with that refusal and the check run is in any case the business of the
+# run whose job GitHub concluded it for.
 #
 # A refusal leaves a warning and never fails the job. The job's conclusion is the verdict, and
 # failing this step would turn a passing one red, which blocks the head this step exists to
@@ -64,7 +66,8 @@
 # all, where the default page holds the 30 newest check runs of the commit. Each line carries the
 # check run's external_id as a fourth field, where a check run with none reads as `-` rather than
 # as the empty string GitHub returns for it: the loop reads the line with `read -r`, which a
-# field that is a word on every line keeps lined up whatever a check run carries.
+# field that is a word on every line keeps lined up whatever a check run carries, and `-` is the
+# word the loop reads as a post of the release before the marker.
 #
 # Run from anywhere: GH_TOKEN=... GITHUB_REPOSITORY=o/r HEAD_SHA=... CHECK_RUN_ID=... \
 #   CONCLUSION=... .github/scripts/ci-ok-reconcile.sh
@@ -126,9 +129,9 @@ while read -r id status was marker; do
     continue
   fi
   case $marker in
-    ci-ok-post:*) ;;
+    ci-ok-post:* | -) ;;
     *)
-      echo "ci-ok check run $id carries no ci-ok-post marker, so it is another workflow run's own ci-ok job check run, which that run concludes itself"
+      echo "ci-ok check run $id carries the external_id $marker, which is neither a ci-ok-post: marker nor absent, so it is a job's own ci-ok check run, which the run whose job it is concludes itself"
       continue
       ;;
   esac

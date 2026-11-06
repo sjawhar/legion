@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # The pull request payload a check of a pull request's text reads, as a file: its path on stdout.
-# ci.yaml's lint job and pr-title.yaml both hand that path to check-pr-text.sh as
-# GITHUB_EVENT_PATH, so the two workflows resolve a queued group's pull request through one
-# script rather than each through a copy of this logic, which is what let them drift before.
+# ci.yaml's `pr-title` job hands that path to check-pr-text.sh as GITHUB_EVENT_PATH, because one
+# of the events that job runs on, a merge group, carries no pull request. pr-title.yaml runs on
+# an edit and a review alone, whose payloads carry it, so that workflow reads the run's own
+# GITHUB_EVENT_PATH and calls nothing here.
 #
-# A pull_request or pull_request_review payload carries the pull request already, so the script
-# prints GITHUB_EVENT_PATH and reads nothing. A merge_group payload carries no pull request, only
-# the queue branch the group runs on,
+# A payload that is not a merge group's carries the pull request already, so for any other event
+# the script prints GITHUB_EVENT_PATH and reads nothing. A merge_group payload carries no pull
+# request, only the queue branch the group runs on,
 # refs/heads/gh-readonly-queue/<base>/pr-<number>-<head sha>, so the script reads the pull request
 # that branch names and writes it under RUNNER_TEMP in the shape check-pr-text.sh reads,
 # {pull_request: <the pull request>, number: <its number>}; a branch that names none is refused

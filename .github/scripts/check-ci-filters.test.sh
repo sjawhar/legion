@@ -15,7 +15,8 @@
 # it on a re-run attempt of a merge-group run and theirs must not, ci-caches.yaml's save of a
 # cache family must carry
 # the key and the paths ci.yaml's restore of that family names, its own restores being lookups,
-# and ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json.
+# ci_job_reads.py's WORKSPACES must name exactly the workspaces of the root package.json, and no
+# workflow but ci.yaml may run on a merge group.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, a root package.json with one workspace, and
@@ -45,7 +46,7 @@ source "$script_dir/test-lib.sh"
 # carries the report step and neither may carry the term that skips a job on a re-run attempt of
 # a merge-group run. The site filter gates no job: site.yaml, which
 # PUSH_WORKFLOWS pairs with it, runs on a push whose paths are that filter flattened. The root
-# package.json has the one workspace packages/widget, which WORKSPACES names, since rule 14 holds
+# package.json has the one workspace packages/widget, which WORKSPACES names, since rule 13 holds
 # those two lists to each other; no job here runs Bun, so that manifest is nothing the app gate
 # reads. Echoes the fixture root.
 fixture() {
@@ -1156,10 +1157,10 @@ PY
 check "no filter gates a job that compiles or reads files it does not select" \
   "$(is "$uncovered" "")"
 
-# Rule 14 reads the root manifest as check-bun-workspace-manifests.sh reads it, at every shape:
+# Rule 13 reads the root manifest as check-bun-workspace-manifests.sh reads it, at every shape:
 # a list it cannot read is named rather than taken for an empty one, which would hold WORKSPACES
 # to nothing, and the two spellings of a workspace are one workspace.
-echo "case: a root manifest rule 14 cannot read"
+echo "case: a root manifest rule 13 cannot read"
 root=$(fixture workspace-manifest-gone)
 rm "$root/package.json"
 run_check "$root"
@@ -1212,5 +1213,38 @@ replace "$root/package.json" '["packages/widget/"]' '["packages/widget"]'
 replace "$root/.github/scripts/ci_job_reads.py" 'WORKSPACES = ["packages/widget"]' 'WORKSPACES = ["packages/widget/"]'
 run_check "$root"
 check "and with it in the table" "$(is "$status" 0)"
+
+echo "case: the merge-group trigger belongs to ci.yaml alone"
+# ci-ok-report.sh POSTs the failing ci-ok of a merge-group run the reporting job's own result
+# decides, and a POSTed check run joins the Actions App's first check suite at that commit
+# rather than the posting run's, so the queue reads that POST only while ci.yaml is the one
+# workflow a merge group starts.
+root=$(fixture merge-group-only)
+replace "$root/.github/workflows/ci.yaml" "on: [pull_request]" $'on:\n  pull_request:\n  merge_group:'
+run_check "$root"
+check "passes with ci.yaml itself on merge_group" "$(is "$status" 0)"
+cat > "$root/.github/workflows/scan.yaml" <<'YAML'
+name: Scan
+on:
+  pull_request:
+  merge_group:
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo scan
+YAML
+run_check "$root"
+check "fails once a second workflow runs on it" "$(is "$status" 1)"
+check "naming the file it found and the one workflow that may" \
+  "$(contains "$out" "::error file=.github/workflows/scan.yaml::.github/workflows/scan.yaml runs on merge_group, which only .github/workflows/ci.yaml may")"
+check "the early POST a second suite breaks" \
+  "$(contains "$out" "a POSTed check run joins the Actions App.s first check suite at that commit rather than the posting run.s")"
+check "and the measurement behind it" \
+  "$(contains "$out" 'measured on pull request #2847, which the queue refused to enqueue')"
+mv "$root/.github/workflows/scan.yaml" "$root/.github/workflows/scan.yml"
+run_check "$root"
+check "and reads the .yml spelling GitHub reads too" \
+  "$(contains "$out" "::error file=.github/workflows/scan.yml::")"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

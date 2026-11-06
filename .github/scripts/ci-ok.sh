@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# ci-ok is the one check main's ruleset requires of ci.yaml's router, and this script is its
-# verdict. ci.yaml's `ci-ok` job runs it over `toJSON(needs)`, needing every job of the file but
-# itself and those CI_OK_EXEMPT names, and fails when this script does, so the job's own check
-# run carries the verdict — and a job's check run is in its run's own check suite, where a check
-# run posted with POST /repos/.../check-runs joins the first suite at that commit, which is
-# another workflow's as often as not (ci-ok-report.sh's header holds the measurement). It passes
-# only when `changes` succeeded (it selected the jobs from this head's diff), lint succeeded (it
-# runs on every change), every job `changes` selected succeeded, and every job it did not select
-# succeeded or was skipped.
+# ci-ok is one of the two checks main's ruleset requires of ci.yaml's router, and this script is
+# its verdict. ci.yaml's `ci-ok` job runs it over `toJSON(needs)`, needing every job of the file
+# but itself and those CI_OK_EXEMPT names, and fails when this script does, so the job's own
+# check run carries the verdict — and a job's check run is in its run's own check suite, where a
+# check run POSTed with POST /repos/.../check-runs joins the first suite at that commit, which is
+# another workflow's as often as not (post-check-run.sh's header holds the measurement). It
+# passes only when `changes` succeeded (it selected the jobs from this head's diff), lint
+# succeeded (it runs on every change), every job `changes` selected succeeded, and every job it
+# did not select succeeded or was skipped.
 #
 # A selected job must succeed: skipped, cancelled or absent fails. A skip there means the job's
 # `if:` did not admit the run although `changes` chose it — the two disagree, and whoever meets
@@ -15,12 +15,13 @@
 # tested. A re-run of only the failed jobs does not leave one: `gh run rerun <id> --failed` was
 # measured twice on pull request #2734, and each re-run kept 30 of the run's 31 jobs, ran only
 # the failed job again, and ci-ok passed both times. A merge_group run of ci.yaml is never
-# re-run at all: every job of a re-run attempt of a merge-group run but the ci-ok job skips,
-# each held back by a term of its own `if:` (the comment above ci.yaml's `changes` job says
-# which), deliberately, because a group is tested once, and a pull request the queue removed is
-# tested again when it is added again. The ci-ok job runs there, because its own skip would be
-# a passing required check, and a step of it fails the attempt before this script judges
-# anything, so the run of skips such an attempt leaves never reaches this verdict.
+# re-run at all: every job of a re-run attempt of a merge-group run but the `ci-ok` and
+# `pr-title` jobs skips, each held back by a term of its own `if:` (the comment above ci.yaml's
+# `changes` job says which), deliberately, because a group is tested once, and a pull request
+# the queue removed is tested again when it is added again. Those two jobs run on such an
+# attempt, because each is named for a required check and a skipped job's check run is a passing
+# required check; a step of each fails the attempt before this script judges anything, so the
+# run of skips it leaves never reaches this verdict.
 #
 # Its inputs, from the ci-ok job's step and from ci-ok-report.sh:
 #   NEEDS              `changes`' result and outputs, as `toJSON(needs.changes)` gives them, and
@@ -87,7 +88,7 @@ include "ci-ok";
       selection($job) as $s
       | ["info", "\($job): \($result) (\(if $s.selected then "selected" else "not selected" end): \($s.why))"],
         if $result == "absent" then
-          ["error", "\($job) is absent from NEEDS, but SELECTED_BY maps it to needs.changes.outputs.\($map[$job]); ci-ok-report.sh gives every SELECTED_BY job a result, so this is its defect"]
+          ["error", "\($job) is absent from NEEDS, but SELECTED_BY maps it to needs.changes.outputs.\($map[$job]); the ci-ok job's toJSON(needs) and ci-ok-report.sh both give every SELECTED_BY job a result, so this is a defect of whichever of them built NEEDS"]
         elif $s.selected and $result != "success" then
           ["error", "\($job) ended \($result), but changes selected it (\($s.why)); a selected job must succeed, and a skip here means the job's if: did not admit the run although changes chose it, a disagreement between the two the author must fix"]
         elif ($s.selected | not) and $result != "success" and $result != "skipped" then

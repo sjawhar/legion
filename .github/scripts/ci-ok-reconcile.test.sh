@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Tests for `ci-ok-reconcile.sh`, the last step of ci.yaml's ci-ok job: every other ci-ok check
-# run on the head is PATCHed to what that job concluded, so one verdict stands at the end of
-# every attempt. It leaves alone this job's own check run, one that already carries this
-# conclusion, one that is not completed, and one carrying no ci-ok-post: marker, which is
-# another workflow run's own ci-ok job check run; a refused read or PATCH warns and never fails
-# the job, since failing it would turn a passing verdict red on the head this step exists to
-# unblock.
+# Tests for `ci-ok-reconcile.sh`, the last step of ci.yaml's ci-ok job: every ci-ok check run on
+# the head that a job posted is PATCHed to what that job concluded, so one verdict stands at the
+# end of every attempt. A post is an external_id carrying the ci-ok-post: marker or carrying
+# nothing at all, which is what the ci-ok-report.sh of the release before the marker posted. It
+# leaves alone this job's own check run, one that already carries this conclusion, one that is
+# not completed, and one whose external_id is a UUID, which is a job's own ci-ok check run; a
+# refused read or PATCH warns and never fails the job, since failing it would turn a passing
+# verdict red on the head this step exists to unblock.
 #
 # Each case writes the head's ci-ok check runs as the script's `gh --jq` prints them (id, status,
 # conclusion, external_id) and runs the real script with a stand-in `gh` first on PATH, which
@@ -124,31 +125,49 @@ check "to this job's conclusion" "$(is "$(field .conclusion)" success)"
 check "and the body carries a marker, so the next attempt's read still finds one" \
   "$(contains "$(field .external_id)" '^ci-ok-post:')"
 
-echo "case: another workflow run's own ci-ok job check run on this head"
+echo "case: a ci-ok the release before the marker posted, which carries no external_id at all"
+# The older ci-ok-report.sh posted with no external_id, so GitHub returns an empty one and the
+# script's jq writes `-` for it. Those posts are the stale ci-ok check runs that sit on open
+# heads today, measured on 2026-11-06: 126296045537 on pull request #2726 at 4a878981 and
+# 127791633790 on #2860 at 57182d42, both success, both with an empty external_id. They are the
+# one class of stale verdict this step exists to clear, so an absent marker is a post.
+check_runs "900=in_progress/null" "100=completed/failure@-"
+run_reconcile success
+check "exits 0" "$(is "$status" 0)"
+check "is patched as a marked post is" "$(is "$(patched)" "100 ")"
+check "to this job's conclusion" "$(is "$(field .conclusion)" success)"
+check "and the body carries a marker, so the next attempt's read finds a marked post" \
+  "$(contains "$(field .external_id)" '^ci-ok-post:')"
+check "says what it did" "$(contains "$out" '^set ci-ok check run 100 from failure to success$')"
+
+echo "case: another workflow run's own ci-ok job check run on this head, whose external_id is a UUID"
 # main-bypass-check.yaml dispatches ci.yaml on main, so the dispatched run's github.sha is
 # main's tip, which the queue landed carrying its own group's green ci-ok. Its external_id is a
-# UUID rather than a ci-ok-post: marker (measured on INFRA-1066's k28 probe head), and GitHub
-# refuses a PATCH of it under GITHUB_TOKEN with "Check run status and conclusions can only be
-# updated internally by GitHub Actions", measured on the same probe: an unfiltered step spends
-# its whole retry ladder on a call that cannot succeed and warns that a verdict stands which was
-# never its to change.
+# UUID rather than a ci-ok-post: marker or an absent one (measured on INFRA-1066's k28 probe
+# head), and GitHub refuses a PATCH of it under GITHUB_TOKEN with "Check run status and
+# conclusions can only be updated internally by GitHub Actions", measured on the same probe: an
+# unfiltered step spends its whole retry ladder on a call that cannot succeed and warns that a
+# verdict stands which was never its to change.
 check_runs "900=in_progress/null" "100=completed/success@07c6d79e-718e-5fab-b991-ebb3c3a6833c"
 run_reconcile failure
 check "exits 0" "$(is "$status" 0)"
 check "is left alone" "$(is "$(patched)" "")"
 check "writes nothing" "$(is "$(calls)" 0)"
-check "and says whose check run it is" \
-  "$(contains "$out" "^ci-ok check run 100 carries no ci-ok-post marker, so it is another workflow run's own ci-ok job check run, which that run concludes itself$")"
+check "and names the external_id it saw and whose check run that makes it" \
+  "$(contains "$out" "^ci-ok check run 100 carries the external_id 07c6d79e-718e-5fab-b991-ebb3c3a6833c, which is neither a ci-ok-post: marker nor absent, so it is a job's own ci-ok check run, which the run whose job it is concludes itself$")"
 check "and still counts what it patched" \
   "$(contains "$out" '^ci-ok on abc123 is failure; 0 other check run(s) of that name were set to it$')"
 
-echo "case: a head carrying this job's own ci-ok, a posted one and another run's own"
-check_runs "900=in_progress/null" "100=completed/failure@ci-ok-post:7" "101=completed/failure@-"
+echo "case: a head carrying this job's own ci-ok, a marked post, a legacy post and another run's own"
+check_runs "900=in_progress/null" "100=completed/failure@ci-ok-post:7" "101=completed/failure@-" \
+  "102=completed/failure@4a53aeee-0d45-5854-8639-11c4a3f4d78f"
 run_reconcile success
 check "exits 0" "$(is "$status" 0)"
-check "patches the marked one alone" "$(is "$(patched)" "100 ")"
-check "and counts that one" \
-  "$(contains "$out" '^ci-ok on abc123 is success; 1 other check run(s) of that name were set to it$')"
+check "patches the two posts and nothing else" "$(is "$(patched)" "100 101 ")"
+check "leaving the other run's own job check run to that run" \
+  "$(contains "$out" "^ci-ok check run 102 carries the external_id 4a53aeee-0d45-5854-8639-11c4a3f4d78f, which is neither a ci-ok-post: marker nor absent, so it is a job's own ci-ok check run, which the run whose job it is concludes itself$")"
+check "and counts the two" \
+  "$(contains "$out" '^ci-ok on abc123 is success; 2 other check run(s) of that name were set to it$')"
 
 echo "case: a failing attempt"
 check_runs "900=in_progress/null" "100=completed/success" "101=completed/success"

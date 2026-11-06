@@ -1,8 +1,9 @@
 """The engine of check-ci-filters.sh, whose header says what it proves and why. ci_job_reads.py,
 beside it, is the data it reads: each ci.yaml gate's go commands and static reads, and the files
 tests read outside their packages. ci_workflow_rules.py, also beside it, holds the rules that
-read none of that - what no `if:` of ci.yaml may say, what every job's `if:` must say, and what
-ci-caches.yaml must save for the entries ci.yaml restores - and main() runs them.
+read none of that - what no `if:` of ci.yaml may say, what every job's `if:` must say, what
+ci-caches.yaml must save for the entries ci.yaml restores, and that ci.yaml is the only workflow
+of this repository running on a merge group - and main() runs them.
 
 check-ci-filters.sh runs it from the repository root with this directory on PYTHONPATH, through
 `import ci_filter_coverage` rather than as a script, so ci_job_reads.py's `from ci_filter_coverage
@@ -1021,6 +1022,7 @@ def main() -> int:
     rules.check_rerun_guard(document, problems)
     rules.check_cache_round_trip(document, problems)
     rules.check_workspace_table(data.WORKSPACES, problems)
+    rules.check_one_merge_group_workflow(problems)
     expander = Expander(files)
     check_dead_patterns(data, filters, expander, problems)
     session = Session()

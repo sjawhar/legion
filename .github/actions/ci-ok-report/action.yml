@@ -10,13 +10,12 @@ description: >-
   `if: always()`, so a failed, timed-out or cancelled job reaches it. The job needs `actions: read`
   (the run's jobs, which the posted check's summary names) and `checks: write` (the post).
 
-  A fork pull request's run gets a read-only token, which can post no check run, so on one this
-  action does nothing and the pull request gets no ci-ok: this repository takes no fork pull
-  requests (their runs wait for an approval nobody gives). A fork is a head repository whose id
-  is not the base repository's, both read from the event: a re-run keeps its first attempt's
-  event, so a name compared with github.repository would call every pull request a fork after
-  the repository is renamed or transferred (sjawhar/legion became cybermonklabs/legion on
-  2026-11-03, and the re-run of run 41668010626 then posted no ci-ok).
+  It posts on a merge_group run and nowhere else, so on a pull request's run — a fork's included
+  — the script prints what it saw and exits 0 before it makes any GitHub call. A fork's pull
+  request gets its ci-ok from ci.yaml's `ci-ok` job, whose own check run carries the verdict and
+  costs no token scope, where a POST under a fork's read-only token could never have landed one.
+  This repository takes no fork pull requests in any case: their runs wait for an approval
+  nobody gives.
 
 inputs:
   job:
@@ -33,7 +32,7 @@ runs:
   using: composite
   steps:
     - name: Post the failing ci-ok when this job's result decides a merge-group run
-      if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id)
+      if: always()
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

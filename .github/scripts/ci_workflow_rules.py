@@ -1,19 +1,22 @@
 """The rules about ci.yaml that stand on their own: what no `if:` of it may say, what every job's
 `if:` must say, what ci-caches.yaml must save
-for the entries ci.yaml restores, and which workspaces ci_job_reads.py's WORKSPACES must name.
+for the entries ci.yaml restores, which workspaces ci_job_reads.py's WORKSPACES must name, and
+that no other workflow of this repository runs on a merge group.
 None of them
 reads a filter, a gate or a go command, so none belongs in the filter-coverage engine beside
-them; check-ci-filters.sh's header numbers them 10, 13, 11 and 14, and ci_filter_coverage.main()
-is what runs them, over the ci.yaml document it already loaded - the last of them over the root
-manifest and the WORKSPACES table main() hands it, since what this module imports is the
-engine's names, never the data's.
+them; check-ci-filters.sh's header numbers them 10, 13, 11, 14 and 15, and
+ci_filter_coverage.main()
+is what runs them, over the ci.yaml document it already loaded - the workspace rule over the
+root manifest and the WORKSPACES table main() hands it, since what this module imports is the
+engine's names, never the data's, and the merge-group rule over the workflow directory, which
+it reads itself.
 
 It sits beside that engine (and workflow_paths.py, the path model) in the repository it checks,
 and imports the engine's names for the two workflow files, the repository root, the checks
 main's ruleset requires and the three
-helpers that read an `if:`. main()
-imports this module rather than the other way round, so the one import here is of a module
-Python has finished loading by then.
+helpers that read an `if:`, and the path model's reader of a workflow's `on:`. main()
+imports this module rather than the other way round, so the one import of the engine here is of
+a module Python has finished loading by then.
 """
 
 import json
@@ -24,6 +27,7 @@ import yaml
 
 from ci_filter_coverage import (CACHE_WORKFLOW, REPO, REQUIRED_CHECKS, WORKFLOW, conditions, squash,
                                 where_if)
+from workflow_paths import events
 
 
 # ---------------------------------------------------------------- the conditions ci.yaml cannot hold
@@ -252,3 +256,39 @@ def check_workspace_table(workspaces: list, problems: list) -> None:
         problems.append(f"::error file={TABLE}::WORKSPACES names {workspace}, which the root manifest's workspaces "
                         f"does not: every Bun job then declares a read of {workspace}/package.json that no install "
                         f"of this repository reads")
+
+
+# ------------------------------------------------- the one workflow a merge group runs
+# The directory every workflow of this repository is in, and the two suffixes GitHub reads there.
+WORKFLOW_DIR = ".github/workflows"
+WORKFLOW_SUFFIXES = (".yaml", ".yml")
+MERGE_GROUP = "merge_group"
+
+
+def check_one_merge_group_workflow(problems: list) -> None:
+    """ci.yaml is the only workflow of this repository that runs on a merge group.
+
+    What holds it there is ci-ok-report.sh: it POSTs the failing ci-ok of a merge-group run the
+    reporting job's own result decides, rather than waiting for the ci-ok job, so the queue
+    learns the group is doomed while the rest of the run is still going. A POSTed check run
+    joins the Actions App's first check suite at that commit rather than the posting run's
+    (measured on pull request #2860 at 57182d42), and a ci-ok in a suite the queue does not read
+    is a ci-ok the queue does not have: #2847 was refused with `Required status check "ci-ok" is
+    expected` while a green ci-ok sat in PR Title's suite. That POST therefore lands where the
+    queue reads it only because ci.yaml is
+    the one workflow a merge group starts, which makes its suite the first one. A second
+    merge_group workflow puts the early POST back in another suite, and nothing in ci.yaml would
+    say so: the workflow that broke it is the new file. So the rule is about every other
+    workflow, and names the file it found."""
+    for path in sorted(p for p in (REPO / WORKFLOW_DIR).iterdir() if p.suffix in WORKFLOW_SUFFIXES):
+        name = f"{WORKFLOW_DIR}/{path.name}"
+        if name == WORKFLOW or MERGE_GROUP not in events(yaml.safe_load(path.read_text()) or {}):
+            continue
+        problems.append(f"::error file={name}::{name} runs on {MERGE_GROUP}, which only {WORKFLOW} may: "
+                        f"ci-ok-report.sh POSTs the failing ci-ok of a merge-group run the reporting job's own "
+                        f"result decides, and a POSTed check run joins the Actions App's first check suite at that "
+                        f"commit rather than the posting run's, so a second {MERGE_GROUP} workflow can hold that "
+                        f"first suite and the queue never reads the POST - measured on pull request #2847, which "
+                        f"the queue refused to enqueue with `Required status check \"ci-ok\" is expected` while a "
+                        f"green ci-ok sat in another workflow's check suite. Run this work on pull_request, or "
+                        f"move it into {WORKFLOW}")

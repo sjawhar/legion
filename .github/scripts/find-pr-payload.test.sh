@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for `find-pr-payload.sh`: the payload file ci.yaml's lint job and pr-title.yaml hand to
+# Tests for `find-pr-payload.sh`: the payload file ci.yaml's `pr-title` job hands to
 # check-pr-text.sh, which is the event's own payload at every event that carries a pull request
 # and, on a merge group, the queued pull request read from the queue branch the group runs on.
 #
@@ -111,4 +111,4 @@ check "it names the ref" \
   "$(contains "$err" "^::error::merge_group.head_ref 'refs/heads/gh-readonly-queue/main/pr-2847-$short' names no queued pull request ")"
 check "it reads no route" "$(is "$(gh_calls)" "")"
 
-summary "the pull request payload both workflows check a pull request's text against"
+summary "the pull request payload the pr-title job checks a pull request's text against"

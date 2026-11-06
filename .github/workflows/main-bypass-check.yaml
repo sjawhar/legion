@@ -29,8 +29,8 @@ name: CI (main bypass check)
 # What it deliberately does not do:
 #   * it starts at most one run per push, named for the push's head; it does not test a commit in
 #     isolation, and it reads no other commit of the push — neither their merge-group runs nor
-#     their ci-ok check runs, and it no longer falls back to the compare API for a payload GitHub
-#     cut at its documented 2048-commit cap, since the head answers for all of them;
+#     their ci-ok check runs, nor the compare route for a payload GitHub cut at its documented
+#     2048-commit cap, since the head answers for all of them;
 #   * it reverts nothing, reopens nothing and blocks nothing. It makes the missing CI run, and
 #     what that run reports is for a person to act on;
 #   * it passes over a head whose own message carries one of GitHub's skip markers (the script's

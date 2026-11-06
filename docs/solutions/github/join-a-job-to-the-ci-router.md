@@ -44,8 +44,9 @@ its own workflows; this page covers this repository only.
 3. **`needs: changes`** on the job, and
    `if: needs.changes.outputs.<filter> == 'true' && (github.event_name != 'merge_group' || github.run_attempt == '1')`.
    The second term holds the job back on a re-run attempt of a merge-group run, where the group is tested already.
-   Every job of `ci.yaml` carries a term of its own for that and `check-ci-filters.sh` fails one that does not:
+   Every job of `ci.yaml` but the two named for a required check carries a term of its own for that and `check-ci-filters.sh` fails one that does not:
    `gh run rerun --failed` leaves out a `changes` that succeeded and hands the attempt that job's outputs again, so no job may lean on `changes`' skip for it.
+   `ci-ok` and `pr-title` must carry neither term and are refused one, since a skipped job's check run is a passing required check: each runs on every attempt and fails one above the first in a step of its own.
 4. **The `ci-ok-report` step as the job's last step**, the same text in every job:
 
    ```yaml
@@ -93,15 +94,18 @@ request #2860 at 57182d42, where CI's `ci-ok` landed in the suite of "Rebuild Cl
 plugin" (114301219205) rather than CI's own (114301219822), and on #2847, where it landed in PR
 Title's suite and the merge queue refused to enqueue with `Required status check "ci-ok" is
 expected` while that `ci-ok` was green. A job's own check run is in its run's own suite by
-construction. The runner it waits for is this shape's cost, and the figure first written here
-measured the wrong thing: a median of 8 seconds over the 25 newest completed `pull_request` runs
-is each run's longest wait among jobs that are created with the run and queue together.
+construction. The runner it waits for is this shape's cost, and the figure first written here is
+retracted: a median of 8 seconds over the 25 newest completed `pull_request` runs measured each
+run's longest wait among jobs that are created with the run and queue together, which answers
+another question.
 A job gated on every other job is created then too, but starts only once the last of them ends,
 which is when the pool is busiest with the next wave of runs.
-The one reading of the trailing job's own wait is the probe of 2026-11-06 for
-dispatch://INFRA-1066's k27: its `ci-ok` job was created at 10:16:21Z with every other job of
-the run already finished, and had not started 30 minutes later, with a dozen runs of other
-branches in the account's queue.
+Three readings of that wait have been taken for dispatch://INFRA-1066, and they do not agree:
+26 minutes 37 seconds on the k27 probe of 2026-11-06, whose `ci-ok` job was created at 10:16:21Z
+with every other job of its run already finished; 4 minutes 3 seconds on the tester's run of the
+same issue; and about 50 minutes on this change's own head.
+So the cost is a distribution rather than a number, and what sets it is how busy the account's
+queue is at the moment the last of the verdict job's needs ends.
 The verdict stays a job regardless, because a late verdict is right while a verdict filed in
 another workflow's suite blocks the head until a person re-runs it.
 
@@ -150,8 +154,10 @@ but `changes` and those `CI_OK_EXEMPT` names does not end with the report step, 
 non-exempt job. A wrong entry would fail a job its `if:` rightly skipped, pass one a re-run left
 skipped, or leave a job out of the verdict altogether.
 
-A fork pull request's run gets a read-only token, which can post no check run, so a fork pull
-request gets no posted `ci-ok` and no push-time `pr-title`: this repository takes no fork pull
+A fork pull request's run gets a read-only token, which can post no check run, and neither
+required check needs one: `ci-ok` and `pr-title` are jobs of ci.yaml, a job's own check run costs
+no token scope, so a fork's head carries both. What a fork cannot get is the early posted `ci-ok`
+of a doomed merge-group run, which no fork is ever in: this repository takes no fork pull
 requests, whose runs wait for an approval nobody gives.
 
 A job whose main half must run on a push to main, as the docs site's Pages deploy must, cannot be
@@ -356,27 +362,31 @@ anything lands. A new job needs nothing extra for it. But a job whose `if:` name
 `github.event_name` must admit `merge_group`, or it skips on the group while its output selects
 it, and `ci-ok` fails the group: a selected job that skipped is a job the verdict cannot accept.
 What skips a
-group does so on purpose: lint's pull-request text check
-(pr-title.yaml checks the text on the group), and worker-image (pull request only, so it is in
-`CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The nine slow suites go the
+group does so on purpose, and worker-image is the one job that does (pull request only, so it is
+in `CI_OK_PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The queued pull request's
+text is checked on the group by ci.yaml's `pr-title` job, which finds it with
+find-pr-payload.sh; pr-title.yaml runs on an edit and a review alone, and a group carries
+neither. The nine slow suites go the
 other way: the queue is where their result normally comes from, and a pull request runs them only
 when it carries the label `full-ci`. The
 docs job runs on a group and on a pull request alike; docs-pages.yaml builds and publishes main's
 site on a push trigger of its own.
 
 Two things a group's run alone carries.
-Every job of a re-run attempt skips, so a merge-group run is never re-run: a group is tested once, and the pull request is tested again when it is queued again.
-Each job carries the term that does it, which step 3 above gives.
+Every job of a re-run attempt skips but `ci-ok` and `pr-title`, which fail such an attempt in a step, so a merge-group run is never re-run: a group is tested once, and the pull request is tested again when it is queued again.
+Each of the other jobs carries the term that does it, which step 3 above gives.
 And the run of a group the queue has replaced is force-cancelled by a job of the workflow itself — `cancel-started`, which runs only on `merge_group`, reports nothing and is therefore named in `CI_OK_EXEMPT` rather than in `CI_OK_SELECTED_BY` — which cancels the groups of its own pull request the queue built before it.
 A group that can no longer merge because the group below it failed is the queue's own to rebuild: a job that fails posts the failing `ci-ok` at once from its own report step, the queue takes that pull request out, and the groups above it are built again.
 
 ## Drafts run no test job
 
-`changes` and the jobs it selects skip on a draft pull request, and the `ci-ok` job carries the
-same draft term, so a draft gets no `ci-ok` at all rather than a verdict over nothing but skips,
-which keeps it from merging with nothing tested (a skipped job reports success, so a passing
-check there would be a lie). Lint posts no `pr-title` there either; pr-title.yaml
-still checks a draft's text when it is edited or reviewed. Marking the pull request
+`changes` and the jobs it selects skip on a draft pull request, and the `ci-ok` and `pr-title`
+jobs carry the same draft term, so a draft's `ci-ok` and `pr-title` are those two skipped jobs'
+own check runs, which GitHub and the Legion daemon count as passes.
+That is safe only because a draft can neither be queued nor merged, so nothing reads either pass
+to merge by; pr-title.yaml still checks a draft's text when it is edited or reviewed.
+The alternative, a verdict over nothing but skips, would put a failing `ci-ok` on a head nobody
+asked to test. Marking the pull request
 ready for review (`ready_for_review`) starts a run that selects by the same diff. A job with
 `needs: changes` and a plain `if:` skips when `changes` skips, so it keeps the rule. A job whose
 `if:` starts with a status function — `!cancelled()`, to run when `changes` failed as lint,

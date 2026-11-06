@@ -101,9 +101,7 @@
 #      nothing: the workflow asks only whether that exact key is already there, no step of it
 #      reads a restored entry, and a prefix hit would answer for an older key and skip the build
 #      that fills this one, leaving it empty.
-#  12. is gone: ci.yaml's merge-group cancel jobs are `cancel-started` alone now, and the rule
-#      that held one cancel job to every job a merge-group run can run went with the others.
-#  13. a job of ci.yaml whose `if:` lacks `(github.event_name != 'merge_group' ||
+#  12. a job of ci.yaml whose `if:` lacks `(github.event_name != 'merge_group' ||
 #      github.run_attempt == '1')`, or, for a job whose `if:` admits merge_group alone (the
 #      one cancel job, `cancel-started`), `github.run_attempt == '1'`: a group is
 #      tested once, and `gh run rerun --failed` leaves out a `changes` that succeeded and hands
@@ -114,7 +112,7 @@
 #      skipped job's check run is a passing required check, so a term that held one of them back
 #      on such an attempt would hand the group that check concluded by nothing. Each of the two
 #      runs on every attempt and refuses one above the first in a step.
-#  14. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
+#  13. a workspace of the root package.json that ci_job_reads.py's WORKSPACES does not name, or a
 #      WORKSPACES entry the root manifest does not list, naming the workspace. A frozen
 #      `bun install` reads every workspace manifest, so the table declares each of them a read of
 #      every Bun job and this check holds every filter gating such a job to all of them. What the
@@ -134,6 +132,16 @@
 #      package whose filter never selects it, which is why ci_job_reads.py's envoy_client_dep
 #      declares, in one place for every gate whose job compiles @legion/envoy-client, that it
 #      compiles @legion/broker-client with it.
+#  14. a workflow of .github/workflows other than ci.yaml that runs on `merge_group`, naming the
+#      file: ci-ok-report.sh POSTs the failing ci-ok of a merge-group run the reporting job's
+#      own result decides, so the queue learns a group is doomed without waiting for the ci-ok
+#      job, and a POSTed check run joins the Actions App's first check suite at that commit
+#      rather than the posting run's. That POST reaches the queue only because ci.yaml is the
+#      one workflow a merge group starts, which makes its suite the first one; a second such
+#      workflow can hold that suite instead, and this repository has measured that the queue
+#      then does not read the POST - pull request #2847 was refused with `Required status check
+#      "ci-ok" is expected` while a green ci-ok sat in PR Title's suite. Work that must run on a
+#      merge group belongs in ci.yaml.
 #
 # A claimed go command is reduced only in its simple form, never parsed further: one line of
 # `go test|vet|build`, then relative package paths and only -v, -race, -count=N, -timeout D,
@@ -194,8 +202,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # The engine (ci_filter_coverage.py), its data (ci_job_reads.py), the rules that read no filter
-# and no go command (ci_workflow_rules.py: rules 10, 11, 13 and 14 above, the last of them
-# given that data's WORKSPACES by main() rather than importing the data itself) and the path
+# and no go command (ci_workflow_rules.py: rules 10 to 14 above, the workspace one
+# given that data's WORKSPACES by main() rather than importing the data itself, the merge-group
+# one reading .github/workflows itself) and the path
 # model (workflow_paths.py) sit beside this script in the repository it checks. The engine is
 # imported, not run as a script, so the data's `from ci_filter_coverage import ...` binds the
 # same classes.

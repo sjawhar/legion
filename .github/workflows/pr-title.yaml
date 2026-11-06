@@ -9,25 +9,16 @@ name: PR Title
 # which main's ruleset requires, as the job's own check run: the job is named for the check, and
 # this workflow holds no `checks: write`.
 #
-# What it no longer runs on, and why. A check run posted with `POST /repos/.../check-runs` under
-# GITHUB_TOKEN joins the Actions App's first check suite at that commit, not the suite of the run
-# that posted it: measured on probe branch probe/infra1066-ciok at 365e2766, where the posting job
-# ran in suite 114285918850 and the check run it created landed in 114285918626, the other
-# workflow's suite. On pull request #2847 that rule put ci.yaml's `ci-ok` into this workflow's
-# suite (114222733751 against CI's 114222734375, created in the same second), the rollup reported
-# the required `ci-ok` under workflow "PR Title", and the merge queue refused to enqueue with
-# `Required status check "ci-ok" is expected`. Neither required check rides on that rule now:
-# `ci-ok` is a job of ci.yaml, `pr-title` is a job of ci.yaml and the job of this workflow, and a
-# job's check run is in its own run's suite whatever else runs at that head. The two triggers
-# stay gone, for
-# what each of them costs rather than for the suites a pull request's head carries anyway
-# (claude-envoy-rebuild.yaml, changelog-fold.yaml and codeql.yaml run on a pull request too:
-# measured on #2860 at 57182d42, where CI's posted `ci-ok` landed in the suite of "Rebuild Claude
-# Envoy plugin"):
+# What it leaves to ci.yaml, and why. Both workflows report `pr-title` as a job's own check run,
+# which GitHub puts in that job's run's own check suite whatever else runs at the commit, so
+# which suite is the older at a head decides nothing here; .github/scripts/post-check-run.sh's
+# header says what a check run POSTed with `POST /repos/.../check-runs` does instead, and why
+# neither required check is posted any more. What keeps the triggers below out of this file is
+# therefore what each would cost, not the suite a pull request's head carries anyway:
 #   * no merge_group. ci.yaml's `pr-title` job runs on the group, checks the queued pull request's
-#     text there (it finds the pull request the group's branch names with find-pr-payload.sh, the
-#     script both workflows find their payload with) and carries `pr-title` on the group's commit
-#     as its own check run. The queue needs that report: a required check that does not
+#     text there (it finds the pull request the group's branch names with find-pr-payload.sh) and
+#     carries `pr-title` on the group's commit as its own check run. The queue needs that report:
+#     a required check that does not
 #     report on the merge group fails the group ("The merge will fail as the required status check
 #     will not be reported",
 #     https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue#triggering-merge-group-checks-with-github-actions).
@@ -35,21 +26,18 @@ name: PR Title
 #     merge group starts.
 #   * no `opened` and no `reopened`. ci.yaml runs on both, and its `pr-title` job checks the same
 #     text and carries `pr-title` on the same head, so a run here is a second run of the same
-#     check at
-#     the same head: it buys work, not suites. The
-#     trigger goes rather than the job, because a job-level `if:` would not have helped: GitHub
-#     creates the run, and its check suite, before it reads one. At the draft heads f5fc75a0 and
-#     e26c2054, where every job of ci.yaml is skipped, that run still holds a suite of 30 skipped
-#     check runs (114131780811 and 113923512090) — a skipped job is a suite all the same.
+#     check at the same head: it buys work, not suites. It is the trigger that is left out and
+#     not the job, because a job-level `if:` would not do it: GitHub creates the run, and its
+#     check suite, before it reads one. At the draft heads f5fc75a0 and e26c2054, where every job
+#     of ci.yaml is skipped, that run still holds a suite of 30 skipped check runs
+#     (114131780811 and 113923512090) — a skipped job is a suite all the same.
 # That costs a fork's pull request nothing: ci.yaml's `pr-title` job runs on a fork's pull request
 # as on any other, and a job's check run needs no token scope, so the check lands on a fork's head
 # too. A fork's change reaches the merge queue only once a maintainer takes the branch into this
 # repository, where every event is same-repo again.
 #
-# `edited` and `pull_request_review` stay for every head: ci.yaml runs on neither, so nothing else
-# checks the text an edit or a review brings. Which workflow's check suite is the older at a head
-# decides nothing here any more: both workflows report `pr-title` as a job's own check run, which
-# is in that job's run's own suite whatever else runs at the commit.
+# `edited` and `pull_request_review` are this workflow's for every head: ci.yaml runs on neither,
+# so nothing else checks the text an edit or a review brings.
 #
 # A push starts no run here: ci.yaml's `pr-title` job, which runs at every push to a pull request
 # that is not a draft and when a draft is marked ready, runs the same check and carries `pr-title`
@@ -109,29 +97,17 @@ jobs:
           ref: ${{ github.event_name != 'pull_request' && github.event.repository.default_branch || '' }}
           persist-credentials: false
 
-      # The payload the check below reads, as a file: find-pr-payload.sh's answer. For every event
-      # this workflow runs on that is the run's own payload, since each of them carries the pull
-      # request; the script's other half, which reads the pull request a merge group's queue branch
-      # names, is what ci.yaml's `pr-title` job calls it for. One script, so the two workflows cannot
-      # drift over what they check a queued pull request's text against.
-      - name: Find the pull request payload
-        id: payload
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          path=$(.github/scripts/find-pr-payload.sh)
-          echo "path=$path" >> "$GITHUB_OUTPUT"
-
       # The title, body, commit messages, comments and reviews are as public as the tree
       # (check-pr-text.sh says where each lands), and the title must be a conventional commit
-      # subject. ci.yaml's `pr-title` job checks them too (that file says when it runs); this step checks
-      # them at every event above, an edit and a review alike: a review run reports `pr-title` on
-      # the head too, and one that skipped the title would post a passing `pr-title` over a failed
-      # one. The step reads the payload file rather than an `env:` block,
-      # which the runner prints in the job log; only its path is in `env:`. A workflow `env:` cannot
-      # override a GITHUB_* variable, so the shell sets GITHUB_EVENT_PATH for the script.
+      # subject. ci.yaml's `pr-title` job checks them too (that file says when it runs); this step
+      # checks them at every event above, an edit and a review alike: a review run reports
+      # `pr-title` on the head too, and one that skipped the title would post a passing `pr-title`
+      # over a failed one. check-pr-text.sh reads the run's own payload, GITHUB_EVENT_PATH as
+      # Actions writes it, since both events here carry the pull request; find-pr-payload.sh,
+      # which ci.yaml's `pr-title` job hands it instead, is for the one event that does not, a
+      # merge group. It reads that file rather than the step's environment, which the runner
+      # prints in the job log.
       - name: Check the title, body, branch name, commits, comments and reviews
         env:
           GH_TOKEN: ${{ github.token }}
-          PAYLOAD: ${{ steps.payload.outputs.path }}
-        run: GITHUB_EVENT_PATH="$PAYLOAD" .github/scripts/check-pr-text.sh
+        run: .github/scripts/check-pr-text.sh

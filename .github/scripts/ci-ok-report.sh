@@ -4,25 +4,15 @@
 # job needs every job of the run, fails when ci-ok.sh's verdict over their results is failure, and
 # its own check run is the ci-ok main's ruleset reads.
 #
-# Why the verdict is a job and this post is not. A check run created with
-# POST /repos/.../check-runs under GITHUB_TOKEN (post-check-run.sh) joins the Actions App's first
-# check suite at that commit, never reliably the posting run's: measured on pull request #2860 at
-# 57182d42, where CI's ci-ok landed in the suite of "Rebuild Claude Envoy plugin"
-# (114301219205) rather than in CI's own (114301219822), and on #2847, where it landed in PR
-# Title's suite and the merge queue refused to enqueue with `Required status check "ci-ok" is
-# expected` while that ci-ok was green. A job's own check run is in its run's own suite by
-# construction, so the verdict is a job now. What that job costs is a wait nobody had measured
-# rightly. An earlier figure here - a median of 8 seconds over the 25 newest completed
-# pull_request runs - measured each run's longest wait among jobs that are all created with the
-# run and queue together, which answers another question: a job gated on every other job is
-# created then too but cannot start until the last of them ends, which is when the pool is
-# busiest with the next wave. The one measurement of the right thing is the probe of 2026-11-06
-# for dispatch://INFRA-1066's k27, whose ci-ok job was created at 10:16:21Z with every other job
-# of its run already finished and had not started 30 minutes later, the account's queue holding a
-# dozen runs of other trees. The verdict is kept here all the same, because one that lands late
-# is right while one filed in another workflow's suite blocks the head until a person re-runs it;
-# the issue's own k7 and k23 measure after the merge whether that wait matters, and this change
-# exists to take load off the pool it waits in.
+# Why the verdict is a job and this post is not. A check run POSTed with
+# POST /repos/.../check-runs joins the Actions App's first check suite at that commit rather than
+# the posting run's, which is another workflow's as often as not and a suite the merge queue then
+# does not read: post-check-run.sh's header holds the measurement. A job's own check run is in
+# its run's own suite by construction, so the verdict is a job. What that shape costs is the
+# verdict job's wait for a runner of its own, which it begins only once the last of its needs has
+# ended; docs/solutions/github/join-a-job-to-the-ci-router.md holds every reading of that wait.
+# The verdict is a job all the same, because one that lands late is right while one filed in
+# another workflow's suite blocks the head until a person re-runs it.
 #
 # What this early post buys is the one thing that job cannot: the ci-ok job waits for every job of
 # the run, so on a merge-group run a failure has already lost it would post the failing verdict
@@ -32,9 +22,8 @@
 #
 # The post carries the external_id ci-ok-post:<this run's id>, which is the marker
 # ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run only when its external_id
-# carries that prefix. A job's own check run carries an external_id of its own, a UUID (measured
-# on both job check runs of INFRA-1066's k28 probe head, 2026-11-06), so the prefix rather than
-# the field's presence is what tells a posted ci-ok from a run's own verdict.
+# carries that prefix. post-check-run.sh's header says what that field holds in each case and why
+# the prefix, rather than the field's presence, is what tells a posted ci-ok from a job's own.
 #
 # So it posts on a merge_group run and nowhere else, and there only in one of four cases: this
 # job's own result is a failure or a cancellation (`cancelled` is what a job its own
