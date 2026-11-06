@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# smoke-role-takeover.sh — live proof that a soft role claim naming a predecessor takes the role
-# only from a predecessor that is gone or is the claimant's own client instance (INFRA-404, R8 and
-# A5 of dispatch://INFRA-404/spec).
+# smoke-role-takeover.sh — live proof that a role claim is weighed on the process that holds it:
+# a second process that resumed a live session's id can neither take, release nor outlast that
+# session's role (INFRA-783), and a soft claim naming a predecessor takes the role only from a
+# predecessor that is gone or is the claimant's own client instance (INFRA-404, R8 and A5 of
+# dispatch://INFRA-404/spec).
 #
 # It builds natsd (packages/envoy/internal/testnats/cmd/natsd) and the listener
 # (packages/envoy/cmd/listener) from this checkout with `go build` and runs both on loopback ports
 # of its own, exactly as packages/envoy-client/test/envoy-stack.ts does, and then drives each row
-# of R8's table with real client processes:
+# with real client processes:
 #
 #   - one Bun process per Oh My Pi Envoy extension instance (scripts/role-takeover/omp-client.ts),
 #     each loading this checkout's extensions/envoy.ts against the stand-in host the package's own
@@ -17,31 +19,45 @@
 #
 # No model provider, no credential and no container: `go` and `bun`. Every client reaches the
 # listener through a recording proxy of its own (scripts/role-takeover/listener-proxy.ts), so what
-# each client sent and what the listener answered it is read from a log rather than inferred, and
-# a request can be held: A5's first scenario holds a fork's role claim back until another process
-# has resumed and registered its predecessor.
+# each client sent and what the listener answered it is read from a log rather than inferred.
+#
+# The listener runs with a live window of seconds (`session_live_window`), because every row now
+# turns on whether a claim's holder is still answering for it: a holder renews its claim by
+# registering, and a claim nobody renewed inside that window is the next claimant's to take. A
+# row that waits that window out waits for the listener to say so — `role_unrenewed`, or the
+# claim a refused process keeps asking for being granted — and never for a sleep.
 #
 # The rows, each printed with its outcome:
 #
-#   R8 row 1  a claim under the id that holds the role keeps it — an Oh My Pi plugin reload, and a
-#             Claude Code channel server restart, each under the session id that holds the role.
+#   R8 row 1  a claim under the id that holds the role, made once nobody has renewed that claim
+#             inside the live window, takes it — an Oh My Pi plugin reload, and a Claude Code
+#             channel server restart, each under the session id that holds the role.
 #   R8 row 2  an Oh My Pi fork gets its parent's role: the predecessor's live entry carries the
 #             claimant's own client instance id (R6 case 2).
 #   R8 row 3  an Oh My Pi move, in one process, to a session whose records name the held role gets
 #             it, by the same case.
 #   R8 row 4  a Claude Code `/clear` handoff gets the role: the deregistration removes the
 #             process's own entry (R7), and the claim then finds no live predecessor (R6 case 1).
-#   R8 row 5  each of those three after another process resumed the predecessor id and registered
-#             it last is refused 409 naming the predecessor, and that process keeps the role. Its
-#             Oh My Pi fork case is A5's first scenario and its Claude Code case A5's second.
-#   A5        a refused process stays registered, and after the holder exits the refused Oh My Pi
-#             process takes the role on its next session event.
+#   INFRA-783 a second process that resumed a live session's id is refused the role that session
+#             holds (409 naming the holder), is granted it once the holder stops renewing the
+#             claim and the window passes, and a release from the process that no longer holds
+#             the claim frees nothing. The Oh My Pi story drives all three; the Claude Code
+#             story drives the refusal, since a channel server presses the role record it read
+#             as it booted and asks again only for a role it holds.
+#   R8 row 5  a claim naming a predecessor that is live inside another client instance is refused
+#             409 naming it, in Oh My Pi (A5 scenario 1) and in the Claude Code `/clear` handoff
+#             (A5 scenario 2).
+#   A5        a refused process stays registered, and takes the role on its next session event
+#             once the predecessor that held it is gone.
 #
 # `--base-rev <rev>` builds the listener from that revision instead of the working copy, leaving
-# every client as it is here. Against `main@origin` the two A5 scenarios (and row 5's third case,
-# which is the same rule) must fail, because that listener takes a role from any predecessor a
-# claim names, live or not. It reads the revision without touching this working copy: `jj
-# --ignore-working-copy log` resolves it and `git archive` extracts packages/envoy.
+# every client as it is here. Against `main@origin` nine of the fourteen rows fail, which is this
+# smoke's measure of what the change is for: every INFRA-783 row, because that listener hands a
+# role held under a session id to any process that claims under that id; A5's two scenarios and
+# row 5, because it takes a role from any predecessor a claim names, live or not; and the two row
+# 1 rows, whose claim it grants but whose holder it names no process for. It reads the revision
+# without touching this working copy: `jj --ignore-working-copy log` resolves it and `git archive`
+# extracts packages/envoy.
 #
 # Exit status: 0 PASS (every row held); 1 FAIL (the failing rows are listed); 2 refused (a
 # prerequisite is missing or the configuration is invalid); 129, 130, 143 on SIGHUP, SIGINT,
@@ -49,14 +65,40 @@
 set -euo pipefail
 
 # The Claude Code channel server heartbeats on a timer of its own; the Oh My Pi extension's
-# heartbeat is this script's to tick, so its interval is set past the run. A holder that must not
-# re-register after another process took over its entry gets the long one.
+# heartbeat is this script's to tick (`{"op":"heartbeat"}` in omp-client.ts), so its interval is
+# set past the run and every Oh My Pi pass is driven. A Claude Code process that must keep
+# answering for its claim gets the short interval, or is told to register through a tool
+# (`renew_claude`); one that must stop answering gets the long one.
 readonly claude_heartbeat_ms=1000
 readonly claude_quiet_heartbeat_ms=3600000
 readonly omp_heartbeat_ms=600000
+# The deadline one Oh My Pi pass gets, set on its own rather than from the heartbeat above:
+# ENVOY_PASS_DEADLINE_MS has a floor of 30 s (MIN_PASS_DEADLINE_MS in
+# packages/envoy-client/src/envoy-settings.ts), and a pass that takes the heartbeat's ten minutes
+# to be abandoned would hang a row instead of failing it.
+readonly omp_pass_deadline_ms=30000
+# The listener's own windows for this run.
+#
+# ENVOY_SESSION_LIVE_WINDOW is how long a registration keeps a session live and, with it, how long
+# a claim stands renewed: the rows where a second process takes over wait it out, so it is seconds
+# rather than the five minutes a deployment runs. It is the whole budget between a holder's last
+# registration and a claimant's claim in the rows where the holder must still be answering, so it
+# is set well past what a Claude Code channel server costs to start.
+#
+# ENVOY_ROLE_CLAIM_REAP_INTERVAL is the role claim reaper's period, short so that every row is
+# swept several times. The reaper frees nothing here, which is the point of leaving
+# ENVOY_SESSION_GONE_HORIZON at its hour-long default: a holder that stops answering reads
+# unresponsive, never gone, for the whole run, so every claim stands until a claimant takes it and
+# each row is decided by the claim's own renewal rather than by a claim the reaper removed.
+readonly session_live_window=10s
+readonly role_claim_reap_interval=2s
 readonly curl_max_time=20
 readonly client_reply_timeout=180
 readonly listener_wait_timeout=60
+# How long a refused Oh My Pi process is given to be granted the role once its holder stops
+# renewing the claim: the live window above, the heartbeat passes that ask again inside it, and
+# room for a loaded machine.
+readonly takeover_timeout=90
 
 refuse() {
   printf 'smoke-role-takeover: %s\n' "$1" >&2
@@ -270,7 +312,13 @@ wait_for 60 natsd_serving "${work}/logs/natsd.log" ||
   refuse "natsd did not start: $(tail -n 5 "${work}/logs/natsd.log")"
 note "natsd serves ${nats_url} (monitoring 127.0.0.1:${monitor_port})"
 
+# The two windows this run's listener carries are appended to the assignments local-stack.sh
+# hands out, so the two smokes that share that file are run exactly as they were.
 set_listener_env "$listener_port" "$nats_url" "smoke-role-takeover-$$"
+listener_env+=(
+  ENVOY_SESSION_LIVE_WINDOW="$session_live_window"
+  ENVOY_ROLE_CLAIM_REAP_INTERVAL="$role_claim_reap_interval"
+)
 (exec env -i PATH="$PATH" HOME="${work}/listener-home" "${listener_env[@]}" \
   "${work}/bin/listener") >"${work}/logs/listener.log" 2>&1 &
 service_pids+=($!)
@@ -289,6 +337,23 @@ role_holder() {
   code="$(listener_get "/v1/roles/$1")"
   [[ "$code" == 200 ]] || return 0
   jq -r '.holder // ""' "${work}/answer.json"
+}
+
+# role_instance ROLE: the client instance the listener names as the holder's process, empty for a
+# role no live holder's claim names (GET /v1/roles/<role>'s client_instance_id).
+role_instance() {
+  local code
+  code="$(listener_get "/v1/roles/$1")"
+  [[ "$code" == 200 ]] || return 0
+  jq -r '.client_instance_id // ""' "${work}/answer.json"
+}
+
+# role_unrenewed ROLE: nobody has answered for the role's claim inside the live window. The
+# lookup's 404 is the listener's own word for it: a claim is renewed by its holder's
+# registrations, and every write that renews one — the claim itself included — refreshes that
+# holder's registration too, so a holder the lookup reads as lapsed is a claim past the window.
+role_unrenewed() {
+  [[ "$(listener_get "/v1/roles/$1")" == 404 ]]
 }
 
 registered() {
@@ -348,7 +413,7 @@ start_omp() {
   (cd -- "${repo_root}/packages/pi-envoy" &&
     exec env -i PATH="$PATH" HOME="$home" TMPDIR="${TMPDIR:-/tmp}" \
       ENVOY_CONFIG_FILE="${home}/envoy.json" ENVOY_HEARTBEAT_MS="$omp_heartbeat_ms" \
-      ENVOY_PASS_DEADLINE_MS="$omp_heartbeat_ms" ROLE_TAKEOVER_CWD="${home}/cwd" \
+      ENVOY_PASS_DEADLINE_MS="$omp_pass_deadline_ms" ROLE_TAKEOVER_CWD="${home}/cwd" \
       ROLE_TAKEOVER_CLIENT_LOG="${work}/logs/${label}-notices.log" \
       bun --preload "${drivers}/host-stub.ts" "${drivers}/omp-client.ts") \
     <"${work}/${label}.stdin" >"${client_out[$label]}" 2>"${work}/logs/${label}.err" &
@@ -447,8 +512,52 @@ made_claim() {
   [[ -n "$(claim_status "$1" "$2" "$3")" ]]
 }
 
-held_at_proxy() {
-  [[ "$(curl -sS --max-time 5 "${proxy_url[$1]}/__smoke/held?path=/v1/roles/set" | jq -r '.held')" -ge 1 ]]
+# release_status LABEL SESSION TOPIC: the status the listener answered that client's last
+# hand-back of TOPIC for SESSION (POST /v1/interests/unsubscribe), empty when it made none.
+release_status() {
+  jq -r --arg sid "$2" --arg topic "$3" \
+    'select(.path == "/v1/interests/unsubscribe" and .request.session_id == $sid
+            and ((.request.topics // []) | index($topic)) != null) | .status' \
+    "${proxy_log[$1]}" 2>/dev/null | tail -n 1
+}
+
+# release_instance LABEL SESSION TOPIC: the process that hand-back named as the one asking.
+release_instance() {
+  jq -r --arg sid "$2" --arg topic "$3" \
+    'select(.path == "/v1/interests/unsubscribe" and .request.session_id == $sid
+            and ((.request.topics // []) | index($topic)) != null)
+     | .request.client_instance_id // ""' \
+    "${proxy_log[$1]}" 2>/dev/null | tail -n 1
+}
+
+released() {
+  [[ -n "$(release_status "$1" "$2" "$3")" ]]
+}
+
+# ---- making a holder answer for its claim --------------------------------------------------------
+# A claim is renewed by its holder's registrations, so a row where the holder must still hold the
+# role makes it register, and one where it must lose the role simply stops.
+
+# renew_omp LABEL SESSION: one heartbeat pass in that Oh My Pi process, waited out at its proxy.
+# The pass re-registers SESSION, which renews every claim naming that session and that process.
+renew_omp() {
+  local label="$1" session="$2" before
+  before="$(registered_at "$label" "$session")"
+  registered_again() {
+    [[ "$(registered_at "$label" "$session")" -gt "$before" ]]
+  }
+  send "$label" '{"op":"heartbeat"}'
+  wait_for "$listener_wait_timeout" registered_again ||
+    refuse "the ${label} client did not re-register ${session} within ${listener_wait_timeout}s"
+}
+
+# renew_claude LABEL: one registration from that channel server, answered once it has landed. The
+# subscribe tool follows a topic and registers the session on the way (`follow` in
+# src/envoy-channel-server.ts), which is this script's way of making a server on the long
+# heartbeat answer for its claim at a moment of the row's choosing.
+renew_claude() {
+  send "$1" "$(jq -nc --arg t "notifications.team.smoke-takeover-${run_id}" \
+    '{op:"tool",name:"envoy_subscribe",args:{topics:[$t]}}')"
 }
 
 # ---- the rows -----------------------------------------------------------------------------------
@@ -462,7 +571,10 @@ session_for() {
 
 # R8 row 1, Oh My Pi: the extension instance goes away without deregistering (a plugin reload
 # leaves the session's registration standing) and a new instance comes up on the same session id,
-# whose transcript records the claim. Its claim is under the id that holds the role.
+# whose transcript records the claim. Its claim is under the id that holds the role, and the
+# process that made the standing claim is gone: what grants it is that nobody renewed that claim
+# inside the live window, which is the only thing that now hands a role to a second process
+# claiming under the holder's own session id.
 row1_omp() {
   local role session first second
   role="$(role_for r1omp)"
@@ -478,21 +590,27 @@ row1_omp() {
   wait "${client_pid[omp-reload-1]}" 2>/dev/null || true
   expect_true "the session is still registered after the instance is gone" registered "$session"
 
+  # The reloaded instance starts while the window runs out: nothing renews the gone instance's
+  # claim, and only a claim the listener reads as unrenewed is the next instance's to take.
   start_omp omp-reload-2
+  expect_true "nobody renewed the gone instance's claim inside the live window" \
+    wait_for "$listener_wait_timeout" role_unrenewed "$role"
   send omp-reload-2 "$(jq -nc --arg s "$session" --arg r "$role" '{op:"start",session:$s,roles:[$r]}')"
   second="$(instance_id omp-reload-2 "$session")"
   expect "the reloaded instance is another client instance" \
     "$([[ -n "$second" && "$second" != "$first" ]] && echo different || echo same)" "different"
   expect "its claim under the holder's own id is granted" "$(claim_status omp-reload-2 "$session" "")" "200"
   expect "the session keeps the role" "$(role_holder "$role")" "$session"
-  evidence "${session} kept ${role} across a reload from client instance ${first} to ${second}"
+  expect "the claim names the reloaded instance now" "$(role_instance "$role")" "$second"
+  evidence "${session} kept ${role} across a reload from client instance ${first} to ${second}, granted because nobody renewed ${first}'s claim inside the ${session_live_window} live window"
   end_row
   end_scenario
 }
 
 # R8 row 1, Claude Code: the channel server is killed and another starts on the same session id,
 # reading the role record this one wrote. Its claim names that same id as its predecessor, which
-# is the id that holds the role.
+# is the id that holds the role, and it is granted for the reason the reload's is: the gone
+# server renews its claim no longer.
 row1_claude() {
   local role session state first second
   role="$(role_for r1cc)"
@@ -507,6 +625,11 @@ row1_claude() {
   send cc-restart-1 '{"op":"kill"}'
   expect_true "the session is still registered after the server is gone" registered "$session"
 
+  # The restarted server presses the role record as it boots, and it presses it once, so the
+  # window is waited out first: the claim it makes is then weighed against a claim nobody renews
+  # rather than against a live one.
+  expect_true "nobody renewed the gone server's claim inside the live window" \
+    wait_for "$listener_wait_timeout" role_unrenewed "$role"
   start_claude cc-restart-2 "$session" "$state" "$claude_quiet_heartbeat_ms"
   # A listener that grants the claim and one that refuses it both answer it; a listener that
   # never sees one leaves the status below empty, which is the row's failure to report.
@@ -516,7 +639,8 @@ row1_claude() {
     "$([[ -n "$second" && "$second" != "$first" ]] && echo different || echo same)" "different"
   expect "its claim under the holder's own id is granted" "$(claim_status cc-restart-2 "$session" "$session")" "200"
   expect "the session keeps the role" "$(role_holder "$role")" "$session"
-  evidence "${session} kept ${role} across a channel server restart from client instance ${first} to ${second}"
+  expect "the claim names the restarted server now" "$(role_instance "$role")" "$second"
+  evidence "${session} kept ${role} across a channel server restart from client instance ${first} to ${second}, granted because nobody renewed ${first}'s claim inside the ${session_live_window} live window"
   end_row
   end_scenario
 }
@@ -534,12 +658,15 @@ row2_fork() {
   send omp-fork "$(jq -nc --arg s "$parent" '{op:"start",session:$s,roles:[]}')"
   send omp-fork "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
   expect "the parent holds the role" "$(role_holder "$role")" "$parent"
+  # The parent answers for its claim immediately before the fork claims, so the row turns on the
+  # client instance the parent's entry carries and never on a window that ran out beneath it.
+  renew_omp omp-fork "$parent"
   send omp-fork "$(jq -nc --arg s "$child" '{op:"switch",session:$s,reason:"fork"}')"
   expect "the fork claims naming its parent" "$(claim_status omp-fork "$child" "$parent")" "200"
   expect "the fork holds the role" "$(role_holder "$role")" "$child"
   expect_true "the parent's entry carried this instance's id" \
     test "$(instance_id omp-fork "$parent")" = "$(instance_id omp-fork "$child")"
-  evidence "${child} took ${role} from ${parent}, both registered by client instance $(instance_id omp-fork "$child")"
+  evidence "${child} took ${role} from ${parent}, live inside the window and registered by this same client instance $(instance_id omp-fork "$child")"
   end_row
   end_scenario
 }
@@ -556,17 +683,21 @@ row3_move() {
   send omp-move "$(jq -nc --arg s "$held" '{op:"start",session:$s,roles:[]}')"
   send omp-move "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
   expect "the first session holds the role" "$(role_holder "$role")" "$held"
+  # As in row 2: the id the role is held under answers for its claim right before the move, so
+  # the predecessor that claim names is live and is this instance's.
+  renew_omp omp-move "$held"
   send omp-move "$(jq -nc --arg s "$moved" --arg r "$role" '{op:"switch",session:$s,reason:"resume",roles:[$r]}')"
   expect "the move claims naming the id the role was held under" "$(claim_status omp-move "$moved" "$held")" "200"
   expect "the session moved to holds the role" "$(role_holder "$role")" "$moved"
-  evidence "${moved} took ${role} from ${held} inside one client instance $(instance_id omp-move "$moved")"
+  evidence "${moved} took ${role} from the live ${held} inside one client instance $(instance_id omp-move "$moved")"
   end_row
   end_scenario
 }
 
 # R8 row 4: a `/clear` mints a new id in one channel server process. The handoff deregisters the
 # old id carrying this process's client instance id, which removes its own entry (R7), and the
-# claim then finds no live predecessor (R6 case 1).
+# claim then finds no live predecessor (R6 case 1). The claim it is weighed against is still
+# standing: the role claim reaper frees none of this run's claims (see the windows at the top).
 row4_handoff() {
   local role before after state
   role="$(role_for r4)"
@@ -585,111 +716,196 @@ row4_handoff() {
   expect_true "the deregistration removed this process's own entry" unregistered "$before"
   expect "the claim naming the pre-/clear id is granted" "$(claim_status cc-handoff "$after" "$before")" "200"
   expect "the session after the /clear holds the role" "$(role_holder "$role")" "$after"
-  evidence "${after} took ${role} from ${before} after deregistering it as client instance $(instance_id cc-handoff "$after") (the listener answered deleted=$(delete_answer cc-handoff "$before" deleted))"
+  evidence "${after} took ${role} from ${before}, whose entry this process deregistered as client instance $(instance_id cc-handoff "$after") (the listener answered deleted=$(delete_answer cc-handoff "$before" deleted))"
   end_row
   end_scenario
 }
 
-# R8 row 5, Oh My Pi (A5 scenario 1), then row 5's move case, then A5's two remaining claims. One
-# story of two processes: A holds the role under X and forks to Y with its claim held at its own
-# proxy; B resumes X, registers it and holds the role under X; A's claim is then released.
+# INFRA-783, Oh My Pi. One story of two processes on one session id, which is what a continuation
+# resuming a live session is: A holds the role under X and keeps answering for its claim, B
+# resumes X and is held off, A then stops answering and B takes the role, and A's release on its
+# way out frees nothing of B's.
 row5_omp() {
-  local role x y z instance_a instance_b a_at b_at
+  local role x left topic instance_a instance_b
   role="$(role_for r5omp)"
   x="$(session_for r5x)"
-  y="$(session_for r5y)"
-  z="$(session_for r5z)"
-  begin_row "R8 row 5 (A5 scenario 1) — an Oh My Pi fork after another process resumed and registered its predecessor is refused"
+  left="$(session_for r5left)"
+  topic="notifications.role.${role}"
+  begin_row "INFRA-783 — a second Oh My Pi process in the live holder's session is refused the role"
   start_omp omp-a
   send omp-a "$(jq -nc --arg s "$x" '{op:"start",session:$s,roles:[]}')"
   send omp-a "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
   expect "process A holds the role under X" "$(role_holder "$role")" "$x"
   instance_a="$(instance_id omp-a "$x")"
-  a_at="$(registered_at omp-a "$x")"
-
-  curl -fsS --max-time 5 -X POST "${proxy_url[omp-a]}/__smoke/hold?path=/v1/roles/set" >/dev/null ||
-    refuse "could not arm the hold on process A's proxy"
-  send omp-a "$(jq -nc --arg s "$y" '{op:"switch",session:$s,reason:"fork",detach:true}')"
-  wait_for 60 held_at_proxy omp-a ||
-    refuse "process A's claim for ${y} never reached its proxy to be held"
-  note "   process A's claim for ${y} is held at its proxy"
-
   start_omp omp-b
+  # A answers for its claim immediately before B claims, so B is weighed against a claim inside
+  # the live window however long B's process took to start.
+  renew_omp omp-a "$x"
   send omp-b "$(jq -nc --arg s "$x" --arg r "$role" '{op:"start",session:$s,roles:[$r]}')"
   instance_b="$(instance_id omp-b "$x")"
-  b_at="$(registered_at omp-b "$x")"
   expect "process B is another client instance" \
     "$([[ -n "$instance_b" && "$instance_b" != "$instance_a" ]] && echo different || echo same)" "different"
-  expect "process B registered X last" "$([[ "$b_at" -gt "$a_at" ]] && echo later || echo earlier)" "later"
-  expect "process B holds the role under X" "$(role_holder "$role")" "$x"
-
-  curl -fsS --max-time 5 -X POST "${proxy_url[omp-a]}/__smoke/release?path=/v1/roles/set" >/dev/null ||
-    refuse "could not release the hold on process A's proxy"
-  send omp-a '{"op":"join"}'
-  expect "process A's fork claim naming X is refused" "$(claim_status omp-a "$y" "$x")" "409"
-  expect "the refusal names X as the holder" "$(claim_holder omp-a "$y" "$x")" "$x"
-  expect "process B keeps the role" "$(role_holder "$role")" "$x"
-  evidence "${y} was refused ${role} (409 naming ${x}); client instance ${instance_b} kept it, ${instance_a} did not take it"
+  expect "process B registered X last" \
+    "$([[ "$(registered_at omp-b "$x")" -gt "$(registered_at omp-a "$x")" ]] && echo later || echo earlier)" "later"
+  expect "process B's claim under X is refused" "$(claim_status omp-b "$x" "")" "409"
+  expect "the refusal names X as the holder" "$(claim_holder omp-b "$x" "")" "$x"
+  expect "process A keeps the role" "$(role_holder "$role")" "$x"
+  expect "the listener names A's process as the one holding it" "$(role_instance "$role")" "$instance_a"
+  evidence "${x} kept ${role} with client instance ${instance_a}, which answers for the claim; ${instance_b}, which resumed ${x} and registered it last, was refused 409 naming ${x}"
   end_row
 
-  begin_row "R8 row 5 — an Oh My Pi move after another process resumed and registered its predecessor is refused"
-  send omp-a "$(jq -nc --arg s "$z" --arg r "$role" '{op:"tree",session:$s,roles:[$r]}')"
-  expect "process A's move claim naming X is refused" "$(claim_status omp-a "$z" "$x")" "409"
-  expect "the refusal names X as the holder" "$(claim_holder omp-a "$z" "$x")" "$x"
-  expect "process B keeps the role" "$(role_holder "$role")" "$x"
-  evidence "${z} was refused ${role} (409 naming ${x}) in the same process that was refused for ${y}"
+  begin_row "INFRA-783 — the second process is granted the role once the holder stops renewing its claim"
+  # Nothing renews A's claim from here: the Oh My Pi heartbeat is this script's to tick, and it
+  # ticks no more for A. B's own registrations keep X live, so the lookup goes on naming X under
+  # another process, which is the one refusal a heartbeat pass asks about again.
+  granted_to_b() {
+    [[ "$(claim_status omp-b "$x" "")" == 200 ]]
+  }
+  ask_until_granted() {
+    local deadline=$((SECONDS + takeover_timeout))
+    while ((SECONDS < deadline)); do
+      granted_to_b && return 0
+      send omp-b '{"op":"heartbeat"}'
+      sleep 1
+    done
+  }
+  ask_until_granted
+  expect "process B's claim under X is granted" "$(claim_status omp-b "$x" "")" "200"
+  expect "the role is still held under X" "$(role_holder "$role")" "$x"
+  expect "the listener names B's process as the one holding it now" "$(role_instance "$role")" "$instance_b"
+  evidence "${instance_b} took ${role} under ${x} once ${instance_a} had left its claim unrenewed past the ${session_live_window} live window, asking again on each heartbeat pass while ${x} stayed live"
   end_row
 
-  begin_row "A5 — a refused Oh My Pi process stays registered"
-  expect_true "the refused session is registered" registered "$z"
-  # The session this process moved away from is gone at once, not left behind: dispatch://INFRA-392
-  # makes a session id a process leaves gone the moment it leaves it, so that no peer reads a dead
-  # id as live for the live window and as unresponsive for the gone horizon after that. A5's claim
-  # is that being refused a role does not take the process out of the registry, and the session it
-  # now holds is where that is read.
-  expect_true "the session it was refused for first is gone" unregistered "$y"
-  evidence "${z} is in the listener's registry with no role, and ${y}, which this process left, is gone"
-  end_row
-
-  begin_row "A5 — after the holder exits, the refused Oh My Pi process takes the role on its next session event"
-  send omp-b '{"op":"shutdown"}'
-  expect_true "process B's session left the registry when it shut down" \
-    wait_for "$listener_wait_timeout" unregistered "$x"
-  send omp-a "$(jq -nc --arg s "$z" --arg r "$role" '{op:"tree",session:$s,roles:[$r]}')"
-  expect "the refused process now holds the role" "$(role_holder "$role")" "$z"
-  evidence "${z} took ${role} on its next session event once ${x} had left the registry"
+  begin_row "INFRA-783 — a release from the process that no longer holds the claim frees nothing"
+  # A's branch records a release, so A ends its hold and hands the role topic back naming its own
+  # process. A is the second process in X now — the standing claim is B's — and a release frees
+  # the claims of the process that asks and no others, so B keeps the role. This is the incident
+  # itself: the process whose claim is gone leaves, and the live holder is untouched by it.
+  send omp-a "$(jq -nc --arg s "$left" '{op:"switch",session:$s,reason:"new",roles:[null]}')"
+  expect_true "process A handed the role topic back" \
+    wait_for "$listener_wait_timeout" released omp-a "$x" "$topic"
+  expect "the listener took the release" "$(release_status omp-a "$x" "$topic")" "200"
+  expect "the release named A's process" "$(release_instance omp-a "$x" "$topic")" "$instance_a"
+  expect "A's deregistration of X removed nothing either" "$(delete_answer omp-a "$x" deleted)" "false"
+  expect "the role is still held under X" "$(role_holder "$role")" "$x"
+  expect "process B still holds it" "$(role_instance "$role")" "$instance_b"
+  evidence "${instance_a} handed ${topic} back for ${x} and left the id; ${instance_b}'s claim of ${role} stood through it"
   end_row
   end_scenario
 }
 
-# R8 row 5, Claude Code (A5 scenario 2). A holds the role under X and registers X for the last
-# time; B resumes X, registers it and holds the role under X; A then runs a `/clear` handoff.
+# R8 row 5 (A5 scenario 1), Oh My Pi: a soft claim naming a predecessor that is live inside
+# another client instance is refused.
+#
+# The live predecessor is built from two session ids rather than from one. Process D claims the
+# role under Q and moves it to P, so the role is held under P by D's own process; process C then
+# resumes P and forks away from it, and its fork's claim names P. Built the other way — one id,
+# resumed by a second process that then takes the role under it — it proves this rule no longer:
+# that second process is refused under that id now, and the claim it makes is decided on the
+# standing claim rather than on the predecessor it names.
+row6_predecessor() {
+  local role q p z z2 instance_c instance_d
+  role="$(role_for r6)"
+  q="$(session_for r6q)"
+  p="$(session_for r6p)"
+  z="$(session_for r6z)"
+  z2="$(session_for r6z2)"
+  begin_row "R8 row 5 (A5 scenario 1) — an Oh My Pi claim naming a predecessor live inside another client instance is refused"
+  start_omp omp-d
+  send omp-d "$(jq -nc --arg s "$q" '{op:"start",session:$s,roles:[]}')"
+  send omp-d "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
+  send omp-d "$(jq -nc --arg s "$p" --arg r "$role" '{op:"switch",session:$s,reason:"resume",roles:[$r]}')"
+  expect "process D moved the role from Q to P" "$(role_holder "$role")" "$p"
+  instance_d="$(instance_id omp-d "$p")"
+
+  start_omp omp-c
+  send omp-c "$(jq -nc --arg s "$p" '{op:"start",session:$s,roles:[]}')"
+  instance_c="$(instance_id omp-c "$p")"
+  expect "process C is another client instance" \
+    "$([[ -n "$instance_c" && "$instance_c" != "$instance_d" ]] && echo different || echo same)" "different"
+  # C registered P last, which is what a predecessor read would find; D answers again here, so
+  # the predecessor C is about to name is live and is D's.
+  renew_omp omp-d "$p"
+  send omp-c "$(jq -nc --arg s "$z" --arg r "$role" '{op:"switch",session:$s,reason:"fork",roles:[$r]}')"
+  expect "process C's fork claim naming P is refused" "$(claim_status omp-c "$z" "$p")" "409"
+  expect "the refusal names P as the holder" "$(claim_holder omp-c "$z" "$p")" "$p"
+  expect "process D keeps the role" "$(role_holder "$role")" "$p"
+  expect "the listener names D's process as the one holding it" "$(role_instance "$role")" "$instance_d"
+  evidence "${z} was refused ${role} (409 naming ${p}), whose entry is live inside client instance ${instance_d}; ${instance_c}, which had resumed ${p}, did not take it"
+  end_row
+
+  begin_row "A5 — a refused Oh My Pi process stays registered"
+  expect_true "the refused session is registered" registered "$z"
+  # A session a process leaves is gone at once where that entry was its own
+  # (dispatch://INFRA-392), and stays where it was not: P belongs to D, so C's deregistration of
+  # it removed nothing, which is what left a live predecessor for the claim above to be weighed
+  # against.
+  expect "P's registration stayed with D when C left it" "$(delete_answer omp-c "$p" deleted)" "false"
+  evidence "${z} is in the listener's registry with no role, and ${p}, which this process left, stayed registered to ${instance_d}"
+  end_row
+
+  begin_row "R8 row 5 — an Oh My Pi move in the refused process is refused too"
+  send omp-c "$(jq -nc --arg s "$z2" --arg r "$role" '{op:"tree",session:$s,roles:[$r]}')"
+  expect "process C's move claim naming P is refused" "$(claim_status omp-c "$z2" "$p")" "409"
+  expect "the refusal names P as the holder" "$(claim_holder omp-c "$z2" "$p")" "$p"
+  expect "process D keeps the role" "$(role_holder "$role")" "$p"
+  evidence "${z2} was refused ${role} (409 naming ${p}) in the same process that was refused for ${z}"
+  end_row
+
+  begin_row "A5 — after the holder exits, the refused Oh My Pi process takes the role on its next session event"
+  send omp-d '{"op":"shutdown"}'
+  expect_true "process D's session left the registry when it shut down" \
+    wait_for "$listener_wait_timeout" unregistered "$p"
+  send omp-c "$(jq -nc --arg s "$z2" --arg r "$role" '{op:"tree",session:$s,roles:[$r]}')"
+  expect "the claim the refused process makes now is granted" "$(claim_status omp-c "$z2" "")" "200"
+  expect "the refused process now holds the role" "$(role_holder "$role")" "$z2"
+  expect "the listener names C's process as the one holding it" "$(role_instance "$role")" "$instance_c"
+  evidence "${z2} took ${role} on its next session event once ${p} had left the registry"
+  end_row
+  end_scenario
+}
+
+# INFRA-783 and R8 row 5 (A5 scenario 2), Claude Code. A holds the role under X and answers for
+# its claim; B, a second `claude` of the same user, resumes X, reads the role record A wrote and
+# is refused the role under that id; A then runs a `/clear` handoff whose claim names X, which B
+# registers now, and that claim is refused by the predecessor rule.
 row5_claude() {
-  local role x x2 state instance_a instance_b a_at b_at record before_mtime
+  local role x x2 state record instance_a instance_b
   role="$(role_for r5cc)"
   x="$(session_for r5ccx)"
   x2="$(session_for r5ccx2)"
   state="${work}/r5cc-plugin-data"
   record="${state}/roles/${x}.json"
-  begin_row "R8 row 5 (A5 scenario 2) — a Claude Code /clear handoff after another process resumed and registered its predecessor is refused"
+  begin_row "INFRA-783 — a second Claude Code channel server in the live holder's session is refused the role"
   start_claude cc-a "$x" "$state" "$claude_quiet_heartbeat_ms"
   expect_true "process A's channel server registered" wait_for "$listener_wait_timeout" registered "$x"
   send cc-a "$(jq -nc --arg r "$role" '{op:"tool",name:"envoy_role_set",args:{role:$r}}')"
   expect "process A holds the role under X" "$(role_holder "$role")" "$x"
   instance_a="$(instance_id cc-a "$x")"
-  a_at="$(registered_at cc-a "$x")"
-
+  # A answers for its claim here rather than on a timer of its own: this row needs A's claim to
+  # be inside the live window when B claims, and the row below needs B to have registered X
+  # last, which two servers heartbeating against each other would settle by coin toss.
+  renew_claude cc-a
   # B shares A's plugin data directory, as two `claude` processes of one user do, so it reads the
-  # role record A wrote for X and claims it back under that same id.
+  # role record A wrote for X and claims it back under that same id as it boots.
   start_claude cc-b "$x" "$state" "$claude_heartbeat_ms"
   wait_for "$listener_wait_timeout" made_claim cc-b "$x" "$x" || true
   instance_b="$(instance_id cc-b "$x")"
-  b_at="$(registered_at cc-b "$x")"
   expect "process B is another client instance" \
     "$([[ -n "$instance_b" && "$instance_b" != "$instance_a" ]] && echo different || echo same)" "different"
-  expect "process B registered X last" "$([[ "$b_at" -gt "$a_at" ]] && echo later || echo earlier)" "later"
-  expect "process B holds the role under X" "$(role_holder "$role")" "$x"
+  expect "process B's claim under X is refused" "$(claim_status cc-b "$x" "$x")" "409"
+  expect "the refusal names X as the holder" "$(claim_holder cc-b "$x" "$x")" "$x"
+  expect "process A keeps the role" "$(role_holder "$role")" "$x"
+  expect "the listener names A's process as the one holding it" "$(role_instance "$role")" "$instance_a"
+  expect_true "the refused server kept the role record of X, which is the live holder's" test -f "$record"
+  evidence "${x} kept ${role} with client instance ${instance_a}; ${instance_b}, which resumed ${x}, was refused 409 naming ${x} and left the record of ${x} where its writer can still use it"
+  end_row
 
+  begin_row "R8 row 5 (A5 scenario 2) — a Claude Code /clear handoff naming a predecessor live inside another client instance is refused"
+  registered_last() {
+    [[ "$(registered_at cc-b "$x")" -gt "$(registered_at cc-a "$x")" ]]
+  }
+  expect_true "process B registered X last" wait_for "$listener_wait_timeout" registered_last
   send cc-a "$(jq -nc --arg s "$x2" '{op:"clear",session:$s}')"
   # A listener that refuses the handoff's claim leaves the process holding a role it no longer
   # has, which its re-assertion then asks about; one that grants it makes no re-assertion at all,
@@ -702,27 +918,25 @@ row5_claude() {
     "$([[ "$(registered_at cc-a "$x2")" -gt 0 ]] && echo registered || echo no)" "registered"
   expect "A's handoff claim naming X is refused" "$(claim_status cc-a "$x2" "$x")" "409"
   expect "the refusal names X as the holder" "$(claim_holder cc-a "$x2" "$x")" "$x"
-  expect "A's heartbeat re-assertion is refused too" "$(claim_status cc-a "$x2" "")" "409"
-  expect "process B keeps the role" "$(role_holder "$role")" "$x"
-  expect_true "process B's role record for X still exists" test -f "$record"
-  before_mtime="$(stat -c %Y "$record" 2>/dev/null || echo 0)"
-  record_refreshed() {
-    [[ "$(stat -c %Y "$record" 2>/dev/null || echo 0)" -gt "$before_mtime" ]]
-  }
-  expect_true "process B's next heartbeat refreshes that record" wait_for 30 record_refreshed
-  evidence "${x2} was refused ${role} twice (409 naming ${x}); client instance ${instance_b} kept it and kept its record of ${x}"
+  expect "A's re-assertion under its new id is refused too" "$(claim_status cc-a "$x2" "")" "409"
+  expect "the role stays under X" "$(role_holder "$role")" "$x"
+  expect_true "the role record of X survived both refusals" test -f "$record"
+  evidence "${x2} was refused ${role} twice (409 naming ${x}), whose entry is live inside client instance ${instance_b}; the claim of ${role} stayed under ${x}"
   end_row
   end_scenario
 }
 
 # ---- the run ---------------------------------------------------------------------------------
+started_at=$SECONDS
 row1_omp
 row1_claude
 row2_fork
 row3_move
 row4_handoff
 row5_omp
+row6_predecessor
 row5_claude
+note "every row is driven; the rows took $((SECONDS - started_at))s"
 
 printf '\n'
 failures=0
