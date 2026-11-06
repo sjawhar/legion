@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  A listener or dispatch server whose start sends a stream read or a stream create that the NATS
+  server leaves unanswered now sends it again, up to three sends, instead of ending the process.
+  Two programs starting at once each reconcile `ENVOY_NOTIFICATIONS`, and the one that lost its
+  answer used to die ten seconds after it bound its port, serving nothing. The update of that
+  stream already worked this way; the read and the create did not.
+
+  Each start-up step of the listener that can end the process now names itself in its fatal line,
+  so a log that held only `context deadline exceeded` says which step timed out.
