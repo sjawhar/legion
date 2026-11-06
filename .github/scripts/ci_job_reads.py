@@ -662,6 +662,7 @@ GATES = [
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds each lane's server port through it"),
         ("bun.lock", f"{at('dispatch', 'playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
          f"which pins the Playwright version whose browsers {at('dispatch', 'Install Playwright Chromium, WebKit and Firefox')} downloads"),
+        (".github/scripts/playwright-deps-current.sh", at("dispatch", "Install Playwright Chromium, WebKit and Firefox")),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + envoy_client_dep("imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:17 runs")
       + setup_go("dispatch", f"{ENVOY}/go.mod") + bun_job("dispatch") + CI_SELF),
