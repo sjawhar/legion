@@ -25,8 +25,10 @@ GlobalRegistrator.register();
 // from `bun:test` and no global, so without this line every `waitFor` and `findBy*` under
 // `jest.useFakeTimers()` takes the real-clock path and polls timers the test is holding still:
 // a wait whose node is already there passes by its first synchronous check, and a wait that
-// needs the clock to move never ends. `testing-library-fake-timers.test.tsx` is the proof.
-// (dispatch://INFRA-983 found the same line; this change carries it.)
+// needs the clock to move can never end. That is what dispatch://INFRA-983 measured on a 2-core
+// pod, where four of its files fail 16 tests without this line; on the pod this line was written
+// in, nothing discriminates it, so `testing-library-fake-timers.test.tsx` holds it in place by
+// asserting the global rather than by timing a wait, and says so.
 (globalThis as unknown as { jest: typeof jest }).jest = jest;
 
 // Unit tests have no Dispatch server to answer GET /api/v1/schema/blocks, so the session cache
