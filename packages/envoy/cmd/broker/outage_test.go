@@ -323,7 +323,7 @@ func buildAgentSecrets(t *testing.T) string {
 	binPath := filepath.Join(t.TempDir(), "agent-secrets")
 	build := exec.Command("go", "build", "-o", binPath, ".")
 	build.Dir = filepath.Join("..", "agent-secrets")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.1")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/agent-secrets: %v\n%s", err, out)
 	}

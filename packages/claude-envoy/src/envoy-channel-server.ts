@@ -25,6 +25,11 @@ import {
 import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
 import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
+import {
+  heartbeatRetryDelayMs,
+  REGISTRATION_SETTLE_MS,
+  SHUTDOWN_SETTLE_MS,
+} from "@legion/envoy-client/envoy-settings"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
@@ -65,6 +70,7 @@ import {
   EnvoyApiError,
   type EnvoyClient,
   expandSubscriptionTopics,
+  holderStateOf,
   mergeInterestSources,
   newClientInstanceID,
   type SubscribeResult,
@@ -292,6 +298,17 @@ export interface ChannelSessionOptions {
   readonly configFile: SessionConfigFile
   /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
   readonly handoffFlushTimeoutMs?: number
+  /** How long a deregistration waits for a registration already on the wire (default
+   *  `REGISTRATION_SETTLE_MS`), past which the DELETE goes out anyway. The shutdown path spends
+   *  at most `SHUTDOWN_SETTLE_MS` of it, over both of its waits. */
+  readonly registrationSettleMs?: number
+  /**
+   * Schedules the one extra registration a failed heartbeat makes, at the delay it is handed
+   * (the shared draw, `heartbeatRetryDelayMs`), and answers how to drop it; `setTimeout` on this
+   * process's clock unless a test passes its own, so a test reads the delay the session drew and
+   * runs the call without waiting it out.
+   */
+  readonly scheduleRetry?: (run: () => void, delayMs: number) => () => void
   /**
    * `${CLAUDE_PLUGIN_DATA}`: role state per session id, the per-process handoff files, and the
    * replay state per session id.
@@ -590,6 +607,48 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const result = registryWrites.then(() => write())
     registryWrites = result.catch(() => undefined)
     return result
+  }
+
+  /**
+   * The registration this process has on the wire, if any, settled either way. A
+   * `DELETE /v1/sessions/<id>` that overtakes one is undone when it lands: the listener writes the
+   * record again, and a session nothing heartbeats stays registered — live for the live window,
+   * then unresponsive for the gone horizon — so peers keep sending to a server that has stopped
+   * (dispatch://INFRA-392). Every deregistration waits it out first.
+   */
+  let registrationInFlight: Promise<void> | undefined
+
+  /** How long a deregistration waits for that registration, and for the writes the chain still
+   *  holds. A listener call can take a timeout and a retry to fail, so the default is the whole
+   *  of one attempt; past it the DELETE goes out anyway, since one never sent always leaves the
+   *  record behind where one that races a slow registration only may. */
+  const settleMs = options.registrationSettleMs ?? REGISTRATION_SETTLE_MS
+
+  /** The shutdown path's whole settling budget, over both its waits (`SHUTDOWN_SETTLE_MS`). A
+   *  test that shortens `settleMs` shortens this with it. */
+  const shutdownSettleMs = Math.min(settleMs, SHUTDOWN_SETTLE_MS)
+
+  /** Resolves when `settling` settles, or when `ms` have passed. */
+  const settledOrGivenUp = async (settling: Promise<unknown>, ms = settleMs): Promise<void> => {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const timer = setTimeout(resolve, ms)
+    try {
+      await Promise.race([settling.catch(() => undefined), promise])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** Deregisters a session this server has stopped heartbeating: its own at shutdown, and the
+   *  pre-`/clear` id a handoff leaves behind, once that session's registration has settled or
+   *  `settleFor` has passed. The DELETE carries this process's client instance id, so the
+   *  listener removes only a record this instance's registration wrote. */
+  const deregister = async (sessionID: string, settleFor = settleMs): Promise<void> => {
+    if (registrationInFlight !== undefined) await settledOrGivenUp(registrationInFlight, settleFor)
+    await options.client.unregisterSession({
+      sessionID,
+      clientInstanceID: options.clientInstanceID,
+    })
   }
 
   // The live path's claims, which a replay sweep reads to leave a frame being delivered alone.
@@ -1022,7 +1081,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const topics = registeredTopics()
     const asking = relay?.sessionID === identity.id ? relay : undefined
     asking?.delivery.setFollowed(topics)
-    const result = await options.client.subscribe({
+    const registering = options.client.subscribe({
       sessionID,
       directory: identity.directory,
       topics,
@@ -1035,6 +1094,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       plugin: { name: packageName, version: options.pluginVersion },
       ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
     })
+    // Held as a promise that settles either way, so a deregistration waits for the call to leave
+    // the wire without taking on its rejection.
+    const settled = registering.then(
+      () => undefined,
+      () => undefined,
+    )
+    registrationInFlight = settled
+    void settled.then(() => {
+      if (registrationInFlight === settled) registrationInFlight = undefined
+    })
+    const result = await registering
     takeDeliveryAnswer(sessionID, topics, asking, result)
   }
 
@@ -1204,10 +1274,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
         "flushing NATS",
       )
-      await options.client.unregisterSession({
-        sessionID: previous,
-        clientInstanceID: options.clientInstanceID,
-      })
+      // The old id's own registration first: one still on the wire writes the record back after
+      // this DELETE, and the id Claude Code has left stays registered with nothing heartbeating
+      // it.
+      await deregister(previous)
     } catch (error) {
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
@@ -1324,8 +1394,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // One tick at a time, and at most one pending behind it. `serialized` already
   // orders the registry writes across ticks; what these two flags buy is
   // coalescing — a tick requested while one runs (a handoff file written
-  // mid-tick) runs once, straight after — and the single immediate retry a
-  // failed tick asks for below.
+  // mid-tick) runs once, straight after.
   let heartbeatInFlight = false
   let heartbeatRequested = false
   let outageReported = false
@@ -1333,7 +1402,25 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // "no holder" for a session whose registry entry lapsed, and only that warrants a
   // `"reregistered"` regain. Cleared once a whole tick has succeeded.
   let registrationFailed = false
-  const heartbeat = async (): Promise<void> => {
+  // Whether the one extra call a failed tick buys is already owed, and how to drop it: armed by
+  // a failed interval tick, spent by the call it schedules, and cleared by a tick that succeeds
+  // or by shutdown.
+  let retryArmed = false
+  let dropRetry: (() => void) | undefined
+  const scheduleRetry: NonNullable<ChannelSessionOptions["scheduleRetry"]> =
+    options.scheduleRetry ??
+    ((run, delayMs) => {
+      const timer = setTimeout(run, delayMs)
+      return () => {
+        clearTimeout(timer)
+      }
+    })
+  const clearRetry = (): void => {
+    retryArmed = false
+    dropRetry?.()
+    dropRetry = undefined
+  }
+  const heartbeat = async (fromRetry = false): Promise<void> => {
     if (shuttingDown || heartbeatInFlight) return
     heartbeatInFlight = true
     try {
@@ -1351,18 +1438,26 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       })
       registrationFailed = false
       outageReported = false
+      // Back to the plain interval, and a pending extra call goes with it: the registration it
+      // would refresh is fresh now, and a listener that is still slow is owed nothing.
+      clearRetry()
     } catch (error) {
+      // The extra call this failure buys, armed only from an interval tick: a retry that fails
+      // is followed by the next tick, not by a second retry, so a listener that keeps refusing
+      // sees one extra call per interval and no more. A handoff that unregistered the old id and
+      // then failed to register the new one leaves the session unreachable under both until that
+      // call, which is why it does not wait the whole interval out; the delay is drawn per
+      // session, so a listener that failed many of them is not met by all of them at once.
+      const retryIn = fromRetry ? undefined : armRetry()
       if (outageReported) return
       outageReported = true
+      const retrying =
+        retryIn === undefined
+          ? "retrying at the next heartbeat"
+          : `retrying once in ${Math.round(retryIn / 1000)} s, then every heartbeat`
       process.stderr.write(
-        `envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat\n`,
+        `envoy-channel: registry heartbeat failed (${messageFor(error)}); ${retrying}\n`,
       )
-      // A handoff that unregistered the old id and then failed to register the new
-      // one leaves the session unreachable under both until the next attempt: one
-      // immediate retry, not the full heartbeat interval, closes that window. Bounded
-      // to once per outage: a further failure here hits the `outageReported` guard
-      // above before ever reaching this line.
-      requestHeartbeat()
     } finally {
       heartbeatInFlight = false
       // Every tick also sweeps the stream, so a missed trigger is caught up, and a listener that
@@ -1373,6 +1468,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         void heartbeat()
       }
     }
+  }
+  /** Schedules the extra call a failed heartbeat buys and answers how far out it is, or nothing
+   *  when one is already owed. The delay is the shared draw (`heartbeatRetryDelayMs`), the one
+   *  pi-envoy's pane plugin retries on too, so the sessions a slow listener failed together come
+   *  back spread rather than in one burst. */
+  const armRetry = (): number | undefined => {
+    if (retryArmed || shuttingDown) return undefined
+    retryArmed = true
+    const delayMs = heartbeatRetryDelayMs()
+    dropRetry = scheduleRetry(() => {
+      // A tick settled while the delay ran: the registration is fresh and the call is dropped.
+      if (!retryArmed) return
+      retryArmed = false
+      dropRetry = undefined
+      void heartbeat(true)
+    }, delayMs)
+    return delayMs
   }
   const requestHeartbeat = (): void => {
     if (heartbeatInFlight) heartbeatRequested = true
@@ -1460,8 +1572,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // `watchFile` also calls the listener, with every stat field zeroed, when the file
   // is missing as polling begins and when it is removed. A missing file names no id
   // to adopt, and the request below already covers startup: a tick there would be a
-  // second one for the same moment, and in an outage one more attempt than the
-  // bounded retry allows.
+  // second one for the same moment, and in an outage one more attempt than the one
+  // extra call a failed tick buys.
   const handoffFileChanged = (current: Stats): void => {
     if (current.ino !== 0) requestHeartbeat()
   }
@@ -1532,16 +1644,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
+      // The extra call a failed tick scheduled goes too: nothing may register behind the DELETE,
+      // and a timer still pending would hold this process open for the whole of its delay.
+      clearRetry()
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       // The relay's unanswered frames `nak`, so the listener sends them to whoever resumes.
       closeRelay()
       await forwarder.close()
-      await serialized(() =>
-        options.client.unregisterSession({
-          sessionID: identity.id,
-          clientInstanceID: options.clientInstanceID,
-        }),
-      ).catch((error: unknown) => {
+      // The heartbeat is stopped and `follow` refuses while shutting down, so no registration
+      // starts from here. What the chain still holds is waited out — a registration it runs after
+      // the DELETE would write the record back — and so is one already on the wire, both bounded,
+      // and on this path bounded together by `shutdownSettleMs`: a write this listener has
+      // stalled on must not keep the deregistration off the wire entirely, since a record left
+      // behind outlives this process by the whole gone horizon, and the process is not given the
+      // two full waits before it is killed.
+      const settleBy = Date.now() + shutdownSettleMs
+      await settledOrGivenUp(registryWrites, shutdownSettleMs)
+      await deregister(identity.id, Math.max(0, settleBy - Date.now())).catch((error: unknown) => {
         process.stderr.write(
           `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
         )
@@ -1584,6 +1703,7 @@ export async function executeEnvoyTool(
         message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
+        recipient_state: result.recipientState,
         confirmed: result.confirmed,
       }
     }
@@ -1596,9 +1716,20 @@ export async function executeEnvoyTool(
         message: args.message,
         ...toMessageMetadata(args),
       })
-      // A kept answer is a success: the listener holds the message for the role's next holder.
-      // The line says so, in the words the Oh My Pi plugin uses (`publishConfirmationText`).
-      return { message: publishConfirmationText(result), ...result }
+      // The answer the model reads, its line first. A topic send whose subscriber stopped
+      // answering was accepted and stored for that session, and this result is the one place
+      // the model is told so; a kept answer is a success of its own, which the line says in the
+      // words the Oh My Pi plugin uses (`publishConfirmationText`).
+      return {
+        message: publishConfirmationText(result),
+        event_id: result.envelope.event_id,
+        topic: result.envelope.topic,
+        ...(result.holder === undefined ? {} : { holder: result.holder }),
+        ...(result.holderState === undefined ? {} : { holder_state: result.holderState }),
+        unresponsive: result.unresponsive,
+        ...(result.kept === undefined ? {} : { kept: result.kept }),
+        ...(result.keptReason === undefined ? {} : { kept_reason: result.keptReason }),
+      }
     }
     case EnvoyToolOperation.subscribe: {
       const args = parseArguments(spec, input)
@@ -1624,9 +1755,12 @@ export async function executeEnvoyTool(
       return { session_id: identity.id, machine_id: machineID(), dir: identity.directory }
     case EnvoyToolOperation.listSessions: {
       const args = parseArguments(spec, input)
+      // The stalled sessions are asked for by name: a peer that missed its heartbeats is still
+      // running, and a list that leaves it out is read as the peer having died.
       const sessions = await runtime.client.listSessions({
         ...(args.dir === undefined ? {} : { directory: args.dir }),
         ...(args.title === undefined ? {} : { title: args.title }),
+        include: "unresponsive",
       })
       return sessionsOnMachine(sessions, args.machine)
     }
@@ -1639,7 +1773,10 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.getRole: {
       const args = parseArguments(spec, input)
-      return runtime.client.getRole(args.role)
+      const role = await runtime.client.getRole(args.role)
+      // A listener that names only one of the two states still shows the model one answer: what
+      // state the holder is in, and when it was last seen.
+      return { ...role, holder_state: holderStateOf(role) }
     }
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input)
