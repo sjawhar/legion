@@ -15,7 +15,7 @@ interface Recorded {
   readonly body: unknown;
 }
 
-const temporaryDirectory = temporaryDirectories("dispatch-cli");
+const makeDirectory = temporaryDirectories("dispatch-cli");
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const requests: Recorded[] = [];
@@ -423,7 +423,7 @@ beforeEach(() => {
   eventLog = { last: 40, served: 40, queries: [] };
   handoffs.length = 0;
   interests = () => Response.json({ error: "unset" }, { status: 500 });
-  stateDir = temporaryDirectory();
+  stateDir = makeDirectory();
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
   forgetKeyedLayerMemory();
@@ -1359,7 +1359,7 @@ describe("the dispatch CLI's envoy.json", () => {
 
   /** A directory whose envoy.json is not JSON, so a command that reads it exits 2. */
   function brokenConfigDirectory(): string {
-    const dir = temporaryDirectory("broken");
+    const dir = makeDirectory("broken");
     writeFileSync(join(dir, "envoy.json"), "{not json");
     return dir;
   }
@@ -1695,7 +1695,7 @@ describe("the dispatch CLI's subscription note", () => {
     ] as const) {
       interests = answer;
       requests.length = 0;
-      stateDir = temporaryDirectory();
+      stateDir = makeDirectory();
       nextProcess("ses-1");
       const { code, stdout } = await run(ask, withListener);
       expect(code).toBe(0);
@@ -1846,7 +1846,7 @@ describe("cliRefusals", () => {
     expect(unreadable.code).toBe(2);
     expect(cliRefusals(unreadable.stdout)).toEqual(refusal(unreadable.stdout, null));
 
-    stateDir = temporaryDirectory();
+    stateDir = makeDirectory();
     writeFileSync(join(stateDir, "sessions"), "a file where the directory goes");
     const unlisted = await run(["projects"], omp);
     expect(unlisted.code).toBe(2);
@@ -1861,14 +1861,14 @@ describe("cliRefusals", () => {
     expect(warned.stderr).toStartWith("dispatch: warning: ");
     expect(cliRefusals(`${warned.stderr}${warned.stdout}`)).toEqual([]);
 
-    stateDir = temporaryDirectory();
+    stateDir = makeDirectory();
     mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
     const unrecorded = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
     expect(unrecorded.code).toBe(0);
     expect(unrecorded.stdout).toContain("\ndispatch: Dispatch took the call, but this session's");
     expect(cliRefusals(unrecorded.stdout)).toEqual([]);
 
-    stateDir = temporaryDirectory();
+    stateDir = makeDirectory();
     mkdirSync(join(stateDir, ".config", "legion"), { recursive: true });
     writeFileSync(
       join(stateDir, ".config", "legion", "envoy.json"),
@@ -1918,7 +1918,7 @@ describe("cliRefusals", () => {
       ],
     ];
     for (const [name, argv, env, tool] of cases) {
-      stateDir = temporaryDirectory();
+      stateDir = makeDirectory();
       const { code, stdout } = await run(argv, env);
       expect(code, name).toBeGreaterThan(0);
       const logged = ledger("ses-1");
@@ -1939,7 +1939,7 @@ describe("cliRefusals", () => {
     expect(code).toBe(2);
     expect(existsSync(join(stateDir, "sessions"))).toBe(false);
 
-    stateDir = temporaryDirectory();
+    stateDir = makeDirectory();
     await run(["doc-edit", "--help"], omp);
     await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
     expect(existsSync(join(stateDir, "sessions", "ses-1", "results.jsonl"))).toBe(false);

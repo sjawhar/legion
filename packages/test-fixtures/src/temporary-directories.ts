@@ -4,20 +4,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** When the directories a maker made are removed: after each test, or after the whole suite. */
-export type TemporaryDirectoryScope = "test" | "suite";
-
 export type TemporaryDirectoryOptions = {
   /**
-   * `"test"`, the default, removes every directory the maker made in `afterEach`. `"suite"` removes
-   * them in `afterAll`, for a directory a test file makes at module scope or in a `describe` body
-   * and every test of that scope reads.
-   */
-  scope?: TemporaryDirectoryScope;
-  /**
-   * Returns `realpathSync` of the directory. A macOS `tmpdir()` is a symlink (`/var` to
-   * `/private/var`), so a test that compares a path a child process printed with the path the
-   * maker returned needs the resolved one.
+   * Returns the path under `realpathSync` of `tmpdir()`. A macOS `tmpdir()` is a symlink (`/var`
+   * to `/private/var`), so a test that compares a path a child process printed with the path the
+   * fixture returned needs the resolved one.
    */
   real?: boolean;
 };
@@ -31,10 +22,10 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
 /**
  * Registers the removal of every directory the returned maker makes, and returns the maker.
  *
- * Call it at the test file's module scope, or in the body of a `describe`: it registers an
- * `afterEach` or an `afterAll` hook where it is called, and `bun:test` takes the scope of a hook
- * from the point of the call. The call itself makes nothing, so a scope whose hooks never run
- * leaves nothing behind.
+ * Call it at the test file's module scope, or in the body of a `describe`: it registers the
+ * `afterEach` that removes the directories where it is called, and `bun:test` takes the scope of
+ * a hook from the point of the call. The call itself makes nothing, so a scope whose hooks never
+ * run leaves nothing behind.
  *
  * **Call the maker itself from a test body or from a hook, never at module scope or in a
  * `describe` body.** The maker makes its directory at the call, and Bun runs a module body and a
@@ -52,20 +43,15 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
  *
  * The maker is synchronous, so a test body uses it without `await`.
  */
-export function temporaryDirectories(
-  prefix: string,
-  options: TemporaryDirectoryOptions = {}
-): TemporaryDirectoryMaker {
+export function temporaryDirectories(prefix: string): TemporaryDirectoryMaker {
   const made: string[] = [];
-  const remove = (): void => {
+  afterEach(() => {
     for (const directory of made.splice(0)) rmSync(directory, { recursive: true, force: true });
-  };
-  if (options.scope === "suite") afterAll(remove);
-  else afterEach(remove);
+  });
   return (suffix) => {
     const directory = mkdtempSync(join(tmpdir(), nameTemplate(prefix, suffix)));
     made.push(directory);
-    return options.real === true ? realpathSync(directory) : directory;
+    return directory;
   };
 }
 
@@ -89,13 +75,12 @@ export function temporaryDirectories(
  * parent: `realpathSync` needs a path that exists, and the directory itself does not yet.
  *
  * The name is the prefix, a dash and eight random hexadecimal characters, two more than
- * `mkdtemp` adds. The directory is made with `recursive`, so the hook is safe to run twice: Bun
- * runs a file's root `beforeAll` again in some shapes (a file of many `describe`s, one of them
- * `describe.skipIf(true)`, was measured doing so), and an `EEXIST` there would fail the file.
+ * `mkdtemp` adds. The directory is made exclusively, so `mode` applies to it and a path that
+ * somehow exists already fails the file rather than handing two suites one directory.
  */
 export function temporaryDirectory(
   prefix: string,
-  options: Omit<TemporaryDirectoryOptions, "scope"> = {}
+  options: TemporaryDirectoryOptions = {}
 ): string {
   const parent = options.real === true ? realpathSync(tmpdir()) : tmpdir();
   const directory = join(
@@ -103,7 +88,7 @@ export function temporaryDirectory(
     `${nameTemplate(prefix, undefined)}${randomBytes(4).toString("hex")}`
   );
   beforeAll(() => {
-    mkdirSync(directory, { mode: 0o700, recursive: true });
+    mkdirSync(directory, { mode: 0o700 });
   });
   afterAll(() => {
     rmSync(directory, { recursive: true, force: true });
@@ -112,8 +97,9 @@ export function temporaryDirectory(
 }
 
 /**
- * The template `mkdtemp` adds six random characters to: the prefix, the suffix when the caller
- * named one, and one dash, whether or not the prefix already ends with dashes.
+ * The name both forms build on: the prefix, the suffix when the caller named one, and one dash,
+ * whether or not the prefix already ends with dashes. `temporaryDirectories` hands it to
+ * `mkdtemp`, which adds six random characters to it; `temporaryDirectory` adds eight of its own.
  */
 function nameTemplate(prefix: string, suffix: string | undefined): string {
   const stem = suffix === undefined || suffix === "" ? prefix : `${prefix}-${suffix}`;

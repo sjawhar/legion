@@ -9,7 +9,7 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 // UNLABELLED and LABELLED.
 const rig = join(import.meta.dir, "namespace-rig.sh");
 
-const temporaryDirectory = temporaryDirectories("namespace-rig");
+const makeDirectory = temporaryDirectories("namespace-rig");
 
 interface Listing {
   unlabelled: string[];
@@ -17,7 +17,7 @@ interface Listing {
 }
 
 function clean(label: string, before: Listing, after: Listing, failListing = false) {
-  const evidence = temporaryDirectory();
+  const evidence = makeDirectory();
   const script = [
     "set -Eeuo pipefail",
     `source ${JSON.stringify(rig)}`,

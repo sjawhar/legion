@@ -1,16 +1,13 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { temporaryDirectories, temporaryDirectory } from "./temporary-directories";
 
 const makeDirectory = temporaryDirectories("test-fixtures-per-test");
-const makeResolved = temporaryDirectories("test-fixtures-resolved", { real: true });
 
 /** The path the first test made, which the test after it finds removed. */
 let fromTheFirstTest = "";
-/** The path the describe below made, which the test after the describe finds removed. */
-let fromTheDescribe = "";
 /** The path the one-shot describe below made, which the test after it finds removed. */
 let fromTheOneShot = "";
 
@@ -34,43 +31,53 @@ test("makes a fresh directory on every call", () => {
   expect(existsSync(other)).toBe(true);
 });
 
-test("real returns the resolved path, where tmpdir() is a symlink", () => {
+// `temporaryDirectory` resolves `tmpdir()` at the call, in a module body or a `describe` body,
+// so this row cannot point the fixture's own `TMPDIR` at a symlink after the call: it runs a
+// file of its own in a child whose `TMPDIR` is one, as filtered-run.test.ts runs its lock file.
+// Linux's `tmpdir()` is no symlink, so a row that read this process's own would hold with `real`
+// ignored.
+test("real resolves a TMPDIR that is a symlink", () => {
   const root = makeDirectory("symlinked-tmpdir");
   const target = join(root, "target");
   mkdirSync(target);
   const link = join(root, "link");
   symlinkSync(target, link);
-  const previousTmpdir = process.env["TMPDIR"];
-  process.env["TMPDIR"] = link;
-  try {
-    expect(dirname(makeResolved())).toBe(realpathSync(target));
-    expect(dirname(makeDirectory("through-the-link"))).toBe(link);
-  } finally {
-    if (previousTmpdir === undefined) delete process.env["TMPDIR"];
-    else process.env["TMPDIR"] = previousTmpdir;
-  }
+  const fixture = JSON.stringify(join(import.meta.dir, "temporary-directories"));
+  const file = join(root, "real.test.ts");
+  writeFileSync(
+    file,
+    `import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { temporaryDirectory } from ${fixture};
+
+const resolved = temporaryDirectory("child-real", { real: true });
+const plain = temporaryDirectory("child-plain");
+
+test("prints the parent of each reserved path", () => {
+  expect(existsSync(resolved)).toBe(true);
+  expect(existsSync(plain)).toBe(true);
+  console.log(JSON.stringify({ plain: dirname(plain), resolved: dirname(resolved) }));
+});
+`
+  );
+  const run = Bun.spawnSync([process.execPath, "test", file], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: link },
+  });
+  const output = `${run.stdout.toString()}${run.stderr.toString()}`;
+  // `real` is the whole difference between the two: the plain reservation keeps the symlink the
+  // child's `TMPDIR` named, and the resolved one names what the symlink points at.
+  expect(output).toContain(JSON.stringify({ plain: link, resolved: realpathSync(target) }));
+  expect(run.exitCode).toBe(0);
 });
 
-describe("a maker whose scope is the suite", () => {
-  const makeForTheSuite = temporaryDirectories("test-fixtures-suite", { scope: "suite" });
-
-  test("makes a directory the suite's first test can use", () => {
-    fromTheDescribe = makeForTheSuite();
-    expect(existsSync(fromTheDescribe)).toBe(true);
-  });
-
-  test("keeps that directory for the suite's next test", () => {
-    expect(existsSync(fromTheDescribe)).toBe(true);
-  });
-});
-
-describe("a one-shot directory whose scope is the suite", () => {
+describe("a one-shot directory a whole describe shares", () => {
   const one = temporaryDirectory("test-fixtures-one-shot");
   // Read in the describe's body, where the call was: the path is reserved there and the directory
   // is made in the `beforeAll` the call registered, so a run that evaluates this body and runs no
   // hook of it makes nothing.
   const existedAtTheCall = existsSync(one);
-  const resolved = temporaryDirectory("test-fixtures-one-shot-real", { real: true });
 
   test("makes one directory under tmpdir(), named after the prefix", () => {
     fromTheOneShot = one;
@@ -83,25 +90,11 @@ describe("a one-shot directory whose scope is the suite", () => {
   test("keeps that directory for the suite's next test", () => {
     expect(existsSync(one)).toBe(true);
   });
-
-  // `realpathSync` needs a path that exists and the reserved directory does not, so `real`
-  // resolves the parent — `tmpdir()`, which always exists — and joins the reserved name onto it.
-  // The maker's row above reads the same resolution under a `tmpdir()` that is a symlink, which a
-  // reserved path cannot: a symlink made in this body would itself outlive a run that skips it.
-  test("real joins the reserved name onto the resolved tmpdir()", () => {
-    expect(dirname(resolved)).toBe(realpathSync(tmpdir()));
-    expect(existsSync(resolved)).toBe(true);
-  });
 });
 
 test("removed the one-shot directory when its suite ended", () => {
   expect(fromTheOneShot).not.toBe("");
   expect(existsSync(fromTheOneShot)).toBe(false);
-});
-
-test("removed the suite's directory when that suite ended", () => {
-  expect(fromTheDescribe).not.toBe("");
-  expect(existsSync(fromTheDescribe)).toBe(false);
 });
 
 /** The path the skipped describe below reserved, which no hook of that describe ever makes. */

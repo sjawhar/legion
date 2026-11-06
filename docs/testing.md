@@ -18,7 +18,7 @@ The two Bun packages that do not are the fixture package itself, whose tests imp
 - Take a temporary directory from `@legion/test-fixtures/temporary-directories`, never from an `mkdtemp` with a cleanup of your own.
   One directory for a whole file or `describe` is `temporaryDirectory(prefix)`: call it at the test file's module scope, or in the body of a `describe`, never inside a test body.
   It reserves the path at the call and returns it, and registers the `beforeAll` that makes the directory and the `afterAll` that removes it where it is called.
-  A directory per test is `temporaryDirectories(prefix)`, registered in those same two places, which returns a maker that makes a directory at each call and removes them in its `afterEach` — or, with `scope: "suite"`, its `afterAll`.
+  A directory per test is `temporaryDirectories(prefix)`, registered in those same two places, which returns a maker that makes a directory at each call and removes every one of them in its `afterEach`.
   Call that maker from a test body or a hook only: it makes its directory at the call, where the one-shot form makes nothing until its hook runs.
   `bun:test` takes a hook's scope from the point of the call, and Bun 1.4.4 evaluates a module body and a `describe` body in three cases where it then runs no hook that body registered: a `bun test -t <pattern>` that selects no row of the file, one that selects no row of the `describe`, and `describe.skipIf(true)`.
   Nothing catches what such a run leaves: under `bun test` neither `process.once("exit")` nor `"beforeExit"` runs.
@@ -39,6 +39,9 @@ The two Bun packages that do not are the fixture package itself, whose tests imp
   that swaps the runtime's environment for a plain one, and after it `process.env !== Bun.env`, a write reaches neither `Bun.env` nor a child process the test spawns, and the names the test deleted stay deleted in the real environment.
   Under `--parallel`, which implies `--isolate`, the next file gets a fresh `process` and never sees the swap, so the damage shows only where it is hardest to read.
 
+- `mock.module` at module scope outlives the file that wrote it: a filtered run that selects no row of the file still applies it, Bun 1.4.4 has no API that takes a module mock off again, and every later file of the process reads the mocked module (`packages/pi-shared/test/host-registry.ts` says what that costs the suites that mock the host package).
+  Prefer a seam the code under test exposes, set in a `beforeAll` and cleared in the matching `afterAll`, as `setNatsConnectForTests` and `resetNatsConnectForTests` in `packages/pi-envoy/extensions/envoy.ts` are.
+
 - A suite that runs jj or git takes its isolation from `versionControlEnvironment` (`@legion/test-fixtures/version-control-environment`): a home of the suite's own with a jj configuration file in it, no git configuration at all (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), no credential prompt, and the identity jj commits as.
   So neither the developer's `~/.jjconfig.toml`, nor their `~/.gitconfig`, nor the system gitconfig decides a result.
   A suite whose code under test starts jj with the process's own environment puts those names on `process.env` itself, and hands `versionControlNames` to `restoreEnvironment` so the next file finds its own again.
@@ -52,6 +55,7 @@ The two Bun packages that do not are the fixture package itself, whose tests imp
   Call `skipWithout("docker")` once, at the file's module scope, and hand the answer to every `describe.skipIf` and `test.skipIf` of the file:
   it prints one line naming the missing programs and the file whose tests did not run (`@legion/test-fixtures/host-tools`), and a call per test would print that line per test.
   A suite that needs a service does the same with the variable that names it, and makes a database of its own rather than reading the one it finds (`LEGION_TEST_PG_DSN`, `packages/dispatch/e2e/__tests__/psql-session.test.ts`).
+  One that needs both builds the two halves into a single list and prints one line, rather than calling `skipWithout` beside a warning of its own, so a host that has neither reads one line naming both (`hostTool` with the variable, in that file and in `harness-lanes.test.ts`).
 
 - Start a container with `docker run --rm` and register its removal the moment `docker run` returns, not once the whole start has succeeded:
   a start that throws half-way has already made the container (`startNats` in `scripts/e2e/lib/nats-stream.test.ts`).

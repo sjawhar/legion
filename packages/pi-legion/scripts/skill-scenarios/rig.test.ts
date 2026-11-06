@@ -22,9 +22,12 @@ const work = temporaryDirectory("skill-scenarios-rig");
 const operatorHome = path.join(work, "operator-home");
 // The home the probes must not reach, with the one thing they look for in it: a judge that could
 // read it would list this directory. It is staged in a hook, below the one the reservation
-// registered: a run that selects no row of this file makes neither.
+// registered: a run that selects no row of this file makes neither. Each level is made on its
+// own, never with `recursive`, so this hook makes nothing above the reserved root and a root the
+// fixture did not make is an error here rather than a directory nothing removes.
 beforeAll(() => {
-  mkdirSync(path.join(operatorHome, ".ssh"), { recursive: true });
+  mkdirSync(operatorHome);
+  mkdirSync(path.join(operatorHome, ".ssh"));
   writeFileSync(path.join(operatorHome, ".ssh", "id_ed25519"), "not a key\n", { mode: 0o600 });
 });
 /** The variables every child process of this file gets: the caller's PATH, a HOME of the test's

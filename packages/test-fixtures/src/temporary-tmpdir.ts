@@ -28,7 +28,10 @@ export function temporaryTmpdir(prefix: string): string {
   const root = temporaryDirectory(prefix, { real: true });
   let restore: EnvironmentRestore | undefined;
   beforeAll(() => {
-    restore = captureEnvironment(["TMPDIR"]);
+    // `??=`, so a `beforeAll` that runs a second time without its `afterAll` between captures
+    // nothing: it would capture the root this fixture set, and the restore would then point
+    // every later file of the process at a root this one removed.
+    restore ??= captureEnvironment(["TMPDIR"]);
     process.env["TMPDIR"] = root;
   });
   afterAll(() => {

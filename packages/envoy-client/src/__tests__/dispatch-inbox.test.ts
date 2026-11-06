@@ -8,7 +8,7 @@ import { forgetKeyedLayerMemory } from "../dispatch-http";
 // server answers them, so the test pins the lines the command prints rather than the renderer's
 // own idea of them.
 
-const temporaryDirectory = temporaryDirectories("dispatch-inbox");
+const makeDirectory = temporaryDirectories("dispatch-inbox");
 
 const VIEWER = "alice@theorem.dev";
 const SNOOZED_ID = "33333333-3333-4333-8333-333333333333";
@@ -154,7 +154,7 @@ beforeEach(() => {
   whoamiAnswer = LISTED;
   inboxAnswer = LISTED;
   pendingAnswer = LISTED;
-  stateDir = temporaryDirectory();
+  stateDir = makeDirectory();
   resetAdviceMemory();
   forgetKeyedLayerMemory();
 });

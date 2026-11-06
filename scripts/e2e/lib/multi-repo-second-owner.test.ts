@@ -46,7 +46,7 @@ import {
 
 useScratchDirectory();
 
-const temporaryDirectory = temporaryDirectories("multi-repo-acceptance");
+const makeDirectory = temporaryDirectories("multi-repo-acceptance");
 
 afterEach(() => {
   closeServers();
@@ -842,10 +842,10 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
       push_t: { status: 403, content_type: "text/plain", output: writeRefused.body },
     });
     const forgedProtocol = `import json, sys; print(${JSON.stringify(forged)}); sys.exit(0)`;
-    const workspace = temporaryDirectory("workspace");
+    const workspace = makeDirectory("workspace");
     writeFileSync(join(workspace, "hashlib.py"), forgedProtocol);
 
-    const fakeHome = temporaryDirectory("home");
+    const fakeHome = makeDirectory("home");
     const siteProc = Bun.spawnSync([
       "python3",
       "-c",

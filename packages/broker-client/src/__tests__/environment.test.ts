@@ -17,7 +17,7 @@ import {
 } from "../environment";
 import { FORM_LAUNCHER_CREDENTIAL, FORM_LAUNCHER_CREDENTIAL_DECLINED } from "../wire";
 
-const temporaryDirectory = temporaryDirectories("broker-environment");
+const makeDirectory = temporaryDirectories("broker-environment");
 
 test("a machine that names no identity trades nothing, and that is no error", async () => {
   expect(machineIdentity({})).toBeUndefined();
@@ -95,7 +95,7 @@ test("a client this factory builds asks the broker for no launcher credential", 
     },
   });
   try {
-    const file = join(temporaryDirectory(), "token");
+    const file = join(makeDirectory(), "token");
     await writeFile(file, "projected.service.account.token\n");
     const client = await brokerTokenClient({
       [BROKER_URL_VAR]: `http://127.0.0.1:${broker.port}`,

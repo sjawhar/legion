@@ -9,7 +9,7 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 const ENTRY = join(import.meta.dir, "..", "..", "bin", "dispatch.ts");
 const PROJECTS = 4000;
 
-const temporaryDirectory = temporaryDirectories("dispatch-bin");
+const makeDirectory = temporaryDirectories("dispatch-bin");
 
 const server = Bun.serve({
   port: 0,
@@ -31,7 +31,7 @@ const server = Bun.serve({
 afterAll(() => server.stop(true));
 
 async function runEntry(): Promise<{ code: number; stdout: Uint8Array; stderr: string }> {
-  const state = temporaryDirectory();
+  const state = makeDirectory();
   // Bun.spawn's own stdout pipe drains fast enough to hide the loss, so the entry writes into a
   // shell pipe to `cat`, the way a bash tool captures it; pipefail keeps the entry's exit code.
   // The shell runs the same Bun as the test, not whatever `bun` its PATH resolves.

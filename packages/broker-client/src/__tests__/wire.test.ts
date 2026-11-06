@@ -20,7 +20,7 @@ import type { SubjectToken, TokenSource } from "../source";
 import { BrokerRefusedError, type BrokerToken, BrokerTokenClient } from "../token-client";
 import { FORM_LAUNCHER_CREDENTIAL, FORM_LAUNCHER_CREDENTIAL_DECLINED, TOKEN_PATH } from "../wire";
 
-const temporaryDirectory = temporaryDirectories("broker-client");
+const makeDirectory = temporaryDirectories("broker-client");
 
 /** The one file both clients read. It lives in the Go package's testdata because the Go suite is
  *  the half that existed first; this suite reads it by relative path. */
@@ -169,7 +169,7 @@ function metadataSource(token: string): TokenSource {
 async function corpusSource(spec: CorpusToken): Promise<TokenSource> {
   switch (spec.kind) {
     case "kubernetes-projected-file": {
-      const path = join(temporaryDirectory(), "token");
+      const path = join(makeDirectory(), "token");
       await writeFile(path, `${spec.token}\n`, { mode: 0o600 });
       return projectedToken(path);
     }

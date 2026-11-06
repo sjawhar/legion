@@ -5,17 +5,17 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 import { readSecretFile } from "../secret-file";
 
 describe("readSecretFile", () => {
-  const temporaryDirectory = temporaryDirectories("secret-file");
+  const makeDirectory = temporaryDirectories("secret-file");
 
   test("returns the file contents trimmed", () => {
-    const dir = temporaryDirectory();
+    const dir = makeDirectory();
     const file = path.join(dir, "token");
     writeFileSync(file, "  the-token\n");
     expect(readSecretFile("DISPATCH_TOKEN_FILE", file)).toBe("the-token");
   });
 
   test("throws naming the variable and path for an unreadable or empty file", () => {
-    const dir = temporaryDirectory();
+    const dir = makeDirectory();
     const missing = path.join(dir, "missing");
     const empty = path.join(dir, "empty");
     writeFileSync(empty, "\n");
@@ -29,7 +29,7 @@ describe("readSecretFile", () => {
 
   // A multi-line secret cannot be one bearer, and fetch's refusal of the header would quote it.
   test("throws naming the variable and path, never the secret, for one with whitespace inside", () => {
-    const dir = temporaryDirectory();
+    const dir = makeDirectory();
     for (const contents of ["S3CRET\nnotes\n", "S3CRET TOKEN", "S3CRET\u0000"]) {
       const file = path.join(dir, "token");
       writeFileSync(file, contents);

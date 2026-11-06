@@ -15,7 +15,7 @@ interface TestKeyPair {
 /** nats.js types its `nkeys` export `any`. */
 const testKeys: { createUser(): TestKeyPair; createAccount(): TestKeyPair } = nkeys;
 
-const temporaryDirectory = temporaryDirectories("nats-seed");
+const makeDirectory = temporaryDirectories("nats-seed");
 
 function createUser(): { readonly seed: string; readonly publicKey: string } {
   const user = testKeys.createUser();
@@ -23,7 +23,7 @@ function createUser(): { readonly seed: string; readonly publicKey: string } {
 }
 
 function seedFile(contents: string): string {
-  const file = path.join(temporaryDirectory(), "seed");
+  const file = path.join(makeDirectory(), "seed");
   writeFileSync(file, contents, { mode: 0o600 });
   return file;
 }
@@ -93,7 +93,7 @@ describe("natsAuthOptions", () => {
   });
 
   test("refuses an unusable seed naming its variable and path, never falling back", () => {
-    const dir = temporaryDirectory();
+    const dir = makeDirectory();
     const missing = path.join(dir, "missing");
     const blank = seedFile(" \n");
     const notASeed = seedFile("SUNOTASEED");

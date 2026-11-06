@@ -6,7 +6,7 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 import { approvalAsk, edited, handedBack, opened, recordedAt } from "./approval-events.ts";
 
 const script = join(import.meta.dir, "..", "ask-census.ts");
-const temporaryDirectory = temporaryDirectories("ask-census");
+const makeDirectory = temporaryDirectories("ask-census");
 const servers: Array<{ stop: (force?: boolean) => void }> = [];
 
 afterEach(() => {
@@ -81,7 +81,7 @@ describe("ask census since #1671", () => {
     });
     servers.push(server);
 
-    const home = temporaryDirectory();
+    const home = makeDirectory();
     const marker = join(home, "old-token-ran");
     const oldConfig = join(home, ".config", "opencode", "envoy.json");
     await mkdir(join(home, ".config", "opencode"), { recursive: true });
@@ -140,8 +140,8 @@ describe("ask census since #1671", () => {
     });
     servers.push(server);
 
-    const home = temporaryDirectory();
-    const checkout = temporaryDirectory("checkout");
+    const home = makeDirectory();
+    const checkout = makeDirectory("checkout");
     await mkdir(join(home, ".config", "legion"), { recursive: true });
     await writeFile(
       join(home, ".config", "legion", "envoy.json"),

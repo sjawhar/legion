@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { captureEnvironment } from "@legion/test-fixtures/environment";
+import { hostTool } from "@legion/test-fixtures/host-tools";
 
 import { sql, sqlAt } from "../psql";
 
@@ -10,12 +11,21 @@ import { sql, sqlAt } from "../psql";
  *  skipped where no server is named rather than faked against a mock psql that could agree with a
  *  wrong reading of the protocol. */
 const server = process.env.LEGION_TEST_PG_DSN ?? "";
-const live = server !== "";
+/** Everything those cases need and this host or run does not have. The psql half is the gate
+ *  `skipWithout("psql")` is, composed here rather than called: it prints a line of its own, and a
+ *  host that has neither psql nor a server would get one line for each half rather than one
+ *  naming both (harness-lanes.test.ts composes its Playwright gate the same way). */
+const missing = [
+  ...(hostTool("psql") === null ? ["psql on this host's PATH"] : []),
+  ...(server === ""
+    ? ["LEGION_TEST_PG_DSN, naming a server this run may create a database on"]
+    : []),
+];
+const live = missing.length === 0;
 if (!live) {
   console.warn(
-    `Skipped the tests in ${import.meta.path} that need a database. LEGION_TEST_PG_DSN names ` +
-      "no PostgreSQL server. Set it to a server this run may create a database on and run the " +
-      "tests again."
+    `Skipped the tests in ${import.meta.path} that need a database. This run does not have: ` +
+      `${missing.join("; ")}. Supply what is missing and run the tests again.`
   );
 }
 

@@ -4,7 +4,7 @@ import { temporaryDirectories } from "@legion/test-fixtures/temporary-directorie
 import type { Server, ServerWebSocket } from "bun";
 import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "../local-instance-support";
 
-const temporaryDirectory = temporaryDirectories("local-instance-support");
+const makeDirectory = temporaryDirectories("local-instance-support");
 
 /** True while any process of group `pgid` is alive: signal 0 to the group reaches every member. */
 function groupAlive(pgid: number): boolean {
@@ -65,7 +65,7 @@ afterEach(async () => {
 
 describe("Supervisor.stop", () => {
   test("ends every process group it started, a grandchild included", async () => {
-    const pidFile = join(temporaryDirectory(), "leader.pid");
+    const pidFile = join(makeDirectory(), "leader.pid");
     const made = supervisor();
     const leader = made.start(
       "leader",

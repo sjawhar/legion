@@ -26,8 +26,14 @@ export function captureEnvironment(names: readonly string[]): EnvironmentRestore
  * leaves the next file the caller's own environment.
  *
  * The `afterEach` undoes what a test set, after every test. The `afterAll` is for what no
- * `afterEach` runs after: a file whose module scope set one of the names and whose tests were all
- * skipped, and anything set once the last test's `afterEach` has run.
+ * `afterEach` runs after: a file whose rows are each `.skip`, which runs both of these hooks and
+ * no `afterEach` at all, and anything set once the last test's `afterEach` has run.
+ *
+ * A file sets one of these names in a test or in a hook, never at module scope: `bun test -t
+ * <pattern>` that selects no row of the file evaluates the module body and runs neither hook, so
+ * a name set there is still set for every later file of the process (measured: a file that sets
+ * `TQ3_NAME` at module scope, and a later file that reads `set at module scope` under `-t
+ * later`).
  *
  * A name a `describe` sets for its own tests — in its body or in its `beforeAll` — must not be in
  * the captured list: the `afterEach` puts the captured value back after that describe's first

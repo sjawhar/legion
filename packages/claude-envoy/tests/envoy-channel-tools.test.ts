@@ -17,7 +17,7 @@ import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
-const temporaryDirectory = temporaryDirectories("claude-envoy-slack")
+const makeDirectory = temporaryDirectories("claude-envoy-slack")
 
 function sessionWith(followed: string[]): ChannelSession {
   return {
@@ -226,7 +226,7 @@ test("replies in a Slack thread with slack_post, with the token the broker grant
   const restore = captureEnvironment(["PATH", "SLACK_POST_API_URL"])
   let slack: Server<undefined> | undefined
   try {
-    const dir = temporaryDirectory()
+    const dir = makeDirectory()
     writeFileSync(
       join(dir, "agent-secrets"),
       '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nLEGION_SLACK_BOT_TOKEN=xoxb-granted exec "$@"\n',

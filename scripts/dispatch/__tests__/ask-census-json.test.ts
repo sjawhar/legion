@@ -24,7 +24,7 @@ import {
 } from "./approval-events.ts";
 
 const script = join(import.meta.dir, "..", "ask-census.ts");
-const temporaryDirectory = temporaryDirectories("ask-census-json");
+const makeDirectory = temporaryDirectories("ask-census-json");
 const servers: Array<{ stop: (force?: boolean) => void }> = [];
 
 afterEach(() => {
@@ -119,7 +119,7 @@ async function census(flags: readonly string[]): Promise<{
   exitCode: number;
 }> {
   const url = stubDispatch();
-  const codesPath = join(temporaryDirectory(), "codes.csv");
+  const codesPath = join(makeDirectory(), "codes.csv");
   await writeFile(codesPath, CODES_CSV);
   return spawnCensus(
     [
