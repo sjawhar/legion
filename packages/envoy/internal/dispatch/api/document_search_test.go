@@ -38,7 +38,9 @@ const (
 // is held against (document_search_oracle_test.go), and the arguments each is run with. sorted
 // says the statement declares no order of its own, so its rows are compared as a set; holds and
 // lacks are what the rows must and must not name, which is what says the comparison decided
-// something rather than comparing two empty answers.
+// something rather than comparing two empty answers. A statement the plan assertion alone reads
+// (excludingStatements) carries no oracle and no holds: the equality test runs the statements
+// that have one.
 type documentSearchStatement struct {
 	name      string
 	statement string
@@ -152,18 +154,16 @@ func newDocumentSearchFixture(t *testing.T) documentSearchFixture {
 
 // statements is R1's five, each with the arguments its caller passes: search's two with
 // runFusedSearchQuery's and runMeaningSearch's, the related-item check's two with
-// relatedSearch's, and the related-terms probe with probeRelatedCandidates'. The check's $1 is a
-// tsquery already built (relatedQOpener), never re-stemmed, so it is written here as the picker
-// writes it.
+// relatedSearch's, and the related-terms probe with probeRelatedCandidates'. The check's two are
+// the shape a check leaving nothing out runs; the shape every write runs is excludingStatements
+// below, which the plan assertion reads beside these.
 func (f documentSearchFixture) statements() []documentSearchStatement {
 	word := documentSearchWord
 	probeLexemes := []string{word, documentSearchDocumentWord, documentSearchOldWord}
 	searchArguments := []any{word, f.project, searchDefaultLimit, firstTerm(word), headlineOptions,
 		0, contracts.SearchKindDepth, searchFusionK}
-	meaning := []any{embed.Literal(queryVector()), searchMeaningFloor, f.embedder.Identity()}
-	relatedArguments := []any{"'" + word + "'", f.project, suggestionSearchDepth, word, headlineOptions,
-		0, contracts.SearchKindDepth, searchFusionK}
-	lexemes, weights := []string{word}, []float64{2.5}
+	meaning := f.meaningArguments()
+	relatedKeyword, relatedMeaning := f.relatedArguments()
 	documents := []string{f.notes, f.atlas}
 	return []documentSearchStatement{
 		{
@@ -184,14 +184,14 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 			name:      "the related-item check's keyword stage",
 			statement: relatedKeywordQuery,
 			oracle:    mainRelatedKeywordQuery,
-			arguments: slices.Concat(relatedArguments, []any{lexemes, weights}),
+			arguments: relatedKeyword,
 			holds:     documents,
 		},
 		{
 			name:      "the related-item check's meaning stage",
 			statement: relatedMeaningQuery,
 			oracle:    relatedMeaningQueryOverMainsDocumentArm,
-			arguments: slices.Concat(relatedArguments, meaning, []any{lexemes, weights}),
+			arguments: relatedMeaning,
 			holds:     documents,
 		},
 		{
@@ -209,6 +209,55 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 	}
 }
 
+// meaningArguments are the three parameters a meaning statement reads beyond search's own: the
+// query's vector, the floor a meaning arm's row must clear, and the embedder whose vectors it
+// reads.
+func (f documentSearchFixture) meaningArguments() []any {
+	return []any{embed.Literal(queryVector()), searchMeaningFloor, f.embedder.Identity()}
+}
+
+// relatedArguments is what relatedSearch passes the related-item check's keyword and meaning
+// statements over this fixture: search's own eight, the meaning stage's further three, and the
+// chosen lexemes and their idf last. Both shapes of each statement are run with them, so the
+// plain pair and the excluding pair differ in the filter and in nothing else. The check's $1 is
+// a tsquery already built (relatedQOpener), never re-stemmed, so it is written here as the
+// picker writes it.
+func (f documentSearchFixture) relatedArguments() (keyword, meaning []any) {
+	word := documentSearchWord
+	search := []any{"'" + word + "'", f.project, suggestionSearchDepth, word, headlineOptions,
+		0, contracts.SearchKindDepth, searchFusionK}
+	lexemes, weights := []string{word}, []float64{2.5}
+	return slices.Concat(search, []any{lexemes, weights}),
+		slices.Concat(search, f.meaningArguments(), []any{lexemes, weights})
+}
+
+// excludingStatements is the related-item check's two statements in the shape every write runs:
+// the same text with relatedExcludedOwners in its kinds CTE, over one further parameter holding
+// the owners the check leaves out. relatedSearch runs that shape whenever a check excludes
+// anything, and every recording source names an owner - a new issue's key, an ask's id, the
+// document a block sits on - so a create, an ask and a decision block all run these two, and
+// the plain pair above is the no-write route's alone (INFRA-1160).
+//
+// The owners are the fixture's own issue, as an issue create leaves its own issue out, and the
+// slice is never nil: over a NULL array the filter is null of every row, and `where not` then
+// drops the lot, which would make a plan of nothing.
+func (f documentSearchFixture) excludingStatements() []documentSearchStatement {
+	keyword, meaning := f.relatedArguments()
+	owners := []any{[]string{"issue:" + f.issueKey}}
+	return []documentSearchStatement{
+		{
+			name:      "the related-item check's keyword stage, excluding its own issue",
+			statement: relatedKeywordExcludingQuery,
+			arguments: slices.Concat(keyword, owners),
+		},
+		{
+			name:      "the related-item check's meaning stage, excluding its own issue",
+			statement: relatedMeaningExcludingQuery,
+			arguments: slices.Concat(meaning, owners),
+		},
+	}
+}
+
 // A1. Each statement of R1 reaches its document arm through document_search's GIN index, and no
 // read of artifact_versions in its plan tests a tsquery: that test is what the new table exists
 // to move off a table no index can serve. Naming the index is the assertion, not merely the
@@ -217,10 +266,15 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 // own first key column too. Sequential scans are off for the plan: a fixture this small is read
 // faster whole than through any index, so this says the statement's shape permits the index scan,
 // which is the claim under test.
+//
+// The related-item check's two statements are read in both shapes, since both are statements
+// production runs: the plain pair, and the pair whose kinds CTE filters the owners the check
+// leaves out (excludingStatements), which is what every write runs. The filter wraps the arms
+// in a derived table, so it is the shape whose plan could stop reaching the index.
 func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
 	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
-	for _, statement := range fixture.statements() {
+	for _, statement := range slices.Concat(fixture.statements(), fixture.excludingStatements()) {
 		t.Run(statement.name, func(t *testing.T) {
 			plan := planWithoutSeqScans(t, fixture.database, statement.statement, statement.arguments...)
 			firstKeys.RequireIndexKeyed(t, plan, documentSearchIndex, statement.name, explaintest.CondRequired)
