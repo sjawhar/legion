@@ -659,6 +659,11 @@ const regionSpec = "Context\n\n:::ask{#region urgency=\"low\" multiple=\"false\"
 // write after settle, seeds the document's live text with the same markdown, and returns the
 // store, the service and the document's id once settlement has indexed the block as an ask of the
 // document - the row the carry reads.
+//
+// That one settlement is run at once (SettleNow) rather than waited for at the end of the settle
+// window, so settle is the caller's to choose for its own steps alone: a caller whose steps must
+// not be interleaved by a settlement - one that would version or repair the tree between them -
+// gives a window wider than those steps take and pays nothing for it here.
 func seededRegionDocument(t *testing.T, settle time.Duration) (*store.Store, *Service, string) {
 	t.Helper()
 	database := storetest.Open(t)
@@ -666,8 +671,9 @@ func seededRegionDocument(t *testing.T, settle time.Duration) (*store.Store, *Se
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: settle})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, regionSpec)
-	// Settlement indexes the block as an ask of this document, the row the carry reads.
-	service.ScheduleSettlement(artifactID)
+	// Settlement indexes the block as an ask of this document, the row the carry reads. It runs
+	// now, whatever window the caller chose for its own steps.
+	service.SettleNow(artifactID)
 	waitFor(t, 3*time.Second, "settlement to index the block", func() bool {
 		var rows int
 		if err := database.Pool.QueryRow(context.Background(), `select count(*) from asks where block_artifact_id = $1 and block_id = 'region'`, artifactID).Scan(&rows); err != nil {
@@ -696,10 +702,17 @@ func appendSecondRegionAsk(t *testing.T) func(*pmdoc.Node) *pmdoc.Node {
 // second node a document-socket peer wrote with the id of the block the human answered - carries
 // nothing: one node per id is the first thing the carry holds a version to, before any node is
 // read. The same version without the repeat carries, so the repeat alone is what refuses.
+//
+// The service settles a minute after a live write, wide enough that no settlement runs between
+// the answer and the named version, as in TestAnApprovedVersionHoldingARepeatedBlockIDCarries
+// Nothing. A settlement in that window versions the answered tree itself, and that version
+// carries the approval as well, so the run would hold two carries where it reads the named
+// version's one. With the window at 20 ms, CI run 42119624087 counted exactly that: reviews = 3,
+// artifact.approved events = 2 (dispatch://INFRA-1075).
 func TestAVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 	t.Parallel()
 	run := func(t *testing.T, repeat bool) (reviews, approvals int) {
-		database, service, artifactID := seededRegionDocument(t, 20*time.Millisecond)
+		database, service, artifactID := seededRegionDocument(t, time.Minute)
 		approveStoredVersion(t, database, artifactID, 1, "alice")
 
 		answerBlockAs(t, service, artifactID, "region", "alice", []string{"East"})
