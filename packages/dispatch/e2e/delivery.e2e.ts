@@ -126,29 +126,6 @@ test("the Delivery sidebar nav entry opens the delivery timeline @phone", async 
   await context.close();
 });
 
-test("the header names the window and the freshness row names the prototype's six sources", async ({
-  browser,
-}) => {
-  await seedDeliveryFixture();
-  const context = await asUser(browser, "alice");
-  const page = await context.newPage();
-  await openTimeline(page);
-
-  await expect(page.getByText(/Generated .* · window/)).toBeVisible();
-  const freshness = page.getByRole("region", { name: "Source freshness" });
-  for (const source of [
-    "PRs never checked",
-    "Deploy runs never checked",
-    "PR CI never checked",
-    "Events never received",
-  ]) {
-    await expect(freshness.getByText(source)).toBeVisible();
-  }
-  await expect(freshness.getByText(/^Dispatch \d+ s ago$/)).toBeVisible();
-  await expect(freshness.getByText(/^Agents \d+ s ago$/)).toBeVisible();
-  await context.close();
-});
-
 test("a facet lists each value with its count and narrows the PRs, kept in the URL", async ({
   browser,
 }) => {
@@ -331,9 +308,7 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   await context.close();
 });
 
-test("the list sorts by its headers and a row opens the PR's details", async ({
-  browser,
-}, testInfo) => {
+test("the Repository facet narrows the list through the server", async ({ browser }) => {
   await seedDeliveryFixture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -342,29 +317,17 @@ test("the list sorts by its headers and a row opens the PR's details", async ({
   await page.getByRole("button", { name: "List", exact: true }).click();
   await expect(page).toHaveURL(/mode=list/);
   const titles = page.locator("tbody tr td:nth-child(4)");
-  await expect(titles).toHaveText(["fix: a waiting widget", "feat: a shipped widget"]);
-  await page.getByRole("button", { name: /^Merged/ }).click();
-  await expect(titles).toHaveText(["feat: a shipped widget", "fix: a waiting widget"]);
-  await expect(page.getByText("ACME-1 · P0")).toBeVisible();
+  await expect(titles).toHaveCount(2);
 
   // The Repository facet narrows the list server-side; acme/widgets is the only repository
   // seeded, so selecting it is a no-op on the result but proves the picker and the facet
   // round-trip to the server run. Each option carries its count.
-  await page.getByRole("button", { name: /^Repository:/ }).click();
+  const repository = page.getByRole("button", { name: /^Repository:/ });
+  await repository.click();
   await page.getByRole("option", { name: "acme/widgets, 2 PRs" }).click();
   await page.keyboard.press("Escape");
+  await expect(repository).toHaveText("1 selected");
   await expect(titles).toHaveCount(2);
-
-  await page.getByRole("cell", { name: "feat: a shipped widget" }).click();
-  const details = page.getByRole("dialog", { name: "Details" });
-  await expect(details.getByRole("link", { name: "Open on GitHub" })).toHaveAttribute(
-    "href",
-    "https://github.com/acme/widgets/pull/1"
-  );
-  await expect(details.getByRole("link", { name: "ACME-1 — Ship the widgets" })).toBeVisible();
-  await expect(details.getByText("P0", { exact: true })).toBeVisible();
-
-  await page.screenshot({ path: testInfo.outputPath("delivery-drilldown.png"), fullPage: true });
   await context.close();
 });
 

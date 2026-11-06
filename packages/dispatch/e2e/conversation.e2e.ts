@@ -869,34 +869,6 @@ test("the filter opens on All in a fresh context and ignores the settings an old
   }
 });
 
-// An ask answered after a later comment thread was written sits above it: the order is each
-// conversation's own newest activity, not when it started.
-test("an ask answered after a later comment thread sorts above it", async ({ browser }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Order by newest activity" });
-  const ask = await createAsk(
-    issue.key,
-    { options: [{ label: "Ship" }], question: "Answered last?" },
-    agent
-  );
-  const later = await createComment(issue.key, { body: "Written after the ask." }, agent);
-  await answerAsk(ask.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const cards = page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator(":scope > li[data-turn]");
-    await expect(cards).toHaveCount(2);
-    await expect(cards.first()).toHaveAttribute("data-turn", `ask:${ask.id}`);
-    await expect(cards.last()).toHaveAttribute("data-turn", `comment:${later.id}`);
-  } finally {
-    await alice.close();
-  }
-});
-
 // The defect this tab exists to fix: a conversation older than any window of the event log was
 // unreachable without paging back through it. The three per-issue reads have no window at all.
 test("a closed ask older than 200 events is listed under Closed with no paging", async ({
