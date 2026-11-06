@@ -147,13 +147,14 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		return err
 	}
 
-	// The one jj command on the shared clone not built by onClone: `jj workspace add` refuses
-	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
-	// directory), so the add snapshots the clone's own working copy. Every other command
-	// provisioning and removal run on the clone is onClone's, and so is every command a refusal
-	// prints (wayOut). The add registers the workspace with no files (--sparse-patterns empty), so
-	// it is quick under the store lock; Provision writes the working copy after letting the lock go
-	// (checkout).
+	// One of the three jj commands on the shared clone not built by onClone: `jj workspace add`
+	// refuses --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating
+	// its directory), so the add snapshots the clone's own working copy. The other two are the
+	// clear and the abandon that leave the new clone with no working tree, which must act on the
+	// working copy (feedClone). Every other command provisioning and removal run on the clone is
+	// onClone's, and so is every command a refusal prints (wayOut). The add registers the workspace
+	// with no files (--sparse-patterns empty), so it is quick under the store lock; Provision
+	// writes the working copy after letting the lock go (checkout).
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "--sparse-patterns", "empty", "-R", cloneDir,
 	}
