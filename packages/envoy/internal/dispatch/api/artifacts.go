@@ -1117,7 +1117,15 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	// The write is durable here, so the caller is answered before the rooms are told. A publish
+	// opens a room the browsers of that document hold, which waits for the room budget's opening
+	// and for one of the pod's load slots, and under a burst of writes that is where the time
+	// goes: measured at 320 concurrent writes, one the server answered 200 took 1 m 6.19 s
+	// against its caller's 1 m deadline, and that caller read an error of its own and would send
+	// the edit again (INFRA-179). Telling the rooms afterwards loses nothing: the update is
+	// durable before it publishes, no browser holds a document no room holds, and the room that
+	// loads next reads the store (publishLiveWrite).
+	defer s.publish(published...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}
@@ -1955,6 +1963,19 @@ func (s *server) setRoomBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]int64{"bytes": s.deps.Docs.SetRoomBudgetForTest(input.Bytes)})
+}
+
+// roomCharges answers what the room budget charges each room it holds a charge for, beside its own
+// used and limit: {charges: {room: bytes}, used, limit}. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a real-process drive can read which rooms the budget still
+// carries rather than inferring it from the lines a close logs. It acts on the process its call
+// lands on alone, charges nothing and closes nothing.
+func (s *server) roomCharges(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	charges, used, limit := s.deps.Docs.RoomChargesForTest()
+	WriteJSON(w, http.StatusOK, map[string]any{"charges": charges, "used": used, "limit": limit})
 }
 
 // artifactRoomLive answers whether the document's room is resident in this server, a read that

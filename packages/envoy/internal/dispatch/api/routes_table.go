@@ -486,6 +486,7 @@ func (s *server) routes() []apiRoute {
 			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket on every process with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/room-budget", authAny, "Test hook: set the open documents' memory budget to bytes (0 restores the real one), so a browser test can fill it.", s.setRoomBudget},
+			routeRow{http.MethodGet, "/api/v1/artifacts/_test/room-charges", authAny, "Test hook: what the room budget charges each room it holds a charge for, beside its own figures, {charges, used, limit}.", s.roomCharges},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-admission", authAny, "Test hook: make the document's next socket wait ms before its admission, as a browser in a burst waits for its room (0 takes the hold back).", s.holdArtifactAdmission},

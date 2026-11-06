@@ -29,6 +29,36 @@ import (
 // pool is full of work queued behind the transaction's locks (store.Open sizes it to the CPU
 // count, 4 on CI's runner).
 
+// The caller of a write reads its own write the moment it is answered. The handler answers
+// before it tells the document's rooms, because a publish waits for the room budget's opening
+// and for one of the pod's load slots, and under a burst that is where the time goes: one write
+// of 320 was answered 200 a minute and six seconds after its caller's one-minute deadline
+// (INFRA-179). Answering first is only safe while the write is readable the instant the answer
+// lands, which is what this drives, through the two reads the API serves a document by: its
+// text and its blocks. That a browser already in the room is told is the publish's own work and
+// is driven by the peer tests of this package.
+func TestAWriteIsReadableTheMomentItIsAnswered(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Read back a write", "before")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("the edit answered %d: %s", edited.Code, edited.Body.String())
+	}
+	// Read back the instant the answer landed, with nothing waited for.
+	text := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil)
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), "after") || strings.Contains(text.Body.String(), "before") {
+		t.Fatalf("the text read back %d %s, want the write the answer reported", text.Code, text.Body.String())
+	}
+	// The blocks carry each block's range rather than its text, so what shows the write there is
+	// the one paragraph's end: 5, the length of "after", where "before" would leave 6.
+	blocks := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil)
+	if blocks.Code != http.StatusOK || !strings.Contains(blocks.Body.String(), `"to":5`) {
+		t.Fatalf("the blocks read back %d %s, want the one paragraph ending at the 5 bytes of \"after\"", blocks.Code, blocks.Body.String())
+	}
+}
+
 func TestEditArtifactRollbackNeverReachesTheRoom(t *testing.T) {
 	f := newHeldWriteFixture(t, 50*time.Millisecond)
 	f.connectPlainSocket(t)
