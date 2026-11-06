@@ -2,21 +2,63 @@
  * The files of the uploads the page keeps across a reload (`write-store.ts`): `sessionStorage`
  * holds a write's request, but no entry can hold a `File`, so each upload's is kept here, in
  * IndexedDB, under its write's key, from its press until the write lands or is discarded, and a
- * reload resumes the upload with it. IndexedDB is the origin's, not the tab's, so a row also names
- * the login that pressed it and when: another person's rows, and any older than a day (Dispatch
- * forgets a key after `IDEMPOTENCY_KEY_TTL_MS`, and a tab closed with an upload still kept leaves
- * its row behind), are deleted as the page resumes.
+ * reload resumes the upload with it. A row holds the file's bytes, not the `File` itself - WebKit
+ * stores no `File` and fails the write of a row holding one - with its name, type and
+ * last-modified time beside them, from which `get` makes the `File` again. IndexedDB is the
+ * origin's, not the tab's, so a row also names the login that pressed it and when: another
+ * person's rows, and any older than a day (Dispatch forgets a key after `IDEMPOTENCY_KEY_TTL_MS`,
+ * and a tab closed with an upload still kept leaves its row behind), are deleted as the page
+ * resumes.
  */
 import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 
 const DATABASE = "dispatch-kept-files";
 const STORE = "files";
 
+/** A row as this version writes it: the file's bytes, which every engine stores, and the three
+ *  things a `File` is made from them again with. */
 interface KeptFileRow {
   readonly key: string;
   readonly login: string;
   readonly at: number;
+  readonly bytes: ArrayBuffer;
+  readonly name: string;
+  readonly type: string;
+  readonly lastModified: number;
+}
+
+/** A row the release before this one wrote, holding the `File` itself. Rows of this shape are
+ *  still in the stores of readers who loaded that release, so they are read - a reader whose page
+ *  reloads across the deploy resumes their upload - but none is ever written again. */
+interface KeptFileRowBefore {
+  readonly key: string;
+  readonly login: string;
+  readonly at: number;
   readonly file: File;
+}
+
+/** What both shapes name, which is all `keepOnly` reads. */
+type AnyKeptFileRow = KeptFileRow | KeptFileRowBefore;
+
+/** Every field either shape may hold: what a row is read as before its shape is known. */
+type EitherKeptFileRow = Partial<KeptFileRow & KeptFileRowBefore>;
+
+/** The `File` a row of either shape holds: the one the release before this one stored, or one
+ *  made again from this version's bytes. The shapes are told apart by the field each has and the
+ *  other never does, `file` against `bytes`, so neither can be read as the other, and a row that
+ *  is neither - a half-written row, or one from a version after this - is nothing to resume with
+ *  and is answered as absent. */
+function fileFrom(row: unknown): File | undefined {
+  if (typeof row !== "object" || row === null) return undefined;
+  const { bytes, file, lastModified, name, type } = row as EitherKeptFileRow;
+  if (file instanceof File) return file;
+  if (!(bytes instanceof ArrayBuffer) || typeof name !== "string" || typeof type !== "string") {
+    return undefined;
+  }
+  return new File([bytes], name, {
+    lastModified: typeof lastModified === "number" ? lastModified : undefined,
+    type,
+  });
 }
 
 /** Where kept files live: IndexedDB in the page, an in-memory map in a test. */
@@ -45,7 +87,10 @@ function committed(transaction: IDBTransaction): Promise<void> {
 
 /** The database, or `undefined` when this browser has no IndexedDB or refuses to open it (a
  *  private window, a storage policy, a quota error): an upload is then kept without its file, and
- *  a reload lets it go. */
+ *  a reload lets it go. The version stays 1 across the change of shape: both shapes live in the
+ *  one store under the one key path, `get` reads either, and an upgrade that rewrote the rows
+ *  already there could not run - remaking a row needs the bytes of its `File`, and the await of
+ *  `File.arrayBuffer()` ends the version-change transaction the rewrite would have to run in. */
 function openDatabase(): Promise<IDBDatabase | undefined> {
   const factory: IDBFactory | undefined = globalThis.indexedDB;
   if (factory === undefined) return Promise.resolve(undefined);
@@ -90,15 +135,10 @@ export function indexedDbFiles(): KeptFiles {
     delete: async (key) => {
       await run("readwrite", (store) => settled(store.delete(key)));
     },
-    get: async (key) => {
-      const row = (await run("readonly", (store) => settled(store.get(key)))) as
-        | KeptFileRow
-        | undefined;
-      return row?.file instanceof File ? row.file : undefined;
-    },
+    get: async (key) => fileFrom(await run("readonly", (store) => settled(store.get(key)))),
     keepOnly: async (login, now = Date.now()) => {
       await run("readwrite", async (store) => {
-        const rows = (await settled(store.getAll())) as KeptFileRow[];
+        const rows = (await settled(store.getAll())) as AnyKeptFileRow[];
         await Promise.all(
           rows
             .filter((row) => row.login !== login || now - row.at > IDEMPOTENCY_KEY_TTL_MS)
@@ -106,8 +146,27 @@ export function indexedDbFiles(): KeptFiles {
         );
       });
     },
+    // Reading the bytes comes before the row is written, so a row lands later than it did when
+    // it held the `File` itself; `put` still answers once the row is committed, or once there is
+    // nothing kept, and a file the browser can no longer read - one moved or deleted since the
+    // press - is let go like any other IndexedDB failure.
     put: async (key, login, file) => {
-      const row: KeptFileRow = { at: Date.now(), file, key, login };
+      const at = Date.now();
+      let bytes: ArrayBuffer;
+      try {
+        bytes = await file.arrayBuffer();
+      } catch {
+        return;
+      }
+      const row: KeptFileRow = {
+        at,
+        bytes,
+        key,
+        lastModified: file.lastModified,
+        login,
+        name: file.name,
+        type: file.type,
+      };
       await run("readwrite", (store) => settled(store.put(row)));
     },
   };
