@@ -38,6 +38,18 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   Raising Bun is two commits: first the new version's row in `.github/ci-images.yaml`, which `ci.yaml`'s `ci-images` job copies, then `.bun-version`, that ARG and every `FROM` on the row it leaves.
   `.github/scripts/check-bun-version.sh` fails the build until they agree
 
+- **bun.lock** — `ci.yaml`'s `lint` job holds the step `Check bun.lock agrees with the workspace manifests`, which runs `bun install --lockfile-only` and fails when the committed `bun.lock` differs;
+  a red `lint` fails `ci-ok`, which main's ruleset requires.
+  Correct a refused lockfile by running `bun install` and committing what it writes.
+  After a forward merge of main that touched `bun.lock`, take one side's file whole first (`git checkout origin/main -- bun.lock`) and install only then,
+  because Bun ignores a lockfile it cannot parse and resolves every package again.
+  Then hold the difference to the lines the change explains, with `lockfileVersion` unmoved and no entry naming a registry other than npm's, which a configured mirror writes into every line.
+  `docs/solutions/legion/a-forward-merge-in-jj-commits-what-your-tools-wrote-and-a-lockfile-of-self-versions-is-restored-not-regenerated-pr2549.md` tells a reader whose lockfile differs only in workspace version lines to restore the file from the base and run no install,
+  and the step decides that case now, so the reader restores, installs, and commits what Bun writes;
+  the page keeps its text, because no role writes under `docs/solutions/`.
+  The commit that moves `.bun-version` in the two-commit recipe directly above carries the `bun.lock` the new Bun writes, or main reddens every open pull request at once.
+  `.github/scripts/ci_job_reads.py` derives its workspace list from the root manifest, so a workspace added to or deleted from `package.json` needs no edit there
+
 - **Go** for the Legion daemon and its `legion` CLI (`packages/daemon`) and for Envoy (`packages/envoy`), the two modules the root `go.work` binds
 
 - **Oh My Pi extensions**: `@sjawhar/pi-envoy` (`packages/pi-envoy`) for Envoy messaging and the Dispatch tools in every session, `@sjawhar/pi-legion` (`packages/pi-legion`) for the Legion tool, the daemon handshake, role delivery and phase workers, and the private `@legion/pi-shared` (`packages/pi-shared`) both bundle

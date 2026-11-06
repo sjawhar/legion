@@ -199,13 +199,14 @@ jobs:
           # flattens into the list that names it.
           filters: |
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
-            # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
+            # root manifest, the lockfile, the patches package.json:50-59 applies, and the manifest
             # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
             # Bun .bun-version pins.
             bun_install: &bun_install
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/broker-client/package.json'
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -1415,6 +1416,8 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              # ci_job_reads.py reads the workspace list from the root manifest.
+              - 'package.json'
               # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
               # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
@@ -1560,6 +1563,17 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # The frozen install above does not refuse a workspace `version` the lockfile does not hold.
+      # --lockfile-only writes the lockfile the manifests imply and installs nothing, so a
+      # difference here is what a reader's own `bun install` would write.
+      - name: Check bun.lock agrees with the workspace manifests
+        run: |
+          bun install --lockfile-only
+          if ! git diff --exit-code bun.lock; then
+            echo "::error file=bun.lock::bun.lock disagrees with the workspace manifests; run bun install and commit bun.lock, and after a forward merge of main take one side's bun.lock whole before installing"
+            exit 1
+          fi
 
       # A package's `bun run lint` checks only the paths its recipe names. This is the command
       # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome

@@ -30,10 +30,11 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 15 patterns:
+      # ci.yaml's *bun_install, 16 patterns:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
+      - 'packages/broker-client/package.json'
       - 'packages/contracts/package.json'
       - 'packages/envoy-client/package.json'
       - 'packages/pi-envoy/package.json'
