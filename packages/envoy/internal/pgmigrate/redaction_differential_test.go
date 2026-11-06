@@ -15,10 +15,17 @@ package pgmigrate
 // TestRedactionPrintsNoHiddenByte runs the corpus through redactedQuery and checks, text by text,
 // that the marker is never printed where the transcription says it is inside a literal, inside a
 // comment, or past the byte scan.l refused the text on. That is a check of the redaction loop,
-// not of the lexer: it is the leg that catches a loop which leaves scan.l's token boundaries, as
-// the number arm of round 4 did. It also checks the other direction where the two readings agree
-// and neither is refused, since there the redaction is the default reading's own and a marker
-// neither reading hides must survive it.
+// not of the lexer: it is the leg that catches a loop which leaves scan.l's token boundaries. It
+// also checks the other direction where the two readings agree and neither is refused, since
+// there the redaction is the default reading's own and a marker neither reading hides must
+// survive it.
+//
+// What that leg cannot catch is a refusal the transcription does not make, because the bytes it
+// calls hidden are the ones our own reading hides: where the transcription never refuses there
+// is no byte to be past, the marker counts as shape, and the text leaves the hidden class
+// without a word. An assertion keyed off our own refusal cannot fail when the fault is that we
+// did not refuse, which is why the server leg below keys its coverage clause off the byte the
+// server's own lexer stopped on instead.
 //
 // TestRedactionAgainstServerOutcomes is the oracle, and it holds the transcription itself to a
 // real PostgreSQL by comparing OUTCOMES rather than parsing messages. For each text it asks the
@@ -63,13 +70,36 @@ import (
 // --- the corpus ---
 
 // alphabet holds the pieces a text is built from: every shape of quote and prefix scan.l reads
-// differently, the bytes that move a reading (a backslash, a quote, a newline), the comment
-// openers, and the numeric shapes - a digit, a dot, the two dots of {numericfail} and the bare e
-// of {real} - whose absence is why round 4's number arm was never generated here.
+// differently, the bytes that move a reading (a backslash, a quote, a newline, a carriage
+// return), the comment openers, the numeric shapes - a digit, a dot, the two dots of
+// {numericfail} and the bare e of {real} - and one piece for each refusal no other piece can
+// build a text for: the underscore a {decinteger} holds between two digits, which makes
+// {integer_junk} out of a number and what follows it; an escape that makes a byte no UTF-8
+// string holds; the first half of a surrogate pair, after which <xeu> refuses whatever comes; a
+// codepoint addunicode calls no escape value; a parameter number no int32 holds; and a run of
+// {op_chars} four of which are the NAMEDATALEN bytes {operator} refuses. A search whose alphabet
+// cannot build a refusal says nothing about it, which is how a transcription missing five of
+// them was read as green here.
+//
+// No piece is a byte that is not valid UTF-8 on its own. A query text PostgreSQL has is a string
+// in its server encoding, so a text holding one of those is refused before the lexer sees it and
+// is not a text pg_stat_activity can hold; an escape inside a literal is how such a byte is
+// reached from a text that is one.
 var alphabet = []string{
 	"'", "''", `\`, `\'`, `"`, "--", "/*", "*/", "\n", " ", "$t$", "$", "1", ",",
 	"B'", "X'", "N'", "E'", "U&'", "a", ".", "..", "e",
+	"_", "\r", `\xff`, `\ud83d`, `\u0000`, bigParameter, opCharRun,
 }
+
+var (
+	// bigParameter is a {param} whose number no int32 holds, which {param} refuses with
+	// "parameter number too large".
+	bigParameter = "$9999999999"
+	// opCharRun is a quarter of NAMEDATALEN bytes of {op_chars}, so that a text of four of them
+	// is the length {operator} refuses with "operator too long" and a text of fewer is a run it
+	// reads.
+	opCharRun = strings.Repeat("@", 16)
+)
 
 const (
 	marker = "zqz"
@@ -186,6 +216,9 @@ const corpusDepth = 4
 // on, survives it. Where the two readings agree and neither is refused it checks the other
 // direction too: a marker neither hides is shape, and shape is what the report keeps.
 func TestRedactionPrintsNoHiddenByte(t *testing.T) {
+	if testing.Short() {
+		t.Skip("reads a corpus of millions of texts twice over")
+	}
 	var hiddenTexts, leaked, refusedTexts, agreedTexts, overHidden int
 	leaks := map[string]bool{}
 	swallowed := map[string]bool{}
@@ -245,7 +278,7 @@ type answer struct {
 	columns  string
 }
 
-// shapeOf is the part of an answer that cannot depend on what the varying bytes spell: whether
+// shape is the part of an answer that cannot depend on what the varying bytes spell: whether
 // the server refused the statement, with which SQLSTATE and at which byte, and what columns it
 // answered with when it did not.
 func (a answer) shape() string {
@@ -292,9 +325,21 @@ type verdict struct {
 	// token is true where the server's answer changed when the marker was replaced by three
 	// bytes no lexer can read as one token: the server read the marker as a token of its own.
 	token bool
-	// conclusive is false where the server stopped before the marker - an error positioned at
-	// an earlier byte - so nothing it said is evidence about those bytes either way.
+	// conclusive is false where the server refused the text without placing its refusal at or
+	// after the marker: one positioned before it, and one it gave no position for at all, which
+	// a scanner_yyerror of <xe> or <xeu> gives (PostgreSQL 18.6 answers select E'\ud83dzqz with
+	// "invalid Unicode surrogate pair at or near "z"" and no POSITION field). Nothing such an
+	// answer says is evidence about the marker's bytes either way, and the message is no
+	// substitute: one that names the first byte of the marker as the character it stopped on
+	// changes when the marker changes, which is the same change a text whose marker the server
+	// read as a token of its own makes.
 	conclusive bool
+	// coversFrom is the byte the server's own lexer refused the text on, where that byte is the
+	// marker's or earlier, and -1 everywhere else. From that byte Postgres read nothing, so
+	// redactedQuery must have covered the marker rather than printed it. This is the one clause
+	// of this leg that asks our own reading nothing at all, which is what makes it the clause a
+	// refusal the transcription does not make cannot silence.
+	coversFrom int
 	// name is true where this reading holds the marker inside a quoted identifier, which is a
 	// name the report keeps on purpose and which the server need never have looked up.
 	name bool
@@ -305,11 +350,16 @@ type verdict struct {
 
 // scanlErrors are the messages scan.l raises from its error rules, read off the rules
 // themselves: that is what tells a refusal the lexer owns from one the grammar owns, which no
-// outcome can, the parser stopping the statement either way. "invalid Unicode escape" and
-// "invalid Unicode surrogate pair" are left out although <xe> raises both, because gram.y
-// raises the same two words for a U&'…' whose escapes it unpicks after the lexer handed the
-// literal over whole - PostgreSQL 18.6 answers select U&'\' and select E'\u12' alike - so the
-// message cannot say which of the two refused the text.
+// outcome can, the parser stopping the statement either way. "invalid Unicode escape",
+// "invalid Unicode surrogate pair" and "invalid Unicode escape value" are left out although
+// <xe>, <xeu> and addunicode raise all three, because gram.y raises the same words for a U&'…'
+// whose escapes it unpicks after the lexer handed the literal over whole - PostgreSQL 18.6
+// answers select U&'\' and select E'\u12' alike - so the message cannot say which of the two
+// refused the text. "invalid byte sequence for encoding" is in, although a text whose own bytes
+// are not a string in the server encoding is refused with it before the lexer runs, because
+// every piece of the alphabet is valid UTF-8 and so is every text built from them: in this
+// corpus the only way to that message is the pg_verifymbstr of the <xqs> action, over a literal
+// an escape made a byte for.
 var scanlErrors = []string{
 	"unterminated /* comment",
 	"unterminated bit string literal",
@@ -327,18 +377,39 @@ var scanlErrors = []string{
 	"invalid binary integer",
 	"operator too long",
 	"parameter number too large",
+	"invalid byte sequence for encoding",
 }
 
 func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) verdict {
 	at := strings.Index(text, marker)
 	answered := ask(ctx, conn, text)
-	out := verdict{failed: answered.failed, name: ours.isName(at, at+len(marker))}
+	out := verdict{failed: answered.failed, name: ours.isName(at, at+len(marker)), coversFrom: -1}
 	for _, message := range scanlErrors {
 		if strings.HasPrefix(answered.message, message) {
 			out.lexical = true
 		}
 	}
-	if answered.failed && answered.position > 0 && int(answered.position)-1 < at {
+	refusedAt := -1
+	if answered.failed && answered.position > 0 {
+		refusedAt = int(answered.position) - 1
+	}
+	if out.lexical && refusedAt >= 0 && refusedAt < at+len(marker) {
+		// The server's own lexer stopped on a byte of the marker or before it, so Postgres read
+		// none of the text from there and the marker may not be printed. Asking it about a
+		// second statement would say nothing: what it answers for three other bytes past the
+		// byte it stopped on is the same nothing.
+		out.coversFrom = refusedAt
+		return out
+	}
+	if answered.failed && refusedAt < at+len(marker) {
+		// The server refused at a byte of the marker or before it, and the clause above could
+		// not attribute that refusal to its lexer, so nothing it said is evidence about these
+		// bytes. The comparison below would be worse than nothing here: a message that names the
+		// byte the server stopped on names a byte of the marker, so it changes when the marker
+		// changes whatever the server made of it - PostgreSQL 18.6 answers select E'\ud83dzqz
+		// with "invalid Unicode surrogate pair at or near "z"", one of the two messages gram.y
+		// raises in the same words, and the same answer with ")" in it for the replacement. A
+		// refusal with no position at all is this case too.
 		return out
 	}
 	out.conclusive = true
@@ -357,7 +428,17 @@ func probe(ctx context.Context, conn *pgconn.PgConn, text string, ours reading) 
 // that excused itself with its own model would catch neither. It also checks the two halves of
 // the refusal rule: what our reading refuses the server must refuse, and what the server's own
 // lexer refuses our reading must refuse.
+//
+// And where that lexer refused a text on the marker's byte or an earlier one, the text is not
+// dropped as one the server stopped too early to answer for: it is the class Rule R exists for,
+// so what the server says is where its lexer stopped and what this leg checks is that
+// redactedQuery covered the marker from there. That clause reads nothing of our own reading -
+// not its refusal, not its spans - which is what makes it the clause that fails when a refusal
+// scan.l makes is missing from the transcription altogether.
 func TestRedactionAgainstServerOutcomes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("asks a server about thousands of statements")
+	}
 	url := os.Getenv("DISPATCH_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("DISPATCH_TEST_DATABASE_URL must be set")
@@ -387,6 +468,7 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	}
 	sample := serverSample()
 	var asked, leaked, lost, shape, inconclusive, named, refusedByUs, refusalMissing, refusalSpurious int
+	var covered, uncovered int
 	leaks := map[string]bool{}
 	losses := map[string]bool{}
 	refusals := map[string]bool{}
@@ -414,6 +496,16 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			switch {
 			case verdicts[i].name:
 				named++
+			case verdicts[i].coversFrom >= 0:
+				// Rule R, asked of the server: its lexer stopped on this byte, so everything
+				// from there is covered, marker and all.
+				covered++
+				if printed {
+					uncovered++
+					if len(leaks) < 20 {
+						leaks[fmt.Sprintf("scs=%s %q -> %q: the server's own lexer refused it at byte %d, at or before the marker", setting, text, redactedQuery(text), verdicts[i].coversFrom)] = true
+					}
+				}
 			case !verdicts[i].conclusive:
 				inconclusive++
 			default:
@@ -442,12 +534,12 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("server: %d of %d sampled texts under each setting settled by outcome, %d inconclusive (the server's error sits before the marker), %d where the marker is inside a quoted identifier", asked, len(sample), inconclusive, named)
+	t.Logf("server: %d of %d (text, setting) pairs settled by outcome, %d settled by the byte the server's own lexer stopped on, %d inconclusive (refused at a byte of the marker or before it with its lexer unnamed, or refused with no position), %d where the marker is inside a quoted identifier", asked, len(settings)*len(sample), covered, inconclusive, named)
 	t.Logf("%d (text, setting) pairs our reading refuses; %d the server ran anyway, %d the server's own lexer refused and ours did not", refusedByUs, refusalSpurious, refusalMissing)
 	for e := range refusals {
 		t.Logf("  refusal: %s", e)
 	}
-	t.Logf("markers the server never read as a token and redactedQuery printed: %d", leaked)
+	t.Logf("markers the server never read as a token and redactedQuery printed: %d; markers past the byte its lexer stopped on and printed: %d", leaked, uncovered)
 	for e := range leaks {
 		t.Logf("  leak: %s", e)
 	}
@@ -457,6 +549,9 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	}
 	if leaked > 0 {
 		t.Errorf("%d markers printed that the server never read as a token", leaked)
+	}
+	if uncovered > 0 {
+		t.Errorf("%d markers printed at or past the byte the server's own lexer refused the text on", uncovered)
 	}
 	if lost > 0 {
 		t.Errorf("%d markers dropped that the server read as a token of its own under both settings", lost)

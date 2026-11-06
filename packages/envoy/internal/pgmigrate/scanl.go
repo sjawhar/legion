@@ -1,6 +1,10 @@
 package pgmigrate
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
 
 // This file is a transcription of PostgreSQL 18.6's src/backend/parser/scan.l: its start states,
 // its definitions and its rules, in the file's own order, each named beside the Go that stands
@@ -14,36 +18,46 @@ import "strings"
 // the longest match at the scan position wins, and the earliest rule in the file wins a tie
 // (flex(1), "How the input is matched"). lexSQL's driver does exactly that over the rules of the
 // state it is in, which is why the rules are kept in scan.l's order and why a rule may not be
-// moved without checking the ties it would change.
+// moved without checking the ties it would change. INITIAL holds 41 of scan.l's 41 INITIAL
+// rules, in scan.l's order, and every other start state all of its own, but for <xqs>, whose
+// three rules - {quotecontinuefail}, {other} and <<EOF>> - share one action and are folded into
+// the driver's branch for that state.
 //
 // scan.l raises errors (yyerror, ereport(ERROR)) for text Postgres refuses: an unterminated
 // literal or comment, trailing junk after a number or a parameter, an invalid integer, a bad
-// Unicode escape, and U&'…' with standard_conforming_strings off. A session that ran such a
-// statement inside a transaction sits "idle in transaction (aborted)" holding every lock it took
-// before, and pg_stat_activity records the refused text, so the redactor is shown exactly these
-// texts and may not treat them as unreachable. lexSQL therefore reports where scan.l first raised
-// an error, and goes on reading afterwards so that the readers which only want tokens (scanSQL)
-// are not cut short; what redactedQuery does from that point is its own rule, documented there.
+// Unicode escape, a parameter number no int32 holds, an operator of NAMEDATALEN bytes or more,
+// an escape that makes a byte the server encoding cannot hold, and U&'…' with
+// standard_conforming_strings off. A session that ran such a statement inside a transaction sits
+// "idle in transaction (aborted)" holding every lock it took before, and pg_stat_activity
+// records the refused text, so the redactor is shown exactly these texts and may not treat them
+// as unreachable. lexSQL therefore reports where scan.l first raised an error, and goes on
+// reading afterwards so that the readers which only want tokens (scanSQL) are not cut short;
+// what redactedQuery does from that point is its own rule, documented there. A refusal left out
+// of this file is a tail of a refused statement printed, which is why each of them is written
+// where scan.l writes it.
 //
-// Three things this reading does not take, and one reason that is enough for all three. It is
-// the scan.l of one major version (REL_18_STABLE, read against the 18.6 this repository tests
-// on), it takes standard_conforming_strings and no other setting - backslash_quote above all,
-// whose off turns <xe>{xeescape}'s \' into "unsafe use of \' in a string literal", measured on
-// 18.6: select e'\'' , 1 answers that error with backslash_quote off and answers ' | 1 with it
-// at its default - and it does not know the server encoding, which addunicode needs to turn a
-// \uXXXX into bytes. None of the three moves where a literal or a comment begins or ends: each
-// only means Postgres refused a text this reading reads on through, so the rule redactedQuery
-// holds - a byte is printed only where both readings read it as structure - stands as it is,
-// and what is missed is the extra conservatism of hiding the refused tail. Reading the holder's
-// backslash_quote the way the two standard_conforming_strings are read, as a third reading, is
-// a question for whoever owns this rule rather than something to settle here.
+// Two things this reading does not take, and one it takes at a single value. It is the scan.l of
+// one major version (REL_18_STABLE, read against the 18.6 this repository tests on), and it
+// takes standard_conforming_strings and no other setting - backslash_quote above all, whose off
+// turns <xe>{xeescape}'s \' into "unsafe use of \' in a string literal", measured on 18.6:
+// select e'\'' , 1 answers that error with backslash_quote off and answers ' | 1 with it at its
+// default. The server encoding it takes as UTF-8, which addunicode needs to turn a \uXXXX into
+// bytes and pg_verifymbstr needs to say whether an escape made a byte that encoding cannot hold
+// (verifymbstr): UTF-8 is the server_encoding of the 18.6 this module is read against, and
+// against a single-byte server this reading refuses a high byte that server reads, which covers
+// more of a text rather than less. Neither of the two moves where a literal or a comment begins
+// or ends: each only means Postgres refused a text this reading reads on through, so the rule
+// redactedQuery holds - a byte is printed only where both readings read it as structure - stands
+// as it is, and what is missed is the extra conservatism of hiding the refused tail. Reading the
+// holder's backslash_quote the way the two standard_conforming_strings are read, as a third
+// reading, is a question for whoever owns this rule rather than something to settle here.
 //
-// libpg_query (pg_query_go) would not close any of the three. Its scanner is one major
-// version's too, it is compiled with standard_conforming_strings on and offers no way to turn
-// it off, so the other reading would still be written by hand, and it offers no way to set
-// backslash_quote or the server encoding either; against that it costs this module a cgo
-// dependency and a build that is no longer pure Go. What it would give is that a version bump
-// tracks scan.l for free, which is what this file asks a reader to do by diffing it.
+// libpg_query (pg_query_go) would close neither. Its scanner is one major version's too, it is
+// compiled with standard_conforming_strings on and offers no way to turn it off, so the other
+// reading would still be written by hand, and it offers no way to set backslash_quote or the
+// server encoding either; against that it costs this module a cgo dependency and a build that is
+// no longer pure Go. What it would give is that a version bump tracks scan.l for free, which is
+// what this file asks a reader to do by diffing it.
 
 // lexState is one of scan.l's start states (its %x declarations), INITIAL included.
 type lexState int
@@ -75,15 +89,32 @@ type lexer struct {
 	pos    int // the scan position, flex's yy_c_buf_p
 	start  int // yylloc, which SET_YYLLOC() sets to the start of the token being read
 	kind   sqlTokenKind
-	before lexState // yyextra->state_before_str_stop
-	depth  int      // yyextra->xcdepth
-	dolq   string   // yyextra->dolqstart
-	lit    strings.Builder
+	before lexState        // yyextra->state_before_str_stop
+	depth  int             // yyextra->xcdepth
+	dolq   string          // yyextra->dolqstart
+	lit    strings.Builder // yyextra->literalbuf, emptied by startlit() and filled by addlit()
 	emit   func(sqlToken)
 
-	// failAt is where scan.l first raised an error, or -1. Every error rule reports
+	// sawNonASCII is yyextra->saw_non_ascii: an escape of <xe> has made a byte that is not
+	// 7-bit ASCII, which is what makes the <xqs> action verify the literal it assembled.
+	sawNonASCII bool
+
+	// utf16First is yyextra->utf16_first_part, the first half of the surrogate pair <xeu> is
+	// reading the second half of.
+	utf16First int
+
+	// op is the run of {op_chars} last measured, which every token read inside it is answered
+	// from (opRun).
+	op opRun
+
+	// failAt is where scan.l first raised an error, or -1. Most error rules report
 	// lexer_errposition(), which is the yylloc SET_YYLLOC() last set, so failAt is the first byte
-	// of the token the error rule read rather than the byte inside it the rule stopped on.
+	// of the token the error rule read rather than the byte inside it the rule stopped on. The
+	// escape rules of <xe> and <xeu> are the exception: they PUSH_YYLLOC() and SET_YYLLOC() to
+	// point the cursor at the escape sequence itself, so Postgres reports a byte inside the
+	// literal where this reading reports the literal's start. That direction is the safe one -
+	// the report covers from the literal's start, which is at or before the byte Postgres named -
+	// and it is why a reading of this field may not be called a reading of lexer_errposition().
 	failAt int
 }
 
@@ -122,7 +153,7 @@ var lexRules = [lexStates][]lexRule{
 		{"{not_equals}", literal("!="), actOneToken(sqlOther)},
 		{"{self}", matchSelf, actOneToken(sqlOther)},
 		{"{operator}", matchOperator, actOperator},
-		{"{param}", matchParam, actOneToken(sqlParam)},
+		{"{param}", matchParam, actParam},
 		{"{param_junk}", matchParamJunk, actJunk(sqlParam)},
 		{"{decinteger}", matchDecinteger, actOneToken(sqlNumber)},
 		{"{hexinteger}", matchHexinteger, actOneToken(sqlNumber)},
@@ -149,12 +180,12 @@ var lexRules = [lexStates][]lexRule{
 		{`<xc>\*+`, matchStars, actSkip},
 	},
 	lexXB: {
-		{"<xb>{quote}", matchQuote, actQuoteStop},
 		{"<xb>{xbinside}", matchXbinside, actSkip},
+		{"<xb>{quote}", matchQuote, actQuoteStop},
 	},
 	lexXH: {
-		{"<xh>{quote}", matchQuote, actQuoteStop},
 		{"<xh>{xhinside}", matchXhinside, actSkip},
+		{"<xh>{quote}", matchQuote, actQuoteStop},
 	},
 	lexXQ: {
 		{"<xq>{quote}", matchQuote, actQuoteStop},
@@ -163,14 +194,14 @@ var lexRules = [lexStates][]lexRule{
 	},
 	lexXE: {
 		{"<xe>{quote}", matchQuote, actQuoteStop},
-		{"<xe>{xqdouble}", literal("''"), actSkip},
-		{"<xe>{xeinside}", matchXeinside, actSkip},
+		{"<xe>{xqdouble}", literal("''"), actXqdouble},
+		{"<xe>{xeinside}", matchXeinside, actAddLit},
 		{"<xe>{xeunicode}", matchXeunicode, actXeunicode},
 		{"<xe>{xeunicodefail}", matchXeunicodefail, actXeunicodefail},
-		{"<xe>{xeescape}", matchXeescape, actSkip},
-		{"<xe>{xeoctesc}", matchXeoctesc, actSkip},
-		{"<xe>{xehexesc}", matchXehexesc, actSkip},
-		{"<xe>.", matchDot, actSkip},
+		{"<xe>{xeescape}", matchXeescape, actXeescape},
+		{"<xe>{xeoctesc}", matchXeoctesc, actXeoctesc},
+		{"<xe>{xehexesc}", matchXehexesc, actXehexesc},
+		{"<xe>.", matchDot, actAddLit},
 	},
 	lexXEU: {
 		{"<xeu>{xeunicode}", matchXeunicode, actXeuSecond},
@@ -182,12 +213,6 @@ var lexRules = [lexStates][]lexRule{
 		{"<xus>{quote}", matchQuote, actQuoteStop},
 		{"<xus>{xqdouble}", literal("''"), actSkip},
 		{"<xus>{xqinside}", matchXqinside, actSkip},
-	},
-	lexXQS: {
-		{"<xqs>{quotecontinue}", matchQuotecontinue, actQuotecontinue},
-		// <xqs>{quotecontinuefail}, <xqs>{other} and <xqs><<EOF>> share one action: throw
-		// everything after the end quote back with yyless(0) and return the literal. The driver
-		// runs it when {quotecontinue} does not match, so the three need no separate patterns.
 	},
 	lexXDolq: {
 		{"<xdolq>{dolqdelim}", matchDolqdelim, actXdolqDelim},
@@ -213,6 +238,11 @@ func lexSQL(text string, standardConformingStrings bool, emit func(sqlToken)) in
 	l := &lexer{text: text, standardConformingStrings: standardConformingStrings, emit: emit, failAt: -1}
 	for l.pos < len(text) {
 		if l.state == lexXQS {
+			// <xqs>{quotecontinue} is the only rule of this state with an action of its own.
+			// <xqs>{quotecontinuefail}, <xqs>{other} and <xqs><<EOF>> share one action: throw
+			// everything after the end quote back with yyless(0) and return the literal. That
+			// action runs wherever {quotecontinue} does not match, so the three need no
+			// patterns of their own and lexRules holds no row for this state.
 			// <xqs>: {quotecontinue} or the three rules that undo the lookahead.
 			if n := matchQuotecontinue(l, l.pos); n > 0 {
 				actQuotecontinue(l, l.pos, n)
@@ -588,11 +618,7 @@ func matchXcstart(l *lexer, i int) int {
 	if !strings.HasPrefix(l.text[i:], "/*") {
 		return -1
 	}
-	j := i + 2
-	for j < len(l.text) && isOpChar(l.text[j]) {
-		j++
-	}
-	return j - i
+	return l.opRunTo(i+2) - i
 }
 
 // xcstop \*+\/
@@ -671,16 +697,85 @@ func matchOpChar(l *lexer, i int) int {
 	return -1
 }
 
+// opRun is one maximal run of {op_chars} read from one byte of it on, and the three things
+// scan.l's {operator} action asks about a token that begins there. Two of the three are the
+// run's rather than the token's - the action stops the token where the run's first "/*" or "--"
+// begins, and looks back from that same end for a qualifying character and for the trailing run
+// of [+-] - so a run read once answers for every token read in it up to that stop.
+//
+// That is what keeps this reading's cost the text's length rather than its square. Flex asks
+// {operator} and {xcstart} about every byte of such a run while their actions take one or two
+// bytes of it at a time (yyless(nchars), yyless(2)), so measuring the run on every byte measures
+// it once per byte of itself: 64 KiB of +- took 1m23s that way and 90ms this way, and this
+// reader is handed what pg_stat_activity holds, which track_activity_query_size bounds at 1 MB.
+type opRun struct {
+	from, to int // the run itself, [from, to)
+	stop     int // where the first "/*" or "--" at or after from begins, or to where there is none
+	qualify  int // the last byte of "~!@#^&|`?%" before stop-1, or -1 where there is none
+	plus     int // where the run of [+-] that ends at stop begins, or stop where there is none
+}
+
+// opRunTo is the end of the run of {op_chars} that holds i, which is i itself where i is no op
+// char. A run is maximal, so the run last measured ends where the run of every position inside
+// it ends.
+func (l *lexer) opRunTo(i int) int {
+	if i >= l.op.from && i < l.op.to {
+		return l.op.to
+	}
+	l.op = l.measureOpRun(i)
+	return l.op.to
+}
+
+// opRunAt is the run read from i on. The run last measured answers for every position inside it
+// that its stop has not passed; at or past that stop a comment has opened, and what the scanner
+// reads when it comes back into the run after that comment is a run read from there on.
+func (l *lexer) opRunAt(i int) opRun {
+	if i >= l.op.from && i < l.op.stop {
+		return l.op
+	}
+	l.op = l.measureOpRun(i)
+	return l.op
+}
+
+// measureOpRun reads the run from i on. Each of its three searches stops at what it is looking
+// for, and the run's end is taken from the run last measured where that one holds i, so reading
+// a run again after a comment inside it costs the bytes up to the next comment rather than the
+// bytes of the whole run.
+func (l *lexer) measureOpRun(i int) opRun {
+	run := opRun{from: i, to: i, qualify: -1}
+	if i >= l.op.from && i < l.op.to {
+		run.to = l.op.to
+	} else {
+		for run.to < len(l.text) && isOpChar(l.text[run.to]) {
+			run.to++
+		}
+	}
+	run.stop = run.to
+	if at := strings.Index(l.text[i:run.to], "/*"); at >= 0 {
+		run.stop = i + at
+	}
+	if at := strings.Index(l.text[i:run.stop], "--"); at >= 0 {
+		run.stop = i + at
+	}
+	run.plus = run.stop
+	for run.plus > i && (l.text[run.plus-1] == '+' || l.text[run.plus-1] == '-') {
+		run.plus--
+	}
+	for at := run.stop - 2; at >= i; at-- {
+		if strings.IndexByte("~!@#^&|`?%", l.text[at]) >= 0 {
+			run.qualify = at
+			break
+		}
+	}
+	return run
+}
+
 // operator {op_chars}+
 func matchOperator(l *lexer, i int) int {
-	j := i
-	for j < len(l.text) && isOpChar(l.text[j]) {
-		j++
+	if to := l.opRunTo(i); to > i {
+		return to - i
 	}
-	if j == i {
-		return -1
-	}
-	return j - i
+	return -1
 }
 
 // decdigit [0-9] is isDigit in scan.go; hexdigit [0-9A-Fa-f], octdigit [0-7], bindigit [0-1].
@@ -831,24 +926,65 @@ func matchRealMantissa(l *lexer, i int) int {
 }
 
 // integer_junk {decinteger}{identifier}
-func matchIntegerJunk(l *lexer, i int) int { return matchJunk(l, i, matchDecinteger) }
+func matchIntegerJunk(l *lexer, i int) int {
+	// {decinteger} is {decdigit}(_?{decdigit})*: only its underscores can end a shorter match.
+	return matchJunk(l, i, matchDecinteger(l, i), i+1)
+}
 
 // numeric_junk {numeric}{identifier}
-func matchNumericJunk(l *lexer, i int) int { return matchJunk(l, i, matchNumeric) }
-
-// real_junk {real}{identifier}
-func matchRealJunk(l *lexer, i int) int { return matchJunk(l, i, matchReal) }
-
-func matchJunk(l *lexer, i int, number func(*lexer, int) int) int {
-	n := number(l, i)
+func matchNumericJunk(l *lexer, i int) int {
+	n := matchNumeric(l, i)
 	if n < 0 {
 		return -1
 	}
-	name := matchIdentifier(l, i+n)
+	// The {decinteger} whose length can vary is the one after the dot, and the earliest
+	// underscore it can hold is its second byte. An empty one holds none, and the number's own
+	// end is then the only end it has.
+	dot := i + strings.IndexByte(l.text[i:i+n], '.')
+	return matchJunk(l, i, n, min(dot+2, i+n))
+}
+
+// real_junk {real}{identifier}
+func matchRealJunk(l *lexer, i int) int {
+	n := matchReal(l, i)
+	if n < 0 {
+		return -1
+	}
+	// The {decinteger} whose length can vary is the exponent: the mantissa has to end on the
+	// [Ee], and a shorter {decinteger} or {numeric} ends on a digit or on a dot.
+	j := i + matchRealMantissa(l, i) + 1
+	if l.text[j] == '-' || l.text[j] == '+' {
+		j++
+	}
+	return matchJunk(l, i, n, j+1)
+}
+
+// matchJunk is the longest match of a junk rule - {decinteger}{identifier},
+// {numeric}{identifier}, {real}{identifier} - whose number matches n bytes at its longest and
+// whose varying {decinteger} can hold an underscore from vary on. Flex matches a rule's whole
+// pattern and takes the longest match of it, so the number's own longest match is not the only
+// place the identifier may begin: an underscore is an {ident_start} as well as a {decinteger}'s
+// separator, and every match of {decinteger} that stops before one is a match the identifier can
+// follow. 1_0$$ is therefore not the number 1_0 and then $$, but {integer_junk} matching the
+// number 1 and the identifier _0$$ - PostgreSQL 18.6 answers select 1_0$$ x $$ with "trailing
+// junk after numeric literal" at the 1 and reads no dollar-quoted literal in it at all.
+//
+// The earliest such underscore gives the longest match of the whole rule, so there is nothing to
+// search: every later end of the number is a byte of {ident_cont} inside the identifier that
+// starts at that underscore, so the identifier starting there would end on the same byte.
+func matchJunk(l *lexer, i, n, vary int) int {
+	if n < 0 {
+		return -1
+	}
+	end := i + n
+	if at := strings.IndexByte(l.text[vary:i+n], '_'); at >= 0 {
+		end = vary + at
+	}
+	name := matchIdentifier(l, end)
 	if name < 0 {
 		return -1
 	}
-	return n + name
+	return end + name - i
 }
 
 // param \${decdigit}+
@@ -866,7 +1002,9 @@ func matchParam(l *lexer, i int) int {
 	return j - i
 }
 
-// param_junk \${decdigit}+{identifier}
+// param_junk \${decdigit}+{identifier}. {decdigit}+ holds no underscore and a digit is no
+// {ident_start}, so the identifier can only begin where the digits end and the longest match of
+// the number is the only one to try.
 func matchParamJunk(l *lexer, i int) int {
 	n := matchParam(l, i)
 	if n < 0 {
@@ -973,8 +1111,10 @@ func actXnstart(l *lexer, i, n int) {
 	l.ret(sqlWord, i+1)
 }
 
-// {xqstart}: SET_YYLLOC(); BEGIN(standard_conforming_strings ? xq : xe).
+// {xqstart}: warn_on_first_escape = true; saw_non_ascii = false; SET_YYLLOC();
+// BEGIN(standard_conforming_strings ? xq : xe); startlit().
 func actXqstart(l *lexer, i, n int) {
+	l.sawNonASCII = false
 	if l.standardConformingStrings {
 		l.beginLiteral(i, n, lexXQ, sqlString)
 	} else {
@@ -982,8 +1122,12 @@ func actXqstart(l *lexer, i, n int) {
 	}
 }
 
-// {xestart}: SET_YYLLOC(); BEGIN(xe).
-func actXestart(l *lexer, i, n int) { l.beginLiteral(i, n, lexXE, sqlString) }
+// {xestart}: warn_on_first_escape = false; saw_non_ascii = false; SET_YYLLOC(); BEGIN(xe);
+// startlit().
+func actXestart(l *lexer, i, n int) {
+	l.sawNonASCII = false
+	l.beginLiteral(i, n, lexXE, sqlString)
+}
 
 // {xusstart}: SET_YYLLOC(); ereport(ERROR, "unsafe use of string constant with Unicode escapes")
 // when standard_conforming_strings is off; BEGIN(xus).
@@ -998,6 +1142,7 @@ func (l *lexer) beginLiteral(i, n int, state lexState, kind sqlTokenKind) {
 	l.start = i
 	l.kind = kind
 	l.state = state
+	l.lit.Reset() // startlit()
 	l.pos = i + n
 }
 
@@ -1016,33 +1161,57 @@ func actQuotecontinue(l *lexer, i, n int) {
 }
 
 // <xqs>{quotecontinuefail}, <xqs>{other}, <xqs><<EOF>>: yyless(0); BEGIN(INITIAL); return BCONST,
-// XCONST, SCONST or USCONST for the state the literal was read in.
+// XCONST, SCONST or USCONST for the state the literal was read in. The xq and xe arms check what
+// the literal assembled before they return it - "Check that the data remains valid, if it might
+// have been made invalid by unescaping any chars": "if (yyextra->saw_non_ascii)
+// pg_verifymbstr(yyextra->literalbuf, yyextra->literallen, false)". That is where an escape
+// which made a byte the server encoding cannot hold refuses the statement, and it refuses it at
+// the literal's own start, the yylloc of this action being the one {xqstart} or {xestart} set:
+// PostgreSQL 18.6 answers select e'\400' with "invalid byte sequence for encoding "UTF8": 0x00"
+// and select e'\xff' with the same for 0xff.
 func actQuoteStopFail(l *lexer, i, n int) {
-	l.state = l.before
+	if (l.before == lexXQ || l.before == lexXE) && l.sawNonASCII && !verifymbstr(l.lit.String()) {
+		l.fail()
+	}
 	l.ret(l.kind, i)
 }
 
+// verifymbstr is pg_verifymbstr: whether a literal's bytes are a string the server encoding can
+// hold. The encoding is a third thing a query text does not carry, like the two settings the
+// header names, and this reading takes UTF-8: the server_encoding of the PostgreSQL 18.6 this
+// module is read against. A zero byte is refused whatever the encoding - pg_verify_mbstr_len
+// stops on it before it asks the encoding anything - and a high byte is a string of its own
+// under a single-byte encoding, so against a SQL_ASCII or LATIN1 server this reading refuses a
+// literal that server would have read, and covers a tail Postgres went on past. That is the
+// direction this report errs in everywhere else.
+func verifymbstr(literal string) bool {
+	return strings.IndexByte(literal, 0) < 0 && utf8.ValidString(literal)
+}
+
 // <xe>{xeunicode}: BEGIN(xeu) for the first half of a surrogate pair; yyerror("invalid Unicode
-// surrogate pair") for a second half with no first. addunicode's own errors (a codepoint the
-// server encoding cannot hold) are not read here: they leave the literal where it is.
+// surrogate pair") for a second half with no first; addunicode(c) for anything else.
 func actXeunicode(l *lexer, i, n int) {
 	c := hexValue(l.text[i+2 : i+n])
 	switch {
 	case c >= 0xD800 && c <= 0xDBFF:
+		l.utf16First = c
 		l.state = lexXEU
 	case c >= 0xDC00 && c <= 0xDFFF:
 		l.fail()
+	default:
+		l.addUnicode(c)
 	}
 	l.pos = i + n
 }
 
 // <xeu>{xeunicode}: yyerror("invalid Unicode surrogate pair") unless this is a second half;
-// BEGIN(xe).
+// addunicode(surrogate_pair_to_codepoint(utf16_first_part, c)); BEGIN(xe).
 func actXeuSecond(l *lexer, i, n int) {
 	c := hexValue(l.text[i+2 : i+n])
 	if c < 0xDC00 || c > 0xDFFF {
 		l.fail()
 	}
+	l.addUnicode(0x10000 + (l.utf16First-0xD800)*0x400 + (c - 0xDC00))
 	l.state = lexXE
 	l.pos = i + n
 }
@@ -1073,6 +1242,83 @@ func hexValue(s string) int {
 		}
 	}
 	return v
+}
+
+// addunicode(c): "if (!is_valid_unicode_codepoint(c)) yyerror("invalid Unicode escape value")",
+// which is 0 < c <= 0x10FFFF, and then the codepoint's bytes in the server encoding go into the
+// literal - this reading's UTF-8, as verifymbstr reads it. "We expect that
+// pg_unicode_to_server() will complain about any unconvertible code point, so we don't have to
+// set saw_non_ascii": that complaint is the encoding's, and an encoding that holds every
+// codepoint has none to make.
+func (l *lexer) addUnicode(c int) {
+	if c <= 0 || c > 0x10FFFF {
+		l.fail()
+		return
+	}
+	l.lit.WriteRune(rune(c))
+}
+
+// octValue reads {xeoctesc}'s digits as strtoul(yytext + 1, NULL, 8) reads them; the caller
+// takes the result as the unsigned char addlitchar() is given, so \400 is a zero byte.
+func octValue(s string) int {
+	v := 0
+	for i := range len(s) {
+		v = v*8 + int(s[i]-'0')
+	}
+	return v
+}
+
+// <xq,xe,xus>{xqdouble}: addlitchar('\”).
+func actXqdouble(l *lexer, i, n int) {
+	l.lit.WriteByte('\'')
+	l.pos = i + n
+}
+
+// actAddLit is addlit(yytext, yyleng): <xe>{xeinside}, and <xe>. , which scan.l keeps "only for
+// \ just before EOF".
+func actAddLit(l *lexer, i, n int) {
+	l.lit.WriteString(l.text[i : i+n])
+	l.pos = i + n
+}
+
+// <xe>{xeescape}: addlitchar(unescape_single_char(yytext[1])), which is \b \f \n \r \t \v for
+// those six letters and the byte itself for anything else, with "if (c == '\0' ||
+// IS_HIGHBIT_SET(c)) saw_non_ascii = true" for the byte it added. backslash_quote, which refuses
+// \' here when it is off, is not read: the header says why.
+func actXeescape(l *lexer, i, n int) {
+	c := l.text[i+1]
+	switch c {
+	case 'b':
+		c = '\b'
+	case 'f':
+		c = '\f'
+	case 'n':
+		c = '\n'
+	case 'r':
+		c = '\r'
+	case 't':
+		c = '\t'
+	case 'v':
+		c = '\v'
+	}
+	l.addEscaped(i, n, c)
+}
+
+// <xe>{xeoctesc}: addlitchar(strtoul(yytext + 1, NULL, 8)).
+func actXeoctesc(l *lexer, i, n int) { l.addEscaped(i, n, byte(octValue(l.text[i+1:i+n]))) }
+
+// <xe>{xehexesc}: addlitchar(strtoul(yytext + 2, NULL, 16)).
+func actXehexesc(l *lexer, i, n int) { l.addEscaped(i, n, byte(hexValue(l.text[i+2:i+n]))) }
+
+// addEscaped adds the byte an escape made to the literal and, where that byte is not 7-bit
+// ASCII, records what the three escape rules record: "if (c == '\0' || IS_HIGHBIT_SET(c))
+// yyextra->saw_non_ascii = true", which is what makes the <xqs> action verify the literal.
+func (l *lexer) addEscaped(i, n int, c byte) {
+	l.lit.WriteByte(c)
+	if c == 0 || c >= 0x80 {
+		l.sawNonASCII = true
+	}
+	l.pos = i + n
 }
 
 // {dolqdelim}: SET_YYLLOC(); dolqstart = yytext; BEGIN(xdolq).
@@ -1148,8 +1394,11 @@ func actXdinside(l *lexer, i, n int) {
 
 // actSkip is the action of every rule that only adds to the literal it is inside or ignores what
 // it read: <xc>{xcinside}, <xc>{op_chars}, <xc>\*+, <xb>{xbinside}, <xh>{xhinside},
-// <xq,xe,xus>{xqdouble}, <xq,xus>{xqinside}, <xe>{xeinside}, <xe>{xeescape}, <xe>{xeoctesc},
-// <xe>{xehexesc}, <xe>., <xdolq>{dolqinside}, <xdolq>{dolqfailed} and <xdolq>.
+// <xq,xus>{xqdouble}, <xq,xus>{xqinside}, <xdolq>{dolqinside}, <xdolq>{dolqfailed} and <xdolq>.
+// The addlit of a rule of <xe> is kept rather than skipped (actAddLit and its kin), because the
+// <xqs> action reads what an <xe> literal assembled; what the other states assemble no reader of
+// this file asks for, <xq>'s literal included, saw_non_ascii being false for every literal <xq>
+// reads.
 func actSkip(l *lexer, i, n int) { l.pos = i + n }
 
 // actOneToken returns the action of a rule that returns one token of the text it matched.
@@ -1158,6 +1407,19 @@ func actOneToken(kind sqlTokenKind) func(*lexer, int, int) {
 		l.start = i
 		l.ret(kind, i+n)
 	}
+}
+
+// {param}: "val = pg_strtoint32_safe(yytext + 1, (Node *) &escontext); if
+// (escontext.error_occurred) yyerror("parameter number too large")" - the digits after the $ are
+// read as an int32, and a number no int32 holds is refused where it stands, the parameter's own
+// first byte. PostgreSQL 18.6 answers select $999999999999 with "parameter number too large" at
+// the $.
+func actParam(l *lexer, i, n int) {
+	l.start = i
+	if _, err := strconv.ParseInt(l.text[i+1:i+n], 10, 32); err != nil {
+		l.fail()
+	}
+	l.ret(sqlParam, i+n)
 }
 
 // actJunk returns the action of a rule scan.l raises an error from and reads nothing further
@@ -1179,39 +1441,29 @@ func actNumericfail(l *lexer, i, n int) {
 	l.ret(sqlNumber, i+n-2)
 }
 
-// {operator}: the Op rule, which stops at a slash-star or a dash-dash inside the operator and
-// throws back a trailing + or - unless the operator holds one of ~!@#^&|`?% before it.
+// namedatalen is NAMEDATALEN, "#define NAMEDATALEN 64" in src/include/pg_config_manual.h.
+const namedatalen = 64
+
+// {operator}: the Op rule, which stops the token at a slash-star or a dash-dash inside it and
+// throws back a trailing + or - unless the operator holds one of ~!@#^&|`?% before it, and then
+// refuses what is left where that is NAMEDATALEN bytes or more: "Complain if operator is too
+// long. Unlike the case for identifiers, we make this an error not a notice-and-truncate,
+// because the odds are we are looking at a syntactic mistake anyway. if (nchars >= NAMEDATALEN)
+// yyerror("operator too long")". Where the token stops, whether a qualifying character comes
+// before its last byte and where its trailing run of [+-] begins are answers about the run of
+// {op_chars} rather than about this token, and opRun holds them.
 func actOperator(l *lexer, i, n int) {
-	token := l.text[i : i+n]
-	nchars := n
-	slashstar := strings.Index(token, "/*")
-	dashdash := strings.Index(token, "--")
-	if slashstar >= 0 && dashdash >= 0 {
-		if slashstar > dashdash {
-			slashstar = dashdash
-		}
-	} else if slashstar < 0 {
-		slashstar = dashdash
-	}
-	if slashstar >= 0 {
-		nchars = slashstar
-	}
-	if nchars > 1 && (token[nchars-1] == '+' || token[nchars-1] == '-') {
-		ic := nchars - 2
-		for ; ic >= 0; ic-- {
-			if strings.IndexByte("~!@#^&|`?%", token[ic]) >= 0 {
-				break
-			}
-		}
-		if ic < 0 {
-			for {
-				nchars--
-				if nchars <= 1 || (token[nchars-1] != '+' && token[nchars-1] != '-') {
-					break
-				}
-			}
-		}
+	run := l.opRunAt(i)
+	nchars := run.stop - i // "if (nchars < yyleng) yyless(nchars)", at the first "/*" or "--"
+	if nchars > 1 && (l.text[i+nchars-1] == '+' || l.text[i+nchars-1] == '-') && run.qualify < i {
+		// "didn't find a qualifying character, so remove all trailing [+-]": the token ends
+		// where that run of [+-] begins, or is one byte long where it begins at or before the
+		// token's own first byte.
+		nchars = max(1, run.plus-i)
 	}
 	l.start = i
+	if nchars >= namedatalen {
+		l.fail()
+	}
 	l.ret(sqlOther, i+nchars)
 }

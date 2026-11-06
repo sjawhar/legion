@@ -780,10 +780,11 @@ func orNotVisible(s *string) string {
 }
 
 // insufficientPrivilege is what pg_stat_activity.query holds for a session the reading role may
-// not see: Postgres hides every other column of such a session as null, and that one column as
-// this string (pgstatfuncs.c, pg_stat_get_activity). Reading pg_stat_activity in this pod's
+// not see: Postgres hides that session's activity columns, query among them, and puts this
+// string in that one rather than a null (pgstatfuncs.c, pg_stat_get_activity). The session's
+// own identity is still there - pid is the backend's. Reading pg_stat_activity in this pod's
 // PostgreSQL 18.6 as a role that may not see another's backends answers, for pid, state and
-// query, "47||<insufficient privilege>": state null, query the placeholder.
+// query, "47||<insufficient privilege>": the pid, state null, query the placeholder.
 const insufficientPrivilege = "<insufficient privilege>"
 
 // visibleQuery is the holder's query text as the diagnosis prints it: not visible where Postgres

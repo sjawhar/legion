@@ -67,7 +67,7 @@ func isIdentStart(c byte) bool {
 // isIdentCont is scan.l's ident_cont, [A-Za-z\200-\377_0-9\$].
 func isIdentCont(c byte) bool { return isIdentStart(c) || isDigit(c) || c == '$' }
 
-// hiddenSpans returns, in order and merged where they touch, the spans of text that a session
+// hiddenSpans returns, in order and merged where they overlap, the spans of text that a session
 // with standard_conforming_strings off does not read as structure: a string, dollar-quoted or
 // Unicode-escaped literal, or a comment. That is the reading in which a backslash inside a plain
 // literal escapes the byte after it, so that a backslash before a quote carries that literal on
@@ -161,11 +161,11 @@ func hiddenSpans(text string, onFailure int) []sqlToken {
 // every literal and every comment of a text begins and ends is the lexer's and does not depend
 // on the parser reaching it: the rule above, that a byte is printed only where both readings
 // read it as structure, survives a parse error untouched. Hiding from a parse error instead
-// would need a parser in here, which is a second thing to get wrong. So do not look for
-// select 1..e'…' '…\' , ' SECRET ' here, the text whose secret the number arm of round 4
-// printed: PostgreSQL refuses it at the .. , which is the parser's refusal and not the lexer's,
-// and what stopped it leaking is scanl.go reading the number as {numericfail} does rather than
-// running it over the dots and the e.
+// would need a parser in here, which is a second thing to get wrong. A text such as
+// select 1..e'…' '…\' , ' SECRET ' is therefore not hidden by its refusal: PostgreSQL refuses it
+// at the .. , which is the parser's refusal and not the lexer's, and what keeps its secret is
+// scanl.go reading the number as {numericfail} does - throwing the dots back and returning the
+// number - rather than running a number over the dots and the e.
 //
 // Two properties follow. A query whose literals hold no backslash, and which neither reading is
 // refused, is redacted byte for byte as the default reading alone redacts it, because the two

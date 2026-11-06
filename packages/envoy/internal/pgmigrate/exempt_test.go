@@ -1,6 +1,9 @@
 package pgmigrate
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // migration0122 is the text of Dispatch's 0122_artifact_versions_block_index_trigger.up.sql, the
 // migration the exemption was written for; the store's census test reads the shipped file itself.
@@ -125,9 +128,7 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// it as NCHAR or as the identifier n; the quote after it opens a literal of its own,
 		// which is why the n is a word here and the literal that follows takes the setting.
 		// That n is a token PostgreSQL itself returns, not a fragment of a literal: printing it
-		// keeps a name, as the report keeps every name, and hides no byte of any value. It is
-		// one byte more than this row printed before the reading was transcribed from scan.l,
-		// and it is not under-hiding.
+		// keeps a name, as the report keeps every name, and hides no byte of any value.
 		"off: a national-character literal carried on": {"off", `select n'a\' , ghp_NCHAR , ' from t`, "select n?"},
 		// The default setting, where the backslash is a plain byte: the holder's own reading
 		// ends the first literal at its quote and opens the next at the next quote, so the
@@ -199,6 +200,58 @@ func TestRedactedQueryKeepsTheShapeAndDropsEveryValue(t *testing.T) {
 		// {integer_junk} is where scan.l raises "trailing junk after numeric literal": Postgres
 		// read no further, so the rest of the text is covered rather than printed.
 		"trailing junk after a number covers the rest": {"on and off", `select 1abc , ghp_SECRET , 'x'`, "select ?"},
+		// A refusal of the lexer's covers the rest of the text; a refusal of the parser's, or of
+		// anything later, moves nothing, a literal's extent being the lexer's. The rows below
+		// are the two kinds side by side, each measured against a PostgreSQL 18.6.
+		//
+		// {integer_junk} is {decinteger}{identifier}, and flex takes the longest match of the
+		// whole rule: 1_0$$ is the number 1 and the identifier _0$$, not the number 1_0 and a
+		// dollar quote, so this refusal moves a literal's boundary as well as the failure - the
+		// dollar-quoted literal a reading of the number alone would find opens at the second $$,
+		// which Postgres never reaches. 18.6 answers trailing junk after numeric literal at or
+		// near "1_0$$".
+		"the junk of a number before an underscore": {"on and off", "select 1_0$$ x $$ ghp_SECRET", "select ?"},
+		// The same number with no junk after it is a number Postgres reads: select 1_0 answers
+		// 10, so the name after it is a name and this row keeps it.
+		"an underscore inside a number is no refusal": {"on and off", "select 1_0 ghp_SECRET", "select ? ghp_SECRET"},
+		// {param} reads the digits after the $ with pg_strtoint32_safe and raises "parameter
+		// number too large" where no int32 holds them. The $1 of the first row of this table is
+		// a parameter Postgres reads, and stays.
+		"a parameter number no int32 holds": {"on and off", "select $999999999999 ghp_SECRET", "select ?"},
+		// The <xqs> action verifies a literal whose escapes made a byte that is not 7-bit ASCII
+		// (pg_verifymbstr): \400 is a zero byte and \xff is no UTF-8, and 18.6 answers both with
+		// invalid byte sequence for encoding "UTF8". Escapes that spell a character the encoding
+		// holds make a literal it reads, and the name after that is a name.
+		"an escape that makes a zero byte":       {"on and off", `select e'\400' ghp_SECRET`, "select ?"},
+		"an escape that makes a high byte":       {"on and off", `select e'\xff' , ghp_SECRET`, "select ?"},
+		"escapes that make a character it holds": {"on and off", `select e'\xc3\xa9' , ghp_SECRET`, "select ? , ghp_SECRET"},
+		// addunicode refuses a codepoint outside 0 < c <= 0x10FFFF with "invalid Unicode escape
+		// value", which 18.6 answers for both of the first two. A surrogate pair that spells a
+		// character is read; <xeu> refuses anything else after a first half, a letter and a
+		// carriage return alike - and <xeu> is the only place a carriage return reaches a rule
+		// that raises, since between tokens it is {space}.
+		"a codepoint no escape value holds":                {"on and off", `select e'\U0011FFFF' , ghp_SECRET`, "select ?"},
+		"the codepoint zero":                               {"on and off", `select e'\u0000' , ghp_SECRET`, "select ?"},
+		"a surrogate pair that spells a character":         {"on and off", `select e'\ud83d\ude00' , ghp_SECRET`, "select ? , ghp_SECRET"},
+		"a letter where a second half was wanted":          {"on and off", `select e'\ud83dX' , ghp_SECRET`, "select ?"},
+		"a carriage return where a second half was wanted": {"on and off", "select e'\\ud83d\r' , ghp_SECRET", "select ?"},
+		// {operator} refuses a token of NAMEDATALEN bytes or more with "operator too long". One
+		// byte short of it is a token the lexer hands over and the parser complains about, which
+		// moves nothing.
+		"an operator of NAMEDATALEN bytes": {"on and off", "select 1 " + strings.Repeat("@", 64) + " ghp_SECRET", "select ? ?"},
+		"an operator one byte shorter":     {"on and off", "select 1 " + strings.Repeat("@", 63) + " ghp_SECRET", "select ? " + strings.Repeat("@", 63) + " ghp_SECRET"},
+		// A carriage return is {space} in scan.l and whitespace between tokens: select \r 1
+		// answers 1 on 18.6, before the number and after it alike, so both rows keep the name.
+		"a carriage return before a number": {"on and off", "select \r 1 ghp_SECRET", "select ? ghp_SECRET"},
+		"a carriage return after a number":  {"on and off", "select 1 \r ghp_SECRET", "select ? ghp_SECRET"},
+		// Three refusals that are not the lexer's, which 18.6 answers with syntax error at or
+		// near "..", syntax error at or near "$" and column "u" does not exist. {numericfail}
+		// throws the two dots back and returns the number, {dolqfailed} returns the $ alone and
+		// {xufailed} returns the u, so every literal of these texts is where it was and the tail
+		// after the refusal is printed.
+		"two dots after a number are the parser's":   {"on and off", "select 1.. ghp_SECRET", "select ?.. ghp_SECRET"},
+		"a dollar that opens no tag is the parser's": {"on and off", "select $notatag ghp_SECRET", "select $notatag ghp_SECRET"},
+		"a U& that opens no literal is a name":       {"on and off", "select u&x ghp_SECRET", "select u&x ghp_SECRET"},
 	} {
 		if got := redactedQuery(tc.in); got != tc.want {
 			t.Errorf("%s (standard_conforming_strings %s): redactedQuery(%q) = %q, want %q", name, tc.setting, tc.in, got, tc.want)
