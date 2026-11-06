@@ -78,14 +78,18 @@ export function replayed(page: Page, method: string, path: string): Promise<Resp
  *  The page's clock must be installed before it loaded (`page.clock.install()`, which leaves the
  *  clock running at real speed), so the write loop's timers are the ones driven here.
  *
- *  The clock stands still for as long as a write of the page's is out, and runs only over the
- *  waits between attempts. An attempt the page has heard nothing of for `KEYED_SEND_ATTEMPT_MS`
- *  of the page's own time is given up and made again under its key (`writeUnderKey`), and this
- *  loop spends 1.1 s of page time for each 0.1 s of real time: driven over an attempt in flight
- *  it reaches that 15 s in under a second and a half of a loaded lane's real time, abandoning
- *  the very attempt the row waits for and raising one more POST than the row counts. Reads
- *  (`GET`) are left out of the reckoning: none of them is a keyed attempt, and the page holds
- *  some of them open for as long as it lives. */
+ *  While a write of the page's is out the clock runs at about real speed instead of at eleven
+ *  times it, and it never stops. An attempt the page has heard nothing of for
+ *  `KEYED_SEND_ATTEMPT_MS` of the page's own time is given up and made again under its key
+ *  (`writeUnderKey`), and this loop spends 1.1 s of page time for each 0.1 s of real time:
+ *  driven at that pace over an attempt in flight it reaches that 15 s in under a second and a
+ *  half of a loaded lane's real time, abandoning the very attempt the row waits for and raising
+ *  one more POST than the row counts. At the crawling pace the same 15 s costs 15 s of real
+ *  time, which no answer of this harness takes. The clock crawls rather than stopping because a
+ *  write that never ends must not hold the backoff of the write after it: a stopped clock fires
+ *  no timer at all, and the row then waits out its whole budget for a retry that was never
+ *  armed. Reads (`GET`) are left out of the reckoning: none of them is a keyed attempt, and the
+ *  page holds some of them open for as long as it lives. */
 export async function runClockUntil<T>(
   page: Page,
   landing: Promise<T>,
@@ -93,6 +97,7 @@ export async function runClockUntil<T>(
 ): Promise<T> {
   // The writes of the page's that are out, by request: an attempt that went out before this was
   // called ends while it runs, and a tally would count that ending as one write fewer than none.
+  const crawlMs = 100;
   const out = new Set<Request>();
   const went = (request: Request) => {
     if (request.method() !== "GET") out.add(request);
@@ -110,7 +115,7 @@ export async function runClockUntil<T>(
   const quiet = landed.catch(() => undefined);
   try {
     while (waiting) {
-      if (out.size === 0) await page.clock.runFor(stepMs);
+      await page.clock.runFor(out.size === 0 ? stepMs : Math.min(stepMs, crawlMs));
       const margin = Promise.withResolvers<void>();
       setTimeout(margin.resolve, 100);
       await Promise.race([quiet, margin.promise]);
