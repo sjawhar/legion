@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -434,5 +435,137 @@ func TestAnIssueClosedWhileTheListenerWasDownClosesItsRoomsOnTheReconnect(t *tes
 	writeIssueClosed(t, database, "DOC-1", true)
 	close(up)
 	requireEnds(t, alice, "the issue closed while the listener was down, and the reconnect left alice's browser connected")
+	connectWithScope(t, server.URL, artifactID, "alice", "readonly", "before\n")
+}
+
+// roomResident is whether service holds a room of artifactID now (ResidentRooms).
+func roomResident(service *Service, artifactID string) bool {
+	return slices.Contains(service.ResidentRooms(), artifactID)
+}
+
+// requireRecordClosed fails unless service's record of artifactID's room reads its issue closed,
+// read through the pair the service reads it with (lockExistingState, unlockState). A record that
+// reads open took no load after the issue closed, so a test that wants the load's own flag under
+// the close that follows is testing nothing.
+func requireRecordClosed(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	state := service.lockExistingState(artifactID)
+	if state == nil {
+		t.Fatalf("the service holds no record of %s's room, so no load of it read the issue", artifactID)
+	}
+	closed := state.closed
+	service.unlockState(artifactID, state)
+	if !closed {
+		t.Fatalf("the record of %s's room reads its issue open: its load did not mark it closed, and the close below meets the record it would have met anyway", artifactID)
+	}
+}
+
+// A room that loads after its issue closed writes the record's closed flag itself, and the close
+// this process hears afterwards must close that room all the same. Here no room of the document
+// is resident - the seed's room is evicted, leaving the process as one that never opened the
+// document - the issue closes in the database with nothing notified, as a listener's redial
+// leaves it (this test runs no room sync), and alice's browser then loads the room: the load
+// reads the issue itself and writes state.closed on the record (onLoadDocument, websocket.go),
+// with no close behind it, so the room keeps every browser in it on the admission it connected
+// with. The close notified next (issueOpenChanged, the issue-open lane's own handler, called here
+// on the test's goroutine as setIssueClosedHere calls it) found the record's flag already
+// matching the issue and returned, so nothing closed the room and its browsers held that
+// admission until ygo retired the room as idle, 60 to 90 seconds later. A notified close now
+// reaches closeRoomForIssue whatever the record holds (setRoomIssueOpen). The record is read back
+// before that close (requireRecordClosed): a test that reads only the room resident would pass
+// without the load having marked anything, and the flag the load writes is the whole case.
+func TestAnIssuesCloseClosesARoomWhoseLoadAlreadyMarkedItsRecordClosed(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newTestServiceInstance(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict the room the seed loaded: %v", err)
+	}
+	if roomResident(service, artifactID) {
+		t.Fatalf("the process still holds a room of %s before the issue closed, so the load below is not the first one after the close", artifactID)
+	}
+
+	writeIssueClosed(t, database, "DOC-1", true)
+	// The admission is the issue's state as this connect reads it (authorize), so a browser
+	// arriving after the close is read-only; what the close below takes from it is its socket,
+	// which is what a browser admitted writable before the close loses too.
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "readonly", "before\n")
+	if !roomResident(service, artifactID) {
+		t.Fatalf("alice's browser loaded no room of %s, so no load of it read the closed issue", artifactID)
+	}
+	requireRecordClosed(t, service, artifactID)
+
+	service.issueOpenChanged(store.WithTransactionTracking(context.Background()), "DOC-1")
+	waitFor(t, roomWait(t), "the room of "+artifactID+", whose issue DOC-1 closed, to stop being resident", func() bool {
+		return !roomResident(service, artifactID)
+	})
+	requireEnds(t, alice, "the close of issue DOC-1 left alice's browser on the room of "+artifactID+" connected")
+}
+
+// The append gate closes such a room too. Bob opens the document while the issue is closed and
+// nothing has been notified, as a listener's redial leaves it (this test runs no room sync): his
+// connect loads the room, and that load writes the record's closed flag with no close behind it
+// (onLoadDocument, websocket.go). The issue then reopens, still unheard here, so the record
+// keeps the flag its load wrote while the issue is open - only a close or a reopen this process
+// hears rewrites it (setRoomIssueOpen) - and alice, connecting now, is admitted writable: her
+// socket's admission and her authentication both read the issue open (authorize,
+// authorizeSchemaVersion), and ygo fixes that scope until she reconnects. The issue closes a
+// second time, again unheard, and the gate refuses her keystroke's append, the close standing
+// further back than closeMargin so the update's age decides it (ErrIssueClosed); the call at
+// websocket.go:214 hands that refusal to refuseClosedIssueAppend. The gate returned on a record
+// already reading closed, which left alice writing into a room nothing closed; its close is now
+// a notified one, which closes the room whatever the record holds (setRoomIssueOpen), so both
+// browsers' sockets end and they reconnect read-only. The room is closed for its issue rather
+// than failed (beforeFailedEviction).
+func TestTheAppendGateClosesARoomWhoseLoadAlreadyMarkedItsRecordClosed(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newTestServiceInstance(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	var failed atomic.Bool
+	service.beforeFailedEviction = func(string) { failed.Store(true) }
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict the room the seed loaded: %v", err)
+	}
+	if roomResident(service, artifactID) {
+		t.Fatalf("the process still holds a room of %s before the issue closed, so bob's connect below loads none", artifactID)
+	}
+
+	writeIssueClosed(t, database, "DOC-1", true)
+	bob := connectWithScope(t, server.URL, artifactID, "bob", "readonly", "before\n")
+	requireRecordClosed(t, service, artifactID)
+
+	writeIssueClosed(t, database, "DOC-1", false)
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	// The reopen reached no room sync, and alice's connect loaded nothing: the room was already
+	// resident, so the record still holds the flag bob's load wrote.
+	requireRecordClosed(t, service, artifactID)
+
+	// Closed far enough back that the gate judges alice's keystroke by its age alone: inside the
+	// margin it stores a browser's update whatever its age (observedBeforeClose).
+	closedAgo := closeMargin + 30*time.Second
+	if _, err := database.Pool.Exec(context.Background(),
+		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
+		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
+	}
+	// Alice's connect stored nothing that changed the document, and the gate stores nothing from
+	// here on, so this head stands still unless it takes her keystroke.
+	head := storedHead(t, database, artifactID)
+
+	typeOver(t, alice, "before", "typed after the second close")
+	requireEnds(t, alice, "the gate refused alice's keystroke on the room whose load marked its record closed and left her browser connected")
+	requireEnds(t, bob, "the gate's close of the room whose load marked its record closed left bob's read-only browser connected")
+	waitFor(t, roomWait(t), "the room of "+artifactID+", whose issue DOC-1 closed, to stop being resident", func() bool {
+		return !roomResident(service, artifactID)
+	})
+	if moved := storedHead(t, database, artifactID); moved != head {
+		t.Fatalf("the document moved from update %d to %d: the gate stored a browser's update on a closed issue", head, moved)
+	}
+	if failed.Load() {
+		t.Fatal("the refusal failed the room rather than closing it for its issue")
+	}
 	connectWithScope(t, server.URL, artifactID, "alice", "readonly", "before\n")
 }
