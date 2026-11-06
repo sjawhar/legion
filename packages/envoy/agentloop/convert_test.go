@@ -118,6 +118,53 @@ func TestAnAssistantTextPartsPhaseReachesTheWire(t *testing.T) {
 	}
 }
 
+// The phase the provider gave a reply's text comes back on the step's text block, and reaches
+// the wire again when the caller replays that step as the next run's history, so a turn this
+// package carries goes back as it came. TestAnAssistantTextPartsPhaseReachesTheWire covers the
+// phase a caller writes by hand; this one is the phase only the provider knew.
+func TestAStepsTextKeepsTheProvidersPhaseAndReplaysIt(t *testing.T) {
+	t.Parallel()
+	s := newStandIn(t, openaiStream(openaiUsage{Input: 4, Output: 2}, "", openaiPhasedMessage("msg_p", "final_answer", "It says plum.")))
+	result, err := Run(context.Background(), newFixture(t, s, OpenAIResponses, 1).req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Fault != "" {
+		t.Fatalf("result %+v, want no fault: %s", result, result.Detail)
+	}
+	if len(result.Steps) != 1 {
+		t.Fatalf("%d steps, want 1", len(result.Steps))
+	}
+	blocks := []Block{{Kind: TextBlock, Text: "It says plum.", Phase: "final_answer"}}
+	if !reflect.DeepEqual(result.Steps[0].Blocks, blocks) {
+		t.Fatalf("the step's blocks are %+v, want the text with the phase the provider gave it %+v", result.Steps[0].Blocks, blocks)
+	}
+
+	second := newStandIn(t, openaiStream(openaiUsage{Input: 6, Output: 2}, "", openaiMessage("msg_2", "It still says plum.")))
+	g := newFixture(t, second, OpenAIResponses, 1)
+	g.req.History = []Message{
+		{Role: User, Blocks: []Block{{Kind: TextBlock, Text: "Read note.txt."}}},
+		{Role: Assistant, Blocks: result.Steps[0].Blocks},
+	}
+	if result, err := Run(context.Background(), g.req); err != nil || result.Fault != "" {
+		t.Fatalf("the run replaying the step: %+v, %v", result, err)
+	}
+	got := second.requests()
+	if len(got) != 1 {
+		t.Fatalf("%d model calls, want 1", len(got))
+	}
+	var assistant []map[string]any
+	for _, item := range inputItems(t, got[0]) {
+		if item["role"] == "assistant" {
+			assistant = append(assistant, item)
+		}
+	}
+	want := []map[string]any{{"role": "assistant", "content": "It says plum.", "phase": "final_answer"}}
+	if !reflect.DeepEqual(assistant, want) {
+		t.Errorf("the wire's assistant items are %v, want the step's text with its phase %v", assistant, want)
+	}
+}
+
 // Redacted thinking a conversation kept reaches the Anthropic wire as a redacted thinking block,
 // with its payload byte for byte, so the model is given its own turn back as it came.
 func TestRedactedThinkingReplaysToTheWire(t *testing.T) {

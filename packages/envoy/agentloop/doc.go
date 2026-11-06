@@ -4,8 +4,9 @@
 // routes nothing: a caller hands it an endpoint, a model, the messages, the tools the model may
 // call and the bounds of the run, and reads back the reply, every step and what the run cost.
 //
-// Nothing here reads a base URL or a key from the environment. Every endpoint and every
-// credential arrives in the request.
+// Nothing here comes from the environment: neither a base URL nor a key, and none of the
+// organization, the project and the custom headers a vendor client would otherwise read for
+// itself. Every endpoint and every credential arrives in the request.
 //
 // # Tool call numbering
 //
@@ -20,7 +21,10 @@
 // Endpoint.Token returns a token and the kind decides where it goes: X-Api-Key for
 // anthropic-messages; Authorization, as a bearer token, for openai-responses, openai-chat and
 // systemone; and for azure-anthropic the token is handed to the Azure provider's own credential.
-// There is no Endpoint field for an auth scheme.
+// There is no Endpoint field for an auth scheme. A redirect is never followed, in a run or in a
+// decision, so the token reaches the endpoint the caller named and no other server: a 3xx comes
+// back as the response, which the retry leaves alone and the provider reports, so the run ends
+// in FaultProviderError.
 //
 // # The retry
 //

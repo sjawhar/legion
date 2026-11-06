@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	anthropicopt "github.com/anthropics/anthropic-sdk-go/option"
@@ -48,7 +50,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	messages := append(history, input...)
 
 	transport := newModelTransport(req.Model.Endpoint)
-	model, options, err := languageModel(req, &http.Client{Transport: transport})
+	model, options, err := languageModel(req, transport.client())
 	if err != nil {
 		return Result{}, err
 	}
@@ -155,8 +157,14 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 			anthropicopt.WithHTTPClient(client), anthropicopt.WithMaxRetries(0), anthropicopt.WithBaseURL(endpoint.BaseURL)))
 		return model, anthropicOptions(req.Model.Effort), nil
 	case OpenAIResponses:
-		model := openai.NewResponses(placeholderKey, req.Model.ID, openai.WithRequestOptions(
-			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0), openaiopt.WithBaseURL(endpoint.BaseURL)))
+		// The base URL and the key are not all openai-go's client takes from the
+		// environment: an organization, a project and whatever headers
+		// OPENAI_CUSTOM_HEADERS names would ride to the endpoint the caller named. The
+		// first two are overridden; these are taken off again.
+		options := append([]openaiopt.RequestOption{
+			openaiopt.WithHTTPClient(client), openaiopt.WithMaxRetries(0), openaiopt.WithBaseURL(endpoint.BaseURL),
+		}, withoutEnvironmentHeaders()...)
+		model := openai.NewResponses(placeholderKey, req.Model.ID, openai.WithRequestOptions(options...))
 		return model, openaiOptions(req.Model.Effort), nil
 	case OpenAIChat:
 		// The run's own transport puts the token on every request and adds the
@@ -172,7 +180,9 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 		return model, chatOptions(req.Model.Effort), nil
 	case AzureAnthropic:
 		// The deployment name is given only where it differs from the model id, and the
-		// foundry config owns the base URL, which NewAnthropic applies itself.
+		// foundry config owns the base URL, which NewAnthropic applies itself. The run's
+		// client takes the place of the one that config builds, and refuses redirects as
+		// that one does.
 		deployment := endpoint.Deployment
 		if deployment == "" {
 			deployment = req.Model.ID
@@ -193,6 +203,24 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 	default:
 		return nil, nil, fmt.Errorf("agentloop: the loop makes no run on the %s protocol", endpoint.Kind)
 	}
+}
+
+// withoutEnvironmentHeaders takes off the headers openai-go's client puts on every request from
+// the environment: the organization and the project it reads from OPENAI_ORG_ID and
+// OPENAI_PROJECT_ID, and every header OPENAI_CUSTOM_HEADERS names, which that client reads as
+// one "name: value" a line. They are deleted after the client's own defaults are applied and
+// before the call is made, so nothing this package sends comes from the environment.
+func withoutEnvironmentHeaders() []openaiopt.RequestOption {
+	options := []openaiopt.RequestOption{
+		openaiopt.WithHeaderDel("OpenAI-Organization"),
+		openaiopt.WithHeaderDel("OpenAI-Project"),
+	}
+	for _, line := range strings.Split(os.Getenv("OPENAI_CUSTOM_HEADERS"), "\n") {
+		if colon := strings.Index(line, ":"); colon >= 0 {
+			options = append(options, openaiopt.WithHeaderDel(strings.TrimSpace(line[:colon])))
+		}
+	}
+	return options
 }
 
 // finalOutput is Request.Final as the SDK's output: the last reply is validated against the
@@ -345,13 +373,15 @@ func (r *run) result() Result {
 	return result
 }
 
-// finish reads the last model call into result: its output items, the fault the call ended on,
-// and the object the reply was required to be when the request asked for one.
+// finish reads the last model call into result: its output items, the refusal the call may have
+// ended on, the fault it ended on, and the object the reply was required to be when the request
+// asked for one.
 func (r *run) finish(result *Result, stream *aisdk.StreamTextResult) {
 	r.mu.Lock()
 	reason := r.reason
 	r.mu.Unlock()
-	if r.kind == OpenAIResponses {
+	switch r.kind {
+	case OpenAIResponses:
 		items, err := r.transport.outputItems(len(result.Steps))
 		if err != nil {
 			result.Fault, result.Detail = FaultProviderError, err.Error()
@@ -362,6 +392,19 @@ func (r *run) finish(result *Result, stream *aisdk.StreamTextResult) {
 		}
 		if refused(items[len(items)-1]) {
 			result.Fault, result.Detail = FaultRefusal, "the last reply is a refusal"
+			return
+		}
+	case OpenAIChat:
+		// Chat Completions says a refusal in the reply's body alone: it stops for
+		// "stop" with no content, which is otherwise an empty answer or, where the
+		// request asked for a Final object, a malformed one.
+		refusal, err := r.transport.refusal(len(result.Steps))
+		if err != nil {
+			result.Fault, result.Detail = FaultProviderError, err.Error()
+			return
+		}
+		if refusal != "" {
+			result.Fault, result.Detail = FaultRefusal, fmt.Sprintf("the last reply is a refusal: %.500q", refusal)
 			return
 		}
 	}
@@ -416,7 +459,8 @@ func refused(items []json.RawMessage) bool {
 }
 
 // blocksOf is one model call's content as this package's blocks, in the order the model
-// produced it: its thinking or its reasoning, its text, its tool calls and their results.
+// produced it: its thinking or its reasoning, its text with the phase it was produced in, its
+// tool calls and their results.
 func blocksOf(content []aisdk.ContentPart, kind Kind) []Block {
 	var blocks []Block
 	for _, part := range content {
@@ -425,7 +469,7 @@ func blocksOf(content []aisdk.ContentPart, kind Kind) []Block {
 			blocks = append(blocks, reasoningBlock(part, kind))
 		case aisdk.TextContent:
 			if part.Text != "" {
-				blocks = append(blocks, Block{Kind: TextBlock, Text: part.Text})
+				blocks = append(blocks, Block{Kind: TextBlock, Text: part.Text, Phase: textPhase(part, kind)})
 			}
 		case aisdk.ToolCallContent:
 			blocks = append(blocks, Block{Kind: ToolCallBlock, ToolCallID: part.ToolCallID, Name: part.ToolName, Input: part.Input})
@@ -443,6 +487,20 @@ func blocksOf(content []aisdk.ContentPart, kind Kind) []Block {
 		}
 	}
 	return blocks
+}
+
+// textPhase is the phase an openai-responses text part was produced in, which the provider puts
+// in its own metadata and Block.Phase keeps so the part goes back as it came. No other protocol
+// gives its text one.
+func textPhase(part aisdk.TextContent, kind Kind) string {
+	if kind != OpenAIResponses {
+		return ""
+	}
+	var meta openai.OpenAIPartOptions
+	if raw, ok := part.ProviderMetadata["openai"]; ok {
+		_ = json.Unmarshal(raw, &meta)
+	}
+	return meta.Phase
 }
 
 // reasoningBlock is one reasoning part as the protocol's own block: an OpenAI reasoning item

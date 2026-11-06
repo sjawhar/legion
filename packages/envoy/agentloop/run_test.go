@@ -430,7 +430,9 @@ func TestALastReplyCutOffIsAFault(t *testing.T) {
 	}
 }
 
-// A reply the model refused is a refusal fault, on each protocol's own way of saying so.
+// A reply the model refused is a refusal fault, on each protocol's own way of saying so, and
+// whether or not the request asked for a Final object: a refusal is why the run ended, not a
+// reply of the wrong form.
 func TestARefusedReplyIsAFault(t *testing.T) {
 	t.Parallel()
 	refusal := `{"id":"msg_r","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"I will not do that."}]}`
@@ -441,16 +443,31 @@ func TestARefusedReplyIsAFault(t *testing.T) {
 	}{
 		{name: "an Anthropic refusal stop reason", kind: AnthropicMessages, reply: anthropicStream("refusal", anthropicUsage{Output: 1}, anthropicText(""))},
 		{name: "an OpenAI Responses refusal part", kind: OpenAIResponses, reply: openaiStream(openaiUsage{Output: 1}, "", refusal)},
+		{name: "a Chat Completions refusal delta", kind: OpenAIChat, reply: chatRefusalStream("I will not do that.", false)},
+		{name: "a Chat Completions refusal message", kind: OpenAIChat, reply: chatRefusalStream("I will not do that.", true)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			s := newStandIn(t, c.reply)
-			result, err := Run(context.Background(), newFixture(t, s, c.kind, 1).req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Fault != FaultRefusal {
-				t.Errorf("fault %q, want %q: %s", result.Fault, FaultRefusal, result.Detail)
+			for _, final := range []struct {
+				name  string
+				value json.RawMessage
+			}{
+				{name: "with free text asked for"},
+				{name: "with a final object asked for", value: json.RawMessage(finalSchema)},
+			} {
+				t.Run(final.name, func(t *testing.T) {
+					t.Parallel()
+					s := newStandIn(t, c.reply)
+					f := newFixture(t, s, c.kind, 1)
+					f.req.Final = final.value
+					result, err := Run(context.Background(), f.req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if result.Fault != FaultRefusal {
+						t.Errorf("fault %q, want %q: %s", result.Fault, FaultRefusal, result.Detail)
+					}
+				})
 			}
 		})
 	}
@@ -557,13 +574,22 @@ func TestTheCostSumsEveryCallWithItsCacheWrites(t *testing.T) {
 	}
 }
 
+// environmentHeader is the name of a header the environment asks a vendor client to put on every
+// request it makes, whatever endpoint the caller configured.
+const environmentHeader = "X-From-The-Environment"
+
 // The endpoint the run calls is the request's, whatever the environment's own base URLs and key
-// say, and the call carries the request's token.
+// say, and the call carries the request's token and nothing else the environment holds: neither
+// the organization and the project openai-go reads, nor the headers either vendor SDK reads.
 func TestTheEndpointComesFromTheRequestAndNeverTheEnvironment(t *testing.T) {
 	elsewhere := newStandIn(t)
 	t.Setenv("OPENAI_BASE_URL", elsewhere.server.URL+"/v1")
 	t.Setenv("ANTHROPIC_BASE_URL", elsewhere.server.URL)
 	t.Setenv("OPENAI_API_KEY", "a-key-from-the-environment")
+	t.Setenv("OPENAI_ORG_ID", "an-organization-from-the-environment")
+	t.Setenv("OPENAI_PROJECT_ID", "a-project-from-the-environment")
+	t.Setenv("OPENAI_CUSTOM_HEADERS", environmentHeader+": yes\n"+environmentHeader+"-Too: yes")
+	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", environmentHeader+": yes")
 
 	openaiStandIn := newStandIn(t, openaiStream(openaiUsage{Input: 1, Output: 1}, "", openaiMessage("msg_1", "It says plum.")))
 	if result, err := Run(context.Background(), newFixture(t, openaiStandIn, OpenAIResponses, 1).req); err != nil || result.Fault != "" {
@@ -573,11 +599,32 @@ func TestTheEndpointComesFromTheRequestAndNeverTheEnvironment(t *testing.T) {
 	if result, err := Run(context.Background(), newFixture(t, anthropicStandIn, AnthropicMessages, 1).req); err != nil || result.Fault != "" {
 		t.Fatalf("the Anthropic run: %+v, %v", result, err)
 	}
+	chatStandIn := newStandIn(t, chatStream("stop", chatUsage{Prompt: 1, Completion: 1}, "It says plum."))
+	if result, err := Run(context.Background(), newFixture(t, chatStandIn, OpenAIChat, 1).req); err != nil || result.Fault != "" {
+		t.Fatalf("the Chat Completions run: %+v, %v", result, err)
+	}
+	azureStandIn := newStandIn(t, anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText("It says plum.")))
+	if result, err := Run(context.Background(), newFixture(t, azureStandIn, AzureAnthropic, 1).req); err != nil || result.Fault != "" {
+		t.Fatalf("the Azure run: %+v, %v", result, err)
+	}
 	if n := len(elsewhere.requests()); n != 0 {
 		t.Errorf("the environment's endpoint got %d requests, want none", n)
 	}
 	if got := openaiStandIn.requests()[0].header.Get("Authorization"); got != "Bearer standin-openai-token" {
 		t.Errorf("the OpenAI call's Authorization %q, want the request's token", got)
+	}
+	for _, c := range []struct {
+		kind Kind
+		s    *standIn
+	}{
+		{OpenAIResponses, openaiStandIn}, {AnthropicMessages, anthropicStandIn},
+		{OpenAIChat, chatStandIn}, {AzureAnthropic, azureStandIn},
+	} {
+		for _, name := range []string{"OpenAI-Organization", "OpenAI-Project", environmentHeader, environmentHeader + "-Too"} {
+			if got := c.s.requests()[0].header.Get(name); got != "" {
+				t.Errorf("the %s call carries %s %q, want none: the package reads nothing from the environment", c.kind, name, got)
+			}
+		}
 	}
 }
 
@@ -639,6 +686,75 @@ func TestAServerErrorIsRetriedOnceAndARequestErrorIsNot(t *testing.T) {
 	}
 	if n := len(bad.requests()); n != 1 {
 		t.Errorf("a 400 took %d requests, want 1: a request error is not retried", n)
+	}
+}
+
+// A redirect is never followed, in a run and in a decision alike: the transport puts the
+// endpoint's credential on every request it carries, and Go's own client strips Authorization
+// on a cross-domain redirect before a transport runs, so following one would hand the token to
+// whatever server the Location names. The 3xx comes back as the provider's error instead, and
+// the server the redirect points at hears nothing at all.
+func TestARedirectIsNotFollowedAndItsTargetIsNeverCalled(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		// answer is what the redirect's target would reply with, were it ever called,
+		// and call makes the request through the stand-in that redirects, returning the
+		// fault it ended on.
+		answer reply
+		call   func(*testing.T, *standIn) Fault
+	}{
+		{
+			name:   "a run",
+			answer: anthropicStream("end_turn", anthropicUsage{Input: 1, Output: 1}, anthropicText("The target answered.")),
+			call: func(t *testing.T, s *standIn) Fault {
+				result, err := Run(context.Background(), newFixture(t, s, AnthropicMessages, 1).req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.Text != "" {
+					t.Errorf("the run answered %q, want no answer from the redirect's target", result.Text)
+				}
+				return result.Fault
+			},
+		},
+		{
+			name:   "a decision",
+			answer: reply{body: []byte(decideAnswer)},
+			call: func(t *testing.T, s *standIn) Fault {
+				result, err := Decide(context.Background(), newDecideFixture(t, s))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Answers) != 0 {
+					t.Errorf("the decision answered %+v, want no answer from the redirect's target", result.Answers)
+				}
+				return result.Fault
+			},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			target := newStandIn(t, c.answer)
+			redirecting := newStandIn(t, reply{
+				status:  http.StatusTemporaryRedirect,
+				headers: map[string]string{"Location": target.server.URL + "/elsewhere"},
+			})
+			if fault := c.call(t, redirecting); fault != FaultProviderError {
+				t.Errorf("fault %q, want %q: a 3xx is the provider's answer", fault, FaultProviderError)
+			}
+			got := target.requests()
+			if len(got) != 0 {
+				t.Errorf("the redirect's target got %d requests, want none", len(got))
+			}
+			for i, r := range got {
+				for _, name := range []string{"Authorization", "X-Api-Key"} {
+					if credential := r.header.Get(name); credential != "" {
+						t.Errorf("request %d to the redirect's target carries %s %q, want no credential anywhere", i+1, name, credential)
+					}
+				}
+			}
+		})
 	}
 }
 

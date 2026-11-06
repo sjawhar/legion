@@ -288,6 +288,13 @@ func openaiMessage(id, text string) string {
 	return `{"id":"` + id + `","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":` + quote(text) + `,"annotations":[]}]}`
 }
 
+// openaiPhasedMessage is a Responses API message item the model produced in a phase, which the
+// API names on the item itself.
+func openaiPhasedMessage(id, phase, text string) string {
+	return `{"id":"` + id + `","type":"message","role":"assistant","status":"completed","phase":` + quote(phase) +
+		`,"content":[{"type":"output_text","text":` + quote(text) + `,"annotations":[]}]}`
+}
+
 func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
@@ -308,30 +315,57 @@ func (u chatUsage) object() map[string]any {
 	}
 }
 
+// chatChunk is one chat.completion.chunk of a Chat Completions stream: its choices and, on the
+// chunk the usage rides in, the usage.
+func chatChunk(choices []any, usage any) map[string]any {
+	c := map[string]any{
+		"id": "chatcmpl-standin", "object": "chat.completion.chunk", "created": 1,
+		"model": "gpt-standin", "choices": choices,
+	}
+	if usage != nil {
+		c["usage"] = usage
+	}
+	return c
+}
+
+// chatDelta is one chunk's single choice: what the reply added, and the finish reason where the
+// reply ended there.
+func chatDelta(delta map[string]any, finish any) []any {
+	return []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}
+}
+
 // chatStream is the event stream the Chat Completions API sends for a reply whose content
 // arrives in deltas and that stops for finishReason, with the usage chunk the stream is asked
 // for and the [DONE] line that ends it.
 func chatStream(finishReason string, usage chatUsage, deltas ...string) reply {
 	var w sseWriter
-	chunk := func(choices []any, usage any) map[string]any {
-		c := map[string]any{
-			"id": "chatcmpl-standin", "object": "chat.completion.chunk", "created": 1,
-			"model": "gpt-standin", "choices": choices,
-		}
-		if usage != nil {
-			c["usage"] = usage
-		}
-		return c
-	}
-	choice := func(delta map[string]any, finish any) []any {
-		return []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}
-	}
-	w.event("chunk", chunk(choice(map[string]any{"role": "assistant", "content": ""}, nil), nil))
+	w.event("chunk", chatChunk(chatDelta(map[string]any{"role": "assistant", "content": ""}, nil), nil))
 	for _, delta := range deltas {
-		w.event("chunk", chunk(choice(map[string]any{"content": delta}, nil), nil))
+		w.event("chunk", chatChunk(chatDelta(map[string]any{"content": delta}, nil), nil))
 	}
-	w.event("chunk", chunk(choice(map[string]any{}, finishReason), nil))
-	w.event("chunk", chunk([]any{}, usage.object()))
+	w.event("chunk", chatChunk(chatDelta(map[string]any{}, finishReason), nil))
+	w.event("chunk", chatChunk([]any{}, usage.object()))
+	fmt.Fprint(&w, "data: [DONE]\n\n")
+	return reply{body: w.Bytes()}
+}
+
+// chatRefusalStream is the event stream Chat Completions sends for a reply the model refused:
+// the refusal arrives in the choice's delta, as OpenAI streams one, or on the choice's whole
+// message, as a gateway that answers a stream request with the whole reply sends it. Either
+// shape stops for "stop" and carries no content at all, so a refusal the body is not read for
+// reaches the caller as an empty answer.
+func chatRefusalStream(refusal string, whole bool) reply {
+	var w sseWriter
+	w.event("chunk", chatChunk(chatDelta(map[string]any{"role": "assistant", "content": ""}, nil), nil))
+	if whole {
+		w.event("chunk", chatChunk([]any{map[string]any{
+			"index": 0, "message": map[string]any{"role": "assistant", "refusal": refusal}, "finish_reason": "stop",
+		}}, nil))
+	} else {
+		w.event("chunk", chatChunk(chatDelta(map[string]any{"refusal": refusal}, nil), nil))
+		w.event("chunk", chatChunk(chatDelta(map[string]any{}, "stop"), nil))
+	}
+	w.event("chunk", chatChunk([]any{}, chatUsage{Prompt: 2, Completion: 1}.object()))
 	fmt.Fprint(&w, "data: [DONE]\n\n")
 	return reply{body: w.Bytes()}
 }
