@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 import { ArtifactMedia } from "./ArtifactMedia";
 import { RefLink } from "./RefLink";
-import { usePinnedMedia, useReferenceTarget } from "./reference-target";
+import { usePinnedMedia, useReferencePath, useReferenceTarget } from "./reference-target";
 import { type DispatchReferenceRoute, parseNodeReference, referencedArtifact } from "./routes";
 
 /** A picture's placeholder in a rendered body, holding the `DispatchPicture` a portal renders
@@ -61,8 +61,9 @@ export function DispatchPicture({
   /** The placeholder this is portalled into: the link the serializer wrote, or the element a
    *  surface put in its place. A player leaves that link where it is, so the keyboard reaches
    *  the artifact's page through it; the address comes off only for the length of a pointer
-   *  press, so a press on the player's controls plays instead of opening that page
-   *  (`ArtifactMedia`). */
+   *  press, so a press on the player's controls plays instead of opening that page. A mouse
+   *  reaches that page by the caption drawn under the player, beside this link rather than
+   *  inside it (`ArtifactMedia`). */
   anchor?: HTMLElement;
   caption: string;
   route: DispatchReferenceRoute;
@@ -79,6 +80,9 @@ export function DispatchPicture({
   }).picture;
   const pinned = usePinnedMedia(route);
   const media = target ?? pinned;
+  // Where the artifact's page is, for the caption a player is drawn with: the address this
+  // reference opens, which is the one the serializer already wrote onto the placeholder.
+  const path = useReferencePath(route);
   // The placeholder is the link the serializer wrote, so the fallback hands the reader back
   // exactly that link, its address the one `RefLink` keeps on it.
   const link = <RefLink anchor={anchor} route={route} />;
@@ -104,6 +108,7 @@ export function DispatchPicture({
       height={media.height}
       host={anchor}
       kind={media.kind}
+      page={path}
       src={media.src}
       variant="block"
       width={media.width}

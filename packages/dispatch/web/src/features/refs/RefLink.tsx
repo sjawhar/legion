@@ -36,7 +36,8 @@ export interface ReferenceAnchor {
  * broken-image glyph. A reference to a video standing alone in its block is its player instead,
  * drawn at reading size as a picture line's is, and the anchor stays the link it was: a pointer
  * press on the player is the player's and plays rather than opening the artifact's page, while
- * the keyboard reaches that page through the link as it does around a picture
+ * the keyboard reaches that page through the link as it does around a picture, and a mouse
+ * reaches it by the caption drawn under the player, which is its own link beside this one
  * (`ArtifactMedia`); inside a sentence the reference is the link it has always been. When the
  * element it renders into is a link, its href follows `useReferencePath`, which a pinned block
  * of a spec resolves only once its issue's summary is read. */
@@ -69,6 +70,7 @@ export function RefLink({
         fallback={label}
         host={anchor}
         kind="video"
+        page={path}
         src={player}
         variant="block"
       />

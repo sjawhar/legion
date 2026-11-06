@@ -357,8 +357,12 @@ test("a video reference in a comment draws a player for the picture line and for
 // player's own. That press is all the link gives up: it keeps its address, so it takes the
 // focus, is named by what it holds and opens the artifact's page on Enter, which is the way a
 // keyboard reader reaches that page from a body - the way a picture's link has always left
-// open.
-test("a keyboard reader opens a video's artifact page from the body it plays in, where a press on the player opens nothing @phone", async ({
+// open. A mouse has no such way: the player is drawn over every point of that link, so no
+// gesture on it reaches the page. The caption under the player is the control that gives the
+// mouse one back, beside the link rather than inside it (an `<a>` inside an `<a>` is no
+// markup at all): the reference's own words, linking to the same page, pressable and in the
+// tab order.
+test("a video's caption opens its artifact page on a click and on Enter, where a press on the player opens nothing @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -369,6 +373,7 @@ test("a keyboard reader opens a video's artifact page from the body it plays in,
     const artifacts = `/api/v1/issues/${issue.key}/artifacts`;
     await uploadVersion(page, artifacts, "clip.webm", "video/webm", TINY_WEBM);
     const clipRef = `dispatch://${issue.key}/artifact/clip-webm@v1`;
+    const clipSrc = `${artifacts}/clip-webm/versions/1`;
     const artifactPage = `/issues/${issue.key}/artifacts/clip-webm?v=1`;
     const comment = await createComment(issue.key, { body: `![clip.webm](${clipRef})` });
 
@@ -381,43 +386,76 @@ test("a keyboard reader opens a video's artifact page from the body it plays in,
       const url = new URL(frame.url());
       opened.add(`${url.pathname}${url.search}`);
     });
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const card = page.locator(`[data-turn="comment:${comment.id}"]`);
-    // The card the reader opened holds the body at reading size, where the picture line is the
-    // player and its placeholder the link around it. A preview of the same comment elsewhere on
-    // the page draws that reference as a link with no player inside it, so the player is what
-    // tells the body's own placeholder from a preview's.
-    await card.getByRole("button", { name: "Expand thread" }).click();
-    const line = card.locator(`a[data-dispatch-picture="${clipRef}"]:has(video)`);
-    const player = line.locator("video");
-    await expectPlayer(player, `${artifacts}/clip-webm/versions/1`);
-    await expectPlays(player);
-    opened.clear();
+
+    /** The comment's body, opened afresh: the card the reader expanded holds it at reading
+     *  size, where the picture line is the player, its placeholder the link around it and the
+     *  caption the link under it. A preview of the same comment elsewhere on the page draws
+     *  that reference as a link with no player inside it, so the player is what tells the
+     *  body's own placeholder from a preview's. Each gesture below opens a page, so each round
+     *  comes back here; the addresses opened are cleared once the body is on the screen. */
+    const openTheBody = async () => {
+      await page.goto(`/issues/${issue.key}/conversation`);
+      const card = page.locator(`[data-turn="comment:${comment.id}"]`);
+      await card.getByRole("button", { name: "Expand thread" }).click();
+      const line = card.locator(`a[data-dispatch-picture="${clipRef}"]:has(video)`);
+      const player = line.locator("video");
+      await expectPlayer(player, clipSrc);
+      opened.clear();
+      return { caption: card.locator("a[data-dispatch-player-caption]"), line, player };
+    };
+
+    /** Fails unless the artifact's page is what the last gesture opened, and nothing else. */
+    const expectTheArtifactPage = async () => {
+      await page.waitForURL(`**${artifactPage}`);
+      const shown = page.getByRole("region", { name: "clip.webm version 1" });
+      await expectPlayer(shown.locator("video"), clipSrc);
+      expect([...opened]).toEqual([artifactPage]);
+    };
+
+    const first = await openTheBody();
+    await expectPlays(first.player);
 
     // A press on the player is the player's: it opens no page, whatever the engine's own
     // controls do with it. Every step below runs on the body this press left in place, and the
-    // list of addresses opened says so for itself before the Enter that does open one.
-    await player.click();
+    // list of addresses opened says so for itself before the gesture that does open one.
+    await first.player.click();
 
-    // The link the player is drawn in is the artifact's, and it is named by the player it
-    // holds. It takes the focus and stands in the page's own tab order, which is how a reader
-    // arrives at it: the step back from it lands somewhere else, and the step forward lands on
-    // it again.
-    await expect(line).toHaveAttribute("href", artifactPage);
-    await expect(line).toHaveAccessibleName("clip.webm");
-    await line.focus();
-    await expect(line).toBeFocused();
+    // The link the player is drawn in is the artifact's still, and it is named by the player it
+    // holds: the press took its address off for its own length and put it back.
+    await expect(first.line).toHaveAttribute("href", artifactPage);
+    await expect(first.line).toHaveAccessibleName("clip.webm");
+
+    // The caption is a link of its own to the same page, carrying the words the reference gave
+    // the player. It takes the focus and stands in the page's own tab order, which is how a
+    // reader arrives at it: the step back from it lands somewhere else, and the step forward
+    // lands on it again.
+    await expect(first.caption).toHaveAttribute("href", artifactPage);
+    await expect(first.caption).toHaveText("clip.webm");
+    await first.caption.focus();
+    await expect(first.caption).toBeFocused();
     await page.keyboard.press("Shift+Tab");
-    await expect(line).not.toBeFocused();
+    await expect(first.caption).not.toBeFocused();
     await page.keyboard.press("Tab");
-    await expect(line).toBeFocused();
+    await expect(first.caption).toBeFocused();
     expect([...opened], "the press on the player opened no page").toEqual([]);
 
+    // Enter on the caption opens the artifact's page, where the video plays.
     await page.keyboard.press("Enter");
-    await page.waitForURL(`**${artifactPage}`);
-    const shown = page.getByRole("region", { name: "clip.webm version 1" });
-    await expectPlayer(shown.locator("video"), `${artifacts}/clip-webm/versions/1`);
-    expect([...opened]).toEqual([artifactPage]);
+    await expectTheArtifactPage();
+
+    // A plain click on it opens that page too: the gesture the player's own box leaves the link
+    // above no room for.
+    const second = await openTheBody();
+    await second.caption.click();
+    await expectTheArtifactPage();
+
+    // And the link the player is drawn in still opens it on Enter, as it did before the caption
+    // was drawn under it.
+    const third = await openTheBody();
+    await third.line.focus();
+    await expect(third.line).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expectTheArtifactPage();
   } finally {
     await alice.close();
   }
