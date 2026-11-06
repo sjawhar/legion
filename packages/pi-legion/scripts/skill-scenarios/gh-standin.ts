@@ -24,6 +24,10 @@ const Fixtures = z.looseObject({
   ),
 });
 
+/** The part of rig.sh's <run>/world.json this stand-in reads: the issue branch of the run's own
+ * bare remote, whose tip is the pull request's head. */
+const World = z.looseObject({ branch: z.string() });
+
 const run = process.env.SKILL_SCENARIO_RUN;
 if (!run) {
   console.error("gh-standin: SKILL_SCENARIO_RUN is unset");
@@ -108,7 +112,37 @@ if (body !== undefined) {
   writeFileSync(`${run}/fixtures.json`, JSON.stringify({ ...fixtures, routes: edited }));
   kept = body;
 }
+// What GitHub answers for the pull request's head is the commit its branch points at, so a route
+// whose object carries `headRefOid` answers the tip of the run's own remote rather than the
+// fixture's first commit: a role that pushes and then reads the head, which the worker skill has
+// every pushing role do, must see its own commit. The tip is read from the run's bare remote at
+// the call, and a remote the run has not got leaves the fixture's value as it is.
+function branchTip(): string | undefined {
+  const world = World.safeParse(
+    JSON.parse(readFileSync(`${run}/world.json`, "utf8").toString() || "{}")
+  );
+  if (!world.success) return undefined;
+  const read = Bun.spawnSync([
+    "git",
+    "-C",
+    `${run}/remote.git`,
+    "rev-parse",
+    `refs/heads/${world.data.branch}`,
+  ]);
+  const tip = read.stdout.toString().trim();
+  return read.exitCode === 0 && tip !== "" ? tip : undefined;
+}
 let output: unknown = route.stdout ?? "";
+if (typeof output === "object" && output !== null && "headRefOid" in output) {
+  const tip = branchTip();
+  if (tip !== undefined) {
+    const nested =
+      "head" in output && typeof output.head === "object" && output.head !== null
+        ? { head: { ...output.head, sha: tip } }
+        : {};
+    output = { ...output, headRefOid: tip, ...nested };
+  }
+}
 const jsonIndex = args.indexOf("--json");
 if (jsonIndex >= 0 && typeof output === "object" && output !== null && !Array.isArray(output)) {
   const record: Record<string, unknown> = { ...output };
