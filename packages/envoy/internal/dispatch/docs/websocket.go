@@ -75,10 +75,18 @@ func WithCommentMarks(ctx context.Context) context.Context {
 // commentMarkOperation is ctx for one of the comment anchor operations WithCommentMarks names:
 // owner-verified when the caller marked ctx, unchanged otherwise.
 func commentMarkOperation(ctx context.Context) context.Context {
-	if marked, _ := ctx.Value(commentMarksContextKey{}).(bool); marked {
+	if commentMarks(ctx) {
 		return withOwnerVerified(ctx)
 	}
 	return ctx
+}
+
+// commentMarks is whether the caller marked ctx as a comment's writes to a document
+// (WithCommentMarks). A write under it that reaches the document on a closed issue is that
+// comment's anchor, and it forks cold (readFork).
+func commentMarks(ctx context.Context) bool {
+	marked, _ := ctx.Value(commentMarksContextKey{}).(bool)
+	return marked
 }
 
 type shutdownLoadContextKey struct{}

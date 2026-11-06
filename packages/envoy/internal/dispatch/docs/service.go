@@ -1626,6 +1626,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Lock()
 		state.settleWarming = false
 		s.unlockState(room, state)
+		if errors.Is(err, ErrIssueClosed) {
+			// The issue closed, and no room of this process holds the document, so no record
+			// here remembers the close (state.closed above, which ends a resident room's
+			// settlement): the warm-up's load read the issue instead (allowInject). A closed
+			// issue settles nothing, so this ends exactly as a closed owner row ends it below,
+			// writing nothing and failing nothing. The document's pending-settlement row keeps
+			// the work, and the resumption arms it once the issue reopens
+			// (resumeOwedSettlements, which skips a closed issue).
+			return settleOutcome{}
+		}
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			return stoppedShort(fmt.Errorf("warm document for settlement: %w", err))
 		}
