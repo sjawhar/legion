@@ -185,7 +185,7 @@ func check(rules Rules, g Grant, value string, r *Request) (*SecretRule, string)
 	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
 	// header, not only the ones the entry names, and an entry with a kind is not exempt.
 	for _, h := range r.Headers {
-		if carries(value, h[1]) {
+		if Carries(value, h[1]) {
 			return nil, "request already carries the value"
 		}
 	}
@@ -234,9 +234,14 @@ func mentions(value, v string) bool {
 	return ok && strings.Contains(payload, value)
 }
 
-// carries reports whether a request header already carries the real value. The empty
+// Carries reports whether a request header already carries the real value. The empty
 // value carries nowhere, because every string contains it.
-func carries(value, v string) bool {
+//
+// It is exported for the proxy port (internal/broker/airlockproxy), which reads it to tell
+// which of a grant's names one request is for: the name whose placeholder a header already
+// holds. It is the same function the Lean model calls carries, unchanged by being exported,
+// so the contract with that model is the contract of check and Rewrite as before.
+func Carries(value, v string) bool {
 	return value != "" && mentions(value, v)
 }
 

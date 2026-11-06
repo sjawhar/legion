@@ -17,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +36,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlockproxy"
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/config"
@@ -213,6 +215,17 @@ func main() {
 	// not this read's.
 	caCertificate, err := readAirlockCACertificate(cfg.AirlockCACertFile)
 	fatal(err)
+	// And the authority itself, the key beside that certificate, which the proxy port signs
+	// each bound host's certificate with. It is built here, with the two reads above, because
+	// it is the last thing about the airlock that can refuse a boot: a key that is not the
+	// certificate's, or a certificate that is no authority, would leave every bound host's
+	// handshake failing for every command, found out one command at a time. nil for a
+	// deployment with no airlock, which binds no proxy port.
+	var airlockCA *airlockproxy.Authority
+	if cfg.AirlockRulesFile != "" {
+		airlockCA, err = airlockproxy.NewAuthority(cfg.AirlockCACertFile, cfg.AirlockCAKeyFile)
+		fatal(err)
+	}
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -334,10 +347,14 @@ func main() {
 				},
 			}).Run(serving)
 		},
-		Listen:     listenTCP(cfg.ListenAddr),
-		ListenWait: rereadListenWait,
-		Catchup:    func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
-		Log:        slog.Default(),
+		Listen: listenTCP(cfg.ListenAddr),
+		// The proxy port, bound by the same boot and only for a deployment that has an
+		// airlock: without a rules file no name is ever held back, so there is nothing for a
+		// proxy to carry and no port to bind.
+		ListenAirlock: airlockListen(cfg),
+		ListenWait:    rereadListenWait,
+		Catchup:       func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
+		Log:           slog.Default(),
 	})
 	fatal(err)
 	// A boot signalled before it had bound anything answers no serving context, having logged the
@@ -360,6 +377,9 @@ func main() {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
+	if started.AirlockListener != nil {
+		slog.Info("airlock proxy listening", "addr", started.AirlockListener.Addr().String())
+	}
 
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
 	enr := &enroll.Service{
@@ -534,6 +554,19 @@ func main() {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// The airlock's proxy port, for a deployment that has one: the same rules file every
+	// release reads, the same request machine the API decides with - the proxy's two reads are
+	// its AirlockConnection and AirlockValues - and the authority built at the top of main.
+	var airlockProxy *airlockproxy.Server
+	if started.AirlockListener != nil {
+		airlockProxy = airlockproxy.New(airlockproxy.Options{
+			Rules:  rules,
+			Grants: reqMachine,
+			CA:     airlockCA,
+			Idle:   time.Duration(cfg.AirlockIdleSeconds) * time.Second,
+			Log:    slog.Default(),
+		})
+	}
 	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
 	// the socket is bound and srv.Serve is about to take it, so there are requests to finish and
 	// a drain whose job is finishing them. Closing serveStarted before srv.Serve starts is what
@@ -555,11 +588,26 @@ func main() {
 			stopNotify()
 		}
 	}()
+	if airlockProxy != nil {
+		go func() {
+			if err := airlockProxy.Serve(started.AirlockListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("broker: airlock proxy serve", "error", err)
+				stopNotify()
+			}
+		}()
+	}
 
 	<-ctx.Done()
+	// nil when this deployment has no airlock, which is what brokerStop reads as "there is no
+	// proxy port to drain".
+	var airlockShutdown func(ctx context.Context) error
+	if airlockProxy != nil {
+		airlockShutdown = airlockProxy.Shutdown
+	}
 	stop(context.Background(), brokerStop{
 		Drain: drain, DrainNow: drainNow, Draining: draining.Store,
-		Shutdown: srv.Shutdown, EndServing: started.EndServing, CloseStore: st.Close,
+		Shutdown: srv.Shutdown, ShutdownAirlock: airlockShutdown,
+		EndServing: started.EndServing, CloseStore: st.Close,
 		Log: slog.Default(),
 	})
 }
@@ -722,6 +770,17 @@ func readAirlockRules(path string) (airlock.Rules, error) {
 		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE %s: %w", path, err)
 	}
 	return rules, nil
+}
+
+// airlockListen is brokerBoot.ListenAirlock in production: the bind on
+// BROKER_AIRLOCK_LISTEN_ADDR, and nil for a deployment that names no rules file. Nil rather
+// than a bind of the default address, because a broker with no airlock holds back no name, so a
+// proxy port there would be a port that authenticates nobody and carries nothing.
+func airlockListen(cfg config.Config) func() (net.Listener, error) {
+	if cfg.AirlockRulesFile == "" {
+		return nil
+	}
+	return listenTCP(cfg.AirlockListenAddr)
 }
 
 // readAirlockCACertificate reads the airlock proxy's certificate authority, the PEM certificate

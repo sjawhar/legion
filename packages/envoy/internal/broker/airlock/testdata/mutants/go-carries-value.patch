@@ -12,7 +12,7 @@
 -	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
 -	// header, not only the ones the entry names, and an entry with a kind is not exempt.
 -	for _, h := range r.Headers {
--		if carries(value, h[1]) {
+-		if Carries(value, h[1]) {
 -			return nil, "request already carries the value"
 -		}
 -	}

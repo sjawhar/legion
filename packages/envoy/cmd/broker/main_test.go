@@ -670,10 +670,12 @@ func airlockRulesFile(t *testing.T, rules string) string {
 	return path
 }
 
-// airlockCACertificateFile writes a PEM certificate into a file of t's own and answers its path,
-// the file BROKER_AIRLOCK_CA_CERT_FILE names: a self-signed certificate, since the boot reads it
-// as a certificate and trusts nothing about who signed it.
-func airlockCACertificateFile(t *testing.T) string {
+// airlockCAFiles writes a self-signed certificate authority and its key into files of t's own
+// and answers the two paths, the files BROKER_AIRLOCK_CA_CERT_FILE and
+// BROKER_AIRLOCK_CA_KEY_FILE name. Self-signed, since the boot reads the certificate as a
+// certificate and trusts nothing about who signed it; the key is beside it because the proxy
+// port signs each bound host's certificate with it and refuses to start without it.
+func airlockCAFiles(t *testing.T) (certFile, keyFile string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -692,7 +694,20 @@ func airlockCACertificateFile(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return writeTempFile(t, "airlock-ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "airlock-ca.crt")
+	keyFile = filepath.Join(dir, "airlock-ca.key")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }
 
 // writeTempFile writes content into a file named name under a directory of t's own.
@@ -706,15 +721,18 @@ func writeTempFile(t *testing.T, name string, content []byte) string {
 }
 
 // airlockEnv is what a broker with an airlock is started with besides its rules file: the proxy
-// the release names and the certificate authority it hands over, without which config.Load
-// refuses a broker that reads rules it could not proxy.
+// the release names, the certificate authority it hands over and the key behind it, without
+// which config.Load refuses a broker that reads rules it could not proxy, and an address of its
+// own for the proxy port, since a fixed one would be a port two rows of this package could not
+// both hold.
 func airlockEnv(t *testing.T) []string {
 	t.Helper()
-	ca := airlockCACertificateFile(t)
+	certFile, keyFile := airlockCAFiles(t)
 	return []string{
 		"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
-		"BROKER_AIRLOCK_CA_CERT_FILE=" + ca,
-		"BROKER_AIRLOCK_CA_KEY_FILE=" + filepath.Join(filepath.Dir(ca), "airlock-ca.key"),
+		"BROKER_AIRLOCK_CA_CERT_FILE=" + certFile,
+		"BROKER_AIRLOCK_CA_KEY_FILE=" + keyFile,
+		"BROKER_AIRLOCK_LISTEN_ADDR=127.0.0.1:0",
 	}
 }
 
