@@ -30,6 +30,11 @@
 # failure, takes the pull request out and rebuilds the groups above it without waiting for the
 # rest of the run.
 #
+# The post carries the external_id ci-ok-post:<this run's id>, which is the marker
+# ci-ok-reconcile.sh looks for: that step rewrites a ci-ok check run only when it carries one. A
+# job's own check run carries no external_id at all, so an unmarked ci-ok on the head is another
+# workflow run's own verdict, which that run's own job concludes.
+#
 # So it posts on a merge_group run and nowhere else, and there only in one of four cases: this
 # job's own result is a failure or a cancellation (`cancelled` is what a job its own
 # `timeout-minutes` cut off carries, and it decides the group just as a failure does), or
@@ -189,4 +194,5 @@ title=$(cut -c1-200 <<<"$decided_job decided this merge-group run: $title")
 } >"$summary"
 CHECK_NAME=ci-ok CONCLUSION=$conclusion TITLE=$title SUMMARY_FILE=$summary \
   DETAILS_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID \
+  EXTERNAL_ID=ci-ok-post:$GITHUB_RUN_ID \
   "$script_dir/post-check-run.sh"

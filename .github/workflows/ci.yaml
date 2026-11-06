@@ -1672,6 +1672,7 @@ jobs:
           CONCLUSION: ${{ steps.pr-text.outcome == 'success' && 'success' || 'failure' }}
           OUTCOME: ${{ steps.pr-text.outcome }}
           DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${{ job.check_run_id }}
+          EXTERNAL_ID: pr-title:${{ github.run_id }}
         run: |
           export SUMMARY_FILE="$RUNNER_TEMP/pr-title-summary.md"
           echo "check-pr-text.sh in this run's lint job: $OUTCOME. Its log names what it refused." > "$SUMMARY_FILE"

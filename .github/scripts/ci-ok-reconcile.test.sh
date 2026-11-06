@@ -2,12 +2,14 @@
 # Tests for `ci-ok-reconcile.sh`, the last step of ci.yaml's ci-ok job: every other ci-ok check
 # run on the head is PATCHed to what that job concluded, so one verdict stands at the end of
 # every attempt. It leaves alone this job's own check run, one that already carries this
-# conclusion and one that is not completed; a refused read or PATCH warns and never fails the
-# job, since failing it would turn a passing verdict red on the head this step exists to unblock.
+# conclusion, one that is not completed, and one carrying no ci-ok-post: marker, which is
+# another workflow run's own ci-ok job check run; a refused read or PATCH warns and never fails
+# the job, since failing it would turn a passing verdict red on the head this step exists to
+# unblock.
 #
 # Each case writes the head's ci-ok check runs as the script's `gh --jq` prints them (id, status,
-# conclusion) and runs the real script with a stand-in `gh` first on PATH, which answers that read
-# and records the body of each PATCH it is sent.
+# conclusion, external_id) and runs the real script with a stand-in `gh` first on PATH, which
+# answers that read and records the body of each PATCH it is sent.
 #
 # Run from anywhere: .github/scripts/ci-ok-reconcile.test.sh
 # CI runs it in ci.yaml's test job.
@@ -49,14 +51,20 @@ esac
 GH
 chmod +x "$work/bin/gh"
 
-# check_runs <id>=<status>[/<conclusion>]...: the head's ci-ok check runs, one per line, as
-# `gh api --jq '.check_runs[] | "\(.id) \(.status) \(.conclusion)"'` prints them.
+# check_runs <id>=<status>[/<conclusion>][@<external id>]...: the head's ci-ok check runs, one
+# per line, as `gh api --jq '.check_runs[] | "\(.id) \(.status) \(.conclusion) \(…)"'` prints
+# them. A check run named with no `@` carries ci-ok-post:9, the marker post-check-run.sh sends
+# with a ci-ok a job posted; `@-` is what the script's jq writes for a check run with no
+# external_id at all, which is a job's own check run.
 check_runs() {
-  local pair rest
+  local pair spec marker rest
   : > "$work/check-runs"
   for pair in "$@"; do
-    rest=${pair#*=}
-    printf '%s %s %s\n' "${pair%%=*}" "${rest%%/*}" "${rest#*/}" >> "$work/check-runs"
+    spec=${pair%%@*}
+    marker=ci-ok-post:9
+    [ "$spec" = "$pair" ] || marker=${pair#*@}
+    rest=${spec#*=}
+    printf '%s %s %s %s\n' "${spec%%=*}" "${rest%%/*}" "${rest#*/}" "$marker" >> "$work/check-runs"
   done
   rm -f "$work"/patched.*.json "$work/patched-ids" "$work/list-fails" "$work/patch-fails"
 }
@@ -106,6 +114,38 @@ check_runs "900=in_progress/null" "100=in_progress/null" "101=queued/null"
 run_reconcile success
 check "is left to that run" "$(is "$(patched)" "")"
 check "naming each" "$(contains "$out" '^ci-ok check run 101 is queued, so the run deciding it writes its conclusion$')"
+
+echo "case: a ci-ok a job of a run posted, which carries the marker"
+check_runs "900=in_progress/null" "100=completed/failure@ci-ok-post:7"
+run_reconcile success
+check "exits 0" "$(is "$status" 0)"
+check "is patched" "$(is "$(patched)" "100 ")"
+check "to this job's conclusion" "$(is "$(field .conclusion)" success)"
+check "and the body carries a marker, so the next attempt's read still finds one" \
+  "$(contains "$(field .external_id)" '^ci-ok-post:')"
+
+echo "case: another workflow run's own ci-ok job check run on this head"
+# main-bypass-check.yaml dispatches ci.yaml on main, so the dispatched run's github.sha is
+# main's tip, which the queue landed carrying its own group's green ci-ok. A job's own check run
+# carries no external_id at all, which is what tells it from one a job posted, and the run that
+# made it concludes it itself: a failing dispatched run that rewrote it would turn main red.
+check_runs "900=in_progress/null" "100=completed/success@-"
+run_reconcile failure
+check "exits 0" "$(is "$status" 0)"
+check "is left alone" "$(is "$(patched)" "")"
+check "writes nothing" "$(is "$(calls)" 0)"
+check "and says whose check run it is" \
+  "$(contains "$out" "^ci-ok check run 100 carries no ci-ok-post marker, so it is another workflow run's own ci-ok job check run, which that run concludes itself$")"
+check "and still counts what it patched" \
+  "$(contains "$out" '^ci-ok on abc123 is failure; 0 other check run(s) of that name were set to it$')"
+
+echo "case: a head carrying this job's own ci-ok, a posted one and another run's own"
+check_runs "900=in_progress/null" "100=completed/failure@ci-ok-post:7" "101=completed/failure@-"
+run_reconcile success
+check "exits 0" "$(is "$status" 0)"
+check "patches the marked one alone" "$(is "$(patched)" "100 ")"
+check "and counts that one" \
+  "$(contains "$out" '^ci-ok on abc123 is success; 1 other check run(s) of that name were set to it$')"
 
 echo "case: a failing attempt"
 check_runs "900=in_progress/null" "100=completed/success" "101=completed/success"

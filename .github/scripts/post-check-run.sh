@@ -18,12 +18,16 @@
 #   TITLE              one line, shown beside the check.
 #   SUMMARY_FILE       a file whose text is the check's summary (markdown), cut to GitHub's limit.
 #   DETAILS_URL        where the check links: the job that decided it.
+#   EXTERNAL_ID        the posted check run's `external_id`: the one field that tells a check run
+#                      posted here from a job's own check run of the same name, which carries
+#                      none, so a step reading a head's check runs can see which of them a job
+#                      posted. ci-ok-reconcile.sh reads it to decide which ci-ok it may rewrite.
 #   GH_RETRY_SECONDS   optional: a refused or failed post is retried twice on gh-read.sh's one
 #                      ladder, this many seconds and then twice as many apart (10 by default; the
 #                      tests set 0), then fails the step.
 #
 # Run from anywhere: HEAD_SHA=... CHECK_NAME=... CONCLUSION=... TITLE=... SUMMARY_FILE=...
-#   DETAILS_URL=... .github/scripts/post-check-run.sh
+#   DETAILS_URL=... EXTERNAL_ID=... .github/scripts/post-check-run.sh
 # Its tests are in ci-ok-report.test.sh, which ci.yaml's test job runs.
 set -euo pipefail
 shopt -s inherit_errexit
@@ -32,7 +36,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=.github/scripts/gh-read.sh
 source "$script_dir/gh-read.sh"
 
-for input in GH_TOKEN GITHUB_REPOSITORY HEAD_SHA CHECK_NAME CONCLUSION TITLE SUMMARY_FILE DETAILS_URL; do
+for input in GH_TOKEN GITHUB_REPOSITORY HEAD_SHA CHECK_NAME CONCLUSION TITLE SUMMARY_FILE DETAILS_URL EXTERNAL_ID; do
   if [ -z "${!input:-}" ]; then
     echo "::error::post-check-run.sh needs $input in its environment"
     exit 1
@@ -56,8 +60,10 @@ esac
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
 jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSION" \
-  --arg url "$DETAILS_URL" --arg title "$TITLE" --rawfile summary "$SUMMARY_FILE" \
+  --arg url "$DETAILS_URL" --arg title "$TITLE" --arg external_id "$EXTERNAL_ID" \
+  --rawfile summary "$SUMMARY_FILE" \
   '{name: $name, head_sha: $sha, status: "completed", conclusion: $conclusion, details_url: $url,
+    external_id: $external_id,
     output: {title: $title, summary: ($summary | .[0:65000])}}' >"$body"
 if posted=$(gh_read gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input "$body" --jq '.html_url'); then
   echo "posted $CHECK_NAME ($CONCLUSION) on $HEAD_SHA: $posted"

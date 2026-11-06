@@ -94,6 +94,8 @@ check "on the head" "$(is "$(field .head_sha)" abc123)"
 check "completed" "$(is "$(field .status)" completed)"
 check "failing" "$(is "$(field .conclusion)" failure)"
 check "linking the run" "$(is "$(field .details_url)" https://github.com/o/r/actions/runs/41)"
+check "marked as a ci-ok a job posted, which ci-ok-reconcile.sh reads" \
+  "$(is "$(field .external_id)" ci-ok-post:41)"
 check "records the reporting job at its own job.status, not the status the route shows it at" \
   "$(contains "$(field .output.summary)" '^typecheck: failure (selected')"
 check "records a running job at its live status" \
@@ -203,5 +205,38 @@ jobs typecheck=in_progress
 run_report '{"result": "success", "outputs": {}}' merge_group failure "$script_dir/../workflows/ci.yaml"
 check "reads it and posts" "$(is "$(posted)" 1)"
 check "failing on the job that decided the run" "$(is "$(field .conclusion)" failure)"
+
+echo "case: post-check-run.sh called with no marker"
+# The marker is the one field that tells a posted check run from a job's own check run of the
+# same name, which carries none, and ci-ok-reconcile.sh PATCHes only the check runs that carry
+# one, so a post that set none would leave a check run no later attempt could reconcile.
+jobs
+: > "$work/summary.md"
+set +e
+out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GH_RETRY_SECONDS=0 \
+  HEAD_SHA=abc123 CHECK_NAME=pr-title CONCLUSION=success TITLE='the title is conventional' \
+  SUMMARY_FILE="$work/summary.md" DETAILS_URL=https://github.com/o/r/actions/runs/41 \
+  "$script_dir/post-check-run.sh" 2>&1)
+status=$?
+set -e
+check "fails the step" "$(is "$status" 1)"
+check "posts nothing" "$(is "$(posted)" 0)"
+check "names the input" \
+  "$(contains "$out" 'post-check-run.sh needs EXTERNAL_ID in its environment')"
+
+echo "case: post-check-run.sh posts the marker it was given"
+# As ci.yaml's lint job calls it for pr-title, the other check run posted this way.
+jobs
+: > "$work/summary.md"
+set +e
+out=$(PATH="$work/bin:$PATH" GH_TOKEN=t GITHUB_REPOSITORY=o/r GH_RETRY_SECONDS=0 \
+  HEAD_SHA=abc123 CHECK_NAME=pr-title CONCLUSION=success TITLE='the title is conventional' \
+  SUMMARY_FILE="$work/summary.md" DETAILS_URL=https://github.com/o/r/actions/runs/41 \
+  EXTERNAL_ID=pr-title:41 "$script_dir/post-check-run.sh" 2>&1)
+status=$?
+set -e
+check "exits 0" "$(is "$status" 0)"
+check "posts one check run" "$(is "$(posted)" 1)"
+check "carrying that external_id" "$(is "$(field .external_id)" pr-title:41)"
 
 summary "ci-ok-report.sh posts the failing ci-ok of a merge-group run one job's result decided"
