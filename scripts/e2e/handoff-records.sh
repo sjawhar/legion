@@ -15,12 +15,11 @@
 #     HANDOFF_SESSION_MISMATCH naming both sessions, and the issue stays in planning; control: after
 #     the planner writes its own, the same completion moves the issue to implementing;
 #   - A7: a testing issue's `test` record posted to Dispatch's own handoff route with the daemon's
-#     session as its actor, as the daemon writes one and as the issues carry from before handoffs
-#     moved to Dispatch (the `dispatch` CLI, this proof's worker side, refuses a session id with a
-#     colon in it); the tester's completion
-#     naming that record is refused HANDOFF_SESSION_MISMATCH; the tester reads it, writes it again
-#     under its session and completes, and the reviewer the daemon starts is prompted with a task
-#     naming that record;
+#     session as its actor, the author of the records the issues carry from before handoffs moved
+#     to Dispatch (the `dispatch` CLI, this proof's worker side, refuses a session id with a colon
+#     in it); the tester's completion naming that record is refused HANDOFF_SESSION_MISMATCH; the
+#     tester reads it, writes it again under its session and completes, and the reviewer the daemon
+#     starts is prompted with a task naming that record;
 #   - HANDOFF_NOT_NEW: the implementer completes round 1, the tester fails it, and the implementer's
 #     round-2 completion naming its round-1 record is refused; naming a new record moves it on;
 #   - A10: with Dispatch up the first write succeeds; with the Dispatch process stopped

@@ -361,10 +361,10 @@ func (r *handoffRecordsLive) a7DaemonSessionRecord() {
 	t := r.t
 	tester := r.claimant(claim.RoleTester, r.a7, "ses_a7_tester")
 	body := r.smallBody(r.a7, "test", "written under the daemon's session before handoffs moved to Dispatch")
-	// The seed goes to Dispatch's own route with the daemon's session as its actor, as the daemon
-	// writes one: the `dispatch` CLI is this harness's worker side and refuses a session id with a
-	// colon in it, which legion-daemon:<PROJECT> has, so that nothing speaks as the daemon by
-	// setting a variable.
+	// The seed goes to Dispatch's own route with the daemon's session as its actor, the author of
+	// the records the issues carry from before handoffs moved to Dispatch: the `dispatch` CLI is
+	// this harness's worker side and refuses a session id with a colon in it, which
+	// legion-daemon:<PROJECT> has, so that nothing speaks as the daemon by setting a variable.
 	daemonSession := dispatch.DaemonSession(r.a7)
 	status, answer := r.dispatch.agentPost("/api/v1/issues/"+r.a7+"/handoffs/test", map[string]any{
 		"actor": map[string]string{"kind": "session", "id": daemonSession}, "body": string(body),

@@ -262,9 +262,9 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 }
 
 // underLegion is whether every path of one compare entry (githubrest.ChangedPaths of that entry:
-// its name, and a rename's previous name too) is under .legion/. The entry's status is read no
-// more, so an entry that adds, modifies, removes or renames within .legion/ answers true, and a
-// rename whose other name is outside .legion/ answers false.
+// its name, and a rename's previous name too) is under .legion/. The entry's status is not read,
+// so an entry that adds, modifies, removes or renames within .legion/ answers true, and a rename
+// whose other name is outside .legion/ answers false.
 func underLegion(paths []string) bool {
 	for _, path := range paths {
 		if !strings.HasPrefix(path, ".legion/") {
