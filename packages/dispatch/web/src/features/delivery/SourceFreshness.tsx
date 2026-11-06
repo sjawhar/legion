@@ -42,8 +42,13 @@ export function SourceFreshness({
     <section aria-label="Source freshness">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         {rows.map((row) => (
+          // `min-w-0`: the row's text is one `truncate` line (`white-space: nowrap`), so its
+          // min-content width is the whole sentence, and a flex item's automatic minimum size is
+          // that width. Without this, a row naming a reconcile error stands at its full length
+          // past the column, and a phone, whose layout follows its widest content, widens and
+          // scrolls the whole page under the reader rather than clipping it (INFRA-1260).
           <span
-            className={`flex max-w-[36rem] items-center gap-1 ${row.red ? dangerText : textMutedOnCanvas}`}
+            className={`flex max-w-[36rem] min-w-0 items-center gap-1 ${row.red ? dangerText : textMutedOnCanvas}`}
             data-red={row.red}
             data-source={row.name}
             key={row.name}

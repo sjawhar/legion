@@ -343,17 +343,18 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   const before = await layout();
   const finger = await pressFinger(page, dot);
   await expect(page.getByText("acme/widgets#1: feat: a shipped widget")).toBeVisible();
-  // The tooltip stays inside the chart: ECharts paints it inside the chart's host, and before the
-  // host's wrapper clipped it, its first frame stood past the viewport's right edge, widening the
-  // page to 462 px and jumping it upward under the finger. Polled, not read once: a widening
-  // that lasts is never reached, and a single frame caught mid-paint is read again rather than
-  // failed.
-  await expect.poll(layout).toEqual(before);
+  // Nothing the touch brings up stands past the viewport's right edge: ECharts paints the
+  // tooltip inside the chart's host, whose wrapper clips it (`Timeline.tsx`), and the rows above
+  // the chart hold their column (`SourceFreshness.tsx`). A phone lays its page out to the widest
+  // thing on it, so one element past that edge widens the whole page and moves it under the
+  // finger. Read once, not polled: a widening of a single frame is the defect, and a poll that
+  // asks again until one sample fits cannot fail for it.
+  expect(await layout()).toEqual(before);
   // Up the time axis (later times) from the dot, which sits near the chart's foot.
   await finger.moveTo({ x: dot.x, y: Math.max(box.y + 20, dot.y - box.height * 0.4) }, 8);
   await expect(page.getByTestId("delivery-brush-band")).toBeVisible();
   // The chart claims the finger (touch-action: none): the page does not scroll under it.
-  await expect.poll(layout).toEqual(before);
+  expect(await layout()).toEqual(before);
   await finger.lift();
 
   await expect(page).toHaveURL(/[?&]ws=.*[?&]we=/);
