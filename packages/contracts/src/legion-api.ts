@@ -20,14 +20,14 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
 const timestamp = z.iso.datetime({ offset: true });
 
-/** The RFC 3339 instant a session sends, refused exactly where Go's `time.Time` decode refuses
- * it: seconds required, the fraction optional, `Z` or an offset required. `timestamp` above takes
- * `2026-11-06T10:00Z`, which that decode rejects, so a plugin that validated a request field
- * against it would send a body the daemon answers with its generic invalid-body error rather than
- * the field's own guidance. The plugin's `wake_at` reads this same schema
- * (`packages/pi-shared/src/legion-phase-ops.ts`), so both sides refuse the same strings. Only a
- * field a session sends reads it: every other field here is the daemon's own output, which Go
- * always writes with seconds. */
+/** The RFC 3339 instant a session sends: seconds required, the fraction optional, `Z` or an
+ * offset required, as Go's `time.Time` decode requires them. It is the stricter of the two: it
+ * refuses a few strings that decode takes (`+24:00`, a comma before the fraction). `timestamp`
+ * above takes `2026-11-06T10:00Z`, which that decode rejects, so a plugin that validated a request
+ * field against it would send a body the daemon answers with its generic invalid-body error rather
+ * than the field's own guidance. The plugin's `wake_at` reads this same schema
+ * (`packages/pi-shared/src/legion-phase-ops.ts`). Only a field a session sends reads it: every
+ * other field here is the daemon's own output, which Go always writes with seconds. */
 export const LegionInstant = timestamp.regex(
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
   { error: "an RFC 3339 time with seconds, as 2026-11-02T09:00:00Z is" }

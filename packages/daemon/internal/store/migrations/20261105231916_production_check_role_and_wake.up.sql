@@ -64,8 +64,9 @@ alter table outbox add constraint outbox_kind_check check (kind in (
 --
 -- No backfill, as 0067's assignment columns had none: 0 is a claim, or a delivery, that is no
 -- look's, which is what every row recorded before this migration was. A worker live at the
--- upgrade holding a look's task keeps being routed by the issue's phase only until its look's
--- own start row is run again; the check's bound and its look bound end a look nobody reports.
+-- upgrade holding a look's task therefore serves no look: its report on that look is taken for a
+-- phase completion and refused there, recording nothing, and the look's own bound (check_look)
+-- ends it as one nobody reported; the next look's start row carries the look onto the delivery.
 alter table pending_task_deliveries add column check_look integer not null default 0;
 alter table pending_task_deliveries add column check_opened_at timestamptz;
 alter table claims add column serving_check_look integer not null default 0;
