@@ -15,5 +15,6 @@ func RunGuardFailureAndExit() {
 }
 
 // ChildGuardFailureLine is what the child's stderr holds, the line MustGuard prints for a Guard
-// that failed.
-const ChildGuardFailureLine = "TestMain: fixtureenv: unset GIT_DIR: the child's own failure\n"
+// that failed. It is derived from the error the child hands it: restated, a drift between the two
+// would fail the assertion for the wrong reason.
+var ChildGuardFailureLine = "TestMain: " + childGuardFailure.Error() + "\n"

@@ -20,12 +20,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T) {
@@ -334,44 +334,22 @@ type scratchDispatch struct {
 	output   *syncBuffer
 }
 
-// startScratchDispatchOn creates the server's scratch database on the test DSN's Postgres, builds
-// cmd/dispatch, and starts it.
+// startScratchDispatchOn gives the server a scratch database of its own on the test DSN's
+// Postgres (testpg.Database) and starts the cmd/dispatch this process built.
 func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scratchDispatch {
 	t.Helper()
-	ctx := context.Background()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse test DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open Postgres admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	database := "dispatch_scratch_test_" + outboxSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(ctx, "create database "+database+" strategy file_copy"); err != nil {
-		t.Fatalf("create scratch Dispatch database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+database+" with (force)"); err != nil {
-			t.Errorf("drop scratch Dispatch database: %v", err)
-		}
-	})
-	serverURL := *base
-	serverURL.Path = "/" + database
+	database := testpg.Database(t, "dispatch_scratch_test")
 	root := options.root
 	if root == "" {
 		root = filepath.Join("..", "..", "..", "..")
 	}
-	if root, err = filepath.Abs(root); err != nil {
+	root, err := filepath.Abs(root)
+	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
 	}
 	d := &scratchDispatch{
 		t: t, binary: testbuild.EnvoyBinary(t, "./cmd/dispatch"), dir: filepath.Join(root, "packages", "envoy"),
-		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: serverURL.String(),
+		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: database,
 		natsURL: options.natsURL, token: scratchAgentToken, home: filepath.Join(t.TempDir(), "home"),
 		log: options.log,
 	}

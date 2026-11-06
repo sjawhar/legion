@@ -270,19 +270,14 @@ func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
 }
 
 // migratedPool is a pool on a database carrying every migration, cloned from the package's
-// template (testpg.Clone). The DSN is required rather than skipped: these tests are the real
+// template (testpg.ClonePool). The DSN is required rather than skipped: these tests are the real
 // Postgres admission tests, and a run that quietly skipped them would prove nothing.
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	if os.Getenv("LEGION_TEST_PG_DSN") == "" {
 		t.Fatal("LEGION_TEST_PG_DSN is required for real Postgres admission tests")
 	}
-	pool, err := pgxpool.New(context.Background(), testpg.Clone(t, "legion_admit_test"))
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_admit_test")
 }
 
 func testJetStream(t *testing.T) jetstream.JetStream {

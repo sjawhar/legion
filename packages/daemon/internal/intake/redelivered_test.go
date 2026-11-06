@@ -76,7 +76,7 @@ func (redeliveredRepositories) ResolveRepository(resolved string) (workflow.Reso
 // sweep are the real binaries; GitHub is a fake that keeps the App webhook's delivery log.
 func TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied(t *testing.T) {
 	ctx := context.Background()
-	binaries := buildEnvoyBinaries(t)
+	binaries := builtEnvoyBinaries(t)
 
 	dsn := testpg.Clone(t, "legion_intake_redelivered_test")
 	pool := drainPool(t, dsn)
@@ -261,7 +261,9 @@ func seedRedeliveredIssue(t *testing.T, pool *pgxpool.Pool) {
 // (testbuild.EnvoyBinary).
 type envoyBinaries struct{ listener, dispatch string }
 
-func buildEnvoyBinaries(t *testing.T) envoyBinaries {
+// builtEnvoyBinaries is the pair of paths, each built on the first test of this process that
+// asked for it.
+func builtEnvoyBinaries(t *testing.T) envoyBinaries {
 	t.Helper()
 	return envoyBinaries{
 		listener: testbuild.EnvoyBinary(t, "./cmd/listener"),

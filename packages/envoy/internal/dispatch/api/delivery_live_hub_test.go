@@ -806,11 +806,18 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 // The scan is run again once the terminated backends are gone, and repeated until it finds no
 // backend at all: the caller has already made the hub blind, so the listener starts no connection
 // of its own, but a dial already in flight when the first scan ran can still hold a LISTEN the
-// first round never saw. Only that first round must find a backend.
+// first round never saw. Only that first round must find a backend, and the rounds share the
+// deadline the wait for an exit has, so a database whose backends keep taking a LISTEN fails
+// here rather than running to the package's test timeout.
 func terminateListener(t *testing.T, database *store.Store) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for round := 0; ; round++ {
+		// A round that ends a backend on its first poll never reaches the wait below, so the
+		// rounds themselves are bounded here.
+		if time.Now().After(deadline) {
+			t.Fatalf("new backends of this database kept holding a LISTEN for %s", 5*time.Second)
+		}
 		var ended []int32
 		if err := database.Pool.QueryRow(context.Background(), `
 			with listener as materialized (

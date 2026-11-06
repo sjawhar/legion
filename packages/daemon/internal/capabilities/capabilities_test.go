@@ -334,11 +334,11 @@ func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 		Patterns []redactionCase `json:"patterns"`
 	}
 	readFixture(t, "capability-redaction.json", &fixture)
-	pads := 0
+	pushes := 0
 	for _, testCase := range fixture.Patterns {
 		whole := cleanDetail(testCase.Detail)
 		for _, letters := range cutBoundaryPads(len(whole)) {
-			pads++
+			pushes++
 			padding := strings.Repeat("a", letters)
 			once := cleanDetail(padding + " " + testCase.Detail)
 			label := fmt.Sprintf("%s: %s, pushed by %d letters", testCase.Pattern, testCase.Name, letters)
@@ -348,15 +348,15 @@ func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 			if !strings.HasPrefix(once, padding[:min(letters, MaxReportDetail)]) {
 				t.Errorf("%s: lost its padding: %q", label, once)
 			}
-			// With no letters there is no space before the case either: cleaning drops it, so
-			// what the push cleans to is the case cleaned whole.
-			pushed := strings.TrimLeft(padding+" "+whole, " ")
+			// With no letters there is no space before the case either: cleaning drops that one
+			// separator, so what the push cleans to is the case cleaned whole.
+			pushed := strings.TrimPrefix(padding+" "+whole, " ")
 			if testCase.Pad == 0 && !strings.HasPrefix(pushed, once) {
 				t.Errorf("%s: %q is not a prefix of the case cleaned whole, %q", label, once, whole)
 			}
 		}
 	}
-	t.Logf("%d cases, %d pad lengths in all", len(fixture.Patterns), pads)
+	t.Logf("%d cases, %d pushed cases in all", len(fixture.Patterns), pushes)
 }
 
 // What the session's plugin sends for the shared fixture's branches —

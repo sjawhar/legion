@@ -63,7 +63,7 @@ func EnvoyBinary(t testing.TB, command string) string {
 // It takes run rather than *testing.M so a package that has a TestMain of its own composes the
 // two:
 //
-//	func TestMain(m *testing.M) { os.Exit(testbuild.Main(m.Run)) }
+//	func TestMain(m *testing.M) { os.Exit(testbuild.Main(func() int { return testnats.Main(m) })) }
 func Main(run func() int) int {
 	shared.main = true
 	code := run()

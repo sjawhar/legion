@@ -79,7 +79,8 @@ database's creation in a string without `strategy file_copy` on the same line.
 
 A test that needs the schema takes a clone of a template its package migrated once, rather than
 running the migrations itself: `packages/daemon/internal/testpg`'s `Clone` answers the clone's
-URL and `CloneStore` the opened store, both dropped when the test ends, and the package's
+URL, `ClonePool` an open `pgxpool` on it and `CloneStore` the opened store, each dropped when the
+test ends, and the package's
 `TestMain` is `testpg.Main("<prefix>", m.Run)`, which drops the template when the run ends and
 composes with the `TestMain` a package already has
 (`testpg.Main(prefix, func() int { return testnats.Main(m) })`).

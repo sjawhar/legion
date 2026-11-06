@@ -55,15 +55,15 @@ var shared struct {
 func Clone(t testing.TB, prefix string) string {
 	t.Helper()
 	if !shared.main {
-		t.Fatal("testpg.Clone needs the package's TestMain to be: func TestMain(m *testing.M) { os.Exit(testpg.Main(\"" + prefix + "\", m.Run)) }")
+		t.Fatal("testpg.Clone needs the package's TestMain to be: func TestMain(m *testing.M) { os.Exit(testpg.Main(\"<template prefix>\", m.Run)) }. Main's prefix names the one template of this test binary, which no clone's prefix has to equal: a package may clone under prefixes of its own, and does.")
 	}
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip(skipMessage)
+		t.Skip(SkipMessage)
 	}
 	shared.once.Do(func() { shared.err = prepare(dsn) })
 	if shared.err != nil {
-		t.Fatalf("%v", shared.err)
+		t.Fatal(shared.err)
 	}
 	name, err := randomName(prefix)
 	if err != nil {
@@ -86,6 +86,18 @@ func CloneStore(t testing.TB, prefix string) *store.Store {
 	}
 	t.Cleanup(st.Close)
 	return st
+}
+
+// ClonePool is Clone opened as a pool, closed when the test ends — before the clone is dropped,
+// since Clone registered that cleanup first.
+func ClonePool(t testing.TB, prefix string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), Clone(t, prefix))
+	if err != nil {
+		t.Fatalf("open a pool on the cloned database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // cloneStatement returns the create database that makes name a copy of the template's files rather
@@ -129,10 +141,19 @@ func Main(prefix string, run func() int) int {
 	return code
 }
 
+// dropSlots holds the drops in flight to two of the admin pool's four connections. A clone takes
+// one of those connections too, and a `drop database … with (force)` forces a checkpoint and
+// waits for it: with every slot on drops — a package whose parallel subtests each clone one
+// database queues one drop per subtest that ends — the next clone waits for a checkpoint on its
+// own clock, which is the cost dropInBackground exists to move off it.
+var dropSlots = make(chan struct{}, 2)
+
 // dropInBackground drops name without waiting for it; Main waits for every drop. Drops in flight
 // together share one checkpoint.
 func dropInBackground(name string) {
 	shared.drops.Go(func() {
+		dropSlots <- struct{}{}
+		defer func() { <-dropSlots }()
 		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
 			shared.dropMu.Lock()
 			shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop the cloned database %s: %v", name, err))

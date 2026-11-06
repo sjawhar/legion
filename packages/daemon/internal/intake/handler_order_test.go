@@ -219,10 +219,5 @@ func seedOrderedIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, is
 // package cannot lend this one; both clone the one template of the test binary they share.
 func orderedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), testpg.Clone(t, "legion_intake_order_test"))
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_intake_order_test")
 }

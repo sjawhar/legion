@@ -1,10 +1,14 @@
 // One stand-in Dispatch for every test that needs one, in place of the copy each package grew of
-// its own (INFRA-1414). Four entry points over one route table and one request recorder:
+// its own (INFRA-1414). Two entry points share one route table and one request recorder:
 //
 //   * `fakeDispatchFetch` — a `fetch`-shaped handler for an injected `fetchImpl` or a
 //     `globalThis.fetch` override, recording every call;
 //   * `startFakeDispatch` — a real loopback server over that same handler, with the `/ws/live`
-//     upgrade the live socket opens;
+//     upgrade the live socket opens.
+//
+// Two stand-ins of their own sit beside them, each for one call a package makes of Dispatch and
+// neither over the route table:
+//
 //   * `fakeRecordClient` — the in-memory document store AskGate's decision record is written to,
 //     with Dispatch's idempotency-key rules;
 //   * `fakeLatestHandoff` — the one call `findHandoffReport` makes of Dispatch.
@@ -49,7 +53,10 @@ export interface FakeDispatchCall {
   readonly method: string;
   /** The request's headers. */
   readonly headers: Headers;
-  /** The request's body as text, empty where it carried none. */
+  /**
+   * The request's body as text, empty where it carried none. `fakeDispatchFetch` reads a string
+   * and a `URLSearchParams`; it records any other body as empty too.
+   */
   readonly body: string;
   /** The signal the caller passed, which a test reads to see whether its request was aborted. */
   readonly signal: AbortSignal | undefined;

@@ -27,8 +27,9 @@ import (
 // the version envoy-infra gives a new Cloud SQL instance.
 const Image = "mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4"
 
-// skipMessage is what a test is skipped with when there is no Postgres to run it against.
-const skipMessage = "LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. In a Legion pod, read skill://legion-worker/references/tools.md, \"The database your tests use\"; never the sessions database. Elsewhere, start one and set it:\n" +
+// SkipMessage is what a test is skipped with when there is no Postgres to run it against. It is
+// exported for the packages whose own skip says the same thing (internal/daemon's testDSN).
+const SkipMessage = "LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. In a Legion pod, read skill://legion-worker/references/tools.md, \"The database your tests use\"; never the sessions database. Elsewhere, start one and set it:\n" +
 	"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + Image + "\n" +
 	"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 	"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./..."
@@ -38,15 +39,15 @@ func Database(t testing.TB, prefix string) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip(skipMessage)
+		t.Skip(SkipMessage)
 	}
 	database, drop, err := create(dsn, prefix)
 	if err != nil {
-		t.Fatalf("%v", err)
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		if err := drop(); err != nil {
-			t.Errorf("%v", err)
+			t.Error(err)
 		}
 	})
 	return database

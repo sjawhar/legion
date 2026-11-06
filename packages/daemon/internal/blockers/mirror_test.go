@@ -179,10 +179,5 @@ func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
 // the real schema, as every other package's record tests are.
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), testpg.Clone(t, "legion_blockers_test"))
-	if err != nil {
-		t.Fatalf("open a pool on the test database: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_blockers_test")
 }

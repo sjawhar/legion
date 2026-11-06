@@ -35,8 +35,7 @@ func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one as internal/testpg's own skip message says, which names the image, and set it:\n" +
-			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/store/")
+		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against: start one and set it as internal/testpg's own skip message says, which holds the whole recipe and the image to run.")
 	}
 	return dsn
 }

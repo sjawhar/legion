@@ -1615,15 +1615,10 @@ func writeHandlers(t *testing.T, pool *pgxpool.Pool) []string {
 }
 
 // migratedPool is a pool on a database carrying every migration, cloned from the package's
-// template (testpg.Clone).
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), testpg.Clone(t, "legion_intake_test"))
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_intake_test")
 }
 
 type lockedBuffer struct {

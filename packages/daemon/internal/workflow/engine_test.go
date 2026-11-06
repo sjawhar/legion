@@ -1051,15 +1051,10 @@ func sameStrings(got, want []string) bool {
 }
 
 // migratedPool is a pool on a database carrying every migration, cloned from the package's
-// template (testpg.Clone).
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(t.Context(), testpg.Clone(t, "legion_workflow_test"))
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_workflow_test")
 }
 
 func randomSuffix(t *testing.T) string {
