@@ -2568,6 +2568,17 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
+      # The suites below read some of contracts' values through plain Node resolution rather than
+      # through the workspace's "bun" export condition: e2e/__tests__/row-configurations.test.ts
+      # spawns Playwright, whose own resolution reads contracts' built dist/. Without this step
+      # that spawn fails the moment contracts' source gains an export its dist lacks, measured on
+      # run 42303677853 at 5636a301, where both of its cases failed with "The requested module
+      # '@legion/contracts/dispatch-tools' does not provide an export named
+      # 'DISPATCH_BLOCK_UNITS'" and passed again once contracts was built (the dispatch and
+      # dispatch-browser-multiprocess jobs carry the same step for the same reason).
+      - name: Build contracts for the suites that spawn Playwright
+        run: bun run build
+        working-directory: packages/contracts
       - name: Lint proof editor
         run: bun run lint
         working-directory: packages/proof-editor
