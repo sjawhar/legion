@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 var (
@@ -456,13 +457,11 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	requireTmux(t)
 	r := &rig{t: t}
 	r.legion, r.omp = standins(t)
+	r.project = "t" + randomHex(t, 4)
 	// The directory is the server's TMUX_TMPDIR itself, with no subdirectory: tmux binds
-	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, and a unix socket path holds at most 107 bytes,
-	// so every byte above that socket counts against a long TMPDIR.
-	dir, err := os.MkdirTemp("", "lgt")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, the longest path put under the directory and
+	// the one a unix socket path's 107 bytes have to hold, so that is the room asked for here.
+	dir := testtmp.Dir(t, filepath.Join("tmux-"+strconv.Itoa(os.Getuid()), "legion-"+r.project))
 	r.dir = dir
 	r.stateDir = filepath.Join(dir, "state")
 	for _, d := range []string{r.stateDir, filepath.Join(dir, "roles")} {
@@ -484,7 +483,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		}
 	}
 	r.environ = append(r.environ, "TMUX_TMPDIR="+dir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
-	r.project = "t" + randomHex(t, 4)
 	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
 	r.stream = newStreamStub(t, filepath.Join(dir, "stream.sock"), r.daemon)
@@ -494,7 +492,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		_ = watchdog.Process.Kill()
 		r.stream.listener.Close()
 		r.daemon.server.Close()
-		os.RemoveAll(dir)
 	})
 	return r
 }

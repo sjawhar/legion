@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // testInstance is a placeholder connection name: this repository names no real instance.
@@ -122,23 +124,12 @@ func (f *fakeDialer) failWith(err error) {
 // build is the Config.NewDialer a test passes: the proxy gets this very fake.
 func (f *fakeDialer) build(context.Context) (Dialer, error) { return f, nil }
 
-// socketPath is a socket path under a short directory of its own (docs/testing.md): a path under
-// t.TempDir() passes the 107-byte unix socket bound once TMPDIR is long.
+// socketPath is this package's socket path: a socket named session.sock in a directory of the
+// test's own, placed by TMPDIR and falling back to /tmp for the socket path's length alone, so
+// that the bind holds within the 107 bytes a unix socket path takes (docs/testing.md).
 func socketPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(shortTempDir(t), "session.sock")
-}
-
-// shortTempDir is a fresh directory directly under the system's temporary directory, removed
-// when the test ends.
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "sp")
-	if err != nil {
-		t.Fatalf("make a short temporary directory: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testtmp.Socket(t, "session.sock")
 }
 
 // startProxy starts a proxy and takes the connection Start's proof dial made, so that the next
@@ -788,7 +779,9 @@ func TestStartRefusesWhenItsContextHasEnded(t *testing.T) {
 // sibling's socket. The proxy's socket is left for its owner's removal of the directory, which
 // follows no link.
 func TestCloseUnlinksNoSocketThroughALinkedDirectory(t *testing.T) {
-	base := shortTempDir(t)
+	// The sockets bound here are g1/.s.PGSQL.5432 and the sibling's g2/.s.PGSQL.5432, of the
+	// same length, so that pair is the room the directory needs.
+	base := testtmp.Dir(t, filepath.Join("g1", ".s.PGSQL.5432"))
 	own, sibling := filepath.Join(base, "g1"), filepath.Join(base, "g2")
 	for _, dir := range []string{own, sibling} {
 		if err := os.Mkdir(dir, 0o700); err != nil {

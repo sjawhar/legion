@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -514,18 +515,14 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	return rt, nil
 }
 
-// toolsDir holds the rig's `legion` and `omp` stand-ins, made once for the test.
+// toolsDir holds the rig's `legion` and `omp` stand-ins, made once for the test. The longest
+// path written under it is the `legion` stand-in (idleRigLegionTool).
 func (r *idleWakeRig) toolsDir() string {
 	r.t.Helper()
 	r.stopMu.Lock()
 	defer r.stopMu.Unlock()
 	if r.toolsPath == "" {
-		dir, err := os.MkdirTemp("", "lgt")
-		if err != nil {
-			r.t.Fatal(err)
-		}
-		r.t.Cleanup(func() { _ = os.RemoveAll(dir) })
-		r.toolsPath = dir
+		r.toolsPath = testtmp.Dir(r.t, "legion")
 	}
 	return r.toolsPath
 }

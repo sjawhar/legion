@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -396,12 +397,7 @@ func TestTheRealShimBridgesAFakeOMPToTheRealListener(t *testing.T) {
 		t.Run(family, func(t *testing.T) {
 			addr := "tcp://127.0.0.1:0"
 			if family == "unix" {
-				dir, err := os.MkdirTemp("", "lit")
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { os.RemoveAll(dir) })
-				addr = "unix://" + filepath.Join(dir, "worker-stream.sock")
+				addr = "unix://" + testtmp.Socket(t, "worker-stream.sock")
 			}
 			bridge(t, legion, addr)
 		})
