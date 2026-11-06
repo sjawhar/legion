@@ -28,6 +28,7 @@ const tables = [
   "default_branch_commits",
   "user_issue_state",
   "user_agent_state",
+  "user_agent_read",
   "user_agent_reply_read",
   "user_agent_thread_dismissed",
   "user_threads",
