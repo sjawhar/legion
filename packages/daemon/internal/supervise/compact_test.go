@@ -16,14 +16,15 @@ const testCompactInstructions = "Write the summary as text."
 // ladderStuck is the claim the provider-errors notice names, idle between the ladder's sends:
 // six turns of it in a row ended in a provider error, so the project's controller has been told
 // once, the task it owes is unconfirmed on the claim, and the ladder's next step is ten minutes
-// away. ladderSends is how many prompts the connection has seen by then.
+// away. ladderSends is how many prompts the connection has seen by then. set, when it is given,
+// changes the dependencies before the machine is built, as workingClaim's own does.
 const ladderSends = providerErrorRunTold
 
-func ladderStuck(t *testing.T, notices *int) *harness {
+func ladderStuck(t *testing.T, notices *int, set ...func(*Deps)) *harness {
 	t.Helper()
-	h := workingClaim(t, func(d *Deps) {
+	h := workingClaim(t, append([]func(*Deps){func(d *Deps) {
 		d.ProviderErrorRunReached = func(Claim, string) { *notices++ }
-	})
+	}}, set...)...)
 	for turn := range providerErrorRunTold {
 		h.errorTurn(StreamPromptResult{Error: "overloaded_error", HTTPStatus: 529})
 		if turn+1 < providerErrorRunTold {
@@ -433,5 +434,119 @@ func TestACompactionWhoseClaimLosesItsProcessLeavesTheOwedTaskToTheRelaunch(t *t
 	prompts := h.wantPrompts(ladderSends + 1)
 	if prompts[ladderSends].DeliveryID != owed {
 		t.Fatalf("the relaunched claim was sent %q, want the task it owed, %q", prompts[ladderSends].DeliveryID, owed)
+	}
+}
+
+// A death the wake pacing parks the relaunch of leaves the claim exactly as the park found it:
+// working, over the dead process it still records, at the generation the compaction was taken
+// at. The one mark of the death is the launch waiting its turn to replace that process
+// (launchWaits), so the end of the compaction has that one thing to read. Taken for a
+// compaction that ran, the end would give the claim back idle and prompt a process that is
+// gone, and the answer would promise its caller both.
+func TestACompactionWhoseRelaunchWaitsItsTurnLeavesTheOwedTaskToThatTurn(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices, pacedDeps(wakeRate))
+	owed := h.pending().ID
+	dead := h.locator()
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	// A claim of the wave takes the turn the limiter had saved, so the relaunch this death
+	// charges waits for the next one rather than running where it is raised.
+	queueAhead(h, 1)
+	h.observe(runtime.Gone)
+	waiting := h.wantWaitingWake(WakeLaunch)
+	release()
+
+	if err := <-compacted; !errors.Is(err, ErrCompactProcessGone) {
+		t.Fatalf("a compaction whose claim's relaunch waits its turn answered %v, want ErrCompactProcessGone", err)
+	}
+	h.m.Wait()
+	h.wantState(StateWorking)
+	if got := h.claim().Locator; got == nil || *got != dead {
+		t.Fatalf("the claim records %+v, want the dead process the park kept, %+v", got, dead)
+	}
+	h.wantWakeDueAt(waiting)
+	h.wantPrompts(ladderSends)
+	if got := h.pending(); got.ID != owed || !got.ConfirmedAt.IsZero() {
+		t.Fatalf("the claim holds %+v, want the task %s still owed and unconfirmed", got, owed)
+	}
+
+	h.advance(waiting.At.Sub(h.clock.Now()))
+	h.relaunched()
+
+	h.m.Wait()
+	prompts := h.wantPrompts(ladderSends + 1)
+	if prompts[ladderSends].DeliveryID != owed {
+		t.Fatalf("the claim the wake's turn relaunched was sent %q, want the task it owed, %q", prompts[ladderSends].DeliveryID, owed)
+	}
+}
+
+// A death that spends the claim's last launch leaves it failed, and a failed claim relaunches of
+// no accord of its own: an operator's retry is what starts it again. The end of the compaction
+// finds a claim with no compaction recorded, which it must give nothing back — taken for a
+// compaction that ran it would idle the failed claim and prompt the process the death ended.
+func TestACompactionWhoseClaimItsDeathFailedGivesItBackNothing(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices, func(d *Deps) { d.Limits.LaunchFailures = 1 })
+	owed := h.pending().ID
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	h.observe(runtime.Gone)
+	h.wantState(StateFailed)
+	release()
+
+	if err := <-compacted; !errors.Is(err, ErrCompactProcessGone) {
+		t.Fatalf("a compaction whose claim its death failed answered %v, want ErrCompactProcessGone", err)
+	}
+	h.m.Wait()
+	h.wantState(StateFailed)
+	if got := h.store.load(h.token).State; got != StateFailed {
+		t.Fatalf("the stored claim is %s, want the failed its death left", got)
+	}
+	h.wantPrompts(ladderSends)
+	if got := h.pending(); got.ID != owed || !got.ConfirmedAt.IsZero() {
+		t.Fatalf("the claim holds %+v, want the task %s still owed and unconfirmed", got, owed)
+	}
+}
+
+// An operator's suspension that arrives under the compaction is held for its end, and its stop
+// timeout is what ends the wait when the compaction outlasts it: the process is stopped and the
+// claim suspended, which only the operator's resume starts again. The end of the compaction
+// finds a claim with no compaction recorded, which it must give nothing back — taken for a
+// compaction that ran it would idle the suspended claim and prompt the process the stop ended.
+func TestACompactionAHeldSuspensionStoppedGivesTheClaimBackNothing(t *testing.T) {
+	notices := 0
+	h := ladderStuck(t, &notices)
+	owed := h.pending().ID
+	release := h.conn.HoldCompact()
+	compacted := make(chan error, 1)
+	go func() { compacted <- h.m.Compact(h.ctx, testCompactInstructions) }()
+	waitForCompacting(t, h)
+
+	held := RequestSuspend{Claim: h.token, By: SuspendedByOperator, Reason: "the operator is draining the daemon"}
+	if err := h.handle(held); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the suspension answered %v, want it held for the compaction's end", err)
+	}
+	h.advance(testStop)
+	h.wantState(StateSuspended)
+	release()
+
+	if err := <-compacted; !errors.Is(err, ErrCompactProcessGone) {
+		t.Fatalf("a compaction a held suspension's deadline stopped answered %v, want ErrCompactProcessGone", err)
+	}
+	h.m.Wait()
+	h.wantState(StateSuspended)
+	if got := h.claim().SuspendedBy; got != SuspendedByOperator {
+		t.Fatalf("the claim is suspended by %q, want the operator whose stop ended it", got)
+	}
+	h.wantPrompts(ladderSends)
+	if got := h.pending(); got.ID != owed || !got.ConfirmedAt.IsZero() {
+		t.Fatalf("the claim holds %+v, want the task %s still owed and unconfirmed", got, owed)
 	}
 }

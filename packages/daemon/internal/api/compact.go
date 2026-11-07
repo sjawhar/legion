@@ -27,8 +27,8 @@ import (
 // before anything was asked — a claim in no state to be compacted, a Claude Code claim, a role
 // the request may not name — a take that did not happen at all
 // (supervise.ErrCompactNotTaken), an end the store would not write
-// (supervise.ErrCompactNotEnded), and a claim that lost its process under the compaction, whose
-// relaunch sends the task it owes (supervise.ErrCompactProcessGone).
+// (supervise.ErrCompactNotEnded), and a claim that lost its process under the compaction, which
+// was given back nothing and sent nothing (supervise.ErrCompactProcessGone).
 type CompactResponse struct {
 	Compacted bool   `json:"compacted"`
 	Reason    string `json:"reason,omitempty"`
@@ -160,9 +160,9 @@ func (s *server) compactClaim(w http.ResponseWriter, r *http.Request) {
 // A compaction Oh My Pi refused or skipped is no refusal of this route: the answer says so, the
 // claim is back, and whatever task it owes has gone again (CompactResponse). A compaction that
 // ran and did not end is a failure of its own: the store would not write the end
-// (supervise.ErrCompactNotEnded), or the claim lost its process under the compaction and its
-// relaunch is what sends the task (supervise.ErrCompactProcessGone). Neither gave the claim
-// back, so neither is answered as a compaction that did not run.
+// (supervise.ErrCompactNotEnded), or the claim lost its process under the compaction
+// (supervise.ErrCompactProcessGone). Neither gave the claim back, so neither is answered as a
+// compaction that did not run.
 func (s *server) compact(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (CompactResponse, bool) {
 	if c := m.Claim(); s.backend != nil && runtime.Of(s.backend(c.Role)) == runtime.BackendClaude {
 		writeFailure(w, http.StatusConflict, claimNotOnOmp, fmt.Sprintf(
@@ -200,12 +200,14 @@ func (s *server) compact(w http.ResponseWriter, r *http.Request, m *supervise.Ma
 		return CompactResponse{}, false
 	case errors.Is(err, supervise.ErrCompactProcessGone):
 		// The claim lost its process under the compaction, so the compaction's end gave it back
-		// nothing and sent it nothing. Its relaunch sends the task it owes, and the answer says
-		// so in the daemon's own words: what Oh My Pi made of such a compaction is in the
-		// machine's log, where no model's words reach the caller's next prompt (reasonBound).
+		// nothing and sent it nothing. What starts it again is its own path's — a relaunch for a
+		// claim the daemon relaunches, an operator's retry or resume for one its death failed or
+		// a held suspension stopped — and the task it owes goes then. The answer says so in the
+		// daemon's own words: what Oh My Pi made of such a compaction is in the machine's log,
+		// where no model's words reach the caller's next prompt (reasonBound).
 		s.log.Warn("api: the claim lost its process while its session was being compacted", "claim", token)
 		writeFailure(w, http.StatusConflict, compactionFailed, fmt.Sprintf(
-			"%s lost its process while its session was being compacted; the task it owes goes at its relaunch", token))
+			"%s lost its process while its session was being compacted; it was not given back, and the task it owes goes when its agent runs again", token))
 		return CompactResponse{}, false
 	default:
 		var refused *supervise.RefusedError

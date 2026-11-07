@@ -1326,11 +1326,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		// pushed.
 		return m.fenceRequest("ready_for_update", ev.Generation, ev.Session)
 	case CompactEnded:
-		// A compaction of a process the claim has been relaunched past decides nothing: the
-		// session it compacted is not the one the claim runs now.
-		if ev.Generation != m.claim.Generation {
-			m.dropStale("CompactEnded", "generation", fmt.Sprint(ev.Generation), fmt.Sprint(m.claim.Generation))
-			return false, nil
+		// The end of a compaction the claim no longer owns decides nothing, and it is answered
+		// rather than dropped: Machine.Compact reads what became of the compaction from this one
+		// answer, which is the only one made under the lock the claim moves behind.
+		if !m.ownsCompaction(ev.Generation) {
+			m.log.Warn("supervise: the compaction's end reached a claim that no longer holds it; the claim was not given back and sent nothing",
+				"generation", ev.Generation, "claimGeneration", m.claim.Generation, "state", m.claim.State)
+			return false, ErrCompactProcessGone
 		}
 	}
 	return true, nil

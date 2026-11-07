@@ -36,19 +36,26 @@ const (
 	thirdToken  claim.Token = "legion-LEGION-209-reviewer"
 )
 
-// pacedHarness is a harness whose machines reserve from one limiter of rate wakes a minute in
-// bursts of one, every paced release spread by half an interval. A rate of zero is the pacing
-// off, and the machines are handed no Reserve at all, which is what the daemon hands them at that
-// rate rather than a limiter that paces nothing (the daemon's run, openSupervision): a harness
-// that handed one would take a path production never takes, and the line its wakes write would
-// say paced=true of a pacing that is off (reserveWake, wakeRan).
+// pacedDeps sets a machine's pacing to one limiter of rate wakes a minute in bursts of one,
+// every paced release spread by half an interval. A rate of zero is the pacing off, and the
+// machine is handed no Reserve at all, which is what the daemon hands it at that rate rather
+// than a limiter that paces nothing (the daemon's run, openSupervision): a harness that handed
+// one would take a path production never takes, and the line its wakes write would say
+// paced=true of a pacing that is off (reserveWake, wakeRan).
+func pacedDeps(rate int) func(*Deps) {
+	return func(d *Deps) {
+		d.WakePace = WakePace{Rate: rate, Burst: 1}
+		if rate > 0 {
+			d.WakePace.Reserve = wakepace.New(rate, 1, func(time.Duration) time.Duration { return wakePart }).Reserve
+		}
+	}
+}
+
+// pacedHarness is a harness whose machines reserve from one such limiter (pacedDeps).
 func pacedHarness(t *testing.T, rate int) *harness {
 	t.Helper()
 	h := newBareHarness(t)
-	h.deps.WakePace = WakePace{Rate: rate, Burst: 1}
-	if rate > 0 {
-		h.deps.WakePace.Reserve = wakepace.New(rate, 1, func(time.Duration) time.Duration { return wakePart }).Reserve
-	}
+	pacedDeps(rate)(&h.deps)
 	c := queuedClaim()
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)

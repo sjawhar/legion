@@ -39,17 +39,22 @@ var ErrCompactNotTaken = errors.New("the claim was not taken for a compaction, s
 // agent's own answer to "are you streaming" ends it (askTurnOver).
 var ErrCompactNotEnded = errors.New("the compaction ended and the claim could not be given back, so the task it owes was not sent")
 
-// ErrCompactProcessGone is a claim that lost its process while its session was being compacted
-// (letGo): the end reaches a claim its relaunch has moved past, or one in a state the end means
-// nothing in, so compactEnded never runs and sends no task. The claim's own path decides what
-// happens to it next, and the task it owes goes at the relaunch, when its agent is ready again
-// (sendPending).
-var ErrCompactProcessGone = errors.New("the claim lost its process while its session was being compacted, so the task it owes goes at its relaunch")
+// ErrCompactProcessGone is a compaction whose end found it was no longer the claim's own
+// (ownsCompaction): the process it ran on was let go, a relaunch has moved the claim past it, or
+// a launch waits to replace that process. So compactEnded never ran: the claim was not given
+// back and the task it owes was not sent.
+//
+// What happens to the claim next is its own path's, and that path is not always a relaunch. A
+// claim whose death the daemon relaunches is sent the owed task when its agent is ready again
+// (sendPending), but a claim its death failed and one a held suspension stopped each run again
+// only when an operator retries or resumes them, and the task waits for that.
+var ErrCompactProcessGone = errors.New("the claim lost its process while its session was being compacted, so it was not given back and the task it owes was not sent")
 
 // compacting is the compaction a claim is in: the connection it runs over and the generation it
-// was taken at, which is what the end of it is fenced on. It is memory only, as a held
-// suspension is: a daemon that restarts mid-compaction leaves a claim stored working, which its
-// agent's own answer to "are you streaming" then ends (askTurnOver), and the owed task goes on
+// was taken at. Its presence and that generation are two of the three things the end of a
+// compaction is fenced on (ownsCompaction). It is memory only, as a held suspension is: a
+// daemon that restarts mid-compaction leaves a claim stored working, which its agent's own
+// answer to "are you streaming" then ends (askTurnOver), and the owed task goes on
 // that end.
 type compacting struct {
 	conn       runtime.Conn
@@ -87,11 +92,15 @@ type compacting struct {
 // (compactEnded). A take that did not happen at all is ErrCompactNotTaken or a *RefusedError,
 // and leaves the claim where it was with its task unsent.
 //
-// A compaction that ran and did not end is neither: ErrCompactNotEnded is the end the store
-// would not write, and ErrCompactProcessGone the claim that lost its process under the
-// compaction. Each leaves the owed task unsent here, and each says so in the daemon's own
-// words: what Oh My Pi answered such a compaction goes to the log rather than to the caller,
-// which no model's words reach through (api's reasonBound).
+// A compaction that ran and did not end is neither, and the end's own answer is what tells the
+// two apart: ErrCompactNotEnded is the end the store would not write, and ErrCompactProcessGone
+// the end the machine judged no longer the claim's own. That judgement is made under the
+// machine's lock, where the claim cannot move under it (ownsCompaction), and it is the whole of
+// what is read here: nothing of the claim is read from this side of the lock, where a relaunch
+// the end itself raises would be taken for the process the compaction lost (afterTurn's
+// refreshPlugin). Each leaves the owed task unsent, and each says so in the daemon's own words:
+// what Oh My Pi answered such a compaction goes to the log rather than to the caller, which no
+// model's words reach through (api's reasonBound).
 func (m *Machine) Compact(ctx context.Context, customInstructions string) error {
 	if strings.TrimSpace(customInstructions) == "" {
 		return ErrCompactInstructions
@@ -114,25 +123,22 @@ func (m *Machine) Compact(ctx context.Context, customInstructions string) error 
 		return fmt.Errorf("%w: %s lost its process before its session could be compacted", ErrCompactNotTaken, token)
 	}
 	err := run.conn.Compact(ctx, customInstructions, runtime.CompactTimeout)
-	// A claim the relaunch has moved past is read before the end is posted rather than after it,
-	// because the end itself can relaunch the claim it gives back (afterTurn's refreshPlugin):
-	// read after, such a relaunch would be taken for the process this compaction lost.
-	movedPast := m.View().Claim.Generation != run.generation
 	// The end runs whatever the compaction did and whatever became of ctx — a caller that hung up
 	// still leaves a claim to give back — so it is posted on a context the caller cannot cancel.
 	ended := CompactEnded{Claim: token, Generation: run.generation, Compacted: err == nil}
 	endErr := m.Handle(context.WithoutCancel(ctx), ended)
-	if !movedPast && endErr == nil {
+	if endErr == nil {
+		// compactEnded ran: the claim is back and the task it owes has gone again, so what this
+		// answers is the compaction itself.
 		return err
 	}
 	if err != nil {
 		m.log.Warn("supervise: the compaction whose end did not run was itself refused or unanswered",
 			"generation", run.generation, "error", err)
 	}
-	var endRefused *RefusedError
-	if movedPast || errors.As(endErr, &endRefused) {
-		// The end was dropped as the end of a generation the claim has been relaunched past, or
-		// refused in the state letGo left the claim in: either way compactEnded did not run.
+	if errors.Is(endErr, ErrCompactProcessGone) {
+		// The machine answered, under its lock, that the compaction is no longer the claim's own
+		// (ownsCompaction): compactEnded did not run and sent nothing.
 		return ErrCompactProcessGone
 	}
 	return fmt.Errorf("%w: %w", ErrCompactNotEnded, endErr)
@@ -146,6 +152,22 @@ func (m *Machine) compaction() (compacting, bool) {
 		return compacting{}, false
 	}
 	return *m.compacting, true
+}
+
+// ownsCompaction is whether the compaction taken at generation is still the claim's own, which
+// is the one thing the end of a compaction turns on and the only place it can be read: the
+// machine's lock is what makes the three facts one answer, and Machine.Compact holds no lock
+// while Oh My Pi writes the summary. It is asked where the end is fenced (Machine.fence), so
+// every caller of it reads the claim as the end will find it.
+//
+// A compaction is the claim's own when the claim records one, since letGo drops the compaction
+// with the process it ran on; when it is the one this end names, since launchNow's bump leaves
+// an earlier generation's behind; and when no launch waits to replace the process it ran on
+// (launchWaits), which is the whole of what a death whose relaunch the wake pacing parked leaves
+// on the claim — it is still working, still over that process and still at that generation
+// (parkWake), and nothing else of the claim waits there.
+func (m *Machine) ownsCompaction(generation uint64) bool {
+	return m.compacting != nil && m.compacting.generation == generation && !m.launchWaits()
 }
 
 // compactStart takes the claim for a compaction: it is working until the compaction ends
@@ -229,12 +251,8 @@ func compactStart(m *Machine, ctx context.Context, _ Event) error {
 // agent as free while it works.
 func compactEnded(m *Machine, ctx context.Context, ev Event) error {
 	ended := ev.(CompactEnded)
-	// A claim working with no compaction recorded is one whose process was let go and taken up
-	// again at the same generation; it goes back idle, as every end of a turn leaves one.
-	run := compacting{back: StateIdle}
-	if m.compacting != nil {
-		run = *m.compacting
-	}
+	// The fence let this end through, so the claim holds the compaction it names (ownsCompaction).
+	run := *m.compacting
 	m.compacting = nil
 	m.disarm(TimerPromptRetry)
 	if ended.Compacted {

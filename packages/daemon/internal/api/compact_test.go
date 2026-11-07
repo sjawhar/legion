@@ -499,9 +499,10 @@ func TestACompactionWhoseEndTheStoreWouldNotWriteAnswersTheStoreFailure(t *testi
 
 // A claim that loses its process while its session is being compacted is sent nothing by the
 // compaction's end: that end reaches a claim the relaunch has moved past, so it decides nothing.
-// The answer names the relaunch as what sends the task the claim owes, where a compaction
-// reported as run would have the CLI say the task had gone again when nothing had sent it.
-func TestACompactionOfAClaimThatLosesItsProcessSaysTheTaskGoesAtTheRelaunch(t *testing.T) {
+// The answer says the claim was not given back and leaves the owed task to the moment its agent
+// runs again, where a compaction reported as run would have the CLI say the task had gone again
+// when nothing had sent it.
+func TestACompactionOfAClaimThatLosesItsProcessSaysItWasNotGivenBack(t *testing.T) {
 	h := compactHarness(t, nil)
 	token := idleOnTheLadder(t, h)
 	conn := connected(h, token)
@@ -517,7 +518,7 @@ func TestACompactionOfAClaimThatLosesItsProcessSaysTheTaskGoesAtTheRelaunch(t *t
 	release()
 
 	wantFreshSessionRefusal(t, <-answered, http.StatusConflict, compactionFailed,
-		string(token)+" lost its process while its session was being compacted; the task it owes goes at its relaunch")
+		string(token)+" lost its process while its session was being compacted; it was not given back, and the task it owes goes when its agent runs again")
 	settled(h, token)
 	if prompts := conn.Prompts(); len(prompts) != 0 {
 		t.Fatalf("the connection was sent %#v, want nothing: the compaction's end reached a claim its relaunch had moved past", prompts)

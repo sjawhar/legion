@@ -473,11 +473,12 @@ type RequestExit struct {
 type RequestCompact struct{ Claim claim.Token }
 
 // CompactEnded is the compaction over, posted by whoever asked for it (Machine.Compact).
-// Generation is the generation the claim was taken at, so an end that reaches a claim its
-// relaunch has moved past decides nothing. Compacted is whether Oh My Pi compacted the session:
-// false for a compaction it refused or skipped and for a wait that ran out, each of which gives
-// the claim back and sends the owed task again all the same, and only true puts the claim's run
-// of provider-error turns back to zero.
+// Generation is the generation the claim was taken at, and an end that names one the claim no
+// longer holds the compaction of is answered ErrCompactProcessGone rather than reaching a row
+// (Machine.fence, ownsCompaction). Compacted is whether Oh My Pi compacted the session: false
+// for a compaction it refused or skipped and for a wait that ran out, each of which gives the
+// claim back and sends the owed task again all the same, and only true puts the claim's run of
+// provider-error turns back to zero.
 type CompactEnded struct {
 	Claim      claim.Token
 	Generation uint64
@@ -989,6 +990,9 @@ func fillTable(t *builder) {
 
 	t.row(onCompactEnded, "the compaction is over: reset the run of provider errors it cleared, and send the owed task", compactEnded,
 		[]ClaimState{StateReady, StateIdle, StateWorking, StateLaunching, StateFailed}, StateWorking)
+	// A claim in one of these states holds no compaction, so the fence answers the end
+	// ErrCompactProcessGone before any of them is read (Machine.fence, ownsCompaction); each is
+	// still the table's word for the state, which every event of it must have.
 	t.ignore(onCompactEnded, "the claim is not in a compaction: the process it ran on was let go first", prompted...)
 	t.ignore(onCompactEnded, "the agent is not ready, so the compaction's process is gone", unready...)
 	t.ignore(onCompactEnded, "no process of this claim is running, so the compaction's own is gone", gone...)

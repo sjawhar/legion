@@ -365,6 +365,12 @@ func TestEveryNamedIgnoreChangesNothingAndRefusesARequest(t *testing.T) {
 					if timer, ok := ev.(Timer); ok {
 						h.m.timers[timer.Kind] = armed{seq: timer.Seq, deliveryID: timer.DeliveryID}
 					}
+					if end, ok := ev.(CompactEnded); ok {
+						// The fence answers an end whose compaction the claim no longer holds
+						// before any row sees it (ownsCompaction), so the compaction it names is
+						// recorded here, as a timer's arming is.
+						h.m.compacting = &compacting{generation: end.Generation, back: c.State}
+					}
 					before := h.claim()
 					puts := len(h.store.history())
 
