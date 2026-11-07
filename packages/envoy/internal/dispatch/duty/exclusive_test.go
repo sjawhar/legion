@@ -28,6 +28,53 @@ func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
 	return leases
 }
 
+// Both lines a tick writes name the tick's own due and the aligned period it fell in. The line is
+// written when the pass ends, so without them a reader has only that moment: a pass held in a
+// slow call writes its line in a period later than the one its tick was judged in, and two
+// processes whose lines land inside one period can have been due in two. Reading dispatch's
+// multiprocess rows cost a day for want of exactly this (INFRA-1492). A pass with no period names
+// no boundary, since periodServed gives it none.
+func TestTheLinesAboutATickNameItsDueAndItsPeriod(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	var logs bytes.Buffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
+	ctx := context.Background()
+	const name, period = "search-term-stats", time.Hour
+	due := time.Date(2026, 11, 7, 12, 37, 19, 0, time.UTC)
+
+	if !Exclusive(ctx, leases, name, due, period, func(context.Context) {}) {
+		t.Fatalf("the first tick did not run its pass:\n%s", logs.String())
+	}
+	ran := `msg="dispatch duty: leased pass ran" lease=` + name +
+		` due=2026-11-07T12:37:19.000Z boundary=2026-11-07T12:00:00.000Z`
+	if !strings.Contains(logs.String(), ran) {
+		t.Errorf("the line a tick that ran wrote does not read %q:\n%s", ran, logs.String())
+	}
+
+	// A later tick of the same period, which reads that period served and skips.
+	logs.Reset()
+	if Exclusive(ctx, leases, name, due.Add(20*time.Minute), period, func(context.Context) {
+		t.Error("a tick whose period another pass served ran a pass of its own")
+	}) {
+		t.Errorf("the tick whose period was served reported running:\n%s", logs.String())
+	}
+	skipped := `msg="dispatch duty: leased pass skipped" lease=` + name +
+		` due=2026-11-07T12:57:19.000Z boundary=2026-11-07T12:00:00.000Z`
+	if !strings.Contains(logs.String(), skipped) {
+		t.Errorf("the line a tick that found its period served wrote does not read %q:\n%s", skipped, logs.String())
+	}
+
+	// A pass with no period has no boundary to name, and names none.
+	logs.Reset()
+	if !Exclusive(ctx, leases, "delivery-consumer-delivery-jobs", due, 0, func(context.Context) {}) {
+		t.Fatalf("the periodless tick did not run its pass:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `due=2026-11-07T12:37:19.000Z`) || strings.Contains(logs.String(), "boundary=") {
+		t.Errorf("the line a periodless pass wrote names a boundary, or no due:\n%s", logs.String())
+	}
+}
+
 // Two processes on one database are two callers here, and the second must skip rather than queue:
 // it is refused while the first is still inside its pass, which is the only moment that matters.
 // No period (0) in this row and the two below it: each is about the lease alone, and a period

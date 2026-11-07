@@ -236,10 +236,15 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	if served {
-		// The same line a lease held elsewhere writes, and for the same reason: this tick would
-		// be the pass some process has already made of this period, and the loops' tests count
-		// one skip either way.
-		slog.Info("dispatch duty: leased pass skipped", "lease", name)
+		// The message a lease held elsewhere writes, and for the same reason: this tick would be
+		// the pass some process has already made of this period, and the loops' tests count one
+		// skip either way. It names the tick's own due and the boundary that due fell in, which
+		// is what tells this skip from that one and, between two processes, tells a tick that
+		// read a served period from one whose period nobody had served: without them a reader
+		// has only the moment each line was written, which is when the pass ended rather than
+		// when its tick was due, and a pass held in a slow call writes its line in a period
+		// later than the one it was judged in (INFRA-1492).
+		slog.Info("dispatch duty: leased pass skipped", passAttrs(name, due, boundary, period)...)
 		return false
 	}
 	pass(ctx)
@@ -259,8 +264,22 @@ func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, p
 		return false
 	}
 	recordPassOn(conn, name, boundary, period)
-	slog.Info("dispatch duty: leased pass ran", "lease", name)
+	slog.Info("dispatch duty: leased pass ran", passAttrs(name, due, boundary, period)...)
 	return true
+}
+
+// passAttrs is what a line about one tick names: the lease, the moment that tick was due, and the
+// aligned period that due fell in. The boundary is left off a pass with no period, which has none
+// to name (periodServed), and is what a reader needs on every other: the line is written when the
+// pass ends, so a pass held in a slow call writes it in a period later than the one its tick was
+// judged in, and two processes' lines can read as one period while their ticks were due in two
+// (INFRA-1492).
+func passAttrs(name string, due time.Time, boundary time.Time, period time.Duration) []any {
+	attrs := []any{"lease", name, "due", due}
+	if period > 0 {
+		attrs = append(attrs, "boundary", boundary)
+	}
+	return attrs
 }
 
 // periodServed answers the aligned start of the period this tick was due in (periodBoundary of

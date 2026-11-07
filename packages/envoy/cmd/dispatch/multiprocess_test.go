@@ -93,6 +93,14 @@ type dispatchPair struct {
 	database *store.Store
 	nats     string
 	proxies  map[*dispatchProcess]*testnats.Proxy
+	// binary is the envoy-dispatch both processes run, built once by the first start and given
+	// to every later one (dispatchOptions.Binary). cmdtest.Build is not memoised: it runs a
+	// whole go build into a temporary directory of its own on every call. A pair that let each
+	// process build its own put that build between the two starts - measured on this two-CPU pod
+	// under two busy loops, forty to fifty-six seconds each - which is the staggered start that
+	// start says below it does not have, and it is long enough to put the two processes' first
+	// ticks in different aligned periods of a loop whose own interval is minutes.
+	binary string
 }
 
 // newPair opens the database and takes the NATS server the pair will share, and starts nothing:
@@ -145,12 +153,17 @@ func (p *dispatchPair) startProcess(t *testing.T, env map[string]string) *dispat
 
 // startProcessSettling is startProcess with a settle delay of the process's own
 // (DISPATCH_TEST_SETTLE_DELAY): how long it waits after a live change before it settles the
-// document. Zero keeps the server's default.
+// document. Zero keeps the server's default. Every process of a pair runs the one binary the
+// first of them built (dispatchPair.binary), so the only work between two starts is a NATS proxy
+// and a held port.
 func (p *dispatchPair) startProcessSettling(t *testing.T, env map[string]string, settle time.Duration) *dispatchProcess {
 	t.Helper()
+	if p.binary == "" {
+		p.binary = cmdtest.Build(t, "envoy-dispatch")
+	}
 	proxy := testnats.StartProxy(t, p.nats)
 	process := startDispatchProcessWith(t, p.databaseURL(t),
-		dispatchOptions{NATSURL: proxy.URL(), SigningKey: multiprocessSigningKey, Env: env, SettleDelay: settle})
+		dispatchOptions{Binary: p.binary, NATSURL: proxy.URL(), SigningKey: multiprocessSigningKey, Env: env, SettleDelay: settle})
 	p.proxies[process] = proxy
 	return process
 }
