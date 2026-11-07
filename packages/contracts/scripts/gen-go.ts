@@ -595,9 +595,16 @@ function valueChecks(key: string, prop: Prop, optional: boolean) {
   if (!prop.enum?.length) return "";
   const n = name(key);
   const indent = optional ? "\t\t" : "\t";
-  // A literal is written as Go reads it: a word quoted, the JSON literals true and false bare.
+  // The switch below reads a Go string, and the optional case leans on `""` being its zero
+  // value, so a set holding anything else needs a Go type of its own to read and validate it
+  // (`x-go-type`, answered above). Refuse such a set rather than emit Go that does not compile.
   const list = prop.enum
-    .map((item) => (typeof item === "string" ? `"${item}"` : String(item)))
+    .map((item) => {
+      if (typeof item !== "string") {
+        throw new Error(`${key}'s enum holds ${JSON.stringify(item)} and names no x-go-type`);
+      }
+      return `"${item}"`;
+    })
     .join(", ");
   const body = [
     `${indent}switch e.${n} {`,

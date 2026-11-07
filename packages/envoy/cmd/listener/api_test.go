@@ -2418,25 +2418,25 @@ func TestMessageHandlersReadExpectsReplyAsFalseOrTheOldNone(t *testing.T) {
 			name: "publish false",
 			path: "/v1/messages/publish",
 			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":false}`,
-			want: "none",
+			want: contracts.ExpectsReplyNone,
 		},
 		{
 			name: "send false",
 			path: "/v1/messages/send",
 			body: `{"target_session":"ses_target","message":"hello","expects_reply":false}`,
-			want: "none",
+			want: contracts.ExpectsReplyNone,
 		},
 		{
 			name: "publish the old none",
 			path: "/v1/messages/publish",
 			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"none"}`,
-			want: "none",
+			want: contracts.ExpectsReplyNone,
 		},
 		{
 			name: "publish optional",
 			path: "/v1/messages/publish",
 			body: `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"hello","expects_reply":"optional"}`,
-			want: "optional",
+			want: contracts.ExpectsReplyOptional,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

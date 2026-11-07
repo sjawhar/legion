@@ -507,45 +507,26 @@ func messageEnvelope(body messageBody, topic, dedupeKey string, expectsReply con
 	}
 }
 
-// expectsReplyAnswer is the expects_reply an answer to one request writes: the envelope's own
-// value in the wire vocabulary (the literal false, "optional", "required"), or nil for a request
-// that said nothing about a reply, so the field is omitted as it always has been - except for a
-// request whose own expects_reply arrived as the old string "none", whose answer writes "none"
-// back.
+// expectsReplyAnswer is the expects_reply an answer to one request writes: the request's own
+// bytes, so each sender reads back the dialect it spoke - the literal false, "optional",
+// "required", or the old string "none" - and nil for a request that said nothing about a reply
+// or wrote null, whose answer omits the field as it always has. The route refuses anything else
+// (validateMessageBody) before an answer is built, and the envelope those same bytes were parsed
+// into carries the one new vocabulary whichever spelling they used.
 //
-// That echo is what keeps the ingress leniency's promise whole. A plugin build old enough to
-// write "none" holds an EnvelopeSchema whose expects_reply is the three-word enum
-// (packages/contracts/src/envelope.ts), and it parses this very answer
+// Answering the request's own spelling is what keeps the ingress leniency's promise whole. A
+// plugin build old enough to write "none" holds an EnvelopeSchema whose expects_reply is the
+// three-word enum (packages/contracts/src/envelope.ts), and it parses this very answer
 // (packages/envoy-client/src/transport.ts): a literal false there fails that parse, so its send
 // is reported unconfirmed and re-sent, and its publish throws. The echo is the answer's alone -
 // every envelope this listener puts on the bus carries the one new vocabulary - and it goes with
 // the leniency itself, on the same count ParseExpectsReply's comment names: once no deployment
 // pins a plugin build old enough to write "none".
-func expectsReplyAnswer(item contracts.Envelope, requested json.RawMessage) json.RawMessage {
-	if requestedExpectsReplyNone(requested) {
-		return json.RawMessage(`"none"`)
-	}
-	if item.ExpectsReply == contracts.ExpectsReplyUnset {
+func expectsReplyAnswer(requested json.RawMessage) json.RawMessage {
+	if len(requested) == 0 || string(requested) == "null" {
 		return nil
 	}
-	written, err := item.ExpectsReply.MarshalJSON()
-	if err != nil {
-		// Unreachable: the route refused anything the parser does not read before it built the
-		// envelope, and every value the parser reads marshals. The field is omitted rather than
-		// the whole answer failing to encode.
-		return nil
-	}
-	return written
-}
-
-// requestedExpectsReplyNone reports whether a request's expects_reply arrived as the old string
-// "none" rather than the literal false that means the same thing now.
-func requestedExpectsReplyNone(requested json.RawMessage) bool {
-	var word string
-	if err := json.Unmarshal(requested, &word); err != nil {
-		return false
-	}
-	return contracts.ExpectsReply(word) == contracts.ExpectsReplyNone
+	return requested
 }
 
 // senderStamp is the sender a send or a publish carries: the session, the machine and directory it
@@ -774,7 +755,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		record.accept(w, sendResponse{
 			Envelope:       item,
-			ExpectsReply:   expectsReplyAnswer(item, body.ExpectsReply),
+			ExpectsReply:   expectsReplyAnswer(body.ExpectsReply),
 			Recipient:      targetSession,
 			RecipientState: state,
 			LastSeen:       target.UpdatedAt,
@@ -1006,7 +987,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		// The answer's own expects_reply, read from the request before any path answers: the three
 		// of them below each write it, and none of them changes the envelope that goes on the bus.
-		expectsReply := expectsReplyAnswer(item, request.ExpectsReply)
+		expectsReply := expectsReplyAnswer(request.ExpectsReply)
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()

@@ -53,13 +53,18 @@ const InboundSenderSchema = z.object({
 });
 
 /**
- * What an inbound frame may say about the reply it wants: the envelope's own vocabulary, and the
- * string `"none"` the field carried before the literal `false` replaced it. A replayed frame and
- * a session on an older plugin build still write that word, so the card reads it rather than
- * discarding the field, and the replay engine reads a stored frame by it (`replay.ts`) rather
- * than keeping a second list of the same words.
+ * What an inbound frame may say about the reply it wants, read as the envelope's one vocabulary:
+ * the string `"none"` the field carried before the literal `false` replaced it parses as
+ * `false`. A replayed frame and a session on an older plugin build still write that word, so the
+ * card reads it rather than discarding the field, and the replay engine reads a stored frame
+ * with this schema (`replay.ts`) rather than keeping a second list of the same words. The
+ * reading happens here and nowhere else, so no reader of a parsed frame is ever shown the old
+ * spelling. `EnvelopeSchema` itself stays strict: it is what a producer of this repository is
+ * held to.
  */
-export const INBOUND_EXPECTS_REPLY_VALUES = [...EXPECTS_REPLY_VALUES, "none"] as const;
+export const InboundExpectsReplySchema = z
+  .literal([...EXPECTS_REPLY_VALUES, "none"] as const)
+  .transform((value): ExpectsReply => (value === "none" ? false : value));
 
 const InboundEnvelopeSchema = z
   .object({
@@ -80,7 +85,7 @@ const InboundEnvelopeSchema = z
     in_reply_to: z.string().optional(),
     supersedes: z.string().optional(),
     urgency: z.string().optional(),
-    expects_reply: z.literal(INBOUND_EXPECTS_REPLY_VALUES).optional(),
+    expects_reply: InboundExpectsReplySchema.optional(),
   })
   .passthrough();
 
@@ -101,17 +106,6 @@ const TolerantInboundEnvelopeSchema = z
   .passthrough();
 
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
-
-/**
- * One vocabulary for an inbox: the old string `"none"` read as the literal `false`, every other
- * value left as it stands. Both spellings mean no reply is wanted, and a reader shown both would
- * see the same meaning written two ways.
- */
-export function expectsReplyValue(
-  value: InboundEnvelope["expects_reply"]
-): ExpectsReply | undefined {
-  return value === "none" ? false : value;
-}
 
 export type DispatchDelivery = {
   readonly resource: "message" | "comment";
@@ -1287,9 +1281,7 @@ export function renderInbound(
     ...(envelope.kept_at === undefined ? {} : { kept_at: inboundTimestamp(envelope.kept_at) }),
     ...(envelope.expires_at === undefined ? {} : { by: inboundTimestamp(envelope.expires_at) }),
     ...(envelope.urgency === undefined ? {} : { urgency: envelope.urgency }),
-    ...(envelope.expects_reply === undefined
-      ? {}
-      : { expects_reply: expectsReplyValue(envelope.expects_reply) }),
+    ...(envelope.expects_reply === undefined ? {} : { expects_reply: envelope.expects_reply }),
     ...(inReplyTo === undefined ? {} : { re: inReplyTo }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),

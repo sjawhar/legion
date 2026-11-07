@@ -2080,13 +2080,22 @@ A `legion` of this release against a daemon of an earlier one, which serves no s
 What a contract bump never refreshes is the pod's own `legion` binary:
 the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement, which the update round makes ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
 
-A release that changes what a producer writes **into an envelope** is rolled plugins first, which the contract number above does not cover:
-that number holds a process to the daemon's API, while an envelope's reader is the session's own plugin, so a value this release's producers write reaches a session on whatever pair its pod installed.
-Pin the plugin pair this release publishes, let every role come onto it, and roll Dispatch after.
-The cost of the other order is a silent loss rather than a refusal, measured on INFRA-1225:
-a `@sjawhar/pi-envoy` from before it declares `expects_reply` as the three words `none`, `optional` and `required`, and its replay reads a stored frame against that strict schema, so a frame carrying the `false` a newer Dispatch writes fails the parse and is logged and settled as "not an Envoy envelope".
-A session on such a pair keeps every live delivery, whose card renderer reads the field leniently and simply drops it, and loses from its 72-hour replay window exactly the deliveries the new value marks:
-an answered ask, an approved artifact, and a plain comment mention.
+A release that changes what a producer writes **into an envelope** is rolled in one order, which the contract number above does not cover:
+that number holds a process to the daemon's API, while an envelope is written by one process and read by another, and the two are pinned separately.
+**Roll the listener Deployment, then the plugin pair, then the Dispatch Deployment**, and expect the loss the middle step leaves.
+Each of the other orders was traced on INFRA-1225, which replaced the string `none` with the literal `false`:
+
+- **Plugins before the listener breaks sends.**
+  The new skills tell an agent to write the new value, and the listener of the previous image decodes the field as a `*string`, so it answers `400` and the message is never sent.
+
+- **Dispatch before the listener loses frames.**
+  An old listener's durable consumer cannot decode what a new Dispatch outbox published, so it drops the message rather than relaying it.
+
+- **Plugins last costs a replay window, and nothing else.**
+  A `@sjawhar/pi-envoy` from before the change declares the field as the three words it knew, and its replay reads a stored frame against that strict schema, so a frame carrying the new value fails the parse and is logged and settled as "not an Envoy envelope".
+  A session on such a pair keeps every live delivery, because its card renderer reads the field leniently and drops a value it does not know, and loses from its 72-hour replay window **every message the new value marks** — on INFRA-1225 the Dispatch deliveries that carry it, an answered ask, an approved artifact and a plain comment mention, and every agent message sent as wanting no reply, including one an un-rolled sender sent itself, since a rolled listener writes each of those to the bus in the new spelling too.
+
+That last loss is the one this order accepts, so the window between the listener and the plugin pair is the window to keep short.
 
 ### Configuration
 

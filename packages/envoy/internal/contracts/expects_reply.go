@@ -9,10 +9,9 @@ import (
 // is the JSON literal false, "optional" or "required"; absent from a message that says nothing
 // about a reply. This type is hand-written beside the generated mirror in generated.go, whose
 // Envelope holds the field as this type and whose Validate() calls the Validate below, so one
-// vocabulary is decided here and nowhere else. The no-reply constant's Go string stays "none"
-// because ParseExpectsReply's string case accepts that legacy wire word by comparing against the
-// constant: retiring the leniency is removing ExpectsReplyNone from that switch, never renaming
-// its value.
+// vocabulary is decided here and nowhere else. A constant's Go string is this package's own name
+// for the value, not a word the wire carries: MarshalJSON writes the wire form and
+// ParseExpectsReply reads every form accepted, the retired one named below among them.
 type ExpectsReply string
 
 const (
@@ -21,7 +20,7 @@ const (
 	// reaches MarshalJSON, so the empty value is dropped rather than written.
 	ExpectsReplyUnset ExpectsReply = ""
 	// ExpectsReplyNone wants no reply. It marshals to the JSON literal false.
-	ExpectsReplyNone ExpectsReply = "none"
+	ExpectsReplyNone ExpectsReply = "no-reply"
 	// ExpectsReplyOptional invites a reply without waiting on one.
 	ExpectsReplyOptional ExpectsReply = "optional"
 	// ExpectsReplyRequired waits on a reply.
@@ -33,6 +32,12 @@ const (
 // listener's own 400 for this field composes its text from it (cmd/listener/api.go), so one edit
 // moves both.
 const ExpectsReplyVocabulary = "false, optional, required"
+
+// expectsReplyLegacyNone is the retired wire word for wanting no reply, which the field carried
+// before the JSON literal false replaced it and which ParseExpectsReply still reads as
+// ExpectsReplyNone. Nothing writes it: retiring the leniency is deleting this constant and the
+// one case of ParseExpectsReply that names it.
+const expectsReplyLegacyNone = "none"
 
 // MarshalJSON writes the no-reply value as the JSON literal false and the other two as their
 // quoted words.
@@ -85,8 +90,11 @@ func ParseExpectsReply(raw json.RawMessage) (ExpectsReply, error) {
 			return ExpectsReplyNone, nil
 		}
 	case string:
+		if read == expectsReplyLegacyNone {
+			return ExpectsReplyNone, nil
+		}
 		switch ExpectsReply(read) {
-		case ExpectsReplyNone, ExpectsReplyOptional, ExpectsReplyRequired:
+		case ExpectsReplyOptional, ExpectsReplyRequired:
 			return ExpectsReply(read), nil
 		}
 	}

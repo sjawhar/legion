@@ -17,7 +17,6 @@ import {
   createDeliveryDedupe,
   type DispatchDelivery,
   expectsLaneReceipt,
-  expectsReplyValue,
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
@@ -477,9 +476,9 @@ export function createChannelDelivery(input: {
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
           from_session: envelope?.source_session,
-          // One vocabulary for the inbox: a frame old enough to carry the string "none" says
-          // what `false` says, and the metadata carries it as the one spelling.
-          expects_reply: expectsReplyValue(envelope?.expects_reply)?.toString(),
+          // One vocabulary for the inbox: the inbound schema reads a frame old enough to carry
+          // the string "none" as `false`, and the metadata carries that one spelling.
+          expects_reply: envelope?.expects_reply?.toString(),
           in_reply_to: envelope?.in_reply_to,
         }),
       },

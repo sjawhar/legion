@@ -12,9 +12,8 @@ import { z } from "zod";
 import {
   type DedupeIdentity,
   type DeliveryDedupe,
-  expectsReplyValue,
-  INBOUND_EXPECTS_REPLY_VALUES,
   type InboundEnvelope,
+  InboundExpectsReplySchema,
   inboundTimestamp,
   type RenderInboundResult,
   senderLabel,
@@ -1409,14 +1408,15 @@ export function replayLedgerIdentity(frame: DedupeIdentity): ReplayLedgerIdentit
 }
 
 /**
- * A stored frame's envelope, read in the lenient inbound vocabulary
- * (`INBOUND_EXPECTS_REPLY_VALUES`): a frame a plugin build old enough to write `"none"` left on
- * the stream is still an envelope here, and is shown rather than passed over as none. The stream
- * holds a frame for the duplicate window, so such frames outlive the build that wrote them.
- * `EnvelopeSchema` itself stays strict: it is what a producer of this repository is held to.
+ * A stored frame's envelope, read with the inbound field schema for `expects_reply`
+ * (`InboundExpectsReplySchema`): a frame a plugin build old enough to write `"none"` left on the
+ * stream is still an envelope here, read as `false` and shown rather than passed over as none.
+ * The stream holds a frame for the duplicate window, so such frames outlive the build that wrote
+ * them. `EnvelopeSchema` itself stays strict: it is what a producer of this repository is held
+ * to.
  */
 const StoredEnvelopeSchema = EnvelopeSchema.extend({
-  expects_reply: z.literal(INBOUND_EXPECTS_REPLY_VALUES).optional(),
+  expects_reply: InboundExpectsReplySchema.optional(),
 });
 
 function parseEnvelope(data: string): Envelope | undefined {
@@ -1427,12 +1427,7 @@ function parseEnvelope(data: string): Envelope | undefined {
     return undefined;
   }
   const result = StoredEnvelopeSchema.safeParse(parsed);
-  if (!result.success) return undefined;
-  // Normalised here, so the ledger, the notices and the host all see the one new vocabulary
-  // whichever spelling the frame was stored under.
-  const { expects_reply: stored, ...fields } = result.data;
-  const expectsReply = expectsReplyValue(stored);
-  return expectsReply === undefined ? fields : { ...fields, expects_reply: expectsReply };
+  return result.success ? result.data : undefined;
 }
 
 function createLedger(now: () => number): Ledger {
