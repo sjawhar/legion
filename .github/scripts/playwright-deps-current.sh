@@ -11,15 +11,17 @@
 # noble, gstreamer1.0-plugins-good pulls in libsoup-3.0-0, libgudev-1.0-0 and libxtst6 - so the
 # closure accounts for names the step never installs, and only the pinned list decides them.
 #
-# `dropped_packages` below is the list of four this check uses; the comment above that install
-# step names the same four for a reader of the workflow, and the list itself is
-# .github/scripts/playwright-packages.txt, one package per line, which both copies of the step
-# read.
+# `dropped_packages` below is the list of four this check uses; the head of
+# .github/scripts/playwright-install.sh, which installs that list, names the same four for a
+# reader of the workflow, and the list itself is .github/scripts/playwright-packages.txt, one
+# package per line, which that script reads.
 #
-# Its callers are the two copies of that step, in dispatch-browser.yaml's shard and alone jobs.
-# Each runs it from packages/dispatch after its own `bunx playwright install`, so both sides are
-# read from the same state. It changes no directory, and the one file it writes, the record of
-# Playwright's apt call, is in a temporary directory it removes on exit.
+# Its one caller is .github/scripts/playwright-install.sh, which the install step of
+# dispatch-browser.yaml's shard job and of its alone job both run. It runs this check from
+# packages/dispatch, the working-directory of both of those steps, after its own
+# `bunx playwright install`, so both sides are read from the same state. It changes no
+# directory, and the one file it writes, the record of Playwright's apt call, is in a temporary
+# directory it removes on exit.
 #
 # It takes the pinned list as its arguments, and `bunx` resolves Playwright from the caller's
 # working directory, so it reads the Dispatch suite's Playwright only when it is run from
@@ -179,14 +181,14 @@ done
 behind=false
 if [ "${#unaccounted[@]}" -gt 0 ]; then
   echo "::error::Playwright asks for system packages the install step neither pins nor drops:" \
-    "${unaccounted[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unaccounted[*]} - re-derive the pinned list in .github/scripts/playwright-packages.txt" \
+    "from playwright-core's lib/coreBundle.js, as that file's head says."
   behind=true
 fi
 if [ "${#unexpected[@]}" -gt 0 ]; then
   echo "::error::Playwright now needs system packages the install step's list does not hold:" \
-    "${unexpected[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unexpected[*]} - re-derive the pinned list in .github/scripts/playwright-packages.txt" \
+    "from playwright-core's lib/coreBundle.js, as that file's head says."
   behind=true
 fi
 if [ "$behind" = true ]; then

@@ -873,23 +873,14 @@ jobs:
               # scripts/skill-scenarios/rig.test.ts:13,129,1009 and rig.sh:215.
               - 'scripts/e2e/lib/**'
               - *omp_install
+            # What ci.yaml's dispatch job reads: the dashboard's lint, typecheck, unit tests and
+            # build, and the Dispatch server the refusal rows of its e2e tests start. Not the
+            # browser suite - the dispatch_browser filter below is this anchor plus the paths
+            # only that suite reads, so a Playwright, broker or file-store change no longer
+            # wakes this five-minute job. The two gates in .github/scripts/ci_job_reads.py are
+            # the partition, and check-ci-filters.sh holds each filter to its gate.
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
-              # The browser suite ci.yaml's dispatch-browser job runs, and the nightly that calls
-              # the same file with the full lane. The dispatch_browser filter below is this
-              # anchor, and that job reads its own definition, which is ci.yaml and the workflow
-              # it calls alike; the nightly is named beside it because the pull request that
-              # changes either is the only run that proves the suite before main, a scheduled run
-              # being started from the default branch alone.
-              - '.github/workflows/dispatch-browser.yaml'
-              - '.github/workflows/dispatch-browser-nightly.yaml'
-              # The browser suite's install steps run it and read the pinned apt list beside it,
-              # and its merge job runs the script that takes each leg's newest attempt
-              # (dispatch-browser.yaml), so a change to any of them must re-run that job, which
-              # this anchor gates through dispatch_browser.
-              - '.github/scripts/playwright-deps-current.sh'
-              - '.github/scripts/playwright-packages.txt'
-              - '.github/scripts/dispatch-browser-latest-blobs.sh'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'
@@ -904,22 +895,48 @@ jobs:
               # reads and parses with the app's own remark pipeline: a filter change that moves
               # them must run this job.
               - 'packages/envoy/going/testdata/**'
-              # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
-              - 'packages/envoy-client/src/**'
-              - 'packages/envoy-client/bin/dispatch.ts'
-              # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
-              # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
+              # The Dispatch server e2e/run-server.sh builds (run-server.sh:330), on the socket
+              # scripts/e2e/lib/held-port.py holds (run-server.sh:80).
               - *go_workspace
               - *dispatch_server
               - 'scripts/e2e/lib/held-port.py'
-              # The file store image: the pull step names its declaration to the pull-test-images
-              # action, and the S3 step reads the same declaration for its docker run.
-              - 'packages/envoy/internal/tests3/seaweedfs.go'
-              - '.github/actions/pull-test-images/**'
               # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to this table.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
+            # The browser suite (dispatch-browser), which .github/workflows/dispatch-browser.yaml
+            # holds: the shards, the three `-alone` projects, the two-process job and the merge
+            # job. It reads everything the dispatch job reads - the dashboard, its contracts and
+            # the Dispatch server its harness builds - so it starts from that anchor, and what
+            # follows is what only it reads.
+            dispatch_browser:
+              - *dispatch
+              # The workflow that holds every browser step, which this job reads as its own
+              # definition, and the nightly, the other caller of that file. A pull request runs
+              # the pull-request lane, the two projects a change is held to; the merge group
+              # runs the full lane, every project and the two-process job, which is the lane the
+              # nightly calls. So the group is where a change to either file meets the whole
+              # suite before main, and the nightly, started from the default branch alone,
+              # answers for no pull request.
+              - '.github/workflows/dispatch-browser.yaml'
+              - '.github/workflows/dispatch-browser-nightly.yaml'
+              # The install both browser jobs run, which reads the pinned apt list and ends with
+              # the check that the list has not fallen behind Playwright; the memory and CPU
+              # sampler their browser steps start and read back; and the script the merge job
+              # runs to take each leg's newest attempt.
+              - '.github/scripts/playwright-install.sh'
+              - '.github/scripts/playwright-packages.txt'
+              - '.github/scripts/playwright-deps-current.sh'
+              - '.github/scripts/dispatch-browser-samples.sh'
+              - '.github/scripts/dispatch-browser-latest-blobs.sh'
+              # e2e/cli-body-cap.e2e.ts:52,57,65 run envoy-client's dispatch CLI, spawned as its
+              # own process (e2e/dispatch-cli.ts:8).
+              - 'packages/envoy-client/src/**'
+              - 'packages/envoy-client/bin/dispatch.ts'
+              # The file store image: the pull step names its declaration to the pull-test-images
+              # action, and the S3 step reads the same declaration for its docker run.
+              - 'packages/envoy/internal/tests3/seaweedfs.go'
+              - '.github/actions/pull-test-images/**'
               # The real secrets broker e2e/broker-approval.e2e.ts approves a request on, the dev
               # OIDC issuer it trusts, and the seeding step that logs its service in and enrols its
               # pods: the packages `go list -deps ./cmd/broker ./cmd/dev-oidc-issuer
@@ -950,13 +967,6 @@ jobs:
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
-            # The browser suite (dispatch-browser), which .github/workflows/dispatch-browser.yaml
-            # holds: the shards, the three `-alone` projects, the two-process job and the merge
-            # job. It reads what the dispatch job reads - the dashboard and its contracts, the
-            # Dispatch server and the broker commands its harness builds, the file store, the
-            # Playwright list check and the two workflow files - so this filter is that anchor.
-            dispatch_browser:
-              - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
               - *bun_install
@@ -1966,6 +1976,12 @@ jobs:
       - name: Test the browser lane's blob attempt selection
         run: .github/scripts/dispatch-browser-latest-blobs.test.sh
 
+      # The memory and CPU sampler dispatch-browser.yaml's two browser steps run, over fixture
+      # sample files: its two readings are pure functions of those files, so the numbers and the
+      # notice titles are held here, where no browser and no runner are needed.
+      - name: Test the browser lane's memory and CPU sampler
+        run: .github/scripts/dispatch-browser-samples.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
@@ -2554,19 +2570,18 @@ jobs:
 
   # Every browser row of the Dispatch suite, which .github/workflows/dispatch-browser.yaml
   # holds: the shard legs, the three `-alone` projects a machine each, the two-process job and
-  # the merge job that joins their reports into one and posts this job's ci-ok report. Two
-  # lanes: a pull request runs `pull-request`, the two projects a change is held to (chromium
-  # and iphone), and every other event runs `full`, every project and the two-process job among
-  # them. The nightly (.github/workflows/dispatch-browser-nightly.yaml) calls the same file with
-  # the full lane, from main.
+  # the merge job that joins their reports into one and posts this job's ci-ok report.
   #
-  # The two lanes need different browsers, so each is given its own `engines`. The
-  # pull-request lane runs `chromium` and `iphone`, and `iphone` is an iPhone 13 on Chromium
-  # (`browserName: "chromium"`, packages/dispatch/e2e/playwright.config.ts), so that lane
-  # launches Chromium alone and downloading WebKit and Firefox on each of its four shard legs
-  # buys nothing. The full lane runs the WebKit and Firefox projects too and needs all three.
-  # Only the browser download narrows: the apt list the install step pins is the three-engine
-  # list on every leg, for the reason that step's own comment gives.
+  # Two lanes, and which run pays for which. A pull request runs `pull-request`, the two
+  # projects a change is held to (chromium and iphone), so a pull request proves those two rows
+  # and no more - it is not the run that proves the suite before main. Every other event runs
+  # `full`: every project, the three `-alone` ones and the two-process job. So the merge group
+  # is where a change meets the whole suite before it lands, and the push to main after it and
+  # the nightly (.github/workflows/dispatch-browser-nightly.yaml, which calls the same file with
+  # the full lane, from main) run it again.
+  #
+  # One input decides that: the called workflow reads `lane` for the projects each job runs and
+  # for the browsers each one installs, so nothing here chooses the engines a second time.
   #
   # The matrix is in the called workflow and cannot be here. Every leg of a matrix shares one
   # job id; .github/actions/ci-ok-report/action.yml names its artifact
@@ -2583,7 +2598,6 @@ jobs:
     uses: ./.github/workflows/dispatch-browser.yaml
     with:
       lane: ${{ github.event_name == 'pull_request' && 'pull-request' || 'full' }}
-      engines: ${{ github.event_name == 'pull_request' && 'chromium' || 'chromium webkit firefox' }}
       ci-ok-changes: ${{ toJSON(needs.changes) }}
 
   claude-envoy:

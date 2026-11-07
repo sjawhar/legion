@@ -7,9 +7,10 @@ header says what is proved).
             `step=` a step of the job whose run: holds `text`, or `source=` a script that holds it.
             A step whose go commands are not in the simple form is an `exact=` entry instead
             (pinned_step): its whole run: script and directory, and the Runs that stand for what
-            it compiles. The check fails when a run: step of a ci.yaml job starts a go command no
-            Run or exact entry claims, and when a pin's text is gone, so the table cannot drift
-            from ci.yaml silently. A claimed command the check does not reduce (check-ci-filters.sh's
+            it compiles. The check fails when a run: step of a ci.yaml job - or of a job of a
+            local workflow that job calls, whose steps it reads the same way - starts a go
+            command no Run or exact entry claims, and when a pin's text is gone, so the table
+            cannot drift from ci.yaml silently. A claimed command the check does not reduce (check-ci-filters.sh's
             header says which it does), and every Run of an exact entry whose step no longer holds
             its script, counts as reading every Go file of the repository and every file under a
             Go module's directory; a script's pin is its whole line.
@@ -74,11 +75,13 @@ def script_run(source, text, started_by, workdir, pkgs, **options):
     return run(workdir, pkgs, f"{source} ({started_by}): {text}", source=source, text=text, **options)
 
 
-def pinned_step(job, step, workdir, script, runs):
-    """A ci.yaml step pinned to its whole run: script and the directory it runs in (an Exact
-    entry). Each of `runs`, (workdir, packages, what the script compiles there, run options),
-    stands for a go command of the script; together they must name all it compiles."""
-    return exact(step, workdir, script, [run(where, pkgs, f"{at(job, step)} (its pinned script): {what}", **options)
+def pinned_step(job, step, workdir, script, runs, workflow=CI):
+    """A step pinned to its whole run: script and the directory it runs in (an Exact entry). Each
+    of `runs`, (workdir, packages, what the script compiles there, run options), stands for a go
+    command of the script; together they must name all it compiles. `job` and `workflow` are the
+    job and the file the citation names: the step of a gate whose ci.yaml job calls a workflow is
+    in that workflow, under a job of its own, while the entry stays on the gate."""
+    return exact(step, workdir, script, [run(where, pkgs, f"{at(job, step, workflow)} (its pinned script): {what}", **options)
                                          for where, pkgs, what, options in runs])
 
 
@@ -673,10 +676,11 @@ BROKER_BUILD = 'flock "$bin/.build.lock" go build -o "$bin/" ./cmd/broker ./cmd/
 BROKER_PKGS = ["./cmd/broker", "./cmd/dev-oidc-issuer", "./internal/broker/brokertest/requestseed"]
 SIGNIN_ISSUER = "packages/dispatch/e2e/run-signin-issuer.sh"
 # The steps of .github/workflows/dispatch-browser.yaml this table cites by name.
-BROWSER_SHARD_SPECS = "Browser-test dispatch dashboard (shard ${{ matrix.shard }} of ${{ inputs.shards }})"
+BROWSER_SHARD_SPECS = "Browser-test dispatch dashboard (shard ${{ matrix.shard }} of 4)"
 BROWSER_ALONE_SPECS = "Browser-test dispatch dashboard (${{ matrix.project }})"
 BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes"
 BROWSER_MP_SIGNIN = "Browser-test a sign-in across two server processes"
+BROWSER_MP_BUILD = "Build the Dispatch server"
 BROWSER_INSTALL = "Install the lane's Playwright browsers"
 BROWSER_MERGE_STEP = "Merge the legs' blob reports into one report"
 BROWSER_SELECT_STEP = "Take the newest attempt of each leg's blob report"
@@ -882,13 +886,13 @@ GATES = [
     gate("dispatch", "dispatch", runs=[
         # The test step runs packages/dispatch/e2e/__tests__, two files of which start
         # `bash e2e/run-server.sh` to prove its refusals (harness-signin.test.ts:81,85 and
-        # round-robin-proxy.test.ts:378). Those rows stop at a refusal, before the build on
-        # run-server.sh:312, so the claim is wider than what the job reaches; it is kept because
+        # round-robin-proxy.test.ts:378,381). Those rows stop at a refusal, before the build on
+        # run-server.sh:330, so the claim is wider than what the job reaches; it is kept because
         # the job starts the script at all, and it is what holds this job's `env:` to
         # ENV_ALLOWED (ci.yaml's comment above the job's timeout-minutes). The browser rows that
         # do reach the build are the dispatch_browser gate's.
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, "started by packages/dispatch/e2e/__tests__/harness-signin.test.ts:81,85 and "
-                   f"round-robin-proxy.test.ts:378, which run `bash e2e/run-server.sh` in {at('dispatch', 'Test dispatch dashboard')}",
+                   f"round-robin-proxy.test.ts:378,381, which run `bash e2e/run-server.sh` in {at('dispatch', 'Test dispatch dashboard')}",
                    ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
         ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes and check:asset-sizes in packages/dispatch"),
@@ -907,12 +911,12 @@ GATES = [
     # two-process job and the merge job, all in dispatch-browser.yaml, which ci.yaml's
     # dispatch-browser job and the nightly both call (at_browser cites their steps).
     #
-    # The multiprocess job's "Build the Dispatch server" step is not pinned here. An exact entry
-    # is looked up among the steps of its gate's ci.yaml job (ci_filter_coverage.py's
-    # check_table), and this gate's job holds no steps but calls a workflow, so no entry of it
-    # could be found. Nothing is lost: that step's `go build -o ./dispatch-e2e ./cmd/dispatch`
-    # compiles ./cmd/dispatch, the closure the run-server.sh Run below already checks, and the
-    # check claims go commands only out of ci.yaml's own run: steps.
+    # ci_filter_coverage.py's check_table reads a gate whose ci.yaml job calls a local workflow
+    # over the jobs of that workflow, so dispatch-browser.yaml's go commands, `env:` blocks and
+    # `shell:` keys are held here exactly as a job's own steps are: the multiprocess job's build
+    # step is the exact entry below, and a name outside ENV_ALLOWED, or a `shell:`, anywhere in
+    # that file drops the script Runs below out of the check's reduction, which then counts each
+    # as reading every Go file of the repository.
     gate("dispatch_browser", BROWSER_JOB, runs=[
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, "started by packages/dispatch/e2e/harness-listeners.ts's dispatchServer, which e2e/run.ts starts in "
                    f"{at_browser(BROWSER_SHARD_SPECS)}, {at_browser(BROWSER_ALONE_SPECS, BROWSER_ALONE)}, "
@@ -925,6 +929,15 @@ GATES = [
         script_run(SIGNIN_ISSUER, "flock ./.dev-oidc-issuer-e2e.lock go build -o ./dev-oidc-issuer-e2e ./cmd/dev-oidc-issuer",
                    "started by packages/dispatch/e2e/harness-listeners.ts's signInIssuerListeners under DISPATCH_E2E_SIGNIN=oidc, in "
                    f"{at_browser(BROWSER_MP_SIGNIN, BROWSER_MP)}", ENVOY, ["./cmd/dev-oidc-issuer"], mode="build"),
+    ], exact=[
+        # The multiprocess job builds the server once, so its two processes find it current and
+        # start in seconds rather than waiting out run-server.sh's own build in each boot wait.
+        # The line has an `-o`, which is no form this check reduces, so the entry pins the whole
+        # script and names the one package it compiles - the closure the run-server.sh Run above
+        # checks as well.
+        pinned_step(BROWSER_MP, BROWSER_MP_BUILD, ENVOY, "go build -o ./dispatch-e2e ./cmd/dispatch", [
+            (ENVOY, ["./cmd/dispatch"], "go build -o ./dispatch-e2e ./cmd/dispatch", {"mode": "build"}),
+        ], workflow=BROWSER_SITE),
     ], reads=reads(
         ("packages/dispatch/**", f"{at_browser(BROWSER_SHARD_SPECS)}, {at_browser(BROWSER_ALONE_SPECS, BROWSER_ALONE)}, "
          f"{at_browser(BROWSER_MP_SPECS, BROWSER_MP)} and {at_browser(BROWSER_MP_SIGNIN, BROWSER_MP)} run the suite, "
@@ -942,10 +955,14 @@ GATES = [
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:80 holds each lane's server port through it"),
         ("bun.lock", f"{at_browser('playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
          f"which pins the Playwright version whose browsers {at_browser(BROWSER_INSTALL)} downloads"),
+        (".github/scripts/playwright-install.sh", at_browser(BROWSER_INSTALL)),
+        (".github/scripts/dispatch-browser-samples.sh",
+         f"{at_browser(BROWSER_SHARD_SPECS)} and {at_browser(BROWSER_ALONE_SPECS, BROWSER_ALONE)} "
+         "start it and read its two summaries"),
         (".github/scripts/playwright-deps-current.sh", at_browser(BROWSER_INSTALL)),
         (".github/scripts/dispatch-browser-latest-blobs.sh", at_browser(BROWSER_SELECT_STEP, BROWSER_MERGE)),
-        (".github/scripts/playwright-packages.txt", f"{at_browser(BROWSER_INSTALL)} reads it as the apt list it installs, "
-         "and the alone job's copy of that step reads the same file"),
+        (".github/scripts/playwright-packages.txt", f"{at_browser(BROWSER_INSTALL)} and the alone job's step of "
+         "that name both run .github/scripts/playwright-install.sh, which reads it as the apt list it installs"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
     ) + setup_go(BROWSER_SHARD, f"{ENVOY}/go.mod", BROWSER_SITE) + bun_job(BROWSER_SHARD, BROWSER_SITE)
       + CI_SELF + BROWSER_SITE_SELF),

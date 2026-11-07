@@ -1,13 +1,14 @@
 # The apt packages the Dispatch browser suite installs for Playwright: Playwright's whole
 # ubuntu24.04-x64 list less four media packages (gstreamer1.0-libav, gstreamer1.0-plugins-bad,
 # gstreamer1.0-plugins-good and libavcodec60). Why those four are dropped, and what that saves,
-# is above the install step that reads this file in .github/workflows/dispatch-browser.yaml.
+# is in the head of .github/scripts/playwright-install.sh, the script that reads this file.
 #
-# Two steps read it, the shard job's and the alone job's "Install the lane's Playwright
-# browsers", each with a `grep` that drops these `#` lines and the blank ones. That filter is
-# load-bearing: the shell reads this file, not apt, and `$packages` is left unquoted there and
-# splits into words, so a comment line reaches apt as one package name per word. Both steps then
-# hold this list against Playwright's own with .github/scripts/playwright-deps-current.sh.
+# One script reads it, that one, which the "Install the lane's Playwright browsers" step of
+# .github/workflows/dispatch-browser.yaml's shard job and of its alone job both run; its `grep`
+# drops these `#` lines and the blank ones. That filter is load-bearing: the shell reads this
+# file, not apt, and `$packages` is left unquoted there and splits into words, so a comment line
+# reaches apt as one package name per word. That script then holds this list against
+# Playwright's own with .github/scripts/playwright-deps-current.sh.
 #
 # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`, `firefox`
 # and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's lib/coreBundle.js, less
