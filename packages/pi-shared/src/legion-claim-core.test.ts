@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import { createLegionDaemonClient } from "./daemon-client";
 import { bootLegionClaim, type LegionClaimHost } from "./legion-claim-core";
 import type { ClaimCapability } from "./legion-phase-ops";
@@ -21,11 +20,6 @@ const registration = {
   ompSessionFile: "/sessions/ses_claim.jsonl",
   agentId: "ses_claim",
   pluginContract: 29,
-};
-const report: LegionCapabilityReportBody = {
-  measuredAt: "2026-10-18T00:00:00.000Z",
-  elapsedMs: 3,
-  rows: [{ name: "github", ok: true, detail: "gh viewer login: legion-implementer[bot]" }],
 };
 
 /** A host over a stub daemon whose `register` and `ready` answer as given, recording every step it
@@ -67,42 +61,31 @@ function claimHost(options: {
   return { host, steps, lines, capabilities, regain: () => regain };
 }
 
-const readyBody = (capabilities?: LegionCapabilityReportBody) =>
+const readyBody = () =>
   JSON.stringify({
     claimToken,
     sessionId: "ses_claim",
     secret: registered.secret,
     generation: registered.generation,
-    ...(capabilities === undefined ? {} : { capabilities }),
   });
 
-test("registers, runs afterRegister, records the capability, claims the role, then readies with the measured report, and readies again on a regain of its role", async () => {
-  const measured = Promise.withResolvers<LegionCapabilityReportBody>();
+test("registers, runs afterRegister, records the capability, claims the role, then readies without a capability report, and readies again on a regain of its role", async () => {
   const { host, steps, lines, capabilities, regain } = claimHost({
     overrides: {
-      measure: async (claim) => {
-        steps.push(`measure ${claim.issue}`);
-        return measured.promise;
-      },
       afterRegister: async (claim) => {
         steps.push(`afterRegister ${claim.claimToken}`);
-        // The measurement runs beside the steps after the registration: it settles only now.
-        measured.resolve(report);
       },
     },
   });
 
   await bootLegionClaim(host);
 
-  // The measurement starts a microtask after the registration answered, so afterRegister is
-  // called first and both run side by side; the ready waits on the measurement.
   expect(steps).toEqual([
     `claims/register ${JSON.stringify(registration)}`,
     `afterRegister ${claimToken}`,
-    `measure ${registered.issue}`,
     "setCapability",
     `claimRole ${claimToken}`,
-    `claims/ready ${readyBody(report)}`,
+    `claims/ready ${readyBody()}`,
     "onRoleRegained",
   ]);
   expect(capabilities).toEqual([
@@ -114,28 +97,15 @@ test("registers, runs afterRegister, records the capability, claims the role, th
       issue: String(registered.issue),
       role: registered.role as never,
       secret: String(registered.secret),
+      promptAgents: registered.promptAgents as never,
     },
   ]);
 
-  // Another role's regain sends nothing; this claim's sends the same ready, report included.
+  // Another role's regain sends nothing; this claim's sends the one ready the boot built.
   await regain()?.("some-other-role", "reclaimed");
   await regain()?.(claimToken, "reregistered");
-  expect(steps.slice(7)).toEqual([`claims/ready ${readyBody(report)}`]);
+  expect(steps.slice(6)).toEqual([`claims/ready ${readyBody()}`]);
   expect(lines).toEqual([`re-ran claims/ready after role ${claimToken} was reregistered`]);
-});
-
-test("a measurement that rejects costs the report alone: one line, ready without capabilities", async () => {
-  const { host, steps, lines } = claimHost({
-    overrides: { measure: async () => Promise.reject(new Error("no capability host")) },
-  });
-  await bootLegionClaim(host);
-  expect(steps.filter((step) => step.startsWith("claims/ready"))).toEqual([
-    `claims/ready ${readyBody()}`,
-  ]);
-  expect(lines).toEqual([
-    "capability measurement failed; ready carries no report: no capability host",
-  ]);
-  expect(steps).not.toContain("stop");
 });
 
 for (const status of [400, 403, 409]) {

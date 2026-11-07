@@ -2,9 +2,11 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
 // blockIndexService is a document service whose documents never settle during the test, on a
@@ -1690,8 +1693,9 @@ func TestOlderItemTextCitingABlockIsReindexed(t *testing.T) {
 }
 
 // An edit of a comment that lands while the tick indexes it is not lost: the tick waits on the row
-// the edit holds, indexes the edited text once the edit commits, and leaves the comment owed, since
-// the edit moved its owed row; the next tick settles it. Neither waits on the other for good.
+// the edit holds, finds the edit moved the comment's owed row once it commits, and so writes
+// nothing and leaves the comment owed; the next tick indexes the edited text and settles it.
+// Neither waits on the other for good.
 func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1734,8 +1738,8 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("the tick never finished after the edit committed")
 	}
-	if tick.Items != 1 || tick.OwedItems != 1 {
-		t.Fatalf("tick beside the edit = %#v, want the comment indexed and still owed for the edit", tick)
+	if tick.Items != 0 || tick.OwedItems != 1 {
+		t.Fatalf("tick beside the edit = %#v, want nothing written and the comment still owed", tick)
 	}
 	next, err := service.ReconcileBlockIndex(ctx, BlockIndexCursors{}, liveAheadDocuments{})
 	if err != nil {
@@ -2225,3 +2229,445 @@ func TestRetirementWaitsForACurrentWindow(t *testing.T) {
 		t.Fatalf("issue rows = %d (%v), want CORE-1's and CORE-2's, which no window replaces", issues, err)
 	}
 }
+
+// retireVector is a window's vector, as the seeding below writes one.
+const retireVector = "array_fill(0.1::real, array[1536])::vector"
+
+// One pass of the retirement deletes exactly the whole-text rows whose owner holds a window
+// carrying a vector of its current text, and leaves the rest standing: a row whose window is
+// pending, stale or settled with no vector, a row with no window at all, and a row whose
+// window sits under an owner key that does not carry this kind's prefix, which names no row of
+// this kind. The walk reads the owner keys in order, an owner's windows costing it one place
+// however many it holds; a pass stops at the limit it is given and reads on from the cursor it
+// left, and passes of the production limit drain the kind.
+//
+// Both of the pass's statements are held to their plans as well: the delete reaches each row
+// through embeddings_pkey keyed on the row's own id, and the walk reads the owner keys through
+// embeddings_window_owner. A plan that reads every whole-text row of the kind instead is the
+// one INFRA-988 measured at 25 minutes a pass. Every kind of wholeTextOwners is checked, since
+// each reads an owner key prefix of its own.
+func TestRetirementReachesEachWholeTextRowThroughItsPrimaryKey(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	// Each group is a set of whole-text rows named by what their owner's windows are: the ones
+	// marked retiring go, the rest stand. ownerPrefix is the text the group's windows are held
+	// under before the row's own id, which is the kind's own prefix for every group but the
+	// last.
+	type retireGroup struct {
+		name         string
+		rows         int
+		blocks       []string
+		embeddedHash string
+		embedding    string
+		ownerPrefix  string
+		retires      bool
+	}
+	for _, owner := range wholeTextOwners {
+		t.Run(owner.kind, func(t *testing.T) {
+			exec := func(statement string, args ...any) {
+				t.Helper()
+				if _, err := database.Pool.Exec(ctx, statement, args...); err != nil {
+					t.Fatalf("seed the embeddings: %v", err)
+				}
+			}
+			// "twice" holds two windows of one owner, the shape that must cost one place in
+			// the walk and one deletion.
+			groups := []retireGroup{
+				{"ready", 30, []string{"b1"}, "md5(e.id)", retireVector, owner.ownerPrefix, true},
+				{"twice", 10, []string{"b1", "b2"}, "md5(e.id)", retireVector, owner.ownerPrefix, true},
+				{"pending", 7, []string{"b1"}, "null", "null", owner.ownerPrefix, false},
+				{"stale", 5, []string{"b1"}, "md5('an older text')", retireVector, owner.ownerPrefix, false},
+				{"novector", 3, []string{"b1"}, "md5(e.id)", "null", owner.ownerPrefix, false},
+				{"naked", 11, nil, "", "", owner.ownerPrefix, false},
+			}
+			if owner.ownerPrefix != "" {
+				// A pass reads the id of a whole-text row out of its window's owner key, by
+				// taking this kind's prefix off the front of that key. A key of another shape
+				// holds no id of this kind, so it must retire nothing rather than the row of
+				// whatever text is left: "otherprefix" holds current windows under another
+				// leading text, and its rows stand. The document entry's prefix is empty, so
+				// every key of that kind carries it and the group is seeded for the items
+				// alone.
+				groups = append(groups, retireGroup{
+					"otherprefix", 4, []string{"b1"}, "md5(e.id)", retireVector, "elsewhere/", false,
+				})
+			}
+			owed, windowed := 0, 0
+			want := map[string]int{}
+			for _, group := range groups {
+				exec(`
+					insert into embeddings (kind, id, text_snapshot, content_hash)
+					select $1, $2 || '-' || to_char(n, 'FM000'), 'the whole text', md5($2 || n::text)
+					from generate_series(1, $3) n
+				`, owner.kind, group.name, group.rows)
+				for _, block := range group.blocks {
+					exec(fmt.Sprintf(`
+						insert into embeddings (kind, id, text_snapshot, content_hash,
+						                        embedded_hash, model, embedding, embedded_at, covers)
+						select $1, $2 || e.id || '#' || $3, 'a window of ' || e.id, md5(e.id),
+						       %s, 'dev:words-v1', %s, now(), array[$3]
+						from embeddings e where e.kind = $4 and e.id like $5
+					`, group.embeddedHash, group.embedding),
+						owner.windowKind, group.ownerPrefix, block, owner.kind, group.name+"-%")
+				}
+				if len(group.blocks) > 0 {
+					windowed += group.rows
+				}
+				if group.retires {
+					owed += group.rows
+					continue
+				}
+				want[group.name] = group.rows
+			}
+			exec(`analyze embeddings`)
+
+			// The walk's own read, asked for more keys than the fixture can answer with. An
+			// owner holding two windows takes one place in it, so the keys are the rows that
+			// hold a window, each once.
+			keys := ownerKeys(t, database, owner, windowed+1)
+			if len(keys) != windowed {
+				t.Fatalf("the walk reads %d owner keys of the %s windows, want %d: an owner's windows cost it one place in the walk however many it holds",
+					len(keys), owner.windowKind, windowed)
+			}
+			// The ids a pass hands the delete: the row behind each owner key that carries this
+			// kind's prefix (wholeTextOwner.pass).
+			ids := make([]string, 0, len(keys))
+			for _, key := range keys {
+				if id, ok := strings.CutPrefix(key, owner.ownerPrefix); ok {
+					ids = append(ids, id)
+				}
+			}
+			requireRetireByPrimaryKey(t, database, owner, ids)
+			requireOwnersReadTheWindowIndex(t, database, owner)
+
+			// A limit bounds the pass, and the cursor it leaves is where the next one reads on
+			// from: a pass of ten from the start stops at the tenth owner key, and the pass
+			// after it stops at the twentieth rather than at the tenth over again.
+			const small = 10
+			if len(keys) < 2*small {
+				t.Fatalf("the fixture holds %d owner keys of the %s windows, too few for two passes of %d",
+					len(keys), owner.windowKind, small)
+			}
+			firstRetired, firstNext, err := owner.pass(ctx, database.Pool, "", small)
+			if err != nil {
+				t.Fatalf("the first pass of %d over the whole-text %s rows: %v", small, owner.kind, err)
+			}
+			if firstRetired > small || firstNext != keys[small-1] {
+				t.Fatalf("a pass of %d from the start retired %d whole-text %s rows and left the cursor %q, want at most %d rows and the cursor %q, its %dth owner key",
+					small, firstRetired, owner.kind, firstNext, small, keys[small-1], small)
+			}
+			secondRetired, secondNext, err := owner.pass(ctx, database.Pool, firstNext, small)
+			if err != nil {
+				t.Fatalf("the pass of %d after the cursor %q: %v", small, firstNext, err)
+			}
+			if secondRetired > small || secondNext != keys[2*small-1] {
+				t.Fatalf("a pass of %d from the cursor %q retired %d whole-text %s rows and left the cursor %q, want at most %d rows and the cursor %q, the %dth owner key past the one it started after",
+					small, firstNext, secondRetired, owner.kind, secondNext, small, keys[2*small-1], small)
+			}
+
+			// Passes of the production limit from the start, each reading on from the cursor
+			// the one before it left, until one retires nothing and sends the walk back to the
+			// start. The turns are bounded, so a walk that never comes to rest fails here
+			// rather than running for ever.
+			const turns = 8
+			retired, after, rested := firstRetired+secondRetired, "", false
+			passes := 0
+			for ; passes < turns; passes++ {
+				gone, next, err := owner.pass(ctx, database.Pool, after, blockIndexRetireBatch)
+				if err != nil {
+					t.Fatalf("pass %d of %d over the whole-text %s rows: %v", passes+1, blockIndexRetireBatch, owner.kind, err)
+				}
+				if passes == 0 && next != "" {
+					t.Fatalf("the first pass of %d over the %s owners left the cursor %q, want the empty string: the fixture holds %d owner keys, fewer than the %d this pass asked for, and a slice that comes back short is the end of this kind's owners, which sends the next pass back to the first of them",
+						blockIndexRetireBatch, owner.windowKind, next, len(keys), blockIndexRetireBatch)
+				}
+				retired += gone
+				after = next
+				if gone == 0 && next == "" {
+					rested = true
+					break
+				}
+			}
+			if !rested {
+				t.Fatalf("%d passes of %d retired %d whole-text %s rows and never came to rest, the last leaving the cursor %q",
+					passes, blockIndexRetireBatch, retired, owner.kind, after)
+			}
+			if retired != owed {
+				t.Fatalf("the walk retired %d whole-text %s rows, want the %d the fixture owes: every owner holding a window embedded at its current text, and only those",
+					retired, owner.kind, owed)
+			}
+
+			left := map[string]int{}
+			rows, err := database.Pool.Query(ctx, `
+				select split_part(id, '-', 1), count(*) from embeddings where kind = $1 group by 1
+			`, owner.kind)
+			if err != nil {
+				t.Fatalf("read the whole-text %s rows left: %v", owner.kind, err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var group string
+				var count int
+				if err := rows.Scan(&group, &count); err != nil {
+					t.Fatalf("scan the whole-text %s rows left: %v", owner.kind, err)
+				}
+				left[group] = count
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("read the whole-text %s rows left: %v", owner.kind, err)
+			}
+			if !reflect.DeepEqual(left, want) {
+				t.Fatalf("the whole-text %s rows left are %v, want %v: every owner holding a window embedded at its current text, and only those, retires", owner.kind, left, want)
+			}
+		})
+	}
+}
+
+// The kinds of the retirement share one budget of rows deleted, and a kind the budget leaves
+// nothing for keeps the cursor it had. Before the fix this round made, retireWholeText wrote
+// tick.Cursor.Retire inside its loop alone, so a kind the budget skipped came out of the tick
+// with no cursor and walked its window owners from the start again on the next one. That costs
+// the kind a whole lap over its owners, one slice of them every BlockIndexReconcileInterval:
+// this walk reads every window owner of a kind, not only the owners that owe a delete.
+//
+// Three things are stated here: one tick deletes at most blockIndexRetireBatch rows, a kind the
+// budget skips comes back with the cursor it was handed, and the cursor a kind that did run
+// leaves is where the next tick reads that kind on from.
+func TestRetirementSpendsOneBudgetAcrossTheKindsAndKeepsEveryKindsCursor(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	documents, comments := wholeTextOwners[0], wholeTextOwners[1]
+	if documents.kind != "document" || comments.kind != "comment" {
+		t.Fatalf("the retirement walks %q then %q, want the documents then the comments: this test spends the budget on the first kind and reads the second kind's cursor back",
+			documents.kind, comments.kind)
+	}
+
+	// The fixture, by kind: a "ready" row's owner holds a window embedded at its current text,
+	// so the row retires, and a "stale" row's owner holds a window embedded at an older text,
+	// so it stands. "ready" sorts before "stale", so the ready owners come first in the walk.
+	// The documents hold more ready rows than one tick's budget, so the first tick spends the
+	// whole budget on them and never reaches the comments.
+	const (
+		documentTail  = 30 // ready document owners past the first tick's budget
+		documentStale = 10
+		commentReady  = 24
+		commentStale  = 6
+		commentAhead  = 10 // comment owner keys the cursor handed in has already passed
+	)
+	documentReady := blockIndexRetireBatch + documentTail
+	exec := func(statement string, args ...any) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, statement, args...); err != nil {
+			t.Fatalf("seed the embeddings: %v", err)
+		}
+	}
+	// seed writes whole-text rows of this kind named "<group>-NNNN", each with one window of
+	// the kind's window kind under the kind's owner prefix, embedded at embeddedHash.
+	seed := func(owner wholeTextOwner, group string, rows int, embeddedHash string) {
+		t.Helper()
+		exec(`
+			insert into embeddings (kind, id, text_snapshot, content_hash)
+			select $1, $2 || '-' || to_char(n, 'FM0000'), 'the whole text', md5($2 || n::text)
+			from generate_series(1, $3) n
+		`, owner.kind, group, rows)
+		exec(fmt.Sprintf(`
+			insert into embeddings (kind, id, text_snapshot, content_hash,
+			                        embedded_hash, model, embedding, embedded_at, covers)
+			select $1, $2 || e.id || '#b1', 'a window of ' || e.id, md5(e.id),
+			       %s, 'dev:words-v1', %s, now(), array['b1']
+			from embeddings e where e.kind = $3 and e.id like $4
+		`, embeddedHash, retireVector), owner.windowKind, owner.ownerPrefix, owner.kind, group+"-%")
+	}
+	seed(documents, "ready", documentReady, "md5(e.id)")
+	seed(documents, "stale", documentStale, "md5('an older text')")
+	seed(comments, "ready", commentReady, "md5(e.id)")
+	seed(comments, "stale", commentStale, "md5('an older text')")
+	exec(`analyze embeddings`)
+
+	// left is how many whole-text rows of this kind each group has left.
+	left := func(owner wholeTextOwner) map[string]int {
+		t.Helper()
+		rows, err := database.Pool.Query(ctx, `
+			select split_part(id, '-', 1), count(*) from embeddings where kind = $1 group by 1
+		`, owner.kind)
+		if err != nil {
+			t.Fatalf("read the whole-text %s rows left: %v", owner.kind, err)
+		}
+		defer rows.Close()
+		counts := map[string]int{}
+		for rows.Next() {
+			var group string
+			var count int
+			if err := rows.Scan(&group, &count); err != nil {
+				t.Fatalf("scan the whole-text %s rows left: %v", owner.kind, err)
+			}
+			counts[group] = count
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read the whole-text %s rows left: %v", owner.kind, err)
+		}
+		return counts
+	}
+
+	// The cursor the first tick is given for the comments, read from that kind's own owner
+	// keys, so it is a key its walk could have left.
+	ahead := ownerKeys(t, database, comments, commentAhead)
+	if len(ahead) != commentAhead {
+		t.Fatalf("the fixture holds %d owner keys of the %s windows, want at least %d to take a cursor from",
+			len(ahead), comments.windowKind, commentAhead)
+	}
+	commentCursor := ahead[commentAhead-1]
+
+	first := BlockIndexTick{}
+	if err := service.retireWholeText(ctx, map[string]string{comments.kind: commentCursor}, &first); err != nil {
+		t.Fatalf("the first tick of the retirement: %v", err)
+	}
+	if first.Retired != blockIndexRetireBatch {
+		t.Fatalf("the first tick retired %d whole-text rows, want the %d of the budget: the documents alone owe more than one tick may delete",
+			first.Retired, blockIndexRetireBatch)
+	}
+	if got := first.Cursor.Retire[comments.kind]; got != commentCursor {
+		t.Fatalf("the first tick left the %s cursor %q, want the %q it was handed: the documents spent the budget, so this kind read nothing and keeps where its walk had reached. An empty cursor sends it back to the first of its window owners, a whole lap over owners that owe no delete.",
+			comments.kind, got, commentCursor)
+	}
+	// The documents did run, so their cursor is the last owner key their pass read.
+	read := ownerKeys(t, database, documents, blockIndexRetireBatch)
+	if got, want := first.Cursor.Retire[documents.kind], read[len(read)-1]; got != want {
+		t.Fatalf("the first tick left the %s cursor %q, want %q, the last of the %d owner keys its pass read",
+			documents.kind, got, want, blockIndexRetireBatch)
+	}
+	if got, want := left(documents), (map[string]int{"ready": documentTail, "stale": documentStale}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the whole-text document rows left after the first tick are %v, want %v: the budget bounds what a tick deletes", got, want)
+	}
+	if got, want := left(comments), (map[string]int{"ready": commentReady, "stale": commentStale}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the whole-text comment rows left after the first tick are %v, want %v: the documents spent the budget, so this kind read nothing", got, want)
+	}
+
+	second := BlockIndexTick{}
+	if err := service.retireWholeText(ctx, first.Cursor.Retire, &second); err != nil {
+		t.Fatalf("the second tick of the retirement: %v", err)
+	}
+	// What says each kind read on from its cursor rather than from the start is what the
+	// second tick deleted. A window stays when the whole-text row behind it goes, so a walk
+	// over the documents starting over would read the same first blockIndexRetireBatch owner
+	// keys again, whose rows the first tick deleted, and retire none of them; one reading on
+	// from the cursor retires the documentTail rows past them. The comments are the same: a
+	// walk from the start would retire the commentAhead rows the handed-in cursor is past as
+	// well, and this one leaves them.
+	if want := documentTail + commentReady - commentAhead; second.Retired != want {
+		t.Fatalf("the second tick retired %d whole-text rows, want %d: the %d document rows past the cursor the first tick left, and the %d comment rows past the cursor that kind kept",
+			second.Retired, want, documentTail, commentReady-commentAhead)
+	}
+	if got, want := left(documents), (map[string]int{"stale": documentStale}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the whole-text document rows left after the second tick are %v, want %v: the tick read on from the cursor the first left and drained the rest", got, want)
+	}
+	if got, want := left(comments), (map[string]int{"ready": commentAhead, "stale": commentStale}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the whole-text comment rows left after the second tick are %v, want %v: the %d rows the kept cursor is past are the ones this walk has not reached again",
+			got, want, commentAhead)
+	}
+}
+
+// ownerKeys is the owner keys the walk over this kind's windows reads from the start, at most
+// limit of them, as one pass reads them (wholeTextOwner.owners).
+func ownerKeys(t *testing.T, database *store.Store, owner wholeTextOwner, limit int) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), owner.owners(), "", limit)
+	if err != nil {
+		t.Fatalf("read the owners of the %s windows: %v", owner.windowKind, err)
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the owners of the %s windows: %v", owner.windowKind, err)
+	}
+	return keys
+}
+
+// explainPlan is the plan of statement under arguments, read in a transaction that is rolled
+// back, with sequential scans off. A fixture of a few hundred rows sits in a page or two, so
+// what a plan costs here says nothing about what it costs on a production table, and the
+// planner's choice between one read of that page and another says as little; the index a read
+// can be served through, and the column it is keyed on, are the same either way, and they are
+// what these tests pin (explaintest).
+func explainPlan(t *testing.T, database *store.Store, statement string, arguments ...any) json.RawMessage {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the explain transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("set local enable_seqscan = off: %v", err)
+	}
+	var raw []byte
+	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
+		t.Fatalf("explain the statement: %v", err)
+	}
+	return explaintest.OnePlan(t, raw)
+}
+
+// requireRetireByPrimaryKey fails unless the delete reaches the whole-text rows of this kind
+// through embeddings_pkey under a condition naming the row's own id, given the ids one pass
+// hands it. An index scan narrowed on the kind alone, which is the read INFRA-988 measured at
+// 25 minutes a pass, fails here, and so does a sequential scan, which is no index scan at all
+// and so leaves no scan to keep.
+//
+// What is required of a kept scan is its index and its condition, not the node it is: on a
+// fixture whose every row of a kind sits in one page the planner reads them through a bitmap
+// of embeddings_pkey, and on a table where a pass's ids are a thousandth of the kind's rows it
+// reads them one by one, and both are the same read of the same index under the same
+// condition. Holding the node type as well would say nothing more and would need bitmap scans
+// turned off to pass.
+//
+// The statement reads embeddings three times over - the rows it picks and locks, each owner's
+// windows, and the rows the delete takes by the key picked holds - so the kind a scan is
+// narrowed by, written quoted, is what tells the first from the other two. The quotes are what
+// make that safe: 'comment' is no substring of 'comment_block' nor of 'comment/', the window
+// kind and the owner prefix the window read writes, and the delete's own scan is keyed on
+// picked's columns and names no kind at all.
+func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeTextOwner, ids []string) {
+	t.Helper()
+	plan := explainPlan(t, database, owner.retire(), ids)
+	kept := 0
+	for _, scan := range explaintest.IndexScans(t, plan) {
+		if !strings.Contains(scan.Cond, "'"+owner.kind+"'") {
+			continue
+		}
+		kept++
+		if scan.Index != "embeddings_pkey" || !indexCondOnID.MatchString(scan.Cond) {
+			t.Fatalf("the delete reads the whole-text %s rows by a %s under %q, want a read of embeddings_pkey keyed on the row's own id:\n%s",
+				owner.kind, scan, scan.Cond, plan)
+		}
+	}
+	if kept == 0 {
+		t.Fatalf("the plan reads the whole-text %s rows through no index; the delete picks them:\n%s", owner.kind, plan)
+	}
+}
+
+// requireOwnersReadTheWindowIndex fails unless the walk over this kind's window owners reads
+// them through embeddings_window_owner, keyed on that index's own first key column, and reads
+// the embeddings table through no sequential scan. What that catches is a walk the index cannot
+// serve at all, such as one naming its window kind as a parameter, which the index's partial
+// predicate then refuses. It does not catch the 195 ms plan owners records, a parallel
+// sequential scan and a sort, because sequential scans are off here and the planner takes the
+// index whenever it can; check k4 of the issue's Verification document measures that plan.
+//
+// Whether the walk takes the order the index already holds, or reads the kind's windows and
+// sorts them, is not stated here: a fixture of a few dozen windows is one page, which the
+// planner reads whole through a bitmap of this index and sorts whatever the statement asks
+// for, so a plan of it answers that question for the fixture and not for the statement.
+func requireOwnersReadTheWindowIndex(t *testing.T, database *store.Store, owner wholeTextOwner) {
+	t.Helper()
+	plan := explainPlan(t, database, owner.owners(), "", blockIndexRetireBatch)
+	subject := "the walk over the " + owner.windowKind + " owners"
+	explaintest.NewIndexKeys(database.Pool).RequireIndexKeyed(t, plan,
+		"embeddings_window_owner", subject, explaintest.CondRequired)
+	if explaintest.SeqScansRelation(t, plan, "embeddings") {
+		t.Errorf("%s reads embeddings whole:\n%s", subject, plan)
+	}
+}
+
+// indexCondOnID matches an "Index Cond" that keys the id column of the relation the node scans,
+// which the plan writes unqualified; a condition naming another relation's id writes it with
+// that relation's alias.
+var indexCondOnID = regexp.MustCompile(`(^|[^.\w])id =`)

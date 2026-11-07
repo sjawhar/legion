@@ -176,8 +176,25 @@ func TestACommentsEditKeepsItsBlockIDs(t *testing.T) {
 	requireCommentBlocks(t, database, comment.ID, "same body", "b1@1 b2@4 b3@1", 4)
 }
 
+// oweBlockGrammar enqueues one source in the block grammar's queue, as the trigger of a write an
+// older build made does, and answers the row a drain lists it as. A test that re-indexes a source
+// must owe it first: refs.ReindexOwed settles the listed row before it writes, so a source the
+// queue holds no row for is indexed by nothing.
+func oweBlockGrammar(t *testing.T, database *store.Store, kind, id string) refs.Owed {
+	t.Helper()
+	owed := refs.Owed{Queue: refs.BlockGrammarOwed, Kind: kind, ID: id}
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into block_grammar_owed (kind, id) values ($1, $2::uuid)
+		on conflict (kind, id) do update set enqueued_at = now()
+		returning enqueued_at
+	`, kind, id).Scan(&owed.EnqueuedAt); err != nil {
+		t.Fatalf("owe %s %s an index with the block grammar: %v", kind, id, err)
+	}
+	return owed
+}
+
 // A comment edited before blocks existed has its blocks indexed for the first time by the
-// reconciliation (refs.ReindexOwedItem): nothing recorded when those blocks were made, so each
+// reconciliation (refs.ReindexOwed): nothing recorded when those blocks were made, so each
 // has no making time, while a block a later edit adds is made at that edit.
 func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
@@ -194,8 +211,9 @@ func TestAnOlderEditedCommentsFirstItemBlockIndexHasNoMakingTime(t *testing.T) {
 			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-	if err := refs.ReindexOwedItem(context.Background(), database.Pool, refs.OwedItem{Kind: "comment", ID: comment.ID, EnqueuedAt: time.Now()}, "https://dispatch.example"); err != nil {
-		t.Fatalf("reindex the comment: %v", err)
+	owed := oweBlockGrammar(t, database, "comment", comment.ID)
+	if indexed, err := refs.ReindexOwed(context.Background(), database.Pool, owed, "https://dispatch.example"); err != nil || !indexed {
+		t.Fatalf("reindex the comment = %v (%v), want it indexed", indexed, err)
 	}
 	requireCommentBlocks(t, database, comment.ID, "first indexing", "b1@1 b2@1", 1)
 	var unmade int
@@ -900,7 +918,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 	empty, _ := read("an empty suggestion", "/api/v1/comments/"+suggestion.ID+"/blocks", true)
 	requireRead("an empty suggestion", empty, "comment", suggestion.ID, new(1), true, "")
 
-	if malformed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/7430fab3/blocks", nil, "alice"); malformed.Code != http.StatusBadRequest ||
+	if malformed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/7430fab/blocks", nil, "alice"); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"COMMENT_ID_INPUT"`) {
 		t.Fatalf("a non-uuid comment id: status=%d body=%s, want 400 COMMENT_ID_INPUT", malformed.Code, malformed.Body.String())
 	}
@@ -975,7 +993,7 @@ func TestTheBlocksRoutesListAnItemsBlocks(t *testing.T) {
 		!strings.Contains(unnamed.Body.String(), `"code":"SESSION_REQUIRED"`) {
 		t.Fatalf("a bearer naming no session: status=%d body=%s, want 400 SESSION_REQUIRED", unnamed.Code, unnamed.Body.String())
 	}
-	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3/blocks?session=s1", nil); malformed.Code != http.StatusBadRequest ||
+	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab/blocks?session=s1", nil); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"MESSAGE_ID_INPUT"`) {
 		t.Fatalf("a non-uuid message id: status=%d body=%s, want 400 MESSAGE_ID_INPUT", malformed.Code, malformed.Body.String())
 	}

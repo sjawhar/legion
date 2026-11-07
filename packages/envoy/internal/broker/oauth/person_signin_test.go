@@ -435,7 +435,7 @@ func recordCredential(ctx context.Context, cred oauth.MachineCredential) (string
 	err := tx.QueryRow(ctx, `insert into launcher_credentials
 		(id, operator, service, host, key_thumbprint, public_jwk, subject, expires_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8)
-		on conflict (subject) where subject is not null and revoked_at is null
+		on conflict (subject) where subject is not null and pod_uid is null and revoked_at is null
 		do update set key_thumbprint = excluded.key_thumbprint, expires_at = excluded.expires_at
 		returning id`,
 		uuid.NewString(), operator, cred.Service, cred.Host, cred.Thumbprint, []byte(cred.JWK), cred.Subject, cred.Expires).Scan(&id)

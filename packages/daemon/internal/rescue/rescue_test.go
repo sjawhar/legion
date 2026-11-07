@@ -300,6 +300,44 @@ func TestAnotherWorktreeOfTheCloneIsChecked(t *testing.T) {
 	}
 }
 
+// The clone's own working tree is left out of the walk. An issue pod's clone holds no working
+// tree at all (workspace.feedClone), while its git HEAD and its index still name every file of
+// the default branch, so a check that took the clone's directory would read the whole tree as
+// deleted and push that deletion as a rescue branch. The clone is no agent's workspace, and
+// nothing of it is recorded or pushed.
+func TestTheClonesOwnDirectoryIsNotChecked(t *testing.T) {
+	d := rescuetest.NewWithoutCloneTree(t, issue)
+	if files := d.Run(d.Clone, "git", "ls-files"); files != "base.txt" {
+		t.Fatalf("the clone's index names %q, want base.txt: the case stands on a clone whose HEAD and index name a file it holds no copy of", files)
+	}
+	before := d.RemoteBranches()
+	w := only(t, d, d.Check(context.Background(), prefix))
+	if w.Status != rescue.Clean || len(w.Branches) != 0 || w.Error != "" {
+		for _, b := range w.Branches {
+			t.Errorf("the check pushed %s at %s, whose tree is %s, against the clone's HEAD tree %s",
+				b.Name, b.Commit, d.Run(d.Remote, "git", "rev-parse", b.Commit+"^{tree}"),
+				d.Run(d.Clone, "git", "rev-parse", "HEAD^{tree}"))
+		}
+		t.Fatalf("the check reported %+v, want clean: the clone's absent working tree is no agent's work", w)
+	}
+	if after := d.RemoteBranches(); !slices.Equal(after, before) {
+		t.Errorf("the remote's branches are %v, want %v unchanged", after, before)
+	}
+}
+
+// Leaving the clone out takes no work with it: a workspace on such a disk that holds a commit the
+// remote lacks is rescued, as it is on a disk whose clone has a working tree.
+func TestAWorkspaceOfACloneWithNoWorkingTreeIsStillRescued(t *testing.T) {
+	d := rescuetest.NewWithoutCloneTree(t, issue)
+	d.Write(d.Workspace, "fix.txt", "a fix the remote lacks\n")
+	d.JJ("commit", "-m", "a fix the remote lacks")
+	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
+	rescuedTo(t, d, only(t, d, d.Check(context.Background(), prefix)), commit)
+	if body := d.Run(d.Remote, "git", "show", commit+":fix.txt"); body != "a fix the remote lacks" {
+		t.Errorf("the rescued commit's fix.txt holds %q, want the workspace's file", body)
+	}
+}
+
 // A directory under workspaces/ that is no git worktree is an error, never a pass: whatever it
 // holds, nothing can push it.
 func TestADirectoryThatIsNoGitWorktreeIsAnError(t *testing.T) {

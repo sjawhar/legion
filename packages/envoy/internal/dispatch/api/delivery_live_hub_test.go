@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // hubRig is a delivery hub on the API test server: the handler a test writes through, the store
@@ -112,6 +114,14 @@ func (c *fakeHubClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.nowLocked()
+}
+
+// standsStill is whether the clock moves only by Advance, so a view's recompute, due on this
+// clock, waits for the test rather than for the wall clock.
+func (c *fakeHubClock) standsStill() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.still.IsZero()
 }
 
 func (c *fakeHubClock) At(at time.Time, f func()) hubTimer {
@@ -238,12 +248,8 @@ func (r *hubRig) count(since int, match func(deliveryHubNote) bool) int {
 // waitFor waits up to within for a note since mark that matches.
 func (r *hubRig) waitFor(t *testing.T, since int, within time.Duration, what string, match func(deliveryHubNote) bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for r.count(since, match) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("no %s within %s", what, within)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if !testwait.Holds(within, 10*time.Millisecond, func() bool { return r.count(since, match) > 0 }) {
+		t.Fatalf("no %s within %s", what, within)
 	}
 }
 
@@ -793,32 +799,52 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 // pg_stat_activity. pg_terminate_backend answers as soon as it has signalled the backend, which
 // exits after: a NOTIFY committed in between still reaches the listener through that backend, so
 // a test that must commit a change the listener cannot hear waits for the backend to be gone.
+//
+// The scan is run again once the terminated backends are gone, and repeated until it finds no
+// backend at all: the caller has already made the hub blind, so the listener starts no connection
+// of its own, but a dial already in flight when the first scan ran can still hold a LISTEN the
+// first round never saw. Only that first round must find a backend, and the rounds share the
+// deadline the wait for an exit has, so a database whose backends keep taking a LISTEN fails
+// here rather than running to the package's test timeout.
 func terminateListener(t *testing.T, database *store.Store) {
 	t.Helper()
-	var ended []int32
-	if err := database.Pool.QueryRow(context.Background(), `
-		with listener as materialized (
-			select pid from pg_stat_activity
-			where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
-		)
-		select coalesce(array_agg(pid), '{}') from listener where pg_terminate_backend(pid)
-	`).Scan(&ended); err != nil || len(ended) == 0 {
-		t.Fatalf("terminate the listener's backend: ended %v, err %v", ended, err)
-	}
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var left int
-		if err := database.Pool.QueryRow(context.Background(),
-			`select count(*) from pg_stat_activity where pid = any($1)`, ended).Scan(&left); err != nil {
-			t.Fatalf("read whether the listener's backend has exited: %v", err)
+	for round := 0; ; round++ {
+		// A round that ends a backend on its first poll never reaches the wait below, so the
+		// rounds themselves are bounded here.
+		if time.Now().After(deadline) {
+			t.Fatalf("new backends of this database kept holding a LISTEN for %s", 5*time.Second)
 		}
-		if left == 0 {
+		var ended []int32
+		if err := database.Pool.QueryRow(context.Background(), `
+			with listener as materialized (
+				select pid from pg_stat_activity
+				where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
+			)
+			select coalesce(array_agg(pid), '{}') from listener where pg_terminate_backend(pid)
+		`).Scan(&ended); err != nil {
+			t.Fatalf("terminate the listener's backend: ended %v, err %v", ended, err)
+		}
+		if len(ended) == 0 {
+			if round == 0 {
+				t.Fatalf("terminate the listener's backend: no backend of this database held a LISTEN")
+			}
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the listener's terminated backends %v are still in pg_stat_activity 5s later", ended)
+		for {
+			var left int
+			if err := database.Pool.QueryRow(context.Background(),
+				`select count(*) from pg_stat_activity where pid = any($1)`, ended).Scan(&left); err != nil {
+				t.Fatalf("read whether the listener's backend has exited: %v", err)
+			}
+			if left == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the listener's terminated backends %v are still in pg_stat_activity 5s later", ended)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -1148,27 +1174,64 @@ func (r *hubRig) startCaughtUp(t *testing.T) int64 {
 // settle waits until the hub has acted on everything the test's setup wrote, so none of it counts
 // against the measurement that follows: its change cursor at the delivery change log's newest
 // entry (settings and pull requests seeded through delivery.PutSettings and its kin), its event
-// cursor at the event log's head, and then no note for longer than a view's quiet window, by which
-// time a view either catch-up dirtied has begun and finished its recompute. The hub takes delivery
-// changes independently of the safe horizon it reads events up to, and a transaction another
-// package holds open on the shared test Postgres can keep that horizon below the setup's events
-// for a while, so either catch-up can land after the test's snapshots.
+// cursor at the event log's head, and then nothing owed, which is what waitNothingOwed reads. The
+// hub takes delivery changes independently of the safe horizon it reads events up to, and a
+// transaction another package holds open on the shared test Postgres can keep that horizon below
+// the setup's events for a while, so either catch-up can land after the test's snapshots.
 func (r *hubRig) settle(t *testing.T) {
 	t.Helper()
 	latest, err := delivery.LatestChangeSeq(t.Context(), r.database.Pool)
 	if err != nil {
 		t.Fatalf("read the newest delivery change: %v", err)
 	}
-	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
-		if changeSeq, _ := r.cursors(); changeSeq >= latest {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the hub's change cursor did not reach %d within %s", latest, eventFeedWait)
-		}
+	if !testwait.Holds(eventFeedWait, 10*time.Millisecond, func() bool {
+		changeSeq, _ := r.cursors()
+		return changeSeq >= latest
+	}) {
+		t.Fatalf("the hub's change cursor did not reach %d within %s", latest, eventFeedWait)
 	}
 	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
-	r.waitNoRecompute(t, 2*viewQuiet)
+	if r.clock.standsStill() {
+		// A dirty view is due viewQuiet past its mark on the hub's clock (dueAt), so on a clock
+		// standing still the hub can owe a recompute that only the test's own Advance makes due:
+		// waiting for it here would wait for ever. Such a test moves the clock itself and takes
+		// what the recompute then sends.
+		r.waitNoRecompute(t, 2*viewQuiet)
+		return
+	}
+	r.waitNothingOwed(t, latest)
+}
+
+// waitNothingOwed waits until the hub owes no recompute for anything committed up to latest: its
+// change cursor at latest and no view dirty or computing, all read in one hold of its lock. A
+// change marks the views it touches inside the same critical section that moves the cursor
+// (catchUpChanges), a recompute clears the mark inside its read, once it holds the position it
+// answers for, and computing stays set until that recompute has ended. So a hub that owes nothing
+// here has no recompute left to run that would read what the test writes next and send it as a
+// change its subs had already heard.
+func (r *hubRig) waitNothingOwed(t *testing.T, latest int64) {
+	t.Helper()
+	owed := func() (int64, []string) {
+		r.hub.mu.Lock()
+		defer r.hub.mu.Unlock()
+		var busy []string
+		for key, view := range r.hub.views {
+			if view.dirty || view.computing {
+				busy = append(busy, fmt.Sprintf("%s(dirty=%t computing=%t)", key, view.dirty, view.computing))
+			}
+		}
+		slices.Sort(busy)
+		return r.hub.changeSeq, busy
+	}
+	var changeSeq int64
+	var busy []string
+	if !testwait.Holds(eventFeedWait, 10*time.Millisecond, func() bool {
+		changeSeq, busy = owed()
+		return changeSeq >= latest && len(busy) == 0
+	}) {
+		t.Fatalf("the hub still owed work after %s: change cursor %d of %d, views dirty or computing %v",
+			eventFeedWait, changeSeq, latest, busy)
+	}
 }
 
 // A delta an event brings waits eventFeedWait rather than a few seconds: the hub reads events only
@@ -1208,16 +1271,12 @@ func (r *hubRig) waitNoRecompute(t *testing.T, quiet time.Duration) {
 // write anywhere on the test cluster holds back the safe horizon the hub reads up to.
 func (r *hubRig) waitForEventCursor(t *testing.T, want int64, what string) {
 	t.Helper()
-	deadline := time.Now().Add(eventFeedWait)
-	for {
-		_, cursor := r.cursors()
-		if cursor >= want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the hub's event cursor = %d after %s, want it at %d (%s)", cursor, eventFeedWait, want, what)
-		}
-		time.Sleep(10 * time.Millisecond)
+	var cursor int64
+	if !testwait.Holds(eventFeedWait, 10*time.Millisecond, func() bool {
+		_, cursor = r.cursors()
+		return cursor >= want
+	}) {
+		t.Fatalf("the hub's event cursor = %d after %s, want it at %d (%s)", cursor, eventFeedWait, want, what)
 	}
 }
 

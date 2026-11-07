@@ -83,7 +83,6 @@ on:
       - 'packages/daemon/internal/ghconfig/*'
       - 'packages/daemon/internal/ghrepo/*'
       - 'packages/daemon/internal/githubrest/*'
-      - 'packages/daemon/internal/handoffimport/*'
       - 'packages/daemon/internal/intake/*'
       - 'packages/daemon/internal/launcher/*'
       - 'packages/daemon/internal/lookpath/*'
@@ -119,6 +118,7 @@ on:
       - 'packages/daemon/internal/supervise/*'
       - 'packages/daemon/internal/treelifecycle/*'
       - 'packages/daemon/internal/wait/*'
+      - 'packages/daemon/internal/wakepace/*'
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/brokerclient/*'
@@ -132,6 +132,7 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
+      - 'packages/envoy/roleholder/*'
       - 'packages/envoy/sessiontiming/*'
       # ci.yaml's *dispatch_server, 61 patterns:
       - 'packages/envoy/cmd/dispatch/*'

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -45,14 +46,57 @@ type Command struct {
 	Env    []string
 }
 
+// built is the binary each test has already built, by builtKey. go build relinks the whole
+// binary into every -o path it is given - about a second apiece on a warm build cache, minutes on
+// a loaded machine - and a row that starts five processes of one command asked for five of them
+// (INFRA-985), so a test builds each command once and hands every process of that test the same
+// binary. The key holds the test itself, so no binary outlives the TempDir it was written into,
+// and the entry goes when the test ends.
+var built sync.Map
+
+// builtKey is one test's build of one command: the test, and everything that decides what go
+// build writes - the command's name, directory, target, flags and environment, and the overlay.
+type builtKey struct {
+	t    testing.TB
+	args string
+}
+
+// builtBinary is one memoised build: once makes it, path is what it wrote, empty where it failed.
+type builtBinary struct {
+	once sync.Once
+	path string
+}
+
 // BuildCommand builds c and returns the binary's path. The binary is removed when the test ends,
 // and ENVOY_TEST_GO_OVERLAY, when set, is passed to go build -overlay, so a probe can build it
-// from changed sources without editing the tree.
+// from changed sources without editing the tree. A test that asks for the same build again is
+// handed the one it already built (built).
 func BuildCommand(t testing.TB, c Command) string {
+	t.Helper()
+	overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY")
+	// The count of the flags stands between them and the environment, so a value that moves from
+	// one of the two to the other is another key rather than the same one.
+	parts := append([]string{c.Name, c.Dir, c.Target, overlay, strconv.Itoa(len(c.Flags))}, c.Flags...)
+	key := builtKey{t: t, args: strings.Join(append(parts, c.Env...), "\x00")}
+	entry, loaded := built.LoadOrStore(key, &builtBinary{})
+	if !loaded {
+		t.Cleanup(func() { built.Delete(key) })
+	}
+	binary := entry.(*builtBinary)
+	binary.once.Do(func() { binary.path = runBuild(t, c, overlay) })
+	if binary.path == "" {
+		t.Fatalf("build %s: an earlier build of it in this test failed", c.Name)
+	}
+	return binary.path
+}
+
+// runBuild is one go build of c, into a binary named c.Name under a directory of this test's
+// own. It returns the empty path where the build failed, having failed the test.
+func runBuild(t testing.TB, c Command, overlay string) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), c.Name)
 	args := []string{"build", "-o", binary}
-	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
+	if overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}
 	args = append(args, c.Flags...)
@@ -64,7 +108,8 @@ func BuildCommand(t testing.TB, c Command) string {
 	cmd := exec.Command("go", args...)
 	cmd.Dir, cmd.Env = c.Dir, c.Env
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", c.Name, err, out)
+		t.Errorf("build %s: %v\n%s", c.Name, err, out)
+		return ""
 	}
 	return binary
 }

@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, the architect's acceptance, READY, the merge that closes the issue and the production check after it.
+description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, the architect's acceptance, READY, the merge that closes the issue and the production check your project's production_check setting opens after it.
 sidebar:
   order: 2
 ---
@@ -248,8 +248,9 @@ approved: the daemon compares the two
 on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
 but a commit under `docs/solutions/` changed since the approval, so that change goes back to
 review. The one other change it lets
-through is the removal of files under `.legion/`, where handoffs were committed before they moved
-to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
+through is a change whose every path is under `.legion/`, where handoffs were committed before
+they moved to Dispatch: nothing writes or reads a path there now, so nobody reviews one, whatever
+GitHub says the change did to it.
 
 ## Review signalling
 
@@ -412,11 +413,17 @@ live and no admission slot held while the rest of its tree reaches its own merge
 is told once which
 issues the close waits for, and the close comes when the last of them is done or parked. What is
 left after the close is to see the change work in production, and that is
-work after the close: the implementer — the agent that wrote the change — is handed a production
-check in its live session as the issue closes. Each look of the check reaches the deploy as your
+work after the close, where your project asks for it: `projects.<KEY>.production_check` in
+`legion.yaml` takes `off` or `tester` and is `tester` by default, so the tester is handed a
+production check in its live session as the issue closes, and a project that sets `off` opens no
+check at all — the close retires every claim of the issue and releases its pod. The loader
+refuses any other value, naming the key and the value it read. The check's record carries the
+role, written when the check opened, so changing the setting leaves an open check with the role
+it started under, and only that role may report on it. Each look of the check reaches the deploy
+as your
 deployment instructions say (the merge commit published to your deploy role, with no reply
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
-the implementer drove the change in production through a user's own access path and recorded the
+the agent drove the change in production through a user's own access path and recorded the
 result of the issue's `after_merge` check, naming the merge commit and what woke the look, with
 that result's line on the pull request; `pending`,
 when production does not carry the merge yet; or `fail`, a defect, naming the issue, the pull
@@ -426,22 +433,21 @@ One that needs a decision is a Dispatch ask on Legion's
 daily report issue, so you decide whether it needs an issue.
 The record is that result and the pull request: a closed issue takes a result for an `after_merge` or `default_branch` check, and refuses every other write.
 
-Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk
-with it, since an issue's disk belongs to its pod — while its conversation is kept in the session
-database, and the daemon wakes the check — a new pod comes back and
-the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
-deployed (its `issue.deployed` event); when the project names the repository's deploy workflow
-(`projects.<KEY>.deploys` in `legion.yaml`: the repository, the workflow file and a step such as
-`Apply`), at each completed run of that workflow on the repository's default branch whose step
-succeeded after the pull request merged, once per such job; or, for Legion's own repository, when
-a Legion daemon boots on a build that contains the merge, or Dispatch announces that every one of
-its server processes serves such a build. A run of another
-workflow or branch, a run a pull request triggered, a step that was skipped or failed, and a step
-that finished before the merge wake nothing. A wake while a look is open is kept for the next look.
-A look is bounded at two hours, and the whole check at `production_check_hours` (336, fourteen
-days, by default): the wake at that bound is the last look, and a `pending` there closes the check
-as not run, which the implementer writes on the pull request. `legion state` prints how many checks
-are open and the oldest of them.
+Nothing waits for the deploy, and the agent names its own next look. A `pending` on any look but
+the check's last carries `wake_at`, an RFC 3339 time: when the agent wants to look again. The
+look ends, the pod goes — and its disk
+with it, since an issue's disk belongs to its pod — while the conversation is kept in the session
+database, and at the time the agent named a new pod comes back and the same session takes the
+next look. A time less than 60 seconds ahead becomes 60 seconds ahead, and a time at or after the
+check's own bound starts no look of its own, because the look at that bound already stands.
+Nothing else wakes a check: no deploy run, no Dispatch `issue.deployed`, no Dispatch build and no
+daemon boot, and the daemon reads no deployment's production workflows at all.
+A look is bounded at two hours, and a look nobody reported — its two hours, an operator's hold,
+or a claim that failed to start — starts the next look two hours later.
+The whole check is bounded at `production_check_hours` (336, fourteen
+days, by default): the look at that bound is the last, and a `pending` there closes the check
+as not run, which the agent writes on the pull request. `legion state` prints how many checks
+are open and the oldest of them, with when its next look is due.
 
 A child's close deletes its pod, and the disk goes with it; a root's close releases any admission
 slot its issues still held, which happens once no other issue of its tree is still in the

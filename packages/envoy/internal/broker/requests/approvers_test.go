@@ -222,7 +222,10 @@ func TestADenialAfterAnOwnerChangeReleasesNothingAndClosesTheRecord(t *testing.T
 
 // TestAnOwnersApprovalSurvivesLooseningToShared pins the control: once alice's agent-tier secret
 // is shared and human-tier, whose approver is anyone, the grant alice approved keeps releasing its
-// value and is handed back by reuse, and a request still waiting on alice is hers to decide.
+// value and is handed back by reuse of a request for its own lifetime, and a request still waiting
+// on alice is hers to decide. Raising the tier does move what a request naming no lifetime asks
+// for, from the 12-hour default to DefaultHumanGrantLifetime, and reuse matches the lifetime, so
+// such a request opens a new one rather than taking the live grant.
 func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
@@ -244,8 +247,12 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["ALICE_KEY"] != "alice-v1" {
 		t.Fatalf("Values once shared = %v, %v; want ALICE_KEY still released", values, err)
 	}
-	if again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "ALICE_KEY"), ""); err != nil || again.ID != req.ID {
-		t.Fatalf("Create(again) once shared = %+v, %v; want the live grant reused", again, err)
+	granted := int(DefaultGrantLifetime.Seconds())
+	if again, err := m.Create(ctx, enr, signRequestFor(t, m, key, granted, "ALICE_KEY"), ""); err != nil || again.ID != req.ID {
+		t.Fatalf("Create(again, the grant's own lifetime) once shared = %+v, %v; want the live grant reused", again, err)
+	}
+	if again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "ALICE_KEY"), ""); !errors.Is(err, ErrRequestPending) && (err != nil || again.ID == req.ID) {
+		t.Fatalf("Create(again, no TTL) once human tier = %+v, %v; want a new request for the human default, not the 12-hour grant", again, err)
 	}
 	if dec, err := m.ApplyDecision(ctx, *waiting.RecordID, true, otherPerson); err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice) on the waiting request once shared = %+v, %v; want granted", dec, err)
