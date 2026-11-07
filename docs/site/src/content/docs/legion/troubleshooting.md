@@ -728,8 +728,9 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   went ready or failed — are made right behind it, oldest first and before the report of the
   decision whose write landed, except one of a generation the claim has left (`supervise: an owed
   report is dropped; the claim has left the generation it was owed at`, at Info with its `state=`
-  and `generation=`). A claim whose last Warn line has no such line after it is still behind, and
-  its next decision will try again.
+  and `generation=`). A claim whose last `owed=true` line has no such line after it is still
+  behind, and its next decision will try again; one whose last line is `owed=false` has dropped
+  the write, and nothing tries it again.
 - **`supervise: a turn started`** and **`supervise: a turn ended`** at Info, each with the claim
   and its `generation`, and with `delivery=` where the turn is a task's, are how a reader tells a
   turn that started from one the daemon never saw, and a turn that ended from one still running.
