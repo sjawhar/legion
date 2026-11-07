@@ -226,35 +226,55 @@ func (c *currencyReader) headStoredAt(ctx context.Context, repo, sha string) boo
 	return stored
 }
 
-// repositoryOf is the repository the check's issue resolves to: its own, the nearest one above
-// it, or its project's default (refs.IssueRepository), under the canonical name that repository
-// is called today (refs.CanonicalRepo); nil when none resolves or either read failed, which is
-// the unknown answer either way.
+// checkIssueRepository is the repository a check's issue resolves to: its own, the nearest one
+// above it, or its project's default (refs.IssueRepository), under the canonical name that
+// repository is called today (refs.CanonicalRepo); nil when none resolves or either read
+// failed, which is the unknown answer either way. q is the pool or transaction the two reads
+// are made on.
 //
 // The canonical name is taken here, before anything asks GitHub, because everything downstream
-// takes this answer: repositoryReadable, onDefaultBranch and the read-through a recorded result
-// makes (results.go's readThroughPullRequests). An issue recorded under a name that was renamed
-// away would otherwise have the App asked about that name, which GitHub answers 404 for, and
-// every result of that issue would read unknown. A repository with no rename is its own
-// canonical name, so this costs one read and changes no answer for it.
+// takes this answer: the results read's repositoryReadable and onDefaultBranch, and the record
+// route's refusal of a commit the repository does not hold and its read-through of the pull
+// requests GitHub names for that commit (results.go, refuseUnknownCommit and
+// readThroughPullRequests). An issue recorded under a name that was renamed away would
+// otherwise have the App asked about that name, which GitHub answers 404 for, and every result
+// of that issue would read unknown. A repository with no rename is its own canonical name, so
+// this costs one read and changes no answer for it.
+//
+// Both routes resolve through this one function: two hand-kept copies of this resolve are how a
+// refusal and a currency mark come to name different repositories.
+//
+// It answers a repository whether or not the deployment holds an App key, because the currency
+// reader needs it for an answer that asks GitHub nothing: onDefaultBranch answers from the
+// default_branch_commits row Dispatch already holds while that row stands, with no call at all
+// (delivery.CommitOnDefaultBranch), and a nil here would turn every such answer unknown. The
+// record route makes the no-App-key check at its own call site, where every use of the answer
+// is a GitHub round trip.
+func (s *server) checkIssueRepository(ctx context.Context, q refs.Queryer, issueKey string) *string {
+	repo, err := refs.IssueRepository(ctx, q, issueKey)
+	if err != nil {
+		slog.Warn("dispatch: resolve the repository of a check's issue", "issue", issueKey, "error", err)
+		return nil
+	}
+	if repo == nil {
+		return nil
+	}
+	canonical, err := refs.CanonicalRepo(ctx, q, *repo)
+	if err != nil {
+		slog.Warn("dispatch: canonical name of a check's repository", "issue", issueKey, "repo", *repo, "error", err)
+		return nil
+	}
+	return &canonical
+}
+
+// repositoryOf is checkIssueRepository read once per read of the results. The memo keeps a nil
+// as it keeps a repository, so an issue that resolves to none and a read that failed cost one
+// resolve apiece rather than one per result.
 func (c *currencyReader) repositoryOf(ctx context.Context, issueKey string) *string {
 	if repo, memoized := c.repos[issueKey]; memoized {
 		return repo
 	}
-	repo, err := refs.IssueRepository(ctx, c.server.deps.Store.Pool, issueKey)
-	if err != nil {
-		slog.Warn("dispatch: resolve the repository of a check's issue", "issue", issueKey, "error", err)
-		repo = nil
-	}
-	if repo != nil {
-		canonical, err := refs.CanonicalRepo(ctx, c.server.deps.Store.Pool, *repo)
-		if err != nil {
-			slog.Warn("dispatch: canonical name of a check's repository", "issue", issueKey, "repo", *repo, "error", err)
-			repo = nil
-		} else {
-			repo = &canonical
-		}
-	}
+	repo := c.server.checkIssueRepository(ctx, c.server.deps.Store.Pool, issueKey)
 	c.repos[issueKey] = repo
 	return repo
 }

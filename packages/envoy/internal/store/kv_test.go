@@ -1687,7 +1687,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t 
 
 	// The release is handed the claim its caller read, as the reaper's pass hands it the claim it
 	// read to find the holder gone (ReapRoleClaims).
-	claim, _, err := registry.roleClaim(context.Background(), role)
+	claim, err := registry.RoleClaim(context.Background(), role)
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
@@ -1725,7 +1725,7 @@ func TestReleaseReadExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t
 		err: natsgo.ErrKeyNotFound,
 	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
-	claim, _, err := registry.roleClaim(context.Background(), role)
+	claim, err := registry.RoleClaim(context.Background(), role)
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
@@ -1756,7 +1756,7 @@ func TestReleaseReadExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 		err:               releaseErr,
 	}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
 
-	claim, _, err := registry.roleClaim(context.Background(), role)
+	claim, err := registry.RoleClaim(context.Background(), role)
 	if err != nil {
 		t.Fatalf("read the lapsed role claim to release: %v", err)
 	}
@@ -3176,7 +3176,7 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	// read to find the holder gone (ReapRoleClaims).
 	release := func(role string) (ExpiredRoleClaimRelease, error) {
 		t.Helper()
-		claim, _, err := registry.roleClaim(context.Background(), role)
+		claim, err := registry.RoleClaim(context.Background(), role)
 		if err != nil {
 			return ExpiredRoleClaimRetained, err
 		}
