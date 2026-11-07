@@ -84,12 +84,17 @@ A refusal comes from the proxy, not from the service:
   segment, an `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` header where the
   entry lists methods, plain `http://` to a host an entry binds, or a private address.
 
-- `407` once the grant ends, on every call to any host.
+- `407` once the grant ends, on every call to any host. A WebSocket open at that moment is
+  closed with the grant. A tunnel to a host no entry binds carries no value, so it runs to its
+  idle limit instead.
 
-A retry fixes neither, and neither does another name. A `407` needs a new grant. A rule's refusal
-needs a change to the rules file in the deployment's own repository, which a person reviews.
-Report the refusal as you report a service out of reach: the command you ran and the output you
-saw.
+- `503` when the broker could not read the grant at all. The grant has not ended and the call
+  can be made again.
+
+A retry fixes neither of the first two, and neither does another name. A `407` needs a new
+grant. A rule's refusal needs a change to the rules file in the deployment's own repository,
+which a person reviews. Report the refusal as you report a service out of reach: the command you
+ran and the output you saw.
 
 Two calls are not refused by the proxy. A call to a host no entry binds goes out unread, and a
 placeholder in a header the entry does not name goes out as it is, so the service refuses the

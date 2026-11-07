@@ -662,26 +662,100 @@ func TestOneRequestIsHandledForOneNameOfTheGrant(t *testing.T) {
 
 // TestAGrantTheReleaseChecksRefuseIsRefused: the full checks run once per grant per pod, and
 // their refusal is this request's. A grant that is no longer live is 407, as the connection
-// check's own refusals are; anything else is 403.
+// check's own refusals are; a read of those checks that did not happen at all is 503 in the
+// broker's own fixed words, and the store's own error reaches the log and no answer.
 func TestAGrantTheReleaseChecksRefuseIsRefused(t *testing.T) {
 	for _, row := range []struct {
 		name string
 		err  error
 		want int
+		says string
 	}{
-		{"a grant that is no longer live", fmt.Errorf("%w: AUTO_TOKEN's airlock entry changed since this grant was decided", requests.ErrGrantNotLive), http.StatusProxyAuthRequired},
-		{"a check the broker could not take", errors.New("the record chain could not be verified"), http.StatusForbidden},
+		{"a grant that is no longer live", fmt.Errorf("%w: AUTO_TOKEN's airlock entry changed since this grant was decided", requests.ErrGrantNotLive), http.StatusProxyAuthRequired, requests.ErrGrantNotLive.Error()},
+		{"a read of those checks the broker could not make", databaseDown, http.StatusServiceUnavailable, grantUnreadable},
+		// Not every refusal of the release checks is about the grant: a secret the store no
+		// longer holds, and a mint its own minter refused, are the broker's own answer about
+		// this grant's secret, in words that name nothing of the store, and each stays the
+		// 403 it was.
+		{"a secret the store no longer holds", fmt.Errorf("%w: AUTO_TOKEN", requests.ErrSecretNotInStore), http.StatusForbidden, requests.ErrSecretNotInStore.Error()},
+		{"a mint the secret's own minter refused", fmt.Errorf("%w: the minter said no", requests.ErrMintFailed), http.StatusForbidden, requests.ErrMintFailed.Error()},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			r := newRig(t, Options{})
 			r.grants.valuesErr = row.err
 			client := r.client(workerPlaceholder)
 			answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
-			if answer.StatusCode != row.want || !strings.Contains(body, row.err.Error()) {
-				t.Fatalf("the call answered %d %q; want %d naming the broker's own refusal", answer.StatusCode, body, row.want)
+			if answer.StatusCode != row.want || !strings.Contains(body, row.says) {
+				t.Fatalf("the call answered %d %q; want %d naming %q", answer.StatusCode, body, row.want, row.says)
 			}
 			if seen := r.requests(); len(seen) != 0 {
 				t.Fatalf("the service was sent %d requests; want none", len(seen))
+			}
+		})
+	}
+}
+
+// TestAGrantReadThatFailedIsNotTheGrantsOwnRefusal: a read of a grant that did not happen - the
+// store did not answer - is the broker's own 503 and not the grant's 407, on the CONNECT and on
+// a request of a connection already open alike. Two things hang on it. A 407 is what tells a
+// command that its grant has ended and that it needs a new one, so a store down for a minute
+// would otherwise send every agent in the middle of a call to ask for a grant, which on the
+// human tier is a person approving each one; and the store's own words name the database's
+// user, its name and its address, which no command may read. A grant that really has ended is
+// 407 in the broker's own words, as it always was.
+func TestAGrantReadThatFailedIsNotTheGrantsOwnRefusal(t *testing.T) {
+	// The words of the store's own error that no answer of this port may carry.
+	store := []string{"user=broker", "10.20.0.7", "db.internal"}
+	for _, row := range []struct {
+		name      string
+		err       error
+		want      int
+		says      string
+		challenge string
+	}{
+		{"a grant that has ended", requests.ErrGrantNotLive, http.StatusProxyAuthRequired, requests.ErrGrantNotLive.Error(), `Basic realm="airlock"`},
+		{"a read the store did not answer", databaseDown, http.StatusServiceUnavailable, grantUnreadable, ""},
+	} {
+		t.Run(row.name+", on the CONNECT", func(t *testing.T) {
+			r := newRig(t, Options{})
+			r.grants.refuseConnection(workerPlaceholder, row.err)
+			answer, _, _ := r.connectRaw(net.JoinHostPort(boundHost, "443"), basic(workerPlaceholder))
+			body := bodyOf(t, answer)
+			if answer.StatusCode != row.want || !strings.Contains(body, row.says) {
+				t.Fatalf("the CONNECT answered %d %q; want %d naming %q", answer.StatusCode, body, row.want, row.says)
+			}
+			if got := answer.Header.Get("Proxy-Authenticate"); got != row.challenge {
+				t.Errorf("Proxy-Authenticate = %q; want %q: a credential is asked for again only where the grant itself refused", got, row.challenge)
+			}
+			for _, word := range store {
+				if strings.Contains(body, word) {
+					t.Errorf("the answer carries %q of the store's own error; want nothing of it", word)
+				}
+			}
+			if dialed := r.dialedAddresses(); len(dialed) != 0 {
+				t.Fatalf("the proxy dialled %v; want nothing: a CONNECT this port could not decide opens nothing", dialed)
+			}
+		})
+		t.Run(row.name+", on an open connection", func(t *testing.T) {
+			r := newRig(t, Options{})
+			client := r.client(workerPlaceholder)
+			if answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder); answer.StatusCode != http.StatusOK {
+				t.Fatalf("the first call answered %d %q; want 200", answer.StatusCode, body)
+			}
+			r.grants.refuseConnection(workerPlaceholder, row.err)
+			// The same client, so the connection the first call left open: no CONNECT is made
+			// for this one and the per-request read is the whole of what answers it.
+			answer, body := r.get(client, "https://"+boundHost+"/v1/things", "Authorization", "Bearer "+workerPlaceholder)
+			if answer.StatusCode != row.want || !strings.Contains(body, row.says) {
+				t.Fatalf("the second call answered %d %q; want %d naming %q", answer.StatusCode, body, row.want, row.says)
+			}
+			for _, word := range store {
+				if strings.Contains(body, word) {
+					t.Errorf("the answer carries %q of the store's own error; want nothing of it", word)
+				}
+			}
+			if seen := r.requests(); len(seen) != 1 {
+				t.Fatalf("the service was sent %d requests; want the one from before the read failed", len(seen))
 			}
 		})
 	}

@@ -8,8 +8,8 @@ package airlockproxy
 import (
 	"cmp"
 	"context"
-	"errors"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/sjawhar/envoy/internal/broker/airlock"
 	"github.com/sjawhar/envoy/internal/broker/requests"
@@ -218,11 +220,13 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	// says it is for - the full release checks are AirlockValues's, once per grant per pod.
 	connection, err := s.grants.AirlockConnection(r.Context(), info.password)
 	if err != nil {
-		// 407, as the connection's own check answers: this password opens nothing any more,
-		// and the broker's words for why are the ones a command reads from its proxy. The
-		// line is logged against the grant the connection was opened for, which is the only
-		// grant this request has a name for.
-		s.refuse(w, info, r, pair{}, http.StatusProxyAuthRequired, err.Error())
+		// The one rule for a failed grant read (grantRefusal): the read's own answer about
+		// this grant is 407 in the broker's words, which a command reads from its proxy, and
+		// a read that did not happen is 503 and says nothing of why. The line is logged
+		// against the grant the connection was opened for, which is the only grant this
+		// request has a name for.
+		status, why := s.grantRefusal("connection", err)
+		s.refuse(w, info, r, pair{}, status, why)
 		return
 	}
 	// Everything below reads the grant this request was decided for: the names it still
@@ -288,14 +292,12 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 	placeholder := info.grant.Names[chosen.name].Slots[chosen.slot]
 	values, err := s.valuesFor(r.Context(), info.grant.GrantID)
 	if err != nil {
-		// The full release checks refused this grant. ErrGrantNotLive is 407 as the connection
-		// check's own refusals are - the grant is gone and the command's placeholder opens
-		// nothing any more - and everything else is 403, a request this grant may not make.
-		status := http.StatusForbidden
-		if errors.Is(err, requests.ErrGrantNotLive) {
-			status = http.StatusProxyAuthRequired
-		}
-		s.refuse(w, info, r, chosen, status, err.Error())
+		// The same rule as the connection read above (grantRefusal), so that one answer does
+		// not say the grant has ended where the other says the broker could not read it: the
+		// full release checks ending a grant is 407, and a read of them that did not happen
+		// is 503 and carries none of its own words, which here would be the store's.
+		status, why := s.grantRefusal("values", err)
+		s.refuse(w, info, r, chosen, status, why)
 		return
 	}
 	secret, ok := values[chosen.name]
@@ -411,8 +413,79 @@ func (s *Server) serveBound(w http.ResponseWriter, r *http.Request) {
 		// service - what it guards is what leaves, not what comes back.
 		ErrorHandler: s.badGateway(info.host, r.URL.Path),
 	}
+	if decrypted, ok := r.Context().Value(decryptedKey{}).(net.Conn); ok && upgrading(r) {
+		// An upgrade is the one request whose connection outlives it. ReverseProxy joins the
+		// two connections inside the call below and copies bytes until one end closes, so no
+		// request is read on this one again and the read at the top of this function never
+		// runs for it. A watcher reads the grant for it instead, for as long as the join
+		// lasts, which is as long as ServeHTTP has not returned.
+		watching, stop := context.WithCancel(r.Context())
+		defer stop()
+		go s.watchJoined(watching, decrypted, info, r, chosen)
+	}
 	proxy.ServeHTTP(answer, r)
 	s.log.Info(callMessage, s.callFields(info, r, chosen, answer.status, "")...)
+}
+
+// upgrading reports whether a request asks to leave HTTP behind: a Connection header naming the
+// Upgrade token and an Upgrade header naming a protocol, which is how net/http and
+// httputil.ReverseProxy themselves read one.
+func upgrading(r *http.Request) bool {
+	return httpguts.HeaderValuesContainsToken(r.Header["Connection"], "Upgrade") && r.Header.Get("Upgrade") != ""
+}
+
+// joinMessage is the message of the line the close of a joined connection logs. The call itself
+// logs its own line when the join ends (callMessage), so this one is no second call line: it
+// says why the join ended rather than how the call did.
+const joinMessage = "airlock proxy: a joined connection its grant no longer carries"
+
+// watchJoined closes a joined connection once the grant behind it stops carrying it, and it is
+// the whole of what holds such a connection to its grant: after the 101 the two connections are
+// one, no request is read on them again, and the idle limit bounds nothing on a socket a service
+// pings. So the read every other request makes for itself runs here instead, on watchInterval,
+// until the caller's cancel ends it.
+func (s *Server) watchJoined(ctx context.Context, decrypted net.Conn, info connInfo, r *http.Request, chosen pair) {
+	ticker := time.NewTicker(s.watch)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		status, why := s.joinRefusal(ctx, info, chosen.name)
+		if why == "" {
+			continue
+		}
+		s.log.Info(joinMessage, s.callFields(info, r, chosen, status, why)...)
+		// The close ends the copy in both directions, so the ServeHTTP this watcher was
+		// started for returns and the cancel there stops this goroutine.
+		decrypted.Close()
+		return
+	}
+}
+
+// joinRefusal is why the grant behind a joined connection no longer carries it, and "" while it
+// does: the grant's own expiry, the connection read's refusals, and the name this upgrade was
+// decided for going out of the grant, which is how a name an operator withholds reaches a socket
+// that reads no request again. Any other error of that read leaves the connection alone, with
+// the error logged where grantRefusal logs one: a read that failed says nothing about the grant,
+// and a database failover must cut no WebSocket the airlock carries.
+func (s *Server) joinRefusal(ctx context.Context, info connInfo, name string) (int, string) {
+	if expires := info.grant.Expires; expires != nil && !s.now().Before(*expires) {
+		return http.StatusProxyAuthRequired, "this grant expired while this connection was joined to the service"
+	}
+	grant, err := s.grants.AirlockConnection(ctx, info.password)
+	if err != nil {
+		if status, why := s.grantRefusal("connection", err); status == http.StatusProxyAuthRequired {
+			return status, why
+		}
+		return 0, ""
+	}
+	if _, carried := grant.Names[name]; !carried {
+		return http.StatusForbidden, name + " is no longer a name of this grant"
+	}
+	return 0, ""
 }
 
 // callMessage is the message of the one line a call to a bound host logs. Every such call logs

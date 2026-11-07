@@ -670,7 +670,15 @@ What the airlock does not stop is as much of the design as what it does:
 - The placeholder works as the proxy password for its grant's bound hosts until the grant ends,
   from wherever the proxy port is reachable.
 
-- Once the grant ends, every call through the proxy gets `407`, to any host.
+- Once the grant ends, every call through the proxy gets `407`, to any host, and a WebSocket the
+  proxy had joined to a bound host is closed with the grant rather than running to the idle
+  limit. A tunnel to a host no entry binds carries no value, so the idle limit is the whole of
+  what bounds one.
+
+- A `407` is the grant's own answer. A read of the grant that failed — the broker's store did
+  not answer — is `503` with a fixed sentence that names nothing of that failure, and the call
+  can be made again: a store down for a minute ends no grant, and would otherwise send every
+  agent in the middle of a call to ask for a new one.
 
 - A private address that reaches the proxy is refused, because the proxy runs beside the broker,
   whose own identity reads every secret. A command that needs such a call sets its own `NO_PROXY`

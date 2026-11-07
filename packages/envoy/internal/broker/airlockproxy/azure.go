@@ -222,9 +222,14 @@ func (s *Server) exchangeToken(w http.ResponseWriter, info connInfo, r *http.Req
 	}
 	token, expires := accessTokenOf(fields, s.now())
 	slot := azureAccessSlot(x)
+	// A read of this grant like any other, so it answers by the one rule (grantRefusal): a
+	// grant that ended while the exchange ran is the read's own answer, and a read that did
+	// not happen says nothing of the store it went to, which for Postgres would be the
+	// database's user, its name and its address.
 	minted, err := s.grants.AirlockAccessPlaceholder(r.Context(), info.grant.GrantID, chosen.name, slot)
 	if err != nil {
-		s.refuse(w, info, r, chosen, http.StatusInternalServerError, "minting the placeholder for the access token of this exchange: "+err.Error())
+		status, why := s.grantRefusal("azure access placeholder", err)
+		s.refuse(w, info, r, chosen, status, why)
 		return
 	}
 	s.accessFor(accessKey{grant: info.grant.GrantID, name: chosen.name, slot: slot}).keep(token, expires)

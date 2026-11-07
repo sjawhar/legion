@@ -82,6 +82,11 @@ func storedValues(name, value string) map[string]requests.AirlockSecret {
 	return map[string]requests.AirlockSecret{name: {Slots: map[string]string{requests.SlotValue: value}}}
 }
 
+// databaseDown is a grant read that failed in the shape the store fails in: pgx puts the
+// database's user, its name and its address in the text of a connect error, which is why a row
+// about such a failure asserts that no answer of this port carries a word of it.
+var databaseDown = errors.New("failed to connect to `user=broker database=broker`: 10.20.0.7:5432 (db.internal): dial error: timeout")
+
 // fakeGrants is the proxy's GrantSource: the reads of requests.Machine, answered from maps a
 // row writes, and a count of how often the values were read.
 type fakeGrants struct {
@@ -250,10 +255,16 @@ type logCapture struct {
 
 // calls is every line one call to a bound host logged. Records answers a slice of its own, so a
 // row reads the lines written so far while the proxy goes on writing.
-func (c *logCapture) calls() []logLine {
-	var calls []logLine
+func (c *logCapture) calls() []logLine { return c.lines(callMessage) }
+
+// joins is every line the close of a joined connection logged, read the same way.
+func (c *logCapture) joins() []logLine { return c.lines(joinMessage) }
+
+// lines is every line the proxy wrote under one message, with the attributes it wrote them with.
+func (c *logCapture) lines(message string) []logLine {
+	var lines []logLine
 	for _, record := range c.Records() {
-		if record.Message != callMessage {
+		if record.Message != message {
 			continue
 		}
 		fields := map[string]any{}
@@ -261,9 +272,9 @@ func (c *logCapture) calls() []logLine {
 			fields[a.Key] = a.Value.Any()
 			return true
 		})
-		calls = append(calls, logLine{message: record.Message, level: record.Level, fields: fields})
+		lines = append(lines, logLine{message: record.Message, level: record.Level, fields: fields})
 	}
-	return calls
+	return lines
 }
 
 // callsAtLeast is the same, once there are n of them. The proxy writes a call's line after its

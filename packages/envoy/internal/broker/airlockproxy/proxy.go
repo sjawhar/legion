@@ -26,6 +26,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -61,12 +62,21 @@ const (
 	upstreamIdleConns   = 32
 )
 
+// watchInterval is how often a joined connection - a WebSocket the proxy upgraded - reads its
+// grant again (watchJoined). No request is read on such a connection after the upgrade, so this
+// is the whole of how long one may carry bytes once its grant has ended, and fifteen seconds is
+// short beside the shortest grant the broker issues. It costs one connection read per joined
+// connection per interval, the three indexed reads AirlockConnection makes, which a pod holding
+// a handful of sockets pays a few times a minute.
+const watchInterval = 15 * time.Second
+
 // GrantSource is the reads of requests.Machine the proxy makes: one per connection, one per
 // grant per pod, and the policy version that says whether what a pod holds was read under the
 // policy in force now.
 type GrantSource interface {
 	// AirlockConnection is what one connection's password proves: the live grant behind it and
-	// every name it may carry. Its refusals are this port's 407s.
+	// every name it may carry. Its own two refusals are this port's 407s, and every other
+	// error of it is a read that did not happen (grantRefusal).
 	AirlockConnection(ctx context.Context, placeholder string) (requests.AirlockConnection, error)
 	// AirlockValues runs the full release checks and answers the real value of every slot of
 	// every name, with when each name must be read or minted again, and the policy version it
@@ -98,6 +108,10 @@ type Options struct {
 	// either direction. Zero or less leaves a connection open for as long as the command holds
 	// it.
 	Idle time.Duration
+	// Watch is how often a joined connection reads its grant again (watchJoined); zero or
+	// less is watchInterval. A test sets a short one and ends a grant under an open
+	// WebSocket, rather than waiting out the real interval.
+	Watch time.Duration
 	// HashBudget is how many bytes of body the proxy holds at once across every connection
 	// for the AWS calls it has to hash itself (aws.go); zero or less is hashedBodyBudget. A
 	// test sets a small one and drives two requests at it, rather than sending the hundreds
@@ -151,6 +165,7 @@ type Server struct {
 	grants GrantSource
 	ca     *Authority
 	idle   time.Duration
+	watch  time.Duration
 	log    *slog.Logger
 	dial   func(ctx context.Context, network, addr string) (net.Conn, error)
 	now    func() time.Time
@@ -217,7 +232,9 @@ type connInfo struct {
 	// password is the proxy password this connection was opened with: a placeholder of the
 	// grant. Every request on the connection reads the grant again with it (serveBound), so a
 	// grant that has ended, been revoked or had one of its names withheld since the CONNECT
-	// stops at the next request rather than at the idle limit.
+	// stops at the next request rather than at the idle limit. A connection joined to a
+	// service reads no request again, so the watcher of that join reads with it instead
+	// (watchJoined).
 	password string
 	// grant is what that password proved when the connection was opened. Nothing is decided
 	// from it - each request is decided from the grant it read for itself - and what it is
@@ -228,6 +245,12 @@ type connInfo struct {
 // connKey is the context key connInfo travels under.
 type connKey struct{}
 
+// decryptedKey is the context key the decrypted connection itself travels under. A request that
+// is answered and done needs nothing of it - net/http owns the connection - and an upgrade does:
+// once the two connections are joined, closing this one is the only way the grant behind it
+// still reaches it (watchJoined).
+type decryptedKey struct{}
+
 // New builds the proxy. Nothing is bound and nothing is served until Serve.
 func New(o Options) *Server {
 	s := &Server{
@@ -235,6 +258,7 @@ func New(o Options) *Server {
 		grants:     o.Grants,
 		ca:         o.CA,
 		idle:       o.Idle,
+		watch:      o.Watch,
 		log:        o.Log,
 		dial:       o.Dial,
 		now:        o.Now,
@@ -264,6 +288,9 @@ func New(o Options) *Server {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	if s.watch <= 0 {
+		s.watch = watchInterval
+	}
 	s.upstream = &http.Transport{
 		// The whole check-and-dial, so that a request to a bound host reaches the address
 		// this proxy resolved and checked for the name and no other: net/http hands this the
@@ -290,12 +317,15 @@ func New(o Options) *Server {
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       o.Idle,
 		ErrorLog:          errorLog,
-		// The CONNECT target and the grant of the connection this request arrived on. The
-		// request's own Host header is checked against that target by airlock.Decide, so a
-		// request that names another host is refused rather than carried.
+		// The CONNECT target and the grant of the connection this request arrived on, and the
+		// connection itself. The request's own Host header is checked against that target by
+		// airlock.Decide, so a request that names another host is refused rather than carried;
+		// the connection is there for an upgrade, whose handler holds it for as long as the
+		// two ends are joined (watchJoined).
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			info, _ := s.conns.Load(c)
-			return context.WithValue(ctx, connKey{}, info)
+			ctx = context.WithValue(ctx, connKey{}, info)
+			return context.WithValue(ctx, decryptedKey{}, c)
 		},
 		ConnState: func(c net.Conn, state http.ConnState) {
 			if state == http.StateClosed || state == http.StateHijacked {
@@ -350,11 +380,16 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	grant, err := s.grants.AirlockConnection(r.Context(), placeholder)
 	if err != nil {
-		// The broker's own words for why this credential opens nothing - an unknown or ended
-		// grant, an enrollment whose lease lapsed, a grant every one of whose names is
-		// withheld - and never the placeholder itself, which a command's own proxy error line
-		// would otherwise print and keep.
-		s.refuseCredential(w, err.Error())
+		status, why := s.grantRefusal("connection", err)
+		if status == http.StatusProxyAuthRequired {
+			// The broker's own words for why this credential opens nothing - an unknown or
+			// ended grant, an enrollment whose lease lapsed, a grant every one of whose
+			// names is withheld - and never the placeholder itself, which a command's own
+			// proxy error line would otherwise print and keep.
+			s.refuseCredential(w, why)
+			return
+		}
+		http.Error(w, "airlock: "+why, status)
 		return
 	}
 	if r.Method == http.MethodConnect {
@@ -390,6 +425,39 @@ func proxyPassword(r *http.Request) (string, string) {
 func (s *Server) refuseCredential(w http.ResponseWriter, why string) {
 	w.Header().Set("Proxy-Authenticate", `Basic realm="airlock"`)
 	http.Error(w, "airlock: "+why, http.StatusProxyAuthRequired)
+}
+
+// grantUnreadable is what a command is told when a read of its grant did not answer at all. It
+// names nothing of the read that failed - a Postgres connect error carries the database's user,
+// its name and its address - and it says the call can be made again, because nothing in such a
+// failure says the grant has ended.
+const grantUnreadable = "the broker could not read this grant just now; make the call again"
+
+// grantRefusal is the status and the words one failed grant read is answered with, and it is the
+// one rule for every read of a grant this package makes. Three answers, by what the read said:
+//
+//   - A grant that has ended, and a grant holding no name this session may have, are the read's
+//     own answer about that grant, so they are 407 in the broker's own words, which is what
+//     tells a command to ask for a new grant.
+//   - A secret the store no longer holds, and a mint the secret's own minter refused, are the
+//     broker's own answer about this grant's secret rather than about the grant, so they stay
+//     403 in those words, as they were before this rule existed. Neither carries anything of
+//     the store the read went to.
+//   - Every other error is a read that did not happen - a database that did not answer, most of
+//     them - and is 503 and grantUnreadable, with the error itself in the log, where it is
+//     wanted: a failed read is no proof that a grant ended, and a database failover must not
+//     send every agent in the middle of a call to ask for a grant it already holds, which on
+//     the human tier is a person approving each one. Nor may the answer carry the read's own
+//     words, which for a Postgres connect error are the database's user, name and address.
+func (s *Server) grantRefusal(read string, err error) (int, string) {
+	switch {
+	case errors.Is(err, requests.ErrGrantNotLive), errors.Is(err, requests.ErrAirlockNoNames):
+		return http.StatusProxyAuthRequired, err.Error()
+	case errors.Is(err, requests.ErrSecretNotInStore), errors.Is(err, requests.ErrMintFailed):
+		return http.StatusForbidden, err.Error()
+	}
+	s.log.Error("airlock proxy: a grant could not be read", "read", read, "error", err)
+	return http.StatusServiceUnavailable, grantUnreadable
 }
 
 // serveConnect answers one CONNECT: a host one of the grant's names is bound to is decrypted
