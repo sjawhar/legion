@@ -48,7 +48,7 @@ func TestATailCompactionFoldsOnlyTheRowsOlderThanTheTail(t *testing.T) {
 			}{
 				{"one\n", true}, {"one\n\ntwo\n", true}, {"one\n\ntwo\n", false}, {"one\n\ntwo\n", false}, {"three\n", true},
 			} {
-				if _, err := versioned.AppendUpdateWithCredit(context.Background(), artifactID, writer.write(write.markdown), write.content, nil, nil); err != nil {
+				if _, err := versioned.AppendUpdatesWithCredit(context.Background(), artifactID, []BrowserUpdate{{Update: writer.write(write.markdown), ContentChanged: write.content}}); err != nil {
 					t.Fatalf("append update %d: %v", index+1, err)
 				}
 			}

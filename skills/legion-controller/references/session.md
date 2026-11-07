@@ -43,7 +43,8 @@ answer to your ask, a mention), Envoy or Slack. No `legion controller start` can
 owner a command names (`-R owner/repo`, `repos/owner/repo` in `gh api`, a GitHub URL), and with the
 first owner's token (`GH_CONFIG_DIR`) otherwise, so always name the repository: another owner's repository read with
 the first owner's token can fail. The tokens sit in `LEGION_GH_OWNERS_DIR`, one read-only directory
-per owner, refreshed every minute. When the daemon has no GitHub App, `legion controller start`
+per owner, each token reaching that owner's repositories in the project and no others, refreshed
+every minute. When the daemon has no GitHub App, `legion controller start`
 prints `[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody`.
 
 End every pull-request comment or review you post with

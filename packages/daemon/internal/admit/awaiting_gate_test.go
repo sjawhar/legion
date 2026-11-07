@@ -459,7 +459,7 @@ func TestAnApprovedGateResumesItsRootAtOnceAndItsFirstPhaseTakesTheNextSlot(t *t
 		case record.StatusWrite:
 			statusWrites++
 		case record.SuperviseRequest:
-			if payload.Op == "start" && payload.Role == "architect" && strings.Contains(payload.Task, "spec version 3") {
+			if payload.Op == "start" && payload.Role == "architect" && strings.Contains(payload.Task, "primary document version 3") {
 				architectStarts++
 			}
 		}
@@ -810,7 +810,7 @@ func TestAGateWaitHeldByAGuardIsToldDespiteAnActOnAnotherAsk(t *testing.T) {
 			t.Fatalf("root told in place = %#v, want its hand-backs taken in by the handout", got)
 		}
 		task := lastArchitectTask(t, pool, "LEGION-100")
-		for _, want := range []string{"ask ask-q0", "the approval request for spec version 4", "ask ask-q", "Still with the person"} {
+		for _, want := range []string{"ask ask-q0", "the approval request for primary document version 4", "ask ask-q", "Still with the person"} {
 			if !strings.Contains(task, want) {
 				t.Fatalf("task told in place = %q, want it to name %q", task, want)
 			}
@@ -1384,10 +1384,11 @@ func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T
 		applyFact(t, pool, admission, "seed-changes-v4", seeded)
 		var gate *record.DesignGate
 		inTx(t, pool, func(tx pgx.Tx) {
-			var err error
-			if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-100"); err != nil {
+			gates, err := record.NewStore().GatesOf(context.Background(), tx, "LEGION-100")
+			if err != nil {
 				t.Fatalf("read gate: %v", err)
 			}
+			gate = record.SpecGate(gates)
 		})
 		if gate == nil || gate.ApprovedVersion != nil || gate.LatestVersion != 4 {
 			t.Fatalf("gate after the seed read a changes request = %#v, want closed at version 4", gate)
@@ -1676,7 +1677,7 @@ func TestAPersonsReviewOfTheSpecAnswersARootWaitingOnItsQuestion(t *testing.T) {
 		atOnce bool
 		task   []string
 	}{
-		{name: "an approval", answered: true, atOnce: true, task: []string{"spec version 4", "was approved"},
+		{name: "an approval", answered: true, atOnce: true, task: []string{"primary document version 4", "was approved"},
 			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: after}},
 		{name: "a changes request", answered: true, task: []string{"requested changes", "version 4", "name the rollback path"},
 			fact: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 4,

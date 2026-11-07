@@ -62,8 +62,8 @@ func recordedGate(t *testing.T, pool *pgxpool.Pool) *record.DesignGate {
 	t.Helper()
 	var gate *record.DesignGate
 	seedRecord(t, pool, func(tx pgx.Tx) error {
-		var err error
-		gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-208")
+		gates, err := record.NewStore().GatesOf(context.Background(), tx, "LEGION-208")
+		gate = record.SpecGate(gates)
 		return err
 	})
 	return gate

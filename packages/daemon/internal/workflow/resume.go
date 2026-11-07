@@ -11,27 +11,21 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// booted is the daemon's boot (intake.DaemonBooted). It does four things, in this order.
+// booted is the daemon's boot (intake.DaemonBooted). It does three things, in this order.
 //
 // First, the upgrade's sweep (sweepMerged): an issue of this project that awaits its merge on a
 // pull request already merged is one the migration moved out of production_check, and the merge
 // that would have closed it will never come again, so the boot closes it as the merge would have
 // (closeMerged) — unless an issue beneath it is still in the workflow, which leaves it where it
 // is to close when the last of them leaves (leave's closeAwaitingMerge), so the deploy suspends no
-// running child under a mass of lingers. The check such a close opens has no merge commit, which
-// its first compare fills from GitHub.
+// running child under a mass of lingers.
 //
-// Second, a release build's boot compares its own build, and the build Dispatch reported to it,
-// against the open checks of the repository the daemon is built from (compareBuilds): one
-// check_compare row per check, whose GitHub read wakes the check when the build carries its
-// merge. A boot with no revision — every non-release build — compares nothing.
-//
-// Third, the status repair (correctStatuses): every issue the daemon works whose recorded
+// Second, the status repair (correctStatuses): every issue the daemon works whose recorded
 // Dispatch status is not the status of its phase gets the Dispatch status write that corrects it,
 // so a write the daemon lost before the restart is put back by it. The controller tick runs the
 // same repair, so no later loss waits for a restart.
 //
-// Fourth, the resume by rule: every claim of this project that owns its issue's current phase and
+// Third, the resume by rule: every claim of this project that owns its issue's current phase and
 // that the daemon or its own exit suspended (supervise's ByRule) is started again. Nothing else
 // would start it: the phase's start ran before the restart, a re-admission's starts are queued
 // only when a tree is re-admitted, and the next start is the next phase's. This is the one trigger
@@ -60,21 +54,9 @@ import (
 // with the head its round approved) waits for the issue's slot; the outbox does not deliver it
 // to a claim still holding its phase's task. A role a start already covers (StartFor) gets no
 // second. The sweep runs first so the resume reads the trees it closed as lingering.
-func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted) (intake.Result, error) {
+func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (intake.Result, error) {
 	if err := e.sweepMerged(ctx, tx); err != nil {
 		return intake.Result{}, err
-	}
-	if fact.Revision != "" {
-		if err := e.compareBuilds(ctx, tx, wakeDaemonBoot, fact.Revision); err != nil {
-			return intake.Result{}, err
-		}
-		// Dispatch and the daemon are built from one repository, so a deploy that ships them
-		// together reports one commit twice: the daemon's own compare already covers it.
-		if fact.DispatchBuild != fact.Revision {
-			if err := e.compareBuilds(ctx, tx, wakeDispatchBuild, fact.DispatchBuild); err != nil {
-				return intake.Result{}, err
-			}
-		}
 	}
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
@@ -88,7 +70,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 			own = append(own, issue)
 		}
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own)
+	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own, e.cfg.Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}

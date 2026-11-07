@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -856,7 +857,7 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	clock := time.Now().UTC()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
 	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
-	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps()}, quietLogger())}
 	run := func(step string) {
 		t.Helper()
 		if err := runner.RunOnce(context.Background()); err != nil {
@@ -915,7 +916,7 @@ func TestAMergeFailureAlreadyAppliedIsNotLoggedAsSendingTheIssueBack(t *testing.
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
 	var logged bytes.Buffer
 	runner := mergeRunner(pool, records, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock })
-	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps()}, quietLogger())}
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce READY's submission: %v", err)
 	}

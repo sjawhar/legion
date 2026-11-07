@@ -46,8 +46,8 @@ func OutOfWorkflow(status string) bool {
 // will run — a root reopened inside its linger (admit's readmit) stands in admitted with no
 // role's phase until its architect reaches planning, and is running again from the reopen. It is
 // the production check's "runs again" predicate (workflow's check.go) and the outbox's
-// (checkLookHolds): a look of an issue that runs again would resume the implementer and relaunch
-// its Sandbox under the run, so none starts.
+// (checkLookHolds): a look of an issue that runs again would resume the checking role and
+// relaunch its Sandbox under the run, so none starts.
 //
 // It lives here, beside the status rule it is written over, because every judgement that reads
 // the daemon's own records against Dispatch's mirror needs it — the children-first wait
@@ -239,9 +239,10 @@ type LineFacts struct {
 	// Lifecycles is the lifecycle of each tree root of the records, by root key. A tree with no
 	// row has no entry, which reads as a tree nothing has opened.
 	Lifecycles map[string]treelifecycle.Lifecycle
-	// Gates is the design gate of each tree root of the records, by root key; a root with no gate
-	// registered has no entry.
-	Gates map[string]DesignGate
+	// Gates is the design gate of each tree root of the records, by root key: one entry for
+	// every root, holding the steps the deployment gates and whatever rows that root has
+	// registered, so that a root with nothing registered reads as the gate it is (TreeGate).
+	Gates map[string]TreeGate
 	// Owed is the oldest pending start each issue owes its worker, by issue; an issue owing none
 	// has no entry. OwedRows is every one of those rows, oldest first, which the repair of a row
 	// that has outlived its fences walks (admit's finishFencedStarts).
@@ -345,16 +346,35 @@ func ReadParents(ctx context.Context, tx pgx.Tx, store Store, project string, is
 	return parents, nil
 }
 
+// ReadTreeGates is the design gate of each tree root among issues, by root key, in one read
+// whatever the number of trees: one entry per root, so that a root with nothing registered is
+// the gate it is rather than a missing key every reader would have to answer for itself. steps
+// are the design-gate steps the deployment gates (config.Gates.Steps), the empty list gating
+// none, and every entry carries them, because the gate is the list and not a row.
+func ReadTreeGates(ctx context.Context, tx pgx.Tx, store Store, issues []Issue, steps []DesignStep) (map[string]TreeGate, error) {
+	roots := treeRoots(issues)
+	rows, err := store.Gates(ctx, tx, roots)
+	if err != nil {
+		return nil, err
+	}
+	gates := make(map[string]TreeGate, len(roots))
+	for _, root := range roots {
+		gates[root] = TreeGate{Steps: steps, Rows: rows[root]}
+	}
+	return gates, nil
+}
+
 // ReadLineFacts reads the facts of one admission pass for issues: one tree-lifecycle read
-// (ReadLifecycles), one gate read, one read of the records above the pass's own (ReadParents)
-// and one read of the starts the project owes, whatever the number of trees, gates and issues
-// involved. project is the Dispatch project key.
-func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (LineFacts, error) {
+// (ReadLifecycles), one gate read (ReadTreeGates), one read of the records above the pass's own
+// (ReadParents) and one read of the starts the project owes, whatever the number of trees,
+// gates and issues involved. project is the Dispatch project key and steps the design-gate
+// steps the deployment gates.
+func ReadLineFacts(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue, steps []DesignStep) (LineFacts, error) {
 	lifecycles, err := ReadLifecycles(ctx, tx, store, project, issues)
 	if err != nil {
 		return LineFacts{}, err
 	}
-	gates, err := store.Gates(ctx, tx, treeRoots(issues))
+	gates, err := ReadTreeGates(ctx, tx, store, issues, steps)
 	if err != nil {
 		return LineFacts{}, err
 	}
@@ -384,31 +404,81 @@ func GateOpen(gate DesignGate) bool {
 	return gate.ApprovedVersion != nil && *gate.ApprovedVersion == gate.LatestVersion
 }
 
-// GateValue is the gate a root carries, the zero gate for a root with none registered, which is a
-// root whose architect has still to write its spec: the shape AtWork, QueuedRoot and every other
-// rule over a gate takes. It is one helper and not one per reader, because a reader writing its
-// own is free to read a missing gate as something other than a gate that has never opened, and
-// those two readings put a root in different parts of the waiting line.
-func GateValue(gate *DesignGate) DesignGate {
-	if gate == nil {
-		return DesignGate{}
+// RequiredSteps is the steps a root must hold an open gate at before its tree works: the steps
+// the deployment gates, in the order it names them, or the single step spec when it gates none.
+// It is the one statement of the rule, which classify.RequiredSteps calls; internal/classify
+// reads this package, so the rule lives here, where every reader can reach it.
+//
+// The empty list keeps its own hold. A deployment that gates no step asks no person to approve
+// anything, and its registration opens the gate at once; but the registration itself is still
+// what says the architect has written the spec, and a rule reading "every gated step is open"
+// would be true of a tree whose architect had registered nothing and would start it. So the
+// empty list requires the spec step's record, which the registration writes and opens in one act.
+func RequiredSteps(configured []DesignStep) []DesignStep {
+	if len(configured) == 0 {
+		return []DesignStep{DesignStepSpec}
 	}
-	return *gate
+	return configured
 }
 
-// gateReturn is when a root's work came back to it through its design gate: the moment a person
-// approved the version the gate stands open on (DesignGate.ApprovedMark), zero for a gate that
-// is not open. It is the waiting line's ordering key for a root whose own first phase can start,
-// merged on the same time axis as an owed start row's creation and an answered root's answer.
-// A gate whose approval carries no moment — one a registration read from Dispatch rather than
-// from an event — gives the zero time, which puts that root at the head of its part: the line
-// knows its work came back and not when, and the alternative, dropping it to the back by rank,
-// loses what it does know.
-func gateReturn(gate DesignGate) time.Time {
-	if !GateOpen(gate) {
+// TreeGate is one tree's design gate as every rule over it reads it: the steps the deployment
+// gates (Steps, the empty list standing for the single step spec, RequiredSteps) and the row the
+// tree's root holds for each step its architect has registered (Rows, nil for a root that has
+// registered none). The gate is a list of steps and the work waits on all of them, so a rule
+// that used to read one row reads this instead and no reader can answer from one step where the
+// deployment gates three.
+//
+// The zero value is the gate of a root with nothing registered, which is the answer a reader
+// wants for a tree the pass holds no gate row for: it is open at no step and has opened at none.
+type TreeGate struct {
+	Steps []DesignStep
+	Rows  map[DesignStep]DesignGate
+}
+
+// Open is whether the gate lets the tree's work run: a person's approval stands on the current
+// document version of every required step (GateOpen). A required step with no row holds the
+// work, as an unregistered gate always has, so a root with no row at all is held too. It is the
+// one rule for the question, which classify.DesignGatesOpen reads it through.
+func (g TreeGate) Open() bool {
+	for _, step := range RequiredSteps(g.Steps) {
+		if row, registered := g.Rows[step]; !registered || !GateOpen(row) {
+			return false
+		}
+	}
+	return true
+}
+
+// EverOpened is whether every required step's gate has stood open at some point
+// (DesignGate.EverOpened), which is what says the root's architect has had its whole design
+// approved once: after that the root stands at admitted with its own first phase waiting in the
+// line, and its children do the work. A step with no row has never opened, so a gate the
+// architect has still to finish registering has not either.
+func (g TreeGate) EverOpened() bool {
+	for _, step := range RequiredSteps(g.Steps) {
+		if row, registered := g.Rows[step]; !registered || !row.EverOpened {
+			return false
+		}
+	}
+	return true
+}
+
+// OpenedAt is when a root's work came back to it through its design gate: the moment the last of
+// its required steps was approved (DesignGate.ApprovedMark), zero for a gate that is not open.
+// It is the waiting line's ordering key for a root whose own first phase can start, merged on
+// the same time axis as an owed start row's creation and an answered root's answer. A step whose
+// approval carries no moment — one a registration read from Dispatch rather than from an event —
+// gives the zero time, which puts that root at the head of its part when it is the only step:
+// the line knows its work came back and not when, and the alternative, dropping it to the back
+// by rank, loses what it does know.
+func (g TreeGate) OpenedAt() time.Time {
+	if !g.Open() {
 		return time.Time{}
 	}
-	return gate.ApprovedMark.At
+	var at time.Time
+	for _, step := range RequiredSteps(g.Steps) {
+		at = later(at, g.Rows[step].ApprovedMark.At)
+	}
+	return at
 }
 
 // later is whichever of two moments is the later one.
@@ -424,22 +494,24 @@ func later(a, b time.Time) time.Time {
 // (NeedsSlot, which admit's releaseSlots asks of every issue holding one), the grant of one
 // (admit's slotFor, which asks it of the state the promotion leaves the issue in) and the
 // waiting line's first part all read, so no two of them can disagree about what work is. gate is
-// the design gate of the issue's tree root, the zero value for a root with none.
+// the design gate of the issue's tree root, the zero value for a root with no step of it
+// registered.
 //
 // Planning, implementing, testing, reviewing and retro each have a phase worker with work.
 // Merging has one too, unless a closed design gate is holding the READY its merger already built
-// (ReadyPendingVersion), which is a wait on a person rather than work. Admitted is work only for
-// a root whose design gate has never opened, where its architect is writing the spec; after that
-// opening the root's own turns start no phase worker, and its children do the work. Every other
-// phase is a wait: a child at admitted, accepting, awaiting_merge, held, awaiting_person, done.
-func AtWork(issue Issue, gate DesignGate) bool {
+// (ReadyPending), which is a wait on a person rather than work. Admitted is work only for
+// a root whose design gate has never opened at every step the deployment gates, where its
+// architect is writing the design; after that opening the root's own turns start no phase
+// worker, and its children do the work. Every other phase is a wait: a child at admitted,
+// accepting, awaiting_merge, held, awaiting_person, done.
+func AtWork(issue Issue, gate TreeGate) bool {
 	switch issue.Phase {
 	case phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro:
 		return true
 	case phase.Merging:
-		return issue.ReadyPendingVersion == nil
+		return issue.ReadyPending == nil
 	case phase.Admitted:
-		return claim.IsTreeRoot(issue.Key, issue.Tree) && !gate.EverOpened
+		return claim.IsTreeRoot(issue.Key, issue.Tree) && !gate.EverOpened()
 	default:
 		return false
 	}
@@ -463,7 +535,7 @@ func AtWork(issue Issue, gate DesignGate) bool {
 // (Waiting). root is the record of the issue's tree root and gate that root's design gate; live
 // is whether the tree is live (LiveRoots). The slot is accounting only: taking one away
 // suspends no claim, moves no phase and writes no Dispatch status.
-func NeedsSlot(issue, root Issue, gate DesignGate, live bool) bool {
+func NeedsSlot(issue, root Issue, gate TreeGate, live bool) bool {
 	return live && !root.Lingers() && !OutOfWorkflow(issue.Status) && AtWork(issue, gate)
 }
 
@@ -480,12 +552,12 @@ func NeedsSlot(issue, root Issue, gate DesignGate, live bool) bool {
 // it: the pass that starts a wait (workflow's decideAwait, rule 0) and the boot's catch-up of
 // the roots that pass can move (the daemon's catchesUp). A root this answers false for starts no
 // wait on a person, so the boot need not read its Dispatch window either. gate is the root's own
-// design gate, the zero value for a root with none registered.
+// design gate, the zero value for a root with no step of it registered.
 //
 // It is not NeedsSlot read backwards: NeedsSlot says what the cap must hold a slot for, of every
 // issue, from the record alone, while this says what one root may hand that slot back for, and
 // asks the slot row itself.
-func CanWaitOnPerson(root Issue, gate DesignGate, slotted bool) bool {
+func CanWaitOnPerson(root Issue, gate TreeGate, slotted bool) bool {
 	return slotted && root.Phase == phase.Admitted && !root.Lingers() && InWorkflow(root) && AtWork(root, gate)
 }
 
@@ -598,7 +670,7 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 			// back, which is its answer or, when a person's approval opened its gate later
 			// than that, the approval.
 			returned = append(returned, timed{entry: LineEntry{Issue: issue, Kind: LineAnswered},
-				at: later(*issue.Awaiting.AnsweredAt, gateReturn(facts.Gates[issue.Tree]))})
+				at: later(*issue.Awaiting.AnsweredAt, facts.Gates[issue.Tree].OpenedAt())})
 			continue
 		}
 		if _, waitingAsRoot := queuedKeys[issue.Key]; waitingAsRoot {
@@ -654,8 +726,8 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 		if root := byKey[issue.Tree]; root.AwaitingPerson() {
 			continue
 		}
-		gate, registered := facts.Gates[issue.Tree]
-		if !registered || !GateOpen(gate) {
+		gate := facts.Gates[issue.Tree]
+		if !gate.Open() {
 			continue
 		}
 		// A child an unfinished Dispatch issue holds where it stands waits for that issue, not
@@ -683,12 +755,13 @@ func Waiting(issues []Issue, slots []Slot, facts LineFacts) []LineEntry {
 			continue
 		}
 		entry := LineEntry{Issue: issue, Kind: LineFirstPhase}
-		// A tree's own root held a slot while its architect wrote the spec, and gave it up when
-		// the gate opened: its first phase is work coming back, so it stands in the first part
-		// at the moment its gate opened (gateReturn). A child of the tree never held one, so
-		// its first phase is new work and waits in the second part by its tree root's rank.
+		// A tree's own root held a slot while its architect wrote the design, and gave it up
+		// when the last of the gate's steps opened: its first phase is work coming back, so it
+		// stands in the first part at the moment the gate opened (TreeGate.OpenedAt). A child
+		// of the tree never held one, so its first phase is new work and waits in the second
+		// part by its tree root's rank.
 		if claim.IsTreeRoot(issue.Key, issue.Tree) {
-			returned = append(returned, timed{entry: entry, at: gateReturn(gate)})
+			returned = append(returned, timed{entry: entry, at: gate.OpenedAt()})
 			continue
 		}
 		starting = append(starting, entry)
@@ -757,7 +830,7 @@ func queuedRoots(issues []Issue, facts LineFacts) []Issue {
 // of the root is running, and a root whose tree ran and ended queues again with that row still
 // standing until its cleanup confirms. The slot does not answer it either, now that a running
 // root holds none while it waits for its merge or in accepting.
-func QueuedRoot(issue Issue, gate DesignGate) bool {
+func QueuedRoot(issue Issue, gate TreeGate) bool {
 	if !issue.HandedOver || !claim.IsTreeRoot(issue.Key, issue.Tree) || ran(issue, gate) {
 		return false
 	}
@@ -767,9 +840,10 @@ func QueuedRoot(issue Issue, gate DesignGate) bool {
 // ran says whether this root's own record shows the generation it carries already running under
 // Legion. Two things say so, and the slot says neither any more. The record stands in a phase of
 // its own (Issue.CarriesRun — neither admitted nor done): it is at work, waiting for its merge,
-// in accepting, held or waiting on a person. Or its design gate has opened at some point
-// (DesignGate.EverOpened), after which the root stands at admitted while its architect revises
-// the spec and its own first phase waits in the line as a member of its tree (LineFirstPhase).
+// in accepting, held or waiting on a person. Or its design gate has opened at every step the
+// deployment gates at some point (TreeGate.EverOpened), after which the root stands at admitted
+// while its architect revises the design and its own first phase waits in the line as a member
+// of its tree (LineFirstPhase).
 // A re-admission clears the gate with the rest of the generation, so a tree Legion takes back
 // queues again as a root that never ran, which is what it is.
 //
@@ -782,15 +856,15 @@ func QueuedRoot(issue Issue, gate DesignGate) bool {
 // such a root, running and holding no slot in accepting or awaiting_merge, would queue it here
 // again and promote it a second time, moving its awaiting_merge to merging where its merge
 // closes nothing.
-func ran(issue Issue, gate DesignGate) bool {
-	return issue.HandedOverFrom == "" && (issue.CarriesRun() || gate.EverOpened)
+func ran(issue Issue, gate TreeGate) bool {
+	return issue.HandedOverFrom == "" && (issue.CarriesRun() || gate.EverOpened())
 }
 
 // treeLive is TreeLive over the facts of one root already in hand: its tree's lifecycle and its
 // own design gate. It is the one statement of the rule; the pass that judges many trees reads it
 // through liveRoots and the one that judges a single root through TreeLive, so no reader of
 // "this tree is live" can answer differently from another.
-func treeLive(root Issue, lifecycle treelifecycle.Lifecycle, gate DesignGate) bool {
+func treeLive(root Issue, lifecycle treelifecycle.Lifecycle, gate TreeGate) bool {
 	switch {
 	case root.Lingers():
 		return false
@@ -814,15 +888,15 @@ func treeLive(root Issue, lifecycle treelifecycle.Lifecycle, gate DesignGate) bo
 //
 // Live is wider than running (TreeRuns): a root still waiting in the line for its tree to be
 // opened is live, so that a todo child recorded under it joins the tree its promotion opens,
-// and runs nothing yet.
-func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
+// and runs nothing yet. steps are the design-gate steps the deployment gates.
+func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue, steps []DesignStep) (bool, error) {
 	if root.Lingers() {
 		return false, nil
 	}
 	if root.AwaitingPerson() {
 		return true, nil
 	}
-	lifecycle, gate, err := rootFacts(ctx, store, tx, root)
+	lifecycle, gate, err := rootFacts(ctx, store, tx, root, steps)
 	if err != nil {
 		return false, err
 	}
@@ -842,17 +916,18 @@ func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, er
 // a status write on it is a person's move. The last clause is what a re-admission inside a
 // linger needs: readmit clears the linger while the lifecycle of the run that ended still
 // stands open, so the lifecycle alone would call such a root running.
-func TreeRuns(root Issue, lifecycle treelifecycle.Lifecycle, gate DesignGate) bool {
+func TreeRuns(root Issue, lifecycle treelifecycle.Lifecycle, gate TreeGate) bool {
 	return lifecycle.OpenUnderWorkflow() && !root.Lingers() && !QueuedRoot(root, gate)
 }
 
 // TreeRunning is TreeRuns for a caller holding one root and no facts of a pass: it reads that
-// root's tree lifecycle and its design gate, and asks the one rule.
-func TreeRunning(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
+// root's tree lifecycle and its design gate, and asks the one rule. steps are the design-gate
+// steps the deployment gates.
+func TreeRunning(ctx context.Context, store Store, tx pgx.Tx, root Issue, steps []DesignStep) (bool, error) {
 	if !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() {
 		return false, nil
 	}
-	lifecycle, gate, err := rootFacts(ctx, store, tx, root)
+	lifecycle, gate, err := rootFacts(ctx, store, tx, root, steps)
 	if err != nil {
 		return false, err
 	}
@@ -873,13 +948,14 @@ func RunningRoots(issues []Issue, facts LineFacts) map[string]struct{} {
 
 // ReadRunningRoots is RunningRoots for a caller that holds no facts of the pass: the lifecycles
 // and the gates of the roots among issues, in two reads whatever the number of trees, and then
-// the one rule. project is the Dispatch project key.
-func ReadRunningRoots(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue) (map[string]struct{}, error) {
+// the one rule. project is the Dispatch project key and steps the design-gate steps the
+// deployment gates.
+func ReadRunningRoots(ctx context.Context, tx pgx.Tx, store Store, project string, issues []Issue, steps []DesignStep) (map[string]struct{}, error) {
 	lifecycles, err := ReadLifecycles(ctx, tx, store, project, issues)
 	if err != nil {
 		return nil, err
 	}
-	gates, err := store.Gates(ctx, tx, treeRoots(issues))
+	gates, err := ReadTreeGates(ctx, tx, store, issues, steps)
 	if err != nil {
 		return nil, err
 	}
@@ -889,21 +965,22 @@ func ReadRunningRoots(ctx context.Context, tx pgx.Tx, store Store, project strin
 // rootFacts is one root's tree lifecycle and design gate, for the single-root readings of the two
 // rules above — TreeLive, which the recording of a todo child under a live tree asks, and
 // TreeRunning, which workflow's sessionStatusWrite asks of a session's status write: a pass that
-// judges many trees reads them in bulk instead (ReadLineFacts).
-func rootFacts(ctx context.Context, store Store, tx pgx.Tx, root Issue) (treelifecycle.Lifecycle, DesignGate, error) {
+// judges many trees reads them in bulk instead (ReadLineFacts). steps are the design-gate steps
+// the deployment gates.
+func rootFacts(ctx context.Context, store Store, tx pgx.Tx, root Issue, steps []DesignStep) (treelifecycle.Lifecycle, TreeGate, error) {
 	project, err := claim.ProjectToken(root.Project)
 	if err != nil {
-		return treelifecycle.Lifecycle{}, DesignGate{}, err
+		return treelifecycle.Lifecycle{}, TreeGate{}, err
 	}
 	lifecycle, _, err := store.TreeLifecycle(ctx, tx, project, root.Key)
 	if err != nil {
-		return treelifecycle.Lifecycle{}, DesignGate{}, err
+		return treelifecycle.Lifecycle{}, TreeGate{}, err
 	}
-	gate, err := store.Gate(ctx, tx, root.Key)
+	rows, err := store.GatesOf(ctx, tx, root.Key)
 	if err != nil {
-		return lifecycle, DesignGate{}, err
+		return lifecycle, TreeGate{}, err
 	}
-	return lifecycle, GateValue(gate), nil
+	return lifecycle, TreeGate{Steps: steps, Rows: rows}, nil
 }
 
 // LiveRoots is the set of keys whose trees are live (TreeLive), read from the records and the

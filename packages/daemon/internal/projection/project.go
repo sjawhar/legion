@@ -22,11 +22,13 @@ import (
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
 // caller owns the repeatable-read transaction, so its record reads and claims share one snapshot.
 // project is the Dispatch project whose pending status writes and held lifecycle rows the state
-// lists. reports is each claim's latest capability report, by claim (LEGION-663): a claim with one
-// shows it whatever its incarnation — the view carries the reporting process's, for a reader to
-// compare with the locator's — and a claim with none shows no capabilities. Nil is no reports. now
-// is the instant the held rows are read at (record.Store.HeldRows) and their waits are measured from.
-func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, reports map[claim.Token]capabilities.Report, now time.Time) (api.State, error) {
+// lists. steps are the design-gate steps the deployment gates (config.Gates.Steps), which each
+// root's view answers its own state of; the empty list gates none. reports is each claim's latest
+// capability report, by claim (LEGION-663): a claim with one shows it whatever its incarnation —
+// the view carries the reporting process's, for a reader to compare with the locator's — and a
+// claim with none shows no capabilities. Nil is no reports. now is the instant the held rows are
+// read at (record.Store.HeldRows) and their waits are measured from.
+func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, steps []record.DesignStep, claims []supervise.Claim, reports map[claim.Token]capabilities.Report, now time.Time) (api.State, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
 		return api.State{}, err
@@ -176,16 +178,26 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			}
 		}
 
-		gate, err := s.Gate(ctx, tx, issue.Key)
+		gates, err := s.GatesOf(ctx, tx, issue.Key)
 		if err != nil {
 			return api.State{}, err
 		}
+		gate := record.SpecGate(gates)
 		if gate != nil {
 			view.DesignGate = &api.GateView{
 				ArtifactID:      gate.ArtifactID,
 				CurrentVersion:  gate.LatestVersion,
 				ApprovedVersion: gate.ApprovedVersion,
 			}
+		}
+		// The deployment's gate as this root stands in it, one entry for each step it gates. Only
+		// a root holds gate rows — a child's work is held at its root's steps — so a child answers
+		// no entry at all rather than one unregistered step for each the deployment gates. The
+		// entries are the configured steps and not the rows: a row of a step the deployment no
+		// longer gates is kept in the record, where a deployment that gates it again reads its
+		// true state, and is in no entry here, since it holds nothing (classify.DesignGatesOpen).
+		if issue.Key == issue.Tree {
+			view.GatedSteps = api.GatedStepViewsOf(steps, gates)
 		}
 		if check, ok := checks[issue.Key]; ok {
 			view.Check = checkView(check)
@@ -240,7 +252,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			own = append(own, issue)
 		}
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, s, project, own)
+	facts, err := record.ReadLineFacts(ctx, tx, s, project, own, steps)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -305,13 +317,19 @@ type memoryDraw struct {
 	at    *time.Time
 }
 
-// checkView is an open production check as the state shows it (api.CheckView): the last wake is
-// shown once a look has woken, and the next wake is the check's bound, the moment its last look
-// starts.
+// checkView is an open production check as the state shows it (api.CheckView): the role the check
+// records as the one that works it, the last wake once a look has woken, and the next wake —
+// whichever names the next look, the time the checking agent named for itself on a pending report
+// or the retry of a look nobody reported (record.ProductionCheck.WakeAt), and the check's bound,
+// the moment its last look starts, where neither stands.
 func checkView(check record.ProductionCheck) *api.CheckView {
+	next := check.BoundAt
+	if check.WakeAt != nil {
+		next = *check.WakeAt
+	}
 	view := &api.CheckView{
 		Repo: check.Repo, PullRequest: check.Number, MergeCommit: check.MergeSHA, OpenedAt: check.OpenedAt,
-		Looks: check.Looks, LookOpen: check.LookOpen, NextWakeAt: check.BoundAt, Last: check.Last,
+		Role: string(check.Role), Looks: check.Looks, LookOpen: check.LookOpen, NextWakeAt: next, Last: check.Last,
 	}
 	if check.LastWakeAt != nil {
 		view.LastWake = &api.CheckWakeView{Kind: check.LastWakeKind, Detail: check.LastWakeDetail, At: *check.LastWakeAt}

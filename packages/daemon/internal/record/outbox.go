@@ -32,12 +32,15 @@ const (
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 	OutboxKindReadyMerge        OutboxKind = "ready_merge"
-	OutboxKindCheckCompare      OutboxKind = "check_compare"
+	OutboxKindCheckWake         OutboxKind = "check_wake"
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
 	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
 	OutboxKindIssueBundle       OutboxKind = "issue_bundle"
 	OutboxKindIssueRelease      OutboxKind = "issue_release"
+	// OutboxKindGatedStepsPublish is the one kind whose row belongs to no issue: its issue column
+	// holds the bare project key (GatedStepsPublish).
+	OutboxKindGatedStepsPublish OutboxKind = "gated_steps_publish"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
@@ -48,12 +51,15 @@ const (
 // (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
 // each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
 // (with outboxLaneFree across daemons) is what keeps them apart; and the production check's rows
-// (check_compare, check_look, check_bound), which start and end the implementer's looks in order
+// (check_wake, check_look, check_bound), which start and end the checking role's looks in order
 // with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
-// an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
-// daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
-// own because the board lane's architect notices are ordered among themselves and one of them waits
+// an image, and a slow publish never holds a stop back. It carries the deployment's gated-steps
+// publish too, the one row addressed to the bare project key rather than to an issue, so that
+// write runs on a board lane of the project's own, behind none of any issue's rows and holding
+// none of them back. The role-message lane runs the one kind the daemon addresses to a role of
+// the issue that is not its architect (phase_ended), on a lane of its own because the board
+// lane's architect notices are ordered among themselves and one of them waits
 // for as long as its architect holds no role (the daemon's errNoticeWaits): a role told that its
 // phase ended must hear it while that is news, not after whatever its tree's architect is owed.
 type OutboxLane string
@@ -67,8 +73,8 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueBundle, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
-	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindIssueBundle, OutboxKindIssueRelease, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound},
+	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish, OutboxKindGatedStepsPublish},
 	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
 
@@ -286,7 +292,8 @@ type Notice struct {
 	// Dispatch actor as `<kind>:<id>`, a person `user:<login>`. Empty where no person decided:
 	// gates.design off opened the gate.
 	Actor string `json:"actor,omitempty"`
-	// Ref is that decision's Dispatch reference: `dispatch://<KEY>/spec` for a spec decision,
+	// Ref is that decision's Dispatch reference: the document of the design-gate step a design
+	// decision is of (workflow's stepRef), `dispatch://<KEY>/spec` for the spec step,
 	// `dispatch://<KEY>/ask/<id>` for an answer or a resolution, `dispatch://<KEY>/comment/<id>`
 	// for a reply.
 	Ref string `json:"ref,omitempty"`
@@ -379,8 +386,8 @@ func (b BlockedIssue) MarshalJSON() ([]byte, error) {
 // task, or only with the decisions kept for it. It is the tree as the daemon records it then: the
 // root's generation, the launch of the architect's claim it was written for, whether a hand-over
 // created the root at this generation with its child's phase and pull request (HandedOver) and
-// whether its old root's gate came with them (Carried), the design gate policy and the root's
-// gate, and every issue of the tree. A handed-over root's workers already run their phases, so its
+// whether its old root's gate came with them (Carried), the design gate step by step (Gates),
+// and every issue of the tree. A handed-over root's workers already run their phases, so its
 // architect decomposes nothing anew; one that carried no gate registers its own spec. Decided names
 // what a person decided on the tree while nobody in it could hear it and the start did not name (a
 // decision made while the architect's claim had ended, before this relaunch), in the words of
@@ -393,20 +400,31 @@ type CatchUp struct {
 	Launch     uint64         `json:"launch"`
 	HandedOver bool           `json:"handed_over,omitempty"`
 	Carried    bool           `json:"carried,omitempty"`
-	Gate       CatchUpGate    `json:"gate"`
+	Gates      []CatchUpGate  `json:"gates"`
 	Issues     []CatchUpIssue `json:"issues"`
 	Decided    string         `json:"decided,omitempty"`
 	Kept       *KeptDecisions `json:"kept,omitempty"`
 }
 
-// CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
-// root-issues or off) and, once the architect has registered one, the root's registered document,
-// its latest version, and whether that version is approved.
+// CatchUpGate is one design-gate step as a catch-up states it: the step, whether a person must
+// approve its document (Gated) and, once the architect has registered it, the document, its
+// latest version, the version a person approved, if any, and whether the step is open.
+// Unregistered says the root holds no record of the step at all, which is the step its architect
+// has still to register.
+//
+// A catch-up carries one entry for each step the root must hold open before its tree works
+// (classify.RequiredSteps), so a deployment that gates nothing carries the one spec entry with
+// Gated false: that registration opens the step at once and asks no person, which is what the
+// policy word `off` said. The list replaced that word, because one word cannot name a list and
+// each entry now says its own step's part of it.
 type CatchUpGate struct {
-	Policy   string `json:"policy"`
-	Artifact string `json:"artifact,omitempty"`
-	Version  int    `json:"version,omitempty"`
-	Open     bool   `json:"open"`
+	Step         DesignStep `json:"step"`
+	Gated        bool       `json:"gated"`
+	Unregistered bool       `json:"unregistered,omitempty"`
+	Artifact     string     `json:"artifact,omitempty"`
+	Version      int        `json:"version,omitempty"`
+	Approved     int        `json:"approved,omitempty"`
+	Open         bool       `json:"open"`
 }
 
 // CatchUpIssue is one issue of the tree as a catch-up lists it.
@@ -566,10 +584,14 @@ type SuperviseRequest struct {
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
 
-// GateSeed records the design document version that starts a gate.
+// GateSeed records the design document version that starts a gate, and the step whose row it
+// starts: the seed reads that document from Dispatch and applies what it finds there.
 type GateSeed struct {
 	ArtifactID string `json:"artifactId"`
-	Version    int    `json:"version"`
+	// Step is the design-gate step the registered document is that of. A row written before a
+	// deployment could name a list carries none, and the facts its seed builds name no step.
+	Step    DesignStep `json:"step,omitempty"`
+	Version int        `json:"version"`
 	// Generation is the issue generation that registered the gate; the seed's fact is that
 	// generation's.
 	Generation uint64 `json:"generation"`
@@ -658,6 +680,22 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
+// GatedStepsPublish is the design-gate steps the deployment gates, written onto the Dispatch
+// project row so a person reading Dispatch sees what holds a tree's work without reading the
+// deployment's configuration. Project is the Dispatch project key, and Steps the configured list
+// in the order the deployment gates it, empty for a deployment that gates nothing.
+//
+// The row belongs to no issue: its issue column holds Project itself, the bare key, which the
+// same split_part every reader scopes a row by answers. The daemon publishes at every boot and
+// keeps no record of what it last published, so the route is what decides whether anything
+// changed; a boot whose list matches the stored one writes no row there and appends no event.
+type GatedStepsPublish struct {
+	Project string       `json:"project"`
+	Steps   []DesignStep `json:"steps"`
+}
+
+func (GatedStepsPublish) OutboxKind() OutboxKind { return OutboxKindGatedStepsPublish }
+
 // IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
 // branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
 // the push that creates a branch of a large repository, where it takes a push that moves one. A
@@ -709,40 +747,27 @@ type ReadyMerge struct {
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
-// CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
-// Deploy it carries (exactly one). Build is the commit a daemon boot reported itself built from,
-// or Dispatch announced every server process serves (server.started): the executor runs a GitHub
-// compare of the check's merge commit with it, as the implement App, and starts the look Look when
-// the build contains the merge. Deploy is a completed
-// run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
-// the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
-// after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
-// `dispatch build` or `deploy run`), for the look's wake. OpenedAt is the check instance the
-// compare was queued for (ProductionCheck.OpenedAt): the executor compares nothing once a later
-// merge replaced it; zero names no instance and is not fenced. A row queued before Deploy existed
-// carries a build and no deploy, and decodes as it did.
-type CheckCompare struct {
-	Look     int        `json:"look"`
-	Cause    string     `json:"cause"`
-	Build    string     `json:"build,omitempty"`
-	Deploy   *DeployRun `json:"deploy,omitempty"`
-	OpenedAt time.Time  `json:"openedAt,omitzero"`
+// CheckWakeDue is the one row that can start a production check's next look beside the check's
+// own bound (CheckBound): the wake the checking agent named for itself on a pending report
+// (ProductionCheck.WakeAt), or the retry of a look nobody reported. There is at most one such row
+// per check: it is enqueued once, at the end of a look, and consumed when it fires, and the one
+// deferral that queues another — workflow's checkWakeDue, for an issue back in the workflow —
+// queues it in the transaction that finishes the row it came from. Nothing else wakes a check: no
+// boot, no build and no deploy event reads production any more.
+//
+// Look is the look the check stood at when the wake was named, so a row left over from an earlier
+// look starts nothing; OpenedAt is the check instance it was named for
+// (ProductionCheck.OpenedAt), since a later merge of the same issue replaces the check and counts
+// its looks from one again — zero names no instance and is not fenced. Reason is what the wake
+// is, for the look's wake and the log: the agent's own wake, or the retry of a look nobody
+// reported.
+type CheckWakeDue struct {
+	Look     int       `json:"look"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
+	Reason   string    `json:"reason"`
 }
 
-// DeployRun is the deploy workflow run a CheckCompare reads: attempt Attempt of GitHub Actions run
-// Run, of the configured Workflow (its `.github/workflows/` path) and Step (the step whose success
-// is a deploy), on Branch, the issue's recorded default branch. The executor holds the run GitHub
-// returns to each of them, since anyone holding an Envoy bearer can publish the envelope the row
-// was queued from.
-type DeployRun struct {
-	Run      int64  `json:"run"`
-	Attempt  int    `json:"attempt"`
-	Workflow string `json:"workflow"`
-	Step     string `json:"step"`
-	Branch   string `json:"branch"`
-}
-
-func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
+func (CheckWakeDue) OutboxKind() OutboxKind { return OutboxKindCheckWake }
 
 // CheckLook is a look's bound: due at the look's wake plus the look bound, it ends look Look of
 // the issue's production check as a pending report would, when the look is still open then.
@@ -904,6 +929,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindGatedStepsPublish:
+		value := GatedStepsPublish{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindIssueBranch:
 		value := IssueBranch{}
 		if err := decoder.Decode(&value); err != nil {
@@ -922,8 +953,8 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
-	case OutboxKindCheckCompare:
-		value := CheckCompare{}
+	case OutboxKindCheckWake:
+		value := CheckWakeDue{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
@@ -1053,8 +1084,8 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Relaunch && (value.Op != "start" || value.Task != "" || value.Phase == "" || value.NeedsSlot) {
 			return fmt.Errorf("the relaunch half of a start carries a phase and no task, and waits for no slot")
 		}
-		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
-			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
+		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || !worksCheck(value.Role) || value.Phase != "") {
+			return fmt.Errorf("a supervise check look names a start of the implementer or the tester with no phase, and only a start carries one")
 		}
 		if value.Kept != nil {
 			if value.Op != "start" || value.Task == "" {
@@ -1071,6 +1102,15 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
 		}
+	case GatedStepsPublish:
+		if value.Project == "" {
+			return fmt.Errorf("a gated-steps publish requires the project whose row it writes")
+		}
+		for _, step := range value.Steps {
+			if !step.Valid() {
+				return fmt.Errorf("a gated-steps publish names %q, which is no design-gate step", step)
+			}
+		}
 	case AutoMergeDisable:
 		if value.Number <= 0 {
 			return fmt.Errorf("auto-merge disable requires its pull request number")
@@ -1079,18 +1119,12 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Number <= 0 || value.Head == "" {
 			return fmt.Errorf("READY merge requires its pull request number and head")
 		}
-	case CheckCompare:
+	case CheckWakeDue:
 		if value.Look <= 0 {
-			return fmt.Errorf("check compare requires the look it starts")
+			return fmt.Errorf("check wake requires the look it was named at")
 		}
-		if (value.Build == "" && value.Deploy == nil) || value.Cause == "" {
-			return fmt.Errorf("check compare requires the build commit and what asked for it, or a deploy run in place of the build commit")
-		}
-		if value.Build != "" && value.Deploy != nil {
-			return fmt.Errorf("check compare carries both a build commit and a deploy run; it compares exactly one")
-		}
-		if deploy := value.Deploy; deploy != nil && (deploy.Run <= 0 || deploy.Attempt <= 0 || deploy.Workflow == "" || deploy.Step == "" || deploy.Branch == "") {
-			return fmt.Errorf("check compare's deploy run requires a positive run and attempt and its workflow, step and branch")
+		if value.Reason == "" {
+			return fmt.Errorf("check wake requires the reason it wakes the check")
 		}
 	case CheckLook:
 		if value.Look <= 0 {
@@ -1142,4 +1176,11 @@ func validSuperviseOp(op SuperviseOp) bool {
 	default:
 		return false
 	}
+}
+
+// worksCheck says whether role may work a production check's look: the two values a check's
+// record can hold, the migration's default (implementer) and the one value the project's
+// `production_check` setting takes (tester). An architect's look is refused.
+func worksCheck(role claim.Role) bool {
+	return role == claim.RoleImplementer || role == claim.RoleTester
 }

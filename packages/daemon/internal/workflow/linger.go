@@ -18,7 +18,7 @@ import (
 // takes its tree with it into linger, and a root closed as done on a merged pull request then
 // opens its production check (openCheckIfMerged), behind the linger's rows: the root's own
 // IssueSuspend finishes without acting on the check's start (store.IssueSuspension's restarted
-// fence), and the start resumes the implementer in the still-live pod. A child ends only itself:
+// fence), and the start resumes the checking role in the still-live pod. A child ends only itself:
 // it leaves the table, its phase parked in done, so no transition or status write follows the
 // human's move; the tree's architect is told, and decides what the rest of its tree does, as the
 // shipped daemon routes a child's close to the architect. A later todo re-enters the child. What
@@ -28,9 +28,12 @@ import (
 // closed (issue_close: retired, its session dropped). Its pod goes either way, and the disk it
 // ran on with it, so its Sandbox is deleted either way (record.IssueSuspend), while its parent
 // keeps running in a pod of its own. A child closed as done at its merge still owes its
-// production check: five of its claims are closed, the implementer's is not, no IssueSuspend is
-// written, and the check opens in the implementer's live session; the check's close writes the
-// suspension (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms
+// production check, where the project opens one (Engine.checkRole): five of its claims are
+// closed, the checking role's is not, no IssueSuspend is written, and the check opens in that
+// role's live session; the check's close writes the suspension (closeCheck). A project whose
+// `production_check` is off checks nothing in production, so its merged child close is like any
+// other done: every claim is closed and the Sandbox deleted with the pod and the disk it ran on.
+// A done child set back to todo starts fresh. An issue leaving disarms
 // its open pull request (disarmOpen), as a root's linger disarms every member's.
 //
 // A member's leave may be the last one a merged issue above it waited for: an issue whose pull
@@ -41,8 +44,8 @@ import (
 // member stops holding one runs this function — a status moving to backlog, icebox, triage or
 // done (dispatchIssue), a phase reaching done (transition), the architect's close_root, and
 // LeaveUnslotted — and the boot's sweep is the backstop. The child's check opens after that
-// close, so its start row follows the linger's suspends and resumes the implementer as a root's
-// own check does, rather than being stopped by them.
+// close, so its start row follows the linger's suspends and resumes the checking role as a
+// root's own check does, rather than being stopped by them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if err := e.untellUnresumedChanges(ctx, tx, issue); err != nil {
@@ -67,7 +70,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return e.openCheckIfMerged(ctx, tx, issue, false)
 	}
 	if issue.Phase != phase.Done {
-		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.Phase, issue.Hold, issue.ReadyPending = phase.Done, nil, nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -85,7 +88,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		op = "issue_close"
 	}
 	if merged {
-		except = claim.RoleImplementer
+		except = e.checkRole()
 	}
 	if err := e.everyClaim(ctx, tx, issue, op, fmt.Sprintf("%s is %s", issue.Key, status), except); err != nil {
 		return err
@@ -105,7 +108,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	if root == nil {
 		return fmt.Errorf("suspend issue %s: tree root %s is not recorded", issue.Key, issue.Tree)
 	}
-	if !merged {
+	if except == "" {
 		if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{
 			Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation,
 		}); err != nil {
@@ -172,7 +175,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
+	root.Phase, root.Hold, root.Awaiting, root.ReadyPending = phase.Done, nil, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 
@@ -191,7 +194,9 @@ func (e *Engine) LeaveUnslotted(ctx context.Context, tx pgx.Tx, root record.Issu
 
 // openCheckIfMerged opens issue's production check when its pull request has merged: a done issue
 // with no merged pull request — a root closed before its first phase (close_root), a human's done
-// on an issue short of its merge — has nothing to check in production and opens none.
+// on an issue short of its merge — has nothing to check in production and opens none, and neither
+// does a merged one of a project that checks nothing in production, whose openCheck opens no
+// record, queues no bound row and starts no look (Engine.checkRole).
 func (e *Engine) openCheckIfMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, wake bool) error {
 	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 	if err != nil || pr == nil || pr.State != record.PullRequestMerged {

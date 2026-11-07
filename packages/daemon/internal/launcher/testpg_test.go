@@ -29,6 +29,42 @@ func stubTestPG(t *testing.T) (calls string) {
 	return calls
 }
 
+// toldDSN starts generation with env as its start command's own Env, answers what TestPGVariable
+// held in the child's environment, and stops the generation. A child that held no such variable
+// answers "unset": the shell's `${name-unset}` answers the value for a name set to anything,
+// including the empty string, and "unset" only for a name its environment does not hold.
+func (g *rig) toldDSN(generation uint64, env []string) string {
+	g.t.Helper()
+	return g.told(generation, "${"+TestPGVariable+"-unset}", env, "")
+}
+
+// The launcher that serves the pod's test database names it to every generation it starts, over
+// whatever DSN the daemon's start command carried, and a launcher that serves none takes the
+// variable out of the generation's environment. The daemon and the worker image are deployed
+// from two separately pinned builds and this launcher comes from the image, so the process that
+// creates the database is the one that names it: a role is told a database its own pod's server
+// holds whichever of the two builds is older. It reads whether this launcher was told to serve a
+// database, never whether a server answers: the first `ensure` runs before any role and its
+// failure is logged rather than thrown, so neither rig here runs a server at all.
+func TestEveryGenerationIsToldTheDSNItsOwnLauncherServes(t *testing.T) {
+	// What a daemon of another build sends: the database every image's server serves.
+	const fromTheDaemon = "postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable"
+	serving := newSessionRig(t, Config{TestPostgres: true})
+	if got := serving.toldDSN(1, []string{TestPGVariable + "=" + fromTheDaemon}); got != TestPGDSN {
+		t.Errorf("a generation whose start command carried %s=%q ran with %q, want this launcher's own %q",
+			TestPGVariable, fromTheDaemon, got, TestPGDSN)
+	}
+	if got := serving.toldDSN(2, nil); got != TestPGDSN {
+		t.Errorf("a generation whose start command named no DSN ran with %s=%q, want this launcher's own %q",
+			TestPGVariable, got, TestPGDSN)
+	}
+	none := newSessionRig(t, Config{})
+	if got := none.toldDSN(1, []string{TestPGVariable + "=" + fromTheDaemon}); got != "unset" {
+		t.Errorf("a generation of a launcher that serves no test database ran with %s=%q, want no such variable",
+			TestPGVariable, got)
+	}
+}
+
 // The launcher serves the pod's test database before it accepts a role start: serveTestPG's first
 // `ensure` has returned when it does, so a role that starts at once finds the server listening.
 // Each tick asks again, which is what starts a postmaster that has died, and every call carries
