@@ -74,8 +74,8 @@ func (a implementApp) ReadToken(ctx context.Context, _ appauth.AppRole, owner st
 // ProjectDirs is the harness's GitHubDirs (Options.GitHubDirs): the directories a bundle built
 // now for repo would hold (appauth.GitHubDirs), which is what Credential renders, so the two
 // answers move together as the daemon's own do.
-func (t implementTokens) ProjectDirs(repo ghrepo.Repository) []string {
-	return appauth.GitHubDirs(t.repositories, ghrepo.Renames{}, t.left, repo)
+func (t implementTokens) ProjectDirs(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+	return appauth.GitHubDirs(t.repositories, ghrepo.Renames{}, t.left, roles, repo)
 }
 
 // repositories is the run's repositories, as the daemon's mapping would serve them.

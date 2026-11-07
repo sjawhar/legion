@@ -585,7 +585,9 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	// The directories the pods' gh is built from, which sandbox.New now requires
 	// (checkSupervision) and the runtime reads a running pod's gh projection against: the rig's
 	// issues are all on liveRepo, so its owner's directory is the whole set.
-	opts.GitHubDirs = func(ghrepo.Repository) []string { return []string{strings.Split(liveRepo, "/")[0]} }
+	opts.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string {
+		return []string{strings.Split(liveRepo, "/")[0]}
+	}
 	opts.Mapped = func() []ghrepo.Repository { return nil }
 	opts.Tools.Legion = idleRigLegionTool(r.t, tools)
 	opts.Agent = idleRigAgentTool(r.t, tools)

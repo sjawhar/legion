@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -164,7 +165,7 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 			if err := bundle.Validate(); err != nil {
 				t.Errorf("the bundle does not validate: %v", err)
 			}
-			if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, tc.repo); !slices.Equal(dirs, bundle.DirNames()) {
+			if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, Roles, tc.repo); !slices.Equal(dirs, bundle.DirNames()) {
 				t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
 			}
 		})
@@ -179,7 +180,7 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	if _, err := none(context.Background(), claim.RoleController, ghrepo.Repository{}); !errors.Is(err, runtime.ErrNoGitHubOwner) {
 		t.Errorf("a bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
-	if dirs := GitHubDirs(projectRepos(), ghrepo.Renames{}, nil, ghrepo.Repository{}); len(dirs) != 0 {
+	if dirs := GitHubDirs(projectRepos(), ghrepo.Renames{}, nil, Roles, ghrepo.Repository{}); len(dirs) != 0 {
 		t.Errorf("GitHubDirs of a project with no repository = %q, want none", dirs)
 	}
 }
@@ -216,7 +217,7 @@ func TestGitHubCredentialNarrowsEverySiblingRepositoryToItsOwnDirectory(t *testi
 	if want := []string{"cybermonklabs", "theorem-labs", "theorem-labs/nats-server"}; !slices.Equal(bundle.DirNames(), want) {
 		t.Errorf("directories = %q, want %q", bundle.DirNames(), want)
 	}
-	if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, ghrepo.MustParse("theorem-labs/agent-infra")); !slices.Equal(dirs, bundle.DirNames()) {
+	if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, Roles, ghrepo.MustParse("theorem-labs/agent-infra")); !slices.Equal(dirs, bundle.DirNames()) {
 		t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
 	}
 	if want := []string{"cybermonklabs/legion", "theorem-labs/agent-infra", "theorem-labs/nats-server"}; !slices.Equal(minted, want) {
@@ -332,7 +333,7 @@ func TestGitHubCredentialBundlesARenamedPairAsOneOwner(t *testing.T) {
 			if err := bundle.Validate(); err != nil {
 				t.Errorf("the bundle does not validate: %v", err)
 			}
-			if dirs := GitHubDirs(repos, renames, nil, tc.repo); !slices.Equal(dirs, bundle.DirNames()) {
+			if dirs := GitHubDirs(repos, renames, nil, Roles, tc.repo); !slices.Equal(dirs, bundle.DirNames()) {
 				t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
 			}
 		})
@@ -586,7 +587,7 @@ func TestGitHubCredentialLeavesOutARepositoryNamedLikeGhsOwnFiles(t *testing.T) 
 			if err := bundle.Validate(); err != nil {
 				t.Errorf("the bundle does not validate: %v", err)
 			}
-			if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, ghrepo.MustParse(owner+"/legion")); !slices.Equal(dirs, bundle.DirNames()) {
+			if dirs := GitHubDirs(repos, ghrepo.Renames{}, nil, Roles, ghrepo.MustParse(owner+"/legion")); !slices.Equal(dirs, bundle.DirNames()) {
 				t.Errorf("GitHubDirs = %q, want the bundle's own directories %q", dirs, bundle.DirNames())
 			}
 			if count := strings.Count(said.String(), "repository="+named); count != 1 {
@@ -643,5 +644,60 @@ func TestABundleRefusesADefaultOwnerGitHubRefusesEveryLeaseOf(t *testing.T) {
 	}
 	if _, err := controller(context.Background(), "sjawhar"); err != nil {
 		t.Errorf("the controller asking for an owner that answers = %v, want its bundle", err)
+	}
+}
+
+// A read lease over several repositories GitHub refuses is asked for again one repository at a
+// time, and then over the ones that answered. Where every one of them answered, that last ask
+// names what the first ask named, which the Manager remembers as refused for five minutes
+// (narrowingRefusalWindow) — and that memory is stale by construction: every repository it
+// covers has just answered alone. Were it served, the directory would be refused with no call
+// to GitHub, and the whole bundle with it — the write lease, the launch and the controller's
+// own pod alike — over repositories GitHub reaches, until the window passed (INFRA-513).
+func TestTheLastAskOverTheRepositoriesThatAnsweredIsMadePastTheRememberedRefusal(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	var stderr bytes.Buffer
+	// Whether the installation reaches gadgets: the account adds it part-way through.
+	reaches := false
+	github := &keyModeGitHub{owners: []string{"acme"}, slug: "legion-reviewer"}
+	github.answer = func(_ int, body accessTokensBody) (int, string) {
+		if !reaches && slices.Contains(body.Repositories, "gadgets") {
+			return http.StatusUnprocessableEntity, `{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`
+		}
+		return http.StatusOK, mintedFor("ghs_"+strings.Join(body.Repositories, "_"), now.Add(time.Hour), body.Permissions, body.Repositories...)
+	}
+	tokens := keyModeManager(t, github, &now, &stderr)
+	controller := ControllerCredential(tokens, projectRepos("acme/gadgets", "acme/widgets"), ghrepo.Renames{}, NewLeftOut(), quietBundleLog())
+
+	// The probe of an earlier bundle asked for the one repository the installation does not
+	// reach, and the Manager remembers that scope's refusal.
+	if _, err := tokens.ReadToken(context.Background(), Review, "acme", []string{"gadgets"}); !errors.Is(err, ErrNarrowingRefused) {
+		t.Fatalf("the read lease over the repository the installation does not reach = %v, want ErrNarrowingRefused", err)
+	}
+
+	// Four minutes on, the bundle's own ask over both repositories is refused for that same
+	// repository and remembered under a window of its own; the directory holds the one
+	// repository that answered.
+	now = now.Add(4 * time.Minute)
+	bundle, err := controller(context.Background(), "acme")
+	if err != nil {
+		t.Fatalf("the controller's bundle while the installation reaches gadgets not at all: %v", err)
+	}
+	if got := bundleTokens(t, bundle)["acme"]; got != "ghs_widgets" {
+		t.Fatalf("acme's directory holds %q, want the lease over widgets alone", got)
+	}
+
+	// The account adds gadgets to the installation. Two minutes later the refusal of gadgets
+	// alone has passed its window, so the probe asks GitHub and is answered, while the refusal
+	// of the two together, met at four minutes, is remembered still — and is the refusal of an
+	// ask every repository of which has just answered.
+	reaches = true
+	now = now.Add(2 * time.Minute)
+	bundle, err = controller(context.Background(), "acme")
+	if err != nil {
+		t.Fatalf("the controller's bundle once GitHub reaches both repositories = %v, want a bundle: the refusal remembered for their scope was met before either of them answered", err)
+	}
+	if got := bundleTokens(t, bundle)["acme"]; got != "ghs_gadgets_widgets" {
+		t.Fatalf("acme's directory holds %q, want the lease over both repositories", got)
 	}
 }

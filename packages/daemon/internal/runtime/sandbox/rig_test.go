@@ -95,7 +95,7 @@ func testOptions() Options {
 		Tokens:                staticTokens{},
 		GitHubCredential:      staticCredential,
 		ControllerCredential:  staticControllerCredential,
-		GitHubDirs:            func(ghrepo.Repository) []string { return staticDirs },
+		GitHubDirs:            func(ghrepo.Repository, []appauth.AppRole) []string { return staticDirs },
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
@@ -189,7 +189,7 @@ var servedDirs = slices.Sorted(slices.Values(append(slices.Clone(staticDirs), ad
 // mapping). A pod created before it projects no directory for the new owner and never will
 // (movedGhDirs).
 func servingAddedOwner(o *Options) {
-	o.GitHubDirs = func(ghrepo.Repository) []string { return servedDirs }
+	o.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string { return servedDirs }
 	credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		bundle, err := staticCredential(ctx, role, repo)
 		if err != nil {

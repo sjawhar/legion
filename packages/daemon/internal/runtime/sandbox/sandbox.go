@@ -51,6 +51,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -110,7 +111,7 @@ type Runtime struct {
 	tokens                         ProvisionTokens
 	gitHubCredential               runtime.GitHubCredential
 	controllerCredential           runtime.ControllerCredential
-	gitHubDirs                     func(repo ghrepo.Repository) []string
+	gitHubDirs                     func(repo ghrepo.Repository, roles []appauth.AppRole) []string
 	store                          Store
 	conns                          runtime.Conns
 	launchers                      *launchers

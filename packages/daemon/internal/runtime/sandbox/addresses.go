@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -397,6 +398,13 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 // again, for ever (INFRA-513). A mint that answers for it again clears the record, and the pod
 // is then replaced once, which is right.
 //
+// That record is read for the Apps this pod runs and no others: the roles of the kind the role
+// belongs to (podKindFor), mapped through appauth.AppRoleFor. An issue pod projects what both
+// Apps' bundles hold, so a directory either App is refused is in no projection of it; the
+// project controller's pod holds the review App's bundle alone, and an owner the implement
+// App's installation does not reach is one its own `gh` reaches all the same, so a controller
+// pod without that owner's directory has drifted and is replaced by its next launch.
+//
 // Owner directories alone are compared, on both sides (ghOwnerDirs). A bundle built now holds a
 // `<owner>/<repo>` directory for each other repository the pod's own owner serves, and a pod that
 // lacks one of those is not a pod to replace: a repository the mapping gains under another owner
@@ -441,7 +449,7 @@ func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, b
 	slices.Sort(held)
 	held = ghOwnerDirs(held)
 	repo, _ := fetchRepository(pod)
-	served := ghOwnerDirs(r.gitHubDirs(repo))
+	served := ghOwnerDirs(r.gitHubDirs(repo, podAppRoles(podKindFor(role))))
 	lacking := slices.ContainsFunc(served, func(dir string) bool {
 		_, found := slices.BinarySearch(held, dir)
 		return !found
@@ -450,6 +458,20 @@ func (r *Runtime) movedGhDirs(pod *corev1.Pod, role claim.Role) (movedAddress, b
 		return movedAddress{}, false
 	}
 	return movedAddress{where: name, held: ghDirsName(held), handed: ghDirsName(served)}, true
+}
+
+// podAppRoles are the GitHub Apps a pod of kind holds a bundle of, each named once
+// (appauth.AppRoleFor): both of them for an issue pod, whose six roles run as one or the other,
+// and the review App alone for the project controller's. It is what the record of the
+// directories a mint found GitHub refuses is read for (movedGhDirs, appauth.LeftOut).
+func podAppRoles(kind podKind) []appauth.AppRole {
+	apps := make([]appauth.AppRole, 0, len(appauth.Roles))
+	for _, role := range kind.roles() {
+		if app := appauth.AppRoleFor(role); !slices.Contains(apps, app) {
+			apps = append(apps, app)
+		}
+	}
+	return apps
 }
 
 // ghOwnerDirs is the owner directories of a gh directory set, in the order they come: the names

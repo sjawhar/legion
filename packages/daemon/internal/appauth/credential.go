@@ -119,9 +119,15 @@ func ControllerCredential(tokens Tokens, repos func() []ghrepo.Repository, renam
 //
 // It is sticky, not timed: a directory stays recorded left out until a mint of it answers, which
 // clears it, and the comparison then names it once and the pod is replaced once, which is right.
-// It is kept per App role because a pod's projection is its roles' directory sets intersected
-// (sandbox's gitHubBundles): a directory one App's installation does not reach is in no pod's
-// projection, however readily the other App mints it.
+// It is kept per App role, and read for the App roles of the pod an answer is about alone
+// (left, GitHubDirs): a pod's projection is its roles' directory sets intersected (sandbox's
+// gitHubBundles), so a directory one of its own Apps does not reach is in no such pod's
+// projection, however readily the other App mints it — while what the other App's mint found
+// says nothing about a pod that does not run it. The project controller's pod runs the review
+// App alone: were the implement App's record read for it too, a controller launched before an
+// owner was served would never be found to lack that owner's directory, its gh would hold no
+// token for an owner the review App reaches, and in a project with no live issue pod nothing
+// would mint for the implement App to clear the record (INFRA-513).
 //
 // A nil record holds nothing and names nothing left out: the API's controller route builds a
 // bundle of its own per request (internal/api's controllerGitHubCredential), and no pod's
@@ -157,16 +163,18 @@ func (l *LeftOut) record(role AppRole, dir string, left bool) {
 	l.dirs[role][dir] = true
 }
 
-// left reports that the last mint of dir as some App role left it out of that role's bundle, so
-// no pod created now projects it (GitHubDirs).
-func (l *LeftOut) left(dir string) bool {
+// left reports that the last mint of dir as one of roles — the App roles of the pod the answer
+// is for — left it out of that role's bundle, so no pod of those Apps created now projects it
+// (GitHubDirs). A pod running one of them is told nothing by what the mints of an App it does
+// not run found.
+func (l *LeftOut) left(dir string, roles []AppRole) bool {
 	if l == nil {
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, dirs := range l.dirs {
-		if dirs[dir] {
+	for _, role := range roles {
+		if l.dirs[role][dir] {
 			return true
 		}
 	}
@@ -178,10 +186,17 @@ func (l *LeftOut) left(dir string) bool {
 // (sandbox.Options.GitHubDirs), since a pod's projection is fixed at the directories of its
 // creation. A zero repo is the controller's owner-only set, the bundle its pod was launched with.
 //
+// roles are the App roles of the pod that pod projection belongs to, which is what the record of
+// the directories a mint found GitHub refuses is read for (left, LeftOut): an issue pod runs
+// both Apps and projects what both their bundles hold, so a directory either App is refused is
+// in no projection of it, while the project controller's pod runs the review App alone and is
+// handed every directory that App mints, whatever the implement App's installation reaches
+// (sandbox's movedGhDirs, which maps its pod's kind's roles through AppRoleFor).
+//
 // It and GitHubCredential are built from one description of the bundle (bundleDirs), so the set a
 // pod is compared against and the set a pod would be handed cannot drift apart. It mints nothing
 // and calls GitHub not at all, reading the mapping, the configured renames and what the mints
-// before it recorded (left, LeftOut), since the drift check reads it on every evaluation: a
+// before it recorded, since the drift check reads it on every evaluation: a
 // repository whose name no directory may carry is left out of both (bundleDirs), and a directory
 // GitHub refuses every lease of is left out of both as well — of the bundle by the mint that met
 // the refusal, and of this answer by the record that mint wrote, so a pod lacking a directory no
@@ -189,14 +204,14 @@ func (l *LeftOut) left(dir string) bool {
 // A bundle no launch could write — an owner directory ghconfig refuses a name for, which is what
 // GitHubCredential fails on — is no set to compare a pod against and answers none, leaving every
 // pod where it is.
-func GitHubDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, left *LeftOut, repo ghrepo.Repository) []string {
+func GitHubDirs(repos func() []ghrepo.Repository, renames ghrepo.Renames, left *LeftOut, roles []AppRole, repo ghrepo.Repository) []string {
 	layout, err := bundleDirs(repos, renames, repo)
 	if err != nil {
 		return nil
 	}
 	names := make([]string, 0, len(layout.dirs))
 	for _, dir := range layout.dirs {
-		if left.left(dir.name) {
+		if left.left(dir.name, roles) {
 			continue
 		}
 		names = append(names, dir.name)
@@ -506,6 +521,15 @@ func bundleDefault(bundle ghconfig.Bundle, appRole AppRole, role claim.Role, dfl
 // it reaches (leaseScope), so the lease over a single repository that answered is the one its own
 // ask already minted, and a directory of one repository is not asked for twice. A write lease is
 // never softened, and no other failure is read as a refusal of what it named.
+//
+// The last ask, over the repositories that answered, is made past any refusal the Manager
+// remembers for their scope (RefusalForgetter, narrowingRefusalWindow): every repository it
+// names answered alone a moment ago, so a refusal of them together was met before they did and
+// is stale by construction. Where it is every repository the directory holds, that remembered
+// refusal is the one this ask began with — and serving it would leave the directory, and with
+// it the whole bundle, the write lease and the launch included, refused for the rest of the
+// window over repositories GitHub reaches (INFRA-513). A Tokens that remembers no refusal
+// implements no RefusalForgetter and is asked nothing.
 func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease, log *slog.Logger) (entry ghconfig.Rendered, reached bool, err error) {
 	lease, err := hold.mint(ctx, tokens, appRole)
 	if err == nil {
@@ -540,6 +564,9 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 	case 1:
 		lease = only
 	default:
+		if forgetter, ok := tokens.(RefusalForgetter); ok {
+			forgetter.ForgetNarrowingRefusal(appRole, hold.owner, answered)
+		}
 		if lease, err = hold.over(answered).mint(ctx, tokens, appRole); err != nil {
 			return ghconfig.Rendered{}, false, err
 		}

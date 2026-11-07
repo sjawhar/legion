@@ -579,7 +579,18 @@ func (m *Manager) installedFromCommand(ctx context.Context, role AppRole, repo g
 // the mapping's check recording the repository unread and running the command again on every
 // backoff, where the answer is already in: the repository is refused, as it was before a lease
 // named its repositories.
+//
+// The read is that answer's one source, so it drops whatever the Manager remembers of that
+// scope's refusal first (ForgetNarrowingRefusal) and runs the command: the mapping's check is
+// made precisely when an operator has changed something — the App's installation above all —
+// and a read served from the five minutes a refusal is remembered for would tell that operator
+// the App is not installed on a repository it was just installed on (lease,
+// narrowingRefusalWindow, INFRA-513). A refusal the read itself gets is remembered as any
+// mint's is: it is GitHub's answer of this moment, which the bundles refreshing behind the
+// check would otherwise ask for again at once, and the next mapping read drops it again as this
+// one did.
 func (m *Manager) listInstallation(ctx context.Context, role AppRole, repo ghrepo.Repository) (installed, refused bool, err error) {
+	m.ForgetNarrowingRefusal(role, repo.Owner(), []string{repo.Name()})
 	lease, err := m.ReadToken(ctx, role, repo.Owner(), []string{repo.Name()})
 	if errors.Is(err, ErrNotInstalled) || errors.Is(err, ErrNarrowingRefused) {
 		return false, false, nil

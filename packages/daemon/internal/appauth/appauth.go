@@ -339,6 +339,36 @@ func (m *Manager) Forget(role AppRole, owner string) {
 	})
 }
 
+// RefusalForgetter drops the narrowing refusal a token source remembers for one read scope, so
+// the next ask of that scope reaches GitHub rather than the memory
+// (Manager.ForgetNarrowingRefusal). It is optional, as Forgetter is: a caller reaches it through
+// a type assertion on its Tokens (dirEntry), so a test fake and a harness that implement Tokens
+// alone keep working — a source that remembers no refusal has none to drop.
+type RefusalForgetter interface {
+	ForgetNarrowingRefusal(role AppRole, owner string, repos []string)
+}
+
+// ForgetNarrowingRefusal drops the narrowing refusal remembered for role's read lease over repos
+// on owner (lease, narrowingRefusalWindow), and nothing else: no lease, and no other scope's
+// refusal. It is for the caller that knows that one memory is stale — a directory's lease asked
+// for again over the repositories that have just answered one at a time (dirEntry), the
+// mapping's own installation read (listInstallation) — where Forget, which drops every lease and
+// every refusal of the owner, would throw away tokens that are good and make every scope of that
+// owner mint again.
+//
+// The scope is the one the ask itself is cached under: the repositories as a token request
+// carries them (askedRepositories), which a blank name makes no scope of, and nothing is
+// remembered under one.
+func (m *Manager) ForgetNarrowingRefusal(role AppRole, owner string, repos []string) {
+	asked, err := askedRepositories(role, owner, repos)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.refusals, leaseScope(true, role, owner, asked))
+}
+
 // scope is one lease's identity, and the key every lease is cached, awaited and warned under:
 // which kind of token it is, the App role it is minted as, the owner whose installation mints it
 // and the repositories it reaches. The repositories are part of it because they are part of what
@@ -410,6 +440,13 @@ func (r mintRequest) scope() scope { return leaseScope(r.read, r.role, r.owner, 
 // would otherwise ask it again. Only ErrNarrowingRefused is remembered — GitHub's trouble
 // (TransientError) and every other failure keep asking as they always did — and a mint of the
 // scope that succeeds drops what was remembered of it.
+//
+// The memory answers the ask that would repeat a refusal, never one that already knows better.
+// A caller holding what the window cannot know — a directory whose every repository has just
+// answered one at a time, so the refusal of them together was met before they did (dirEntry),
+// and the mapping's installation read, whose whole business is to find the answer changed
+// (listInstallation) — drops that one scope's memory before it asks
+// (ForgetNarrowingRefusal), so what it is served is GitHub's answer now.
 //
 // A mint that succeeds also drops every lease the cache holds that has expired. The cache is
 // keyed by the repositories a lease reaches, so a mapping that changes over a long-lived

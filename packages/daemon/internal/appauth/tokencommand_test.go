@@ -366,6 +366,46 @@ func TestTokenModeARepositoryTheInstallationDoesNotReachIsNotInstalled(t *testin
 	}
 }
 
+// The mapping's installation read is the one source of that answer, so it runs the command and
+// reads GitHub however recently a narrowing was refused for the same one-repository scope
+// (listInstallation, ForgetNarrowingRefusal). Served from the Manager's memory instead, an
+// operator who adds the repository to the App's installation and saves the mapping inside the
+// five minutes a refusal is remembered for would be told the App is not installed on it, while
+// the bundle refreshes behind the check kept that memory alive (INFRA-513).
+func TestTheInstallationReadAsksPastARememberedNarrowingRefusal(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	broker := newFakeBroker(t, []string{"acme"}, now.Add(time.Hour))
+	broker.reaches(t, "widgets")
+	github := &fakeTokenGitHub{slug: "legion-implementer", appID: "12345", repos: []string{"acme/widgets"}}
+	var stderr bytes.Buffer
+	tokens := tokenModeManager(github.serve(t), broker, &now, &stderr)
+
+	// A bundle's own mint of the repository the installation does not reach: the Manager
+	// remembers that scope's refusal.
+	if _, err := tokens.ReadToken(context.Background(), Implement, "acme", []string{"gadgets"}); !errors.Is(err, ErrNarrowingRefused) {
+		t.Fatalf("the read lease over a repository the installation does not reach = %v, want ErrNarrowingRefused", err)
+	}
+	if got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/gadgets")); err != nil || got {
+		t.Fatalf("InstalledOn(acme/gadgets) = %v, %v; want not installed and no error", got, err)
+	}
+
+	// The account adds the repository to the installation, and the operator saves the mapping a
+	// minute later, well inside the window the refusal is remembered for.
+	broker.reaches(t, "widgets", "gadgets")
+	github.mu.Lock()
+	github.repos = []string{"acme/widgets", "acme/gadgets"}
+	github.mu.Unlock()
+	now = now.Add(time.Minute)
+
+	if got, err := tokens.InstalledOn(context.Background(), Implement, ghrepo.MustParse("acme/gadgets")); err != nil || !got {
+		t.Fatalf("InstalledOn(acme/gadgets) once the installation reaches it = %v, %v; want installed: the read asks GitHub, never the Manager's memory of the refusal", got, err)
+	}
+	want := []string{"acme|gadgets|1", "acme|gadgets|1", "acme|gadgets|1"}
+	if runs := broker.runs(t); !slices.Equal(runs, want) {
+		t.Errorf("command runs = %q, want %q: the bundle's own mint, and the command run again for each installation read", runs, want)
+	}
+}
+
 // `agent-secrets` exits 75 while its request still waits for approval: transient, never the
 // configuration's answer.
 func TestTokenModeAPendingApprovalIsTransient(t *testing.T) {
