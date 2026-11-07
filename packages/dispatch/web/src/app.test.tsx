@@ -9,9 +9,9 @@ import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import type { AuthenticatedUser } from "./api/types";
 import { AuthGate } from "./app";
-// The Answers, document and project pages are lazy routes of the app. Importing them here loads
-// their modules with the test file, so a `findByRole` after the click waits for the render alone,
-// not for that first load, which takes longer than the second such a wait allows.
+// The Answers, document and project pages are lazy routes of the app. A page module's first
+// compile is not what a wait is for, so the modules are loaded here, with the test file, and no
+// wait measures that load.
 import "./features/answers/AnswersPage";
 import "./features/document/DocumentPage";
 import "./features/project/ProjectPage";
@@ -534,13 +534,6 @@ test("nothing is read and no socket opens until whoami answers, and the feed res
 });
 
 test("project routes render the project page and a project document route", async () => {
-  // React.lazy loads each page module on its first render (app.tsx). Loading the two pages this
-  // test routes to first keeps their cold compile, hundreds of milliseconds on a loaded host, out
-  // of findBy's one-second window, which is for the routing under test.
-  await Promise.all([
-    import("./features/project/ProjectPage"),
-    import("./features/document/DocumentPage"),
-  ]);
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -626,9 +619,6 @@ test("project routes render the project page and a project document route", asyn
 });
 
 test("the Inbox page links to the answers page, which renders at /answers", async () => {
-  // React.lazy loads the page module on its first render; loading it first keeps its cold
-  // compile out of findBy's window, as the project-routes test above does.
-  await import("./features/answers/AnswersPage");
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({

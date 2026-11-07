@@ -8,6 +8,7 @@ import {
 import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { realClock } from "../../__tests__/fake-clock";
 import {
   type KeptTab,
   keptTab,
@@ -142,8 +143,7 @@ async function onFakeClock(body: () => Promise<void>): Promise<void> {
   try {
     await body();
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 }
 

@@ -1264,9 +1264,8 @@ test("a session with hundreds of commands shows fifty of them", async () => {
 // Completion is offered only where the session would run the text as a command: a session that
 // sent no command list cannot, a `/` inside a message is just text at a terminal too, and a BTW
 // is a side question the session answers rather than input it runs. None of them mentions `/`.
-test("no completion is offered without a command list, for a / mid-message, or in BTW", async () => {
-  jest.useFakeTimers();
-  try {
+test("no completion is offered without a command list, for a / mid-message, or in BTW", () =>
+  onFakeClock(async () => {
     const silent = await renderWithCommands();
     expect(silent.placeholder).not.toContain("/");
     type(silent, "/");
@@ -1288,10 +1287,7 @@ test("no completion is offered without a command list, for a / mid-message, or i
     type(input, "/co");
     await jump(50);
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
-  } finally {
-    realClock();
-  }
-});
+  }));
 
 /** The models a session lists, in its own order: two providers interleaved, and a custom
  *  provider's id holding an `@` and a trailing `:<level>`, which a pick must send unchanged. */
@@ -1665,9 +1661,8 @@ test("Enter sends while the session is mid-turn", async () => {
 // accessible description, and on a line in the composer a reader without a pointer can see. It
 // stays focusable (aria-disabled, not disabled), and neither a click nor Enter sends. With text,
 // the line goes back to saying how to send.
-test("with an empty box Send is refused, says why on screen, and sends nothing", async () => {
-  jest.useFakeTimers();
-  try {
+test("with an empty box Send is refused, says why on screen, and sends nothing", () =>
+  onFakeClock(async () => {
     const createAgentMessage = acceptSends();
     renderLiveView({
       agentState: {},
@@ -1699,10 +1694,7 @@ test("with an empty box Send is refused, says why on screen, and sends nothing",
     expect(sendButton().hasAttribute("aria-describedby")).toBe(false);
     expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
     expect(within(composer()).queryByText("Type a message first.")).toBeNull();
-  } finally {
-    realClock();
-  }
-});
+  }));
 
 // A send Dispatch refuses is not lost: the message is held on screen with the reason, for Retry or
 // Discard, and the box is free for the next one.
@@ -1733,9 +1725,8 @@ test("a refused send keeps the message on screen and says why", async () => {
 // A refusal belongs to the session that sent the message. One landing while the reader is on
 // another session leaves that session's box and screen alone, and is waiting, message and reason,
 // when they go back. A send out on one session does not hold Send on another.
-test("a refusal that lands after switching sessions stays with the session that sent it, not the one on screen", async () => {
-  jest.useFakeTimers();
-  try {
+test("a refusal that lands after switching sessions stays with the session that sent it, not the one on screen", () =>
+  onFakeClock(async () => {
     const { createAgentMessage, held } = holdSends();
     renderLiveView({
       agentState: {},
@@ -1773,10 +1764,7 @@ test("a refusal that lands after switching sessions stays with the session that 
     expect(
       within(screen.getByTestId("agent-send-held")).getByText("Your message: “hold this”")
     ).toBeTruthy();
-  } finally {
-    realClock();
-  }
-});
+  }));
 
 // Messages to one session go out one after another, in press order: Send stays open while one is
 // out, and a press - a click or Enter - while one is out is its own message, which waits its turn.
@@ -1870,9 +1858,8 @@ test("a draft stays with its session across a switch to another", async () => {
 // "Send", and the line under the box says what its placeholder says) and holds no other's; a
 // message out on another session holds nothing there either, and Enter sends nothing while a
 // switch holds.
-test("a pending switch holds its own session's Send, and a send out on another holds nothing there", async () => {
-  jest.useFakeTimers();
-  try {
+test("a pending switch holds its own session's Send, and a send out on another holds nothing there", () =>
+  onFakeClock(async () => {
     const { createAgentMessage, held: answers } = holdSends();
     const view = renderLiveView({
       agentState: {},
@@ -1955,10 +1942,7 @@ test("a pending switch holds its own session's Send, and a send out on another h
     expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
     await switchTo("Reviewer");
     expect(sendButton().disabled).toBe(false);
-  } finally {
-    realClock();
-  }
-});
+  }));
 
 // A session advertising no delivery mode keeps today's behaviour mid-turn too: Send is
 // pressable, the message goes as an aside, and the warning that it records a failed attempt

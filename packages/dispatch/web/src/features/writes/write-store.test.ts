@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
+import { realClock } from "../../__tests__/fake-clock";
 import { keptTab, memoryFiles } from "../../__tests__/kept-sends-harness";
 import { answerSends, type SendAnswers } from "../../__tests__/send-answers";
 import {
@@ -43,8 +44,7 @@ async function onFakeClock(body: () => Promise<void>): Promise<void> {
   try {
     await body();
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 }
 

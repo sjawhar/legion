@@ -20,9 +20,11 @@ beforeEach(() => {
     disconnect() {}
     unobserve() {}
   } as unknown as typeof ResizeObserver;
+  jest.useFakeTimers();
 });
 
 afterEach(() => {
+  realClock();
   globalThis.ResizeObserver = originalObserver;
 });
 
@@ -47,7 +49,6 @@ function drawnRoot(): { element: HTMLElement; grow(by: number): void } {
 const AFTER_THE_QUIET = 300;
 
 test("a document that grows under the target focuses it again, once", async () => {
-  jest.useFakeTimers();
   const drawn = drawnRoot();
   let focused = 0;
   const stop = refocusWhenSettled(() => (focused += 1), drawn.element);
@@ -60,12 +61,10 @@ test("a document that grows under the target focuses it again, once", async () =
     expect(focused).toBe(1);
   } finally {
     stop();
-    realClock();
   }
 });
 
 test("a document that keeps its height leaves the target where the focus put it", async () => {
-  jest.useFakeTimers();
   const drawn = drawnRoot();
   let focused = 0;
   const stop = refocusWhenSettled(() => (focused += 1), drawn.element);
@@ -77,12 +76,10 @@ test("a document that keeps its height leaves the target where the focus put it"
     expect(focused).toBe(0);
   } finally {
     stop();
-    realClock();
   }
 });
 
 test("a reader who moved on after the document grew is not pulled back", async () => {
-  jest.useFakeTimers();
   const drawn = drawnRoot();
   let focused = 0;
   const stop = refocusWhenSettled(() => (focused += 1), drawn.element);
@@ -94,27 +91,20 @@ test("a reader who moved on after the document grew is not pulled back", async (
     expect(focused).toBe(0);
   } finally {
     stop();
-    realClock();
   }
 });
 
 test("a dropped re-run never runs, however the document grows after it", async () => {
-  jest.useFakeTimers();
-  try {
-    const drawn = drawnRoot();
-    let focused = 0;
-    refocusWhenSettled(() => (focused += 1), drawn.element)();
+  const drawn = drawnRoot();
+  let focused = 0;
+  refocusWhenSettled(() => (focused += 1), drawn.element)();
 
-    drawn.grow(300);
-    await tick(AFTER_THE_QUIET);
-    expect(focused).toBe(0);
-  } finally {
-    realClock();
-  }
+  drawn.grow(300);
+  await tick(AFTER_THE_QUIET);
+  expect(focused).toBe(0);
 });
 
 test("a caller with no drawn root and no diagram waiting arms nothing", async () => {
-  jest.useFakeTimers();
   let focused = 0;
   const stop = refocusWhenSettled(() => (focused += 1));
 
@@ -124,6 +114,5 @@ test("a caller with no drawn root and no diagram waiting arms nothing", async ()
     expect(focused).toBe(0);
   } finally {
     stop();
-    realClock();
   }
 });

@@ -18,6 +18,7 @@ import {
   type UploadImplementation,
 } from "../api/client";
 import { QUERY_RETRY_DELAY_MS, queryRetryDelay } from "../api/query-client";
+import { realClock } from "./fake-clock";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -81,15 +82,14 @@ function keyed(key: string): { key: string } {
   return { key };
 }
 
-/** Runs `body` on the fake clock. A timer left at zero delay would hang a later test's `waitFor`
- *  once the real clock is back, so the fake one moves a millisecond before it goes. */
+/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
+ *  timer left at zero delay would otherwise hang a later test's `waitFor`. */
 async function onFakeClock(body: () => Promise<void>): Promise<void> {
   jest.useFakeTimers();
   try {
     await body();
   } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
+    realClock();
   }
 }
 

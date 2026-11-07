@@ -5,10 +5,10 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { jump } from "../../__tests__/fake-clock";
 import {
+  dwellOn,
   type IntersectionControl,
   installIntersectionObserver,
   type Placement,
-  dwellOn as showAndDwell,
 } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssueStates, answerThreadReads } from "../../__tests__/send-answers";
@@ -2013,10 +2013,15 @@ function renderThreads(lists: Lists, unread: readonly string[], focusItemId?: st
   };
 }
 
-/** The dwell of the fixture, on the fake clock this file's tests leave to it to install. */
-async function dwellOn(viewport: IntersectionControl, element: Element, placement?: Placement) {
+/** The shared dwell with the fake clock it moves: this file's tests leave installing the clock to
+ *  the dwell rather than installing it at their head. */
+async function dwellOnFakeClock(
+  viewport: IntersectionControl,
+  element: Element,
+  placement?: Placement
+) {
   jest.useFakeTimers();
-  await showAndDwell(viewport, element, placement);
+  await dwellOn(viewport, element, placement);
 }
 
 /** A session's reply in a message thread. */
@@ -2042,7 +2047,7 @@ test("landing on a message thread shows its replies and marks the thread read th
     await screen.findByText("Session reply message-2");
     const newest = page.turn("message:message-2");
     expect(page.viewport.observed()).toContain(newest);
-    await dwellOn(page.viewport, newest);
+    await dwellOnFakeClock(page.viewport, newest);
     expect(page.mark.mock.calls).toEqual([
       ["message-1", { read_through: "2026-09-09T00:05:00.25Z" }, keyedAttempt],
     ]);
@@ -2063,7 +2068,7 @@ test("a message thread taller than the screen is marked read from its newest rep
   try {
     await screen.findByText("Session reply message-3");
     act(() => page.viewport.show(page.turn("message:message-1"), { height: 3_000, visible: 300 }));
-    await dwellOn(page.viewport, page.turn("message:message-3"));
+    await dwellOnFakeClock(page.viewport, page.turn("message:message-3"));
     expect(page.mark.mock.calls).toEqual([
       ["message-1", { read_through: "2026-09-09T00:06:00Z" }, keyedAttempt],
     ]);
@@ -2086,7 +2091,7 @@ test("a targeted message's thread is marked read once its newest reply is on scr
   );
   try {
     await screen.findByText("Session reply message-2");
-    await dwellOn(page.viewport, page.turn("message:message-2"));
+    await dwellOnFakeClock(page.viewport, page.turn("message:message-2"));
     expect(page.mark.mock.calls).toEqual([
       ["message-1", { read_through: "2026-09-09T00:07:00Z" }, keyedAttempt],
     ]);
@@ -2125,7 +2130,7 @@ test("at a desktop width, landing on a comment opens its thread inline and readi
     expect(
       page.turn("comment:root-comment").querySelector("article")?.getAttribute("aria-expanded")
     ).toBe("true");
-    await dwellOn(page.viewport, replyItem);
+    await dwellOnFakeClock(page.viewport, replyItem);
     expect(page.mark.mock.calls).toEqual([
       ["root-comment", { read_through: reply.created_at }, keyedAttempt],
     ]);
@@ -2164,7 +2169,7 @@ test("on a phone, landing on a comment opens its thread dialog and reading it ma
     const dialog = await screen.findByRole("dialog", { name: "Thread" });
     const replyItem = within(dialog).getByText("Reply comment").closest("li");
     if (replyItem === null) throw new Error("expected the reply's item");
-    await dwellOn(page.viewport, replyItem);
+    await dwellOnFakeClock(page.viewport, replyItem);
     expect(page.mark.mock.calls).toEqual([
       ["root-comment", { read_through: reply.created_at }, keyedAttempt],
     ]);
@@ -2213,7 +2218,7 @@ test("the read mark writes the issue's head seq as the reader, and retries an un
     await screen.findByText("Newest");
     const card = view.container.querySelector('[data-turn="comment:comment-1"]');
     if (card === null) throw new Error("expected the newest card");
-    await dwellOn(viewport, card);
+    await dwellOnFakeClock(viewport, card);
     expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }, keyedAttempt]]);
     expect(putIssueState.mock.calls[0]?.[2]?.login).toBe("alice");
     await jump(1_000);

@@ -23,16 +23,16 @@ function Later(): ReactNode {
 // a held clock need not fire, so a wait that needs the clock to move can never end: that is the
 // 16 failures dispatch://INFRA-983 measured over four of its files on a 2-core pod.
 //
-// Measured here, and the reason this test is shaped as it is: the first assertion is the half
-// that discriminates. With the line removed it fails naming the missing global; the `findBy`
+// Measured here, and the reason this test is shaped as it is: the jest-global assertion is the
+// half that discriminates. With the line removed it fails naming the missing global; the `findBy`
 // below passes either way on this pod, because something outside the held clock still delivers
 // the effect's timer here (a timer scheduled under `jest.useFakeTimers()` does not fire on its
 // own: a probe of one ran to its 20 s deadline). So the wait below is the behaviour the line
-// exists for rather than a discriminator on this machine, and the assertion above it is what
+// exists for rather than a discriminator on this machine, and the jest-global assertion is what
 // turns a removal into a red test instead of a timeout that names nothing.
 //
-// `jestFakeTimersAreEnabled` has a second half, and the second assertion below is it: after the
-// global, the library asks whether `setTimeout` carries a `clock` property or an
+// `jestFakeTimersAreEnabled` has a second half, and the `setTimeout` assertion below is it: after
+// the global, the library asks whether `setTimeout` carries a `clock` property or an
 // `_isMockFunction` flag (@testing-library/dom@10.4.1, dist/helpers.js). Measured here under
 // `jest.useFakeTimers()`: `clock` is an own property of `setTimeout` and `_isMockFunction` is
 // `undefined`. That half is the one a later Bun could break with no wait failing anywhere, so a
