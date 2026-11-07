@@ -1450,12 +1450,20 @@ pg_disk_watch() {
 # longer than the longest act -- and then kills it, and the children of its act with it, so no
 # path out of a step hangs on a watcher that is stuck. The line it writes names the step, since
 # a watcher killed there left whatever it was doing in the copy half done.
+#
+# The first second of that wait is looked at in twentieths rather than in whole seconds: a
+# watcher between naps is gone within milliseconds of its TERM, and a whole-second nap gave each
+# step's teardown a second it spent on a watcher that had already left -- 56 of them in one run
+# of cluster.test.sh, which is a third of that step's time in CI (dispatch://INFRA-1075). After
+# that second the nap is a whole one again, so a watcher inside a long act -- what
+# PG_DISK_STOP_SECONDS is there for -- is still waited out without spinning.
 pg_disk_watch_stop() {
-  local pid=$PG_DISK_WATCHER name=$PG_DISK_WATCH_STEP deadline kids=()
+  local pid=$PG_DISK_WATCHER name=$PG_DISK_WATCH_STEP deadline fine kids=()
   [ -n "$pid" ] || return 0
   PG_DISK_WATCHER="" PG_DISK_WATCH_STEP=""
   kill -- "$pid" 2>/dev/null || true
   deadline=$((EPOCHSECONDS + PG_DISK_STOP_SECONDS))
+  fine=$((EPOCHSECONDS + 1))
   while kill -0 -- "$pid" 2>/dev/null; do
     if ((EPOCHSECONDS >= deadline)); then
       read -ra kids <"/proc/$pid/task/$pid/children" 2>/dev/null || true
@@ -1463,7 +1471,7 @@ pg_disk_watch_stop() {
       note "step $name: the disk watcher did not end within $PG_DISK_STOP_SECONDS s of its SIGTERM, so it was killed"
       break
     fi
-    sleep 1
+    if ((EPOCHSECONDS < fine)); then sleep 0.05; else sleep 1; fi
   done
   wait "$pid" 2>/dev/null || true
 }

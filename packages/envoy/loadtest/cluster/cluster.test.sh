@@ -3451,7 +3451,10 @@ kill_tries() { grep -c -- 'kill -KILL' "$fake/kubectl.log" || true; }
   # the stage before it, so the first poll at or after it is a whole poll less that grace past
   # it: with the poll at least twice the grace, as RUNNER_POLL_SECONDS is to
   # RUNNER_STOP_GRACE_SECONDS in a run, that one try is also the last, which is the one try the
-  # counts below read.
+  # counts below read. Four is the shortest poll left to it, and the three real naps it costs
+  # this case stay: 3 is a wait the fake sleep shortens whatever FAKE_FAST_SLEEP says (it is
+  # apply_manifest's) and 2 is the one it names here, and at either the loop spins and the stop
+  # asks for three SIGKILLs where one falls due (dispatch://INFRA-1075).
   export FAKE_FAST_SLEEP=2
   RUNNER_POLL_SECONDS=4
   RUNNER_STOP_GRACE_SECONDS=1

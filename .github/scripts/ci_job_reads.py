@@ -394,11 +394,19 @@ trap 'kill "$sampler" 2>/dev/null || true' EXIT
 """
 PACK_STEP = "Pack envoy binaries"
 PACK_SCRIPT = """\
+pids=()
 for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
   out="../../out/pr-artifacts/envoy-$arch"
   mkdir -p "$out"
-  GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
-  GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+  (
+    GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+    GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+  ) &
+  pids+=("$!")
+done
+for pid in "${pids[@]}"; do wait "$pid"; done
+for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+  out="../../out/pr-artifacts/envoy-$arch"
   tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
   tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
 done"""
@@ -705,13 +713,26 @@ def race_impossible_tests(root) -> dict:
 
 
 def race_impossible_script(packages) -> str:
-    """envoy-go's plain run of the tests the detector makes impossible: one `go test` per package
-    of `packages` (race_impossible_tests), each naming that package's own tests, anchored and
-    sorted, in its -run."""
-    lines = []
-    for under, names in packages.items():
-        lines.append(f"go test -count=1 -timeout 10m -run '^({'|'.join(sorted(names))})$' ./{under}")
-    return "\n".join(lines)
+    """envoy-go's plain run of the tests the detector makes impossible: one `go test` over every
+    package of `packages` (race_impossible_tests), their tests anchored and sorted in one -run.
+
+    One command rather than one per package, because go then builds the three test binaries
+    together and runs each package's tests as soon as its own binary is linked. One command per
+    package waited out each package's build and its run before the next package's build began,
+    which was 96 s of envoy-go for 44 s of tests: the API package's 40 s build ran while nothing
+    else did, and the documents package's 37 s of tests ran after it rather than beside it (run
+    42307926510, dispatch://INFRA-1075).
+
+    The -run holds every package's names, so a name two of these packages both declared would
+    run in both. That adds a plain run of a test this step did not mean to run there and leaves
+    none out, and these names are whole sentences - no two of the lane's are the same today - so
+    the step is not held to a guard that would cost a parse of every test file of every package
+    it names."""
+    if not packages:
+        return ""
+    names = sorted(set().union(*packages.values()))
+    return (f"go test -count=1 -timeout 10m -run '^({'|'.join(names)})$' "
+            + " ".join(f"./{under}" for under in packages))
 
 
 # The step as the lane and packages/envoy's own source make it, so a test added under
@@ -993,8 +1014,8 @@ GATES = [
         # form: -json is not a flag the check reduces and a redirect is not in that form either
         # (dispatch://INFRA-1075).
         #
-        # One go test per package of the plain run the race lane cannot make (RACE_IMPOSSIBLE_*),
-        # each selecting that package's own tests with -run.
+        # One go test over every package of the plain run the race lane cannot make
+        # (RACE_IMPOSSIBLE_*), selecting their tests with one -run.
         pinned_step("envoy-go", RACE_IMPOSSIBLE_STEP, ENVOY, RACE_IMPOSSIBLE_SCRIPT, [
             (ENVOY, [f"./{under}"], f"go test -run of what the race build cannot run in ./{under}", {})
             for under in RACE_IMPOSSIBLE_PACKAGES

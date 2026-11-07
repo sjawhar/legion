@@ -1820,9 +1820,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       # One service for all three: the Go daemon's unit tests' Postgres, the broker rig its
       # agentsecrets contract tests drive (brokertest.NewRig skips without
@@ -3135,12 +3135,20 @@ jobs:
         # seed's HNSW build failed on it ("could not resize shared memory segment … No space left
         # on device", job 127148899326), which is the container's limit rather than the server's
         # (dispatch://INFRA-1075).
+        #
+        # --health-interval is a second rather than ten, and --health-retries 50 rather than 5,
+        # which is the same 50 s a slow start was given before: docker runs the first health
+        # check an interval after the container starts, so at ten this server was reported
+        # healthy at 14 s where it had been ready at about 1, and the job's first step waited
+        # that out (run 42307926510, "Initialize containers", 22 s of which 15 s was the wait).
+        # A `pg_isready` a second for the job's length is one short exec of the service
+        # container, which no step of this job is measured against (dispatch://INFRA-1075).
         options: >-
           --shm-size=1g
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
@@ -3161,14 +3169,26 @@ jobs:
           cache: false
       # go-envoy-test: this job builds and runs the test binary of every package of the envoy
       # module, a set no other job builds, so it keeps a family of its own and saves it below.
+      #
+      # The key carries packages/envoy/go.sum's hash, and the save below runs when the restore
+      # was not an exact hit, so a push to main whose dependencies moved writes the cache again.
+      # Without the hash the key was the same for every commit at one Go version, the save was
+      # skipped on every exact hit, and the cache was therefore never written again after the
+      # first push at that version: run 42307926510 restored 918 MB on an exact hit and the step
+      # after it still printed `go: downloading github.com/aws/aws-sdk-go-v2 ...`, and compiled
+      # what it downloaded (dispatch://INFRA-1075). The first restore-key is that Go version's
+      # newest cache, so a changed go.sum starts from the nearest older one rather than from
+      # nothing; the second, off main only, reaches across a Go version bump as it did before.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: |
+            go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}-
+            ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -3229,17 +3249,23 @@ jobs:
       # run did: run beside the other package binaries, its Postgres-backed tests and the
       # room-memory measurements queue their per-test database cleanup on the service's one
       # checkpointer, and the API's live-feed and delivery-hub tests wait for the event log's safe
-      # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
+      # horizon, which any open transaction on this job's Postgres delays. The one -run list is
       # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
       # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
       # the ci-filters job naming this step. Measured over three runs on a two-vCPU pod: the bus
       # under a tenth of a second, the API 8 to 10 s, the documents package 92 to 127 s, so 10
       # minutes each is ample.
+      #
+      # One go test over the three packages rather than one per package: go builds the three test
+      # binaries together and runs each package's tests as soon as its own binary is linked, so
+      # the documents package's tests run beside the API package's build instead of after it.
+      # Three commands in a row cost 96 s for 44 s of tests - 40 s of them the API package's
+      # build, with nothing running beside it (run 42307926510, dispatch://INFRA-1075). Each
+      # package measures its own process's heap or allocations, so running them at the same time
+      # changes no number any of them asserts on.
       - name: Test what the race build cannot run at all or at full size
         run: |
-          go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
-          go test -count=1 -timeout 10m -run '^(TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestTheKeyedWriteGuardSeesWhatItGuards)$' ./internal/dispatch/api
-          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/dispatch/docs
+          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestHoldsSeedAllocatesAtMostOneCopyPerDecoding|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestTheKeyedWriteGuardSeesWhatItGuards|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/bus ./internal/dispatch/api ./internal/dispatch/docs
         working-directory: packages/envoy
       # The unit step below, the natslive step and the integration step each write their `go test
       # -json` stream to a file under $RUNNER_TEMP/go-test-json, which the upload step below
@@ -3382,14 +3408,28 @@ jobs:
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
-      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
+      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included. One
+      # architecture's build and notices run beside the other's and nothing of either is the
+      # other's input, so the step is as long as the slower of the two rather than their sum
+      # (5.0 s and 5.5 s of a 10 s step, run 42307926510, dispatch://INFRA-1075). The archives
+      # are written after both, in the target list's order, so the listing below reads as it
+      # did. Under the runner's `bash -e` a failed `wait` ends the step, so an architecture that
+      # did not build still fails it.
       - name: Pack envoy binaries
         run: |
+          pids=()
           for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
             out="../../out/pr-artifacts/envoy-$arch"
             mkdir -p "$out"
-            GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
-            GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            (
+              GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+              GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            ) &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"; do wait "$pid"; done
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+            out="../../out/pr-artifacts/envoy-$arch"
             tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
@@ -3576,9 +3616,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3666,9 +3706,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       # The broker's store, which the package's contract tests open (brokerstoretest.Open in
@@ -3758,9 +3798,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
     # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
     # opens the store when DISPATCH_TEST_DATABASE_URL is unset
@@ -3917,9 +3957,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -3991,9 +4031,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
@@ -4133,9 +4173,9 @@ jobs:
         command: postgres -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=500 -c max_prepared_transactions=20
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
+          --health-interval 1s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 50
     env:
       BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:

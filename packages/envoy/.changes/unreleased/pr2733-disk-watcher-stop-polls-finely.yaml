@@ -1,0 +1,4 @@
+kind: Changed
+body: A load-test step's teardown looks for its disk watcher in twentieths of a second for the
+  first second after the watcher's SIGTERM, rather than in whole seconds, so a step no longer
+  gives up to a second of its own time to a watcher that took the signal and left at once.
