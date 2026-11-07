@@ -32,15 +32,19 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database := storetest.Open(t)
-			config := database.Pool.Config().Copy()
-			config.MaxConns = 8
+			// The race holds several writers of this document at once, so it runs on a pool of
+			// its own, eight connections wide, with the pool storetest opened closed before it so
+			// the two hold no connections together. storetest closes the reopened pool whole
+			// after the test - every pool the service opened through it included
+			// (store.Pool.Settlements, which every settlement reads and writes through). A pool
+			// left open keeps the context of the last query run on each of its connections - a
+			// settlement's, which carries the service through the ledger it joined - so the
+			// service, its rooms and their documents would stay in memory for the rest of the
+			// test binary's run.
 			database.Pool.Close()
-			pool, err := pgxpool.NewWithConfig(context.Background(), config)
-			if err != nil {
-				t.Fatalf("open dedicated table-race pool: %v", err)
-			}
-			database.Pool = store.NewPool(pool)
-			t.Cleanup(pool.Close)
+			database = storetest.Reopened(t, database, func(config *pgxpool.Config) {
+				config.MaxConns = 8
+			})
 			artifactID := createDocument(t, database, "")
 			service := New(Deps{Store: database, Settle: time.Hour})
 			t.Cleanup(func() {
@@ -110,12 +114,13 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			if _, err := gate.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
 				t.Fatalf("lock asks: %v", err)
 			}
-			conditionalTx, err := database.Pool.Begin(context.Background())
+			gated, _ := gatedContext(t, service, context.Background(), artifactID)
+			conditionalTx, err := database.Pool.Begin(gated)
 			if err != nil {
 				t.Fatalf("begin edit transaction: %v", err)
 			}
 			defer conditionalTx.Rollback(context.Background())
-			joined, ledger := service.Join(context.Background(), conditionalTx)
+			joined, ledger := service.Join(gated, conditionalTx)
 			defer ledger.Discard()
 			result := make(chan error, 1)
 			var precondition *model.EditPrecondition

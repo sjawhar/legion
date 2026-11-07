@@ -110,11 +110,11 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
 // checkpoint when one exists, read as every document load reads (loadStored): in one
-// repeatable-read transaction on the rooms pool, folded once that transaction has committed when
-// the rows total at most foldBufferBytes, so a fold holds no connection a room load waits for, and
-// inside it while it streams them when they total more; and noted once it has read more than one
-// row. A room's load decodes the state it returns once more, in the room's load hook
-// (onLoadDocument).
+// repeatable-read transaction on the pool that owns loads, or the one its context names, folded
+// once that transaction has committed when the rows total at most foldBufferBytes, so a fold holds
+// no connection a room load waits for, and inside it while it streams them when they total more;
+// and noted once it has read more than one row. A room's load decodes the state it returns once
+// more, in the room's load hook (onLoadDocument).
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	var update []byte
 	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
@@ -127,23 +127,49 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: persistence.Version(stamp.Version)}, nil
 }
 
+// loadTxSource is where a load of a room's stored history opens its transaction: the pool the
+// caller's context names (withQueryPool), else the pool that owns loads (store.Pool.Rooms).
+//
+// The rooms pool is the fallback because a load is what a caller holding one of the request pool's
+// connections waits on - a write forking a document no room holds (coldFork) is inside its
+// transaction, and ygo's room load is waited on by every caller of that room - so a load that
+// asked the request pool for a connection would wait for one only those callers can release. A
+// caller that names a pool has made that argument for its own: a settlement reads on the
+// settlements pool, which has a connection for every settlement that holds a slot
+// (settlementWorkers), and a cold read's fold on the request pool's connections that admission
+// never hands out, which is where the work a handler leaves running belongs
+// (foldDocument). Keeping them off the rooms pool is what keeps a room's load from queueing behind
+// the reads of requests (INFRA-592).
+func loadTxSource(ctx context.Context, pool *store.Pool) (txSource, error) {
+	if named, ok := ctx.Value(queryPoolKey{}).(*store.Pool); ok {
+		return named, nil
+	}
+	return pool.Rooms()
+}
+
+// txSource opens a transaction of its own, which both the pool that owns loads and the pools a
+// context names do (store.RawPool.BeginTx, store.Pool.BeginTx).
+type txSource interface {
+	BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
+}
+
 // loadStored is the read every document load (Load, LoadDocument) makes of the room's stored
-// updates: in one repeatable-read read-only transaction on the rooms pool, the stamp of the state
-// at their head and the count and bytes of the rows at or below it (readStoredLog), then those
-// rows, which it hands use with the head to fold (foldRead): once the transaction has committed
-// when they total at most foldBufferBytes, while it streams them inside it when they total more. A
-// room with no stored update commits and hands use nothing. It returns the stamp it read, and once
-// its transaction has ended it notes the room (noted) when it read more than one row: one row has
-// nothing to fold, and any later append notes the room itself.
+// updates: in one repeatable-read read-only transaction on the pool loadTxSource names, the stamp
+// of the state at their head and the count and bytes of the rows at or below it (readStoredLog),
+// then those rows, which it hands use with the head to fold (foldRead): once the transaction has
+// committed when they total at most foldBufferBytes, while it streams them inside it when they
+// total more. A room with no stored update commits and hands use nothing. It returns the stamp it
+// read, and once its transaction has ended it notes the room (noted) when it read more than one
+// row: one row has nothing to fold, and any later append notes the room itself.
 func (p *PgVersioned) loadStored(ctx context.Context, room string, use func(head persistence.Version, updates updateSource) error) (DocumentStamp, error) {
 	if err := ctx.Err(); err != nil {
 		return DocumentStamp{}, err
 	}
-	rooms, err := p.store.Pool.Rooms()
+	from, err := loadTxSource(ctx, p.store.Pool)
 	if err != nil {
 		return DocumentStamp{}, err
 	}
-	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := from.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return DocumentStamp{}, fmt.Errorf("begin document load: %w", err)
 	}
@@ -180,14 +206,12 @@ func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Versio
 	return p.head(ctx, rooms, room)
 }
 
-// DocumentStamp is the room's DocumentStamp now, read through the pool that owns loads, as Head
-// reads the head.
+// DocumentStamp is the room's DocumentStamp now, read where every read this service makes for its
+// caller reads (readQuerier): one statement of the cold read that asked for it, on that read's own
+// transaction or its pinned connection, not on the pool that owns loads, where a room's load would
+// queue behind it (coldRead, INFRA-592).
 func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
-	rooms, err := p.store.Pool.Rooms()
-	if err != nil {
-		return DocumentStamp{}, err
-	}
-	return readDocumentStamp(ctx, rooms, room)
+	return readDocumentStamp(ctx, readQuerier(ctx, p.store.Pool), room)
 }
 
 // AppendUpdate validates and stores one incremental V1 update as content.

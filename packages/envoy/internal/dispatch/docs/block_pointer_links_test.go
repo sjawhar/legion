@@ -35,7 +35,7 @@ func writeIndexedDocument(t *testing.T, database *store.Store, service *Service,
 	`, slug).Scan(&id); err != nil {
 		t.Fatalf("create document %s: %v", slug, err)
 	}
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, id, func(ctx context.Context) error {
 		written, err := service.SeedText(ctx, id, markdown, model.Actor{Kind: "user", ID: "alice"})
 		if err != nil {
 			return err
@@ -59,7 +59,7 @@ func writeIndexedDocument(t *testing.T, database *store.Store, service *Service,
 // edit is.
 func editIndexedDocument(t *testing.T, service *Service, artifactID string, ops ...model.EditOp) {
 	t.Helper()
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.ApplyOps(ctx, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 			return err
 		}
@@ -296,7 +296,7 @@ func TestARepeatedBlockIDWritesPointersOnlyFromItsNode(t *testing.T) {
 				id = test.repeat(t, service, checks, tree)
 				return tree
 			})
-			if err := joinedWrite(service, func(ctx context.Context) error {
+			if err := joinedWrite(service, checks, func(ctx context.Context) error {
 				result, err := service.SnapshotVersion(ctx, checks, model.Actor{Kind: "user", ID: "bob"})
 				if err == nil && !result.Wrote {
 					t.Errorf("the repeated id wrote no version of checks.md")
@@ -356,7 +356,7 @@ func TestATypedBlockIDReadsBackFromTheMarkdownAsTheTreeHoldsIt(t *testing.T) {
 				tree.Children[0].Attrs[pmdoc.BlockIDAttr] = test.id
 				return tree
 			})
-			if err := joinedWrite(service, func(ctx context.Context) error {
+			if err := joinedWrite(service, checks, func(ctx context.Context) error {
 				result, err := service.SnapshotVersion(ctx, checks, model.Actor{Kind: "user", ID: "bob"})
 				if err == nil && !result.Wrote {
 					t.Errorf("the claim's new id wrote no version of checks.md")

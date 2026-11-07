@@ -291,12 +291,12 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 	}
 	artifact, err := s.loadArtifact(r.Context(), s.deps.Store.Pool, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	reviews, err := s.loadReviews(r.Context(), s.deps.Store.Pool, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, reviews)
@@ -309,7 +309,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		Reason *string `json:"reason"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.actingPerson(w, r)
@@ -340,13 +340,13 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if artifact.Kind != "doc" {
@@ -354,12 +354,12 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	version, err := settledVersionNumber(r.Context(), tx, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if version == 0 {
@@ -370,7 +370,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	// its thread as the review's provenance.
 	open, err := docs.OpenApprovalAsk(r.Context(), tx, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events := []model.Event{}
@@ -386,7 +386,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		}
 		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		events = append(events, answeredEvents...)
@@ -395,12 +395,12 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	}
 	reviews, reviewEvents, err := s.writeApprovalReviews(r.Context(), tx, artifact, reviewed, state, actor, reason, askID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events = append(events, reviewEvents...)
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)
@@ -469,26 +469,26 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	pool, err := s.readyPool()
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// The coverage is read before the transaction opens, and a read that fails leaves the
 	// request recorded all the same (approvalCoverage).
 	coverage, coverageUnread, err := s.approvalCoverage(r.Context(), pool, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if artifact.Kind != "doc" {
@@ -511,12 +511,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	owner := ownerForArtifact(artifact)
 	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	version, err := settledVersionNumber(r.Context(), tx, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if version == 0 {
@@ -529,7 +529,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if input.IncludeVerification {
 		verification, err := s.verificationDocumentFor(r.Context(), tx, *artifact.IssueKey)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		documents = append(documents, verification)
@@ -537,7 +537,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	// A supplied summary is validated even when this request opens no row.
 	question, err := approvalQuestion(documents, summary)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	type response struct {
@@ -555,7 +555,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		CoverageUnread bool `json:"coverage_unread,omitempty"`
 	}
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// An approval of every document this request names, each at its current version, needs no
@@ -563,7 +563,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	settled, err := docs.NamedDocumentsApproved(r.Context(), tx, documents, artifact.ID,
 		artifact.Approval != nil && artifact.Approval.State == "approved")
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if settled {
@@ -581,31 +581,31 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	open, err := docs.OpenApprovalAskForDocuments(r.Context(), tx, named)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	ask := open
 	var events []model.Event
 	if open != nil {
 		if events, err = s.renewApprovalAsk(r.Context(), tx, open, actor, documents, summary); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	} else {
 		var opened model.Event
 		if ask, opened, err = s.openApprovalAsk(r.Context(), tx, owner, artifact, actor, documents, question); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		events = []model.Event{opened}
 	}
 	// The approval as this request leaves it: awaiting, waiting on whom the request now waits on.
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)
@@ -899,7 +899,7 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		Version int          `json:"version"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -908,13 +908,13 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !documentPlays(artifact, model.ArtifactRolePlan) {
@@ -923,12 +923,12 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	latest, err := settledVersionNumber(r.Context(), tx, artifact.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if latest == 0 {
@@ -944,11 +944,11 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		r.Context(), tx, s.deps.Events, artifact, input.Version, "approved", docs.ReviewKindPlanReview, actor, nil, nil,
 	)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)

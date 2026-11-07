@@ -22,7 +22,7 @@ func (s *server) searchCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := embedqueue.Coverage(r.Context(), s.deps.Store, identity)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, report)

@@ -27,6 +27,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -41,6 +42,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/logging"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
@@ -63,6 +65,11 @@ const (
 	defaultEnvoyURL   = "http://127.0.0.1:9020"
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
+	// logFlushTimeout bounds each exit's wait for the log lines still buffered (logging.Handler's
+	// Flush). A destination that takes writes takes a few thousand lines in milliseconds; the bound
+	// matters only once stderr has stopped taking them, and then the process exits without those
+	// lines rather than outlasting the margin its shutdown leaves inside stopGrace (shutdownMargin).
+	logFlushTimeout = 2 * time.Second
 )
 
 // buildCommit is the legion commit this binary was built from. Only the image build stamps it
@@ -123,6 +130,11 @@ type bootConfig struct {
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// SettlementResumeInterval is how often the settlement resumption arms the settlements
+	// documents still owe, zero for docs.SettlementResumeInterval's minute; only
+	// DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL, under the test hooks, sets it, since a row that
+	// waits for another process's resumption pass would otherwise wait minutes.
+	SettlementResumeInterval time.Duration
 	// CIReconcileInterval is how often the CI reconcile pass runs, zero for cireconcile.Interval's
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
@@ -176,6 +188,9 @@ type bootConfig struct {
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
+	// MetricsAddr is where the metrics listener binds, DISPATCH_METRICS_ADDR (metricsAddress);
+	// empty, nothing listens.
+	MetricsAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
@@ -206,16 +221,36 @@ type bootConfig struct {
 	Answerer answererConfig
 }
 
+// logs is the process's log handler: main installs it as slog's default, so no caller ever waits
+// on stderr, and exit writes the lines it still holds.
+var logs = logging.New(os.Stderr, nil)
+
+// exit ends the process with code once the log lines still buffered are written, within
+// logFlushTimeout: os.Exit runs no deferred call and does not wait for logs' writer, so a reason
+// logged just before it would otherwise be lost. Every exit of the process goes through it.
+func exit(code int) {
+	logs.Flush(logFlushTimeout)
+	os.Exit(code)
+}
+
+// fatal logs why Dispatch cannot go on, at ERROR, and exits with 1 once that reason is written.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	exit(1)
+}
+
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(logs))
+	// Deferred first, so a shutdown writes the lines its other deferred calls logged before the
+	// process ends.
+	defer logs.Flush(logFlushTimeout)
 	env := processSettings()
 	if len(os.Args) > 1 {
-		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
+		exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
 	boot, err := resolveBootConfig(env)
 	if err != nil {
-		slog.Error("dispatch: resolve boot config", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve boot config", "error", err)
 	}
 	// The registry's pace, before anything registers or reads what is live. The live window stays
 	// three beats, as processes.LiveWindow is of processes.HeartbeatInterval, so a run cannot give
@@ -228,8 +263,7 @@ func main() {
 
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
-		slog.Error("dispatch: load envoy config", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load envoy config", "error", err)
 	}
 	serverURL := ""
 	if envoyConfig.Dispatch != nil {
@@ -239,17 +273,14 @@ func main() {
 	// key it will not sign with before NATS or Postgres is dialled.
 	dataDir, err := defaultDataDir()
 	if err != nil {
-		slog.Error("dispatch: resolve data dir", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve data dir", "error", err)
 	}
 	appCfg, appSource, err := loadAppCredentials(env, dataDir)
 	if err != nil {
-		slog.Error("dispatch: load app credentials", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load app credentials", "error", err)
 	}
 	if err := devSignInLoadedFence(boot, serverURL, appCfg, appSource); err != nil {
-		slog.Error("dispatch: dev sign-in", "error", err)
-		os.Exit(1)
+		fatal("dispatch: dev sign-in", "error", err)
 	}
 	if appCfg == nil {
 		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
@@ -269,8 +300,7 @@ func main() {
 	// The profiler binds first, before NATS, migrations and the rest of boot, so a slow or hung
 	// boot can be profiled and a port clash refuses the boot before anything connects.
 	if _, err := startPprof(ctx, boot.PprofAddr); err != nil {
-		slog.Error("dispatch: pprof", "error", err)
-		os.Exit(1)
+		fatal("dispatch: pprof", "error", err)
 	}
 
 	// INFRA-555: every NATS client of the server connects in the background (serverBus), so a bus
@@ -283,8 +313,7 @@ func main() {
 	} else {
 		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverClient(dispatchStreamOptions(boot, env)...)...)
 		if err != nil {
-			slog.Error("dispatch: connect NATS", "error", err)
-			os.Exit(1)
+			fatal("dispatch: connect NATS", "error", err)
 		}
 		defer natsClient.Close()
 	}
@@ -304,8 +333,7 @@ func main() {
 	} else {
 		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup, serverBus()...)
 		if err != nil {
-			slog.Error("dispatch: connect the agent conversation relay", "error", err)
-			os.Exit(1)
+			fatal("dispatch: connect the agent conversation relay", "error", err)
 		}
 		defer streamConn.Close()
 		agentStream = agentstream.NewNATS(streamConn)
@@ -313,12 +341,10 @@ func main() {
 
 	database, err := store.Open(ctx, boot.DatabaseURL)
 	if err != nil {
-		slog.Error("dispatch: open database", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open database", "error", err)
 	}
 	if err := database.Migrate(ctx); err != nil {
-		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
-		os.Exit(1)
+		fatal("dispatch: migrate database", "error", explainMigrateError(err))
 	}
 
 	// document_search (migration 20261101182447) holds each document's latest search vector,
@@ -335,8 +361,7 @@ func main() {
 	// before this one serves every request until this process has filled the table and begins
 	// serving.
 	if filled, err := database.FillDocumentSearch(ctx); err != nil {
-		slog.Error("dispatch: fill document_search for the documents stored before this release", "error", err)
-		os.Exit(1)
+		fatal("dispatch: fill document_search for the documents stored before this release", "error", err)
 	} else if filled > 0 {
 		slog.Info("dispatch: filled document_search for the documents stored before this release", "rows", filled)
 	}
@@ -353,14 +378,12 @@ func main() {
 	}
 
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
-		slog.Error("dispatch: validate default project", "error", err)
-		os.Exit(1)
+		fatal("dispatch: validate default project", "error", err)
 	}
 
 	webDistDir, err := defaultWebDistDir(boot.WebDist)
 	if err != nil {
-		slog.Error("dispatch: resolve web dist dir", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve web dist dir", "error", err)
 	}
 	// The build's assets are in the database before the process serves, before it binds its port
 	// or adopts the socket DISPATCH_LISTEN_FD names, so a page of this build that another process
@@ -371,15 +394,13 @@ func main() {
 	// what GET /api/v1/dashboard/builds answers as this process's.
 	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
 	if err != nil {
-		slog.Error("dispatch: publish dashboard assets", "error", err)
-		os.Exit(1)
+		fatal("dispatch: publish dashboard assets", "error", err)
 	}
 
 	// The store's construction reads no network: credentials come with the first request.
 	fileStore, err := openFileStore(ctx, boot)
 	if err != nil {
-		slog.Error("dispatch: configure the file store", "error", err)
-		os.Exit(1)
+		fatal("dispatch: configure the file store", "error", err)
 	}
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
@@ -397,8 +418,7 @@ func main() {
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
 	if err != nil {
-		slog.Error("dispatch: load signing key", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load signing key", "error", err)
 	}
 	retirePlainRefreshTokens(ctx, people, plainRefreshTokenRetireTimeout)
 	sessions := store.NewPgSessionStore(database.Pool)
@@ -409,6 +429,10 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
+	// The one admission limiter the API admits through, made before the document service so that
+	// service's compaction yields to the very requests this admits, and so the metrics endpoint
+	// reads the same counts (requestLoad, docs.Deps.Requests).
+	limiter := admission.New(admission.DefaultLimits())
 	documentService := docs.New(docs.Deps{
 		Store:             database,
 		Events:            broker,
@@ -418,6 +442,8 @@ func main() {
 		MarkWait:          boot.MarkWait,
 		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
 		EditNoticeQuiet:   boot.EditNoticeQuiet,
+		SettlementResume:  boot.SettlementResumeInterval,
+		Requests:          requestLoad{limiter: limiter},
 		TestHooks:         boot.TestHooksEnabled,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
@@ -430,8 +456,7 @@ func main() {
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
-		slog.Error("dispatch: seed repository projects", "error", err)
-		os.Exit(1)
+		fatal("dispatch: seed repository projects", "error", err)
 	}
 
 	serviceTokens := serviceTokenVerifier(boot)
@@ -451,8 +476,7 @@ func main() {
 	} else {
 		client, err := newEmbedder(ctx, boot.Embedder)
 		if err != nil {
-			slog.Error("dispatch: build the embedder", "error", err)
-			os.Exit(1)
+			fatal("dispatch: build the embedder", "error", err)
 		}
 		embedder = client
 	}
@@ -484,6 +508,7 @@ func main() {
 		AgentStream:    agentStream,
 		Files:          fileStore,
 		Lifetime:       ctx,
+		Admission:      limiter,
 	}
 	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
@@ -507,8 +532,7 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
 	if err != nil {
-		slog.Error("dispatch: build app context", "error", err)
-		os.Exit(1)
+		fatal("dispatch: build app context", "error", err)
 	}
 
 	// Two or more envoy-dispatch processes serve one Postgres and one NATS, so each background
@@ -590,19 +614,33 @@ func main() {
 	//     leaves).
 	leases, err := database.Pool.Leases()
 	if err != nil {
-		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open the lease pool for the maintenance loops", "error", err)
 	}
+	// The background loops below - the embedding queue and its coverage pass, the suggestion
+	// sweep, the term-statistics refresh, the architecture importer's ticker, the delivery
+	// reconcile and intakes - read and write through the background pool, so under load a request
+	// never queues behind a loop's statement for a connection, nor a loop behind the requests. The
+	// document service's own loops (the settlement resumption, the task progress and reference
+	// excerpt reconciliations) take it from the store themselves. Each leased loop still takes its
+	// lease on the lease pool above.
+	background, err := database.Pool.Background()
+	if err != nil {
+		fatal("dispatch: open the background pool for the background loops", "error", err)
+	}
+	backgroundStore := &store.Store{Pool: background}
 
 	// The outbox runs only with NATS, so a process with NATS disabled never publishes
 	// (outboxPublisher stays nil, and /healthz reports outbox_publisher false). outboxStopped is
 	// closed once its Run has returned - its last batch recorded and its hold released - which
-	// shutdown waits for before it closes the pool; it stays nil with no outbox.
+	// shutdown waits for before it closes the pools; it stays nil with no outbox.
 	var outboxPublisher *outbox.Outbox
 	var outboxStopped chan struct{}
-	// The registry /metrics serves (dispatchHandler), built whether or not NATS is configured:
-	// the probe answers from the moment the server does, and a process with no bus simply leaves
-	// the outbox's counter at zero.
+	// The registry /metrics serves on the API port (dispatchHandler), built whether or not NATS is
+	// configured: the probe answers from the moment the server does, and a process with no bus
+	// simply leaves the outbox's counter at zero. It is its own registry, not the metrics
+	// listener's (startMetrics, newDispatchMetrics): that listener binds only where
+	// DISPATCH_METRICS_ADDR is set, which no deployment here does and the load test does, while
+	// this counter is owed wherever Dispatch runs, so each registry serves its own /metrics.
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
@@ -618,8 +656,7 @@ func main() {
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
-			slog.Error("dispatch: open the events outbox's pool", "error", err)
-			os.Exit(1)
+			fatal("dispatch: open the events outbox's pool", "error", err)
 		}
 		// One reader of the role and session buckets serves both: a role route's holder is read
 		// straight from the buckets on the bus client's connection, with no watcher, and judged
@@ -684,7 +721,7 @@ func main() {
 		settingsWake = listenerHub.Wake(delivery.SettingsChannel)
 	}
 
-	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder, Wake: embeddingsWake})
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: backgroundStore, Embedder: backgroundEmbedder, Wake: embeddingsWake})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
 	go documentService.RunSettlementResumption(ctx, leases)
@@ -699,8 +736,8 @@ func main() {
 	go runRoomSync(ctx)
 	go listenerHub.Run(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
-	// boot and every ten minutes.
-	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
+	// boot and every ten minutes, on the background pool as every other loop here reads.
+	go api.RunSearchTermStatsRefresh(ctx, background, api.SearchTermStatsInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again once at start, so their progress shows without anyone editing them
@@ -728,12 +765,11 @@ func main() {
 	go documentService.RunBlockIndexReconciliation(ctx, leases)
 	// The asks a process older than the withdrawal leaves on an issue it closes or
 	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
-	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
+	go api.RunIssueAskRepair(ctx, api.Deps{Store: backgroundStore, Docs: documentService, Events: broker}, leases)
 
 	sweeper, err := webhookSweeper(natsClient, database, appCfg, boot.GitHubAPIBase, boot.NATSReplicas)
 	if err != nil {
-		slog.Error("dispatch: open webhook redelivery", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open webhook redelivery", "error", err)
 	}
 	if sweeper != nil {
 		slog.Info("dispatch: redelivering the GitHub App webhook's failed deliveries", "client_id", appCfg.ClientID, "interval", redeliver.Interval)
@@ -746,8 +782,10 @@ func main() {
 	// of a check never settles, so every interval one process reads each open pull request's head
 	// from GitHub and records the completed checks Envoy's record of that head lacks. It is a
 	// timer that stays, as the webhook redelivery sweep and the delivery reconcile beside it are:
-	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on.
-	reconciler, err := ciReconciler(natsClient, database, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
+	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on. Its
+	// statements, the shared GitHub rate limits included, run on the background pool, as every
+	// other loop's here do.
+	reconciler, err := ciReconciler(natsClient, backgroundStore, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
 	if err != nil {
 		slog.Error("dispatch: open the CI reconcile pass", "error", err)
 		os.Exit(1)
@@ -769,13 +807,16 @@ func main() {
 		slog.Info("dispatch: CI reconcile off: it needs NATS and the GitHub App private key")
 	}
 
-	go architecture.Run(ctx, appCtx.Architecture(), leases)
+	// The ticker's importer is the routes' one on the background pool: it shares their flights, so
+	// a Refresh and a tick of one source make one set of GitHub calls, and the Close below ends
+	// both importers' flights.
+	go architecture.Run(ctx, appCtx.Architecture().On(backgroundStore), leases)
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
-	reconcile := delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker)
+	reconcile := delivery.NewReconcile(background, appCtx.GitHub(), broker)
 	if boot.ReconcileAtStart {
 		reconcile.FirstPassAtStart()
 	}
@@ -793,10 +834,9 @@ func main() {
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverClient(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
-		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker, settingsWake)
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, background, leases, appCtx.GitHub(), broker, settingsWake)
 		if err != nil {
-			slog.Error("dispatch delivery: connect NATS", "error", err)
-			os.Exit(1)
+			fatal("dispatch delivery: connect NATS", "error", err)
 		}
 		waitIntakes = stopIntakes
 		// A stop before serving (the admission wait, below) returns without shutdown, and a panic
@@ -816,27 +856,32 @@ func main() {
 	if natsClient != nil {
 		announcements = natsClient
 	}
-	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
+	announcer := startup.New(startup.Deps{Pool: background, Publisher: announcements})
 
-	routesHandler, background := routes.New(appCtx)
+	routesHandler, apiBackground := routes.New(appCtx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, from the events written
 	// since its last pass, woken by every event commit whichever process made it. It reads the log
 	// only up to the safe horizon of the API server's one events.Horizon, as the live event feed
 	// does, since event ids are not commit order; it takes no lease: each of its pages holds the
 	// suggestion_outcome_cursor row for update, which is what keeps two processes from judging one
-	// page twice.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, background.EventHorizon(), eventsWake)
+	// page twice. Like every other background loop it reads and writes through the background
+	// pool, so no request queues behind it for a connection.
+	go api.RunSuggestionOutcomeSweep(ctx, background, apiBackground.EventHorizon(), eventsWake)
 	// The Idempotency-Keys past their 24 hours and the deliveries a process that died
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because
-	// it resumes those deliveries through the API server built just above.
+	// it resumes those deliveries through the API server built just above; its statements go
+	// through the background pool too.
 	maintenanceInterval := api.MaintenanceSweepInterval
 	if boot.MaintenanceSweepInterval > 0 {
 		maintenanceInterval = boot.MaintenanceSweepInterval
 	}
-	go api.RunMaintenanceSweep(ctx, database.Pool, maintenanceInterval, leases, background.ResumeDeliveries)
+	go api.RunMaintenanceSweep(ctx, background, maintenanceInterval, leases, apiBackground.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
-	server := newHTTPServer(handler, time.Now)
+	// The connection watch is built before the server, which counts through it, and read by the
+	// metrics endpoint below (dispatch_http_conns_closed_unanswered_total).
+	watchedConns := newConns()
+	server := newHTTPServer(handler, time.Now, watchedConns)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
 	// does either before serving, so a socket it cannot serve on or an address it cannot take ends
 	// the process with 1: a supervisor must not read a port clash as a clean stop.
@@ -847,10 +892,22 @@ func main() {
 		listener, err = net.Listen("tcp", boot.ListenAddr)
 	}
 	if err != nil {
-		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
-		os.Exit(1)
+		fatal("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 	}
-	registration, err := joinRegistry(ctx, database, processes.Instance{
+	// The metrics endpoint binds once everything its series read exists, and like the server's
+	// own address a port it cannot take ends the boot.
+	if _, err := startMetrics(ctx, boot.MetricsAddr, metricsSources{
+		Pool:       database.Pool,
+		Background: background,
+		Events:     broker,
+		Admission:  limiter,
+		Docs:       documentService,
+		Logs:       logs,
+		Conns:      watchedConns,
+	}); err != nil {
+		fatal("dispatch: metrics", "error", err)
+	}
+	registration, err := joinRegistry(ctx, database, background, processes.Instance{
 		Commit:         buildCommit,
 		DashboardBuild: dashboardBuild.Build,
 		SigningKeys:    signingKey.Fingerprints(),
@@ -863,20 +920,24 @@ func main() {
 			slog.Info("dispatch: stopped while waiting for admission to the registry of live server processes")
 			return
 		}
-		slog.Error("dispatch: register this server process", "error", err)
-		os.Exit(1)
+		fatal("dispatch: register this server process", "error", err)
 	}
+	serveErr := serveUntilStopped(ctx, cancel, server, listener, registration.Lost())
+	// The shutdown's one deadline starts here, at the signal: every stage of shutdown spends what is
+	// left of it, and so does any stop main runs after it.
+	stopping, stopped := shutdownContext()
+	defer stopped()
 	// The importer's flights outlive the ticker's context, so they are closed inside the
 	// background wait: shutdown runs it before waitUntilIdle and pool.Close, and a sync still
 	// fetching then would write into a closing pool.
 	waitBackground := func() {
-		background.Wait()
+		apiBackground.Wait()
 		appCtx.Architecture().Close()
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, documentService, database.Pool, waitBackground, waitIntakes,
-		deregisterAfterDrain(registration), registration.Lost(), outboxStopped); err != nil {
-		slog.Error("dispatch: serve", "error", err)
-		os.Exit(1)
+	shutdown(stopping, server, documentService, database.Pool, waitBackground, waitIntakes,
+		deregisterAfterDrain(registration), outboxStopped)
+	if serveErr != nil {
+		fatal("dispatch: serve", "error", serveErr)
 	}
 }
 
@@ -1048,6 +1109,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	metricsAddr, err := metricsAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.MetricsAddr = metricsAddr
 	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
@@ -1067,6 +1133,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+		{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL", &boot.SettlementResumeInterval},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
 		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
 		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},

@@ -42,7 +42,7 @@ func startEditInFlight(t *testing.T, service *Service, artifactID string, ops ..
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 	if _, err := service.ApplyOps(joined, artifactID, ops, lostEditAgent, nil); err != nil {
 		t.Fatalf("apply agent operations: %v", err)
@@ -358,7 +358,7 @@ func TestAnAcceptedSuggestionIsRefusedWhenAConcurrentChangeRemovesItsText(t *tes
 			if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 				t.Fatalf("lock owner: %v", err)
 			}
-			joined, ledger := service.Join(ctx, tx)
+			joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 			defer ledger.Discard()
 			human := model.Actor{Kind: "user", ID: "alice"}
 			if err := service.AcceptSuggestion(joined, artifactID, "s1", "Omega", human); err != nil {

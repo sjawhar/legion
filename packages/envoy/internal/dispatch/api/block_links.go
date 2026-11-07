@@ -21,14 +21,14 @@ func (s *server) getBlockLinks(w http.ResponseWriter, r *http.Request) {
 	for index, param := range [2]string{"from", "to"} {
 		document, err := s.blockLinksDocument(r, param)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		documents[index] = document
 	}
 	links, err := refs.BlockLinks(r.Context(), s.deps.Store.Pool, documents[0].ID, documents[1].ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, model.BlockLinks{From: documents[0], To: documents[1], Links: links})

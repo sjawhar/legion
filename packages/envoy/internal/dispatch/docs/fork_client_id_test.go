@@ -29,7 +29,7 @@ func TestAFirstForkTracksTheClientIDItsHistoryLeavesIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			room := newDocumentCopy(crdt.WithClientID(7))
 			room.Transact(typeParagraph(room, "old"))
-			service := &Service{srv: newRoomServer(websocket.NewServer())}
+			service := &Service{srv: newRoomServer(websocket.NewServer(), nil)}
 			write := &liveWrite{artifactID: "r", clientID: 7, state: newRoomState()}
 			var fork *crdt.Doc
 			var err error

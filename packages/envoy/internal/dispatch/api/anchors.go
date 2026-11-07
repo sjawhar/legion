@@ -14,6 +14,31 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
+// validateAnchorInput refuses an anchor whose shape is wrong on the request's own terms: no
+// artifact reference, neither or both of quote and mark_id, an empty one of either. It reads
+// nothing, so a write that anchors takes it before the document's writer gate, and resolveAnchor
+// takes it again under that gate so no caller can skip it.
+func validateAnchorInput(input *model.AnchorInput) error {
+	if input == nil {
+		return nil
+	}
+	if strings.TrimSpace(input.Artifact) == "" {
+		return errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor artifact is required")
+	}
+	quotePath := input.Quote != nil && input.MarkID == nil
+	markPath := input.Quote == nil && input.MarkID != nil && input.Occurrence == nil
+	if !quotePath && !markPath {
+		return errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor must provide quote with optional occurrence or mark_id")
+	}
+	if input.Quote != nil && *input.Quote == "" {
+		return errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor quote must not be empty")
+	}
+	if input.MarkID != nil && strings.TrimSpace(*input.MarkID) == "" {
+		return errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor mark_id must not be empty")
+	}
+	return nil
+}
+
 // resolveAnchor returns the anchor, its document's name, and the version the anchor snapshot
 // wrote (nil when the live document already matched the newest version). The result carries
 // what that write moved in the reference graph, which the caller names on its event.
@@ -21,21 +46,10 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 	if input == nil {
 		return nil, "", nil, nil
 	}
+	if err := validateAnchorInput(input); err != nil {
+		return nil, "", nil, err
+	}
 	artifactRef := strings.TrimSpace(input.Artifact)
-	if artifactRef == "" {
-		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor artifact is required")
-	}
-	quotePath := input.Quote != nil && input.MarkID == nil
-	markPath := input.Quote == nil && input.MarkID != nil && input.Occurrence == nil
-	if !quotePath && !markPath {
-		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor must provide quote with optional occurrence or mark_id")
-	}
-	if input.Quote != nil && *input.Quote == "" {
-		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor quote must not be empty")
-	}
-	if input.MarkID != nil && strings.TrimSpace(*input.MarkID) == "" {
-		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor mark_id must not be empty")
-	}
 	artifact, err := s.lockAnchorArtifact(ctx, tx, owner, artifactRef)
 	if err != nil {
 		return nil, "", nil, err

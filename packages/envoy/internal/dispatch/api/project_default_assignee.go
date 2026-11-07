@@ -36,7 +36,7 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 		order by key
 	`)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defaults, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (projectDefaultAssignee, error) {
@@ -45,7 +45,7 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 		return entry, err
 	})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, defaults)
@@ -67,7 +67,7 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		Assignee json.RawMessage `json:"assignee"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// encoding/json leaves the RawMessage empty when the key is absent and hands it the literal
@@ -85,24 +85,24 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		}
 		canonical, err := s.allowedLogin(r.Context(), login)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		assignee = &canonical
 	}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", key).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	if _, err := tx.Exec(r.Context(), `update projects set default_assignee = $2 where key = $1`, key, assignee); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	stored := projectDefaultAssignee{Project: key, Assignee: assignee}
@@ -110,11 +110,11 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		"settings.project_default_assignee.updated", actor, stored,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)

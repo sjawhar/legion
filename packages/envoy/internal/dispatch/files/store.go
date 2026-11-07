@@ -55,6 +55,12 @@ type Store interface {
 	// ErrNotFound. Any other error is a store failure: the object exists as far as the caller
 	// knows, and could not be opened. The body's reads can fail too, and fail before the body
 	// is done when the bytes read do not hash to sha.
+	//
+	// A read of the body ends when ctx ends: an implementation must carry the context into
+	// the transfer, as S3 and GCS do by opening the object on a request of net/http's whose
+	// body reads fail with the request's context. A caller bounds a store that stops sending
+	// mid-object by cancelling ctx (api.storeBody), and a body that ignored it would leave
+	// that caller blocked in Read with nothing left to cut it off.
 	Get(ctx context.Context, sha string) (*Object, error)
 	// Healthy answers nil when the store can be reached with the credentials it holds.
 	Healthy(ctx context.Context) error

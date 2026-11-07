@@ -84,7 +84,7 @@ func isLifecycleWrite(ctx context.Context) bool {
 // into its own block: the answer route writes that block itself (SetBlockAttributes), and a write
 // from the row could put back an answer it left out for size. Each copy gets the ask's state,
 // answerer and time with the answer left out, as settlement writes a block whose document has no
-// room for its answer (withholdAnswers): no write here is weighed for size, so none adds an
+// room for its answer (weighAnswers): no write here is weighed for size, so none adds an
 // answer's bytes to a document. A copy that already holds the answer in full is left as it is
 // (answeredCopyAttributes), and the settlement an issue's reopen leaves owed writes the answer into
 // the rest.

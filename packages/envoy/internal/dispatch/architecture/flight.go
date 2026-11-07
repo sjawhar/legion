@@ -106,7 +106,8 @@ func (i *Importer) flight(ctx context.Context, project, repo string) (*syncFligh
 	// The starter is one of several callers and may leave before the others,
 	// so its cancellation is dropped: one hang-up fails nobody else's sync.
 	detached := context.WithoutCancel(ctx)
-	// A sync opens its own transactions on the shared pool, so it is marked like an API
+	// A sync opens its own transactions on its store's pool (the request pool for a route's
+	// sync, the background pool for the ticker's), so it is marked like an API
 	// request: a read it makes while one is open must come from that transaction, never from a
 	// second connection (store.ErrNestedAcquire). The mark has to be the flight's own, because
 	// WithoutCancel keeps the starter's values: sharing an HTTP request's mark would make

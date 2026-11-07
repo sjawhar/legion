@@ -54,7 +54,7 @@ func TestADeletionTheRoomTakesAfterAWritesReadIsVersionedAfterTheWrite(t *testin
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -102,7 +102,7 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	if _, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{
@@ -155,7 +155,7 @@ func TestARoomChangeAfterAWritesReadCostsItsVersionNoRender(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
-	joinedCtx, ledger := service.Join(ctx, tx)
+	joinedCtx, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	t.Cleanup(ledger.Discard)
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -247,7 +247,8 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 		if err != nil {
 			t.Fatalf("round %d: begin: %v", round, err)
 		}
-		joinedCtx, ledger := service.Join(ctx, tx)
+		roundCtx, releaseRound := gatedContext(t, service, ctx, artifactID)
+		joinedCtx, ledger := service.Join(roundCtx, tx)
 
 		var browser sync.WaitGroup
 		browser.Add(1)
@@ -275,6 +276,7 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 		if editErr != nil {
 			ledger.Discard()
 			_ = tx.Rollback(ctx)
+			releaseRound()
 			continue
 		}
 		write := ledger.liveWriteFor(artifactID)
@@ -303,6 +305,7 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 		}
 		ledger.Discard()
 		_ = tx.Rollback(ctx)
+		releaseRound()
 	}
 	t.Logf("captures that reused the cached rendering: %d of %d; stale: %d", reused, rounds, stale)
 	if stale > 0 {

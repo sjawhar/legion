@@ -101,10 +101,12 @@ func (g *gatedMarkQuote) MarkQuote(
 
 // The other holders that wait are the document settlements: each opens its own transaction and
 // locks the same issue row an anchored write locks first (lockArtifactOwner), before it knows
-// whether it has work. Two of them, one anchored write holding the row, and one more write
-// queued behind it fill a four-connection pool - small on purpose, because the cycle this
-// pins closes at any size and four reaches it with four callers - so the write in the middle
-// must finish without asking that pool for anything else.
+// whether it has work. They take those transactions' connections from the settlements pool
+// (store.Pool.Settlements), not from the requests' four-connection pool - small on purpose, so a
+// settlement that took one of its connections would leave the write in the middle short - so three
+// of them wait on the row in a pool of their own while the write holds it, and the write finishes
+// without asking its pool for anything else. A second anchored write to the same document queues
+// behind it in the document's writer gate, holding no connection, and finishes once the first has.
 func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	const maxConns = 4
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}
@@ -121,8 +123,8 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	defer release()
 	issue := createInteractionIssue(t, handler, "TEST", "Settlement contention",
 		"alpha bravo charlie delta")
-	siblings := make([]string, 0, 2)
-	for index := range 2 {
+	siblings := make([]string, 0, maxConns-1)
+	for index := range maxConns - 1 {
 		response := dispatchRequest(t, handler, http.MethodPost,
 			"/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
 				"content": fmt.Sprintf("# Sibling %d\n\nfirst body\n", index),
@@ -152,7 +154,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 				"body":   "held write",
 			}, "alice").Code
 	}()
-	<-gate.entered // the first write holds a connection and the issue row
+	<-gate.entered // the first write holds a connection, the issue row and the document's gate
 
 	writes.Add(1)
 	go func() {
@@ -163,12 +165,15 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 				"body":   "queued write",
 			}, "alice").Code
 	}()
-	waitForAcquiredConns(t, database, 2)
+	waitForQueuedWriters(t, service, 1)
 
 	for _, artifactID := range siblings {
 		service.ScheduleSettlement(artifactID)
 	}
-	waitForAcquiredConns(t, database, maxConns)
+	waitForSettlementConns(t, database, int32(len(siblings)))
+	if acquired := database.Pool.Stat().AcquiredConns(); acquired > 1 {
+		t.Errorf("the request pool hands out %d connections while the settlements wait on the row, want the held write's alone", acquired)
+	}
 
 	release()
 	writes.Wait()
@@ -192,4 +197,22 @@ func waitForAcquiredConns(t *testing.T, database *store.Store, want int32) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("pool never handed out %d connections (acquired %d)", want, database.Pool.Stat().AcquiredConns())
+}
+
+// waitForSettlementConns waits until the settlements pool has handed out want connections: the
+// settlements the test arranged are in their transactions, waiting on the row the held write locks.
+func waitForSettlementConns(t *testing.T, database *store.Store, want int32) {
+	t.Helper()
+	settlements, err := database.Pool.Settlements()
+	if err != nil {
+		t.Fatalf("open the settlements pool: %v", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if settlements.Stat().AcquiredConns() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("settlements pool never handed out %d connections (acquired %d)", want, settlements.Stat().AcquiredConns())
 }

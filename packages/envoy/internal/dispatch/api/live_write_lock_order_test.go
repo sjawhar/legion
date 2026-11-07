@@ -21,8 +21,9 @@ import (
 // A project document upload and another write to the same document, started together, both
 // finish. The upload is held inside its transactional append, holding whatever it took before
 // it, until the second request has either entered its document operation (it holds the owner
-// row by then) or queued behind a lock. A write that waits for the in-memory writer slot while
-// holding a lock the slot's holder needs is a cycle Postgres cannot see, so both would hang.
+// row by then), queued behind a lock, or queued for the document's writer gate, which the upload
+// holds. A write that waits for the in-memory writer slot while holding a lock the slot's holder
+// needs is a cycle Postgres cannot see, so both would hang.
 func TestProjectDocumentUploadAndAConcurrentWriteBothFinish(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -95,6 +96,7 @@ func TestProjectDocumentUploadAndAConcurrentWriteBothFinish(t *testing.T) {
 type uploadRaceFixture struct {
 	handler     http.Handler
 	database    *store.Store
+	service     *docs.Service
 	docs        *engagingDocs
 	persistence *heldAppendStore
 	probe       *pgx.Conn
@@ -116,6 +118,7 @@ func newUploadRaceFixture(t *testing.T) *uploadRaceFixture {
 		// held inside its transaction.
 		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 		t.Cleanup(f.persistence.release)
+		f.service = service
 		f.docs = &engagingDocs{API: service, engaged: make(chan struct{})}
 		return f.docs
 	})
@@ -147,8 +150,8 @@ func (f *uploadRaceFixture) request(ctx context.Context, method, target string, 
 	return response
 }
 
-// waitForWriteToEngage returns once the second request has entered its document operation or
-// waits on a database lock.
+// waitForWriteToEngage returns once the second request has entered its document operation,
+// waits on a database lock, or waits for the document's writer gate.
 func (f *uploadRaceFixture) waitForWriteToEngage(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -157,6 +160,9 @@ func (f *uploadRaceFixture) waitForWriteToEngage(t *testing.T) {
 		case <-f.docs.engaged:
 			return
 		default:
+		}
+		if f.service.QueuedDocumentWriters() > 0 {
+			return
 		}
 		var waiting int
 		if err := f.probe.QueryRow(context.Background(), `

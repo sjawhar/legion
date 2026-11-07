@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+  A request's read of a document no longer takes a connection of the four the document loads use.
+  The stored head a read compares a resident room against, and the stamp a read of a document no
+  room holds names its cached rendering by, now read on the connection the read already holds; the
+  fold of a stored history that such a read misses the cache on takes a request-pool connection of
+  its own, at most four of those folds at once, out of the eight connections that pool keeps for
+  the users admission does not count. The four connections the loads use are left to the loads a
+  request's own connection cannot serve: the load of a room, which the whole server waits on, and
+  the fork a write of a document no room holds reads from the store inside its transaction.
+  Measured at ten times the everyday load, the reads had held those four connections 53% of the
+  time and waited on them for 60% of all the waiting there, so every room load queued behind them:
+  about 200 settlements a run ran past their 60-second deadline, two thirds of them inside the
+  warm-up load of the room they had to settle, and were left to the resumption.

@@ -136,8 +136,8 @@ func (o *Outbox) Publishing() bool {
 // send, settles the sends still in flight as lost (sendChains), records what NATS already
 // answered and releases the rest (scanBatch), and then releases the hold (publish), which wakes
 // a standby at once. Run returns once that is done and every wake source has stopped; a graceful
-// stop of the process waits for that before it closes the pool, up to cmd/dispatch's
-// outboxStopBudget.
+// stop of the process waits for that before it closes the pools, within what is left of
+// cmd/dispatch's one shutdown deadline (waitForOutbox).
 func (o *Outbox) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()

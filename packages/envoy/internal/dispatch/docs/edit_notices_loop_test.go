@@ -180,7 +180,7 @@ func TestEditNoticeSweepRetriesAHeldLease(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(context.Background(), leases, editNoticeLease, time.Time{}, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, duty.EditNoticeLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -196,7 +196,7 @@ func TestEditNoticeSweepRetriesAHeldLease(t *testing.T) {
 		sweeper.runEditNotices(ctx, leases, nil, editNoticeSchedule{minGap: 100 * time.Millisecond})
 	})
 	waitFor(t, 20*time.Second, "the sweep to find the lease held twice", func() bool {
-		return countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", editNoticeLease) >= 2
+		return countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", duty.EditNoticeLease) >= 2
 	})
 	if edits := humanEdits(t, database, document); len(edits) != 0 {
 		t.Fatalf("the sweep sent %d notices while the lease was held elsewhere; want none", len(edits))

@@ -1,0 +1,14 @@
+kind: Fixed
+body: |-
+  An event committed out of id order now reaches the live event feed and the Delivery page as soon
+  as the id below it ends, whatever else the process is reading. A reader of the event log reads up
+  to the safe horizon and then decides whether an id it could not read stands above what it read;
+  it asked that of the horizon as it stood at the decision, not of the one it had read through.
+  Another reader observing in between - a second page's event stream, a
+  `GET /api/v1/references?since=` read - can prove those ids final meanwhile, which moves the
+  horizon up to the newest id observed, and the first reader then saw nothing above it and
+  scheduled no re-read. Those events, already committed, waited for the next write to anything
+  before they were delivered: on a quiet Dispatch, minutes or longer, with the Delivery page's
+  tiles as stale for just as long. Each reader now decides against the horizon it read through
+  (the new `events.Horizon.Behind`, which replaces `Pending`), so it re-reads for its own gap
+  however far another reader has moved the horizon meanwhile.

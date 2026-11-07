@@ -93,7 +93,7 @@ func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder(t *te
 	subscribeEvents(t, client, "events", nil)
 
 	// Appended through a broker of process A's own: B learns of them only from the rows.
-	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	low, high, commitLow, _ := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
 	expectNoEventAbove(t, client, "events", low-1, time.Second, "on process B while process A's lower id is open")
 	commitLow()
 	expectEventsInOrder(t, client, "events", low, high)
@@ -252,7 +252,7 @@ func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
 	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("reset the event log: %v", err)
 	}
-	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	low, high, commitLow, _ := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
 	if high >= head {
 		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", high, head)
 	}

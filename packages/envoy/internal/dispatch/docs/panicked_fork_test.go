@@ -66,7 +66,7 @@ func TestAPanickedWriteLeavesNoForkForTheTransactionsLaterWrites(t *testing.T) {
 				}
 				return err
 			}
-			if err := joinedWrite(service, func(ctx context.Context) error {
+			if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 				// An edit, then a suggestion, which leaves the write a rendering of its fork.
 				if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "replace", Find: first, With: first + " firmly"}}, reuseAgent, nil); err != nil {
 					return fmt.Errorf("ApplyOps: %w", err)

@@ -13,7 +13,7 @@ import (
 )
 
 // heldSessionLock takes a connection of leases and the session-level advisory lock key on it.
-func heldSessionLock(t *testing.T, leases *pgxpool.Pool, key int64) *pgxpool.Conn {
+func heldSessionLock(t *testing.T, leases *store.RawPool, key int64) *pgxpool.Conn {
 	t.Helper()
 	conn, err := leases.Acquire(context.Background())
 	if err != nil {
@@ -58,7 +58,7 @@ func requireLockFree(t *testing.T, pool *store.Pool, key int64) {
 
 // requireConnections waits up to 5s for the pool to hold total connections, idle of them idle: a
 // connection released closed is destroyed by the pool on a goroutine of its own.
-func requireConnections(t *testing.T, leases *pgxpool.Pool, total, idle int32, why string) {
+func requireConnections(t *testing.T, leases *store.RawPool, total, idle int32, why string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

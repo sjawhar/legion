@@ -27,7 +27,7 @@ func (s *server) getAppInstallation(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, err := repoProjectPath(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	owner, name, _ := strings.Cut(repo, "/")

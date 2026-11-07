@@ -2,14 +2,24 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"runtime"
 	"strconv"
 	"strings"
-	"time"
+)
+
+// The contention profiles' sampling rates, set only while the profiler listens (startPprof), since
+// a profile nobody can take costs for nothing. A process with neither set records no mutex or block
+// event, and a load test's question - which lock or channel the goroutines queue on - goes
+// unanswered. Both are low enough to leave on in production: one contended mutex unlock in
+// mutexProfileFraction is recorded, and a blocking event is sampled with a chance of its duration
+// over blockProfileRate nanoseconds, so every block of a millisecond or more is recorded and a
+// microsecond's one time in a thousand.
+const (
+	mutexProfileFraction = 100
+	blockProfileRate     = 1_000_000
 )
 
 // pprofAddress is where DISPATCH_PPROF_PORT asks the profiling listener to bind: 127.0.0.1 and
@@ -42,26 +52,15 @@ func pprofHandler() http.Handler {
 
 // startPprof binds addr and serves pprofHandler on it until ctx ends, when the listener and every
 // open connection close at once: a profile in flight is cut off rather than allowed to delay the
-// process's shutdown. An empty addr starts nothing and returns a nil address. A bind that fails is
-// an error naming DISPATCH_PPROF_PORT, so a port clash refuses the boot.
+// process's shutdown (serveSide). It turns the mutex and block profiles on first, at
+// mutexProfileFraction and blockProfileRate, so /debug/pprof/mutex and /debug/pprof/block record
+// from boot on. An empty addr starts nothing, turns on nothing, and returns a nil address. A bind
+// that fails is an error naming DISPATCH_PPROF_PORT, so a port clash refuses the boot.
 func startPprof(ctx context.Context, addr string) (net.Addr, error) {
 	if addr == "" {
 		return nil, nil
 	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("DISPATCH_PPROF_PORT: listen on %s: %w", addr, err)
-	}
-	server := &http.Server{Handler: pprofHandler(), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		_ = server.Close()
-	}()
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			slog.Error("dispatch: pprof listener stopped", "addr", addr, "error", err)
-		}
-	}()
-	slog.Info("dispatch: pprof listening", "addr", listener.Addr().String())
-	return listener.Addr(), nil
+	runtime.SetMutexProfileFraction(mutexProfileFraction)
+	runtime.SetBlockProfileRate(blockProfileRate)
+	return serveSide(ctx, addr, "DISPATCH_PPROF_PORT", "pprof", pprofHandler())
 }

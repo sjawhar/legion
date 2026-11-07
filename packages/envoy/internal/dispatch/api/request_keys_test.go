@@ -65,20 +65,33 @@ func newKeyedRig(t *testing.T, answer func(run int32, w http.ResponseWriter, r *
 	return newKeyedRigAt(t, keyedRigPattern, answer)
 }
 
-// newKeyedRigAt is a keyedRig mounted at pattern, so a route the layer treats as its own - an
-// upload's larger body limit - can be driven too.
+// newKeyedRigAt is a keyedRig mounted at pattern, served as the table's row for it is - an
+// upload's larger body limit and its 413 among them - so a route the layer treats as its own can
+// be driven too.
 func newKeyedRigAt(t *testing.T, pattern string, answer func(run int32, w http.ResponseWriter, r *http.Request)) *keyedRig {
 	t.Helper()
 	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	rig := &keyedRig{database: database, server: served}
 	mux := http.NewServeMux()
 	mux.HandleFunc(http.MethodPost+" "+pattern, trackTransactions(served.keyedWrites(
-		http.MethodPost, pattern,
+		routeOrJSONBody(t, http.MethodPost, pattern),
 		func(w http.ResponseWriter, r *http.Request) { answer(rig.runs.Add(1), w, r) },
-		nil,
 	)))
 	rig.handler = mux
 	return rig
+}
+
+// routeOrJSONBody is the route register serves pattern as: the table's row for it, or a row with
+// no body limit of its own - a JSON body's, as a row that sets none takes - for a pattern the
+// table has none for.
+func routeOrJSONBody(t *testing.T, method, pattern string) apiRoute {
+	t.Helper()
+	for _, route := range (&server{}).routes() {
+		if route.Method == method && route.Pattern == pattern {
+			return route
+		}
+	}
+	return apiRoute{routeRow: routeRow{Method: method, Pattern: pattern, Auth: authAny}}
 }
 
 // send posts body to thing's writes as login under key.
@@ -706,7 +719,7 @@ func TestAHolderThatLostItsKeyCommitsNoWrite(t *testing.T) {
 		}
 		if err != nil {
 			s := &server{}
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		answerRun(run, w, r)
@@ -847,8 +860,8 @@ func TestAnAnswerPastTheKeptSizeReplaysItsStatusAlone(t *testing.T) {
 // A client mints a multipart body's boundary afresh for every attempt, so a retry of one upload
 // under its key is a repeat whatever its boundary; a different file is another request. A body past
 // what the layer holds in memory reaches the handler whole. It runs on an upload route, whose body
-// is the largest the layer reads past a JSON body's megabyte (routeBody; a handoff write reads
-// handoffRequestLimit).
+// is the largest the layer reads past a JSON body's megabyte (apiRoute.bodyLimit; a handoff write
+// reads handoffRequestLimit).
 func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 	rig := newKeyedRigAt(t, "/api/v1/issues/{key}/artifacts", func(run int32, w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)
@@ -857,7 +870,7 @@ func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 		}
 		WriteJSON(w, http.StatusCreated, map[string]any{"run": run, "bytes": len(data)})
 	})
-	content := bytes.Repeat([]byte("0123456789abcdef"), (keyedBodyInMemory/16)*2)
+	content := bytes.Repeat([]byte("0123456789abcdef"), (spooledBodyInMemory/16)*2)
 	upload := func(boundary string, file []byte) *httptest.ResponseRecorder {
 		t.Helper()
 		var body bytes.Buffer
@@ -979,9 +992,8 @@ func TestACommentPostedAgainUnderItsKeyLandsOnce(t *testing.T) {
 func requestDigestOf(t *testing.T, request *http.Request, pattern string) string {
 	t.Helper()
 	digest := sha256.New()
-	limit, _ := routeBody(request.Method, pattern)
 	writeRequestFields(digest, request, request.Method, pattern, patternWildcards(pattern))
-	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), limit)
+	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeOrJSONBody(t, request.Method, pattern).bodyLimit())
 	defer body.close()
 	if err != nil {
 		t.Fatalf("read the request's body: %v", err)

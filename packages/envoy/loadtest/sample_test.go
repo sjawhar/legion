@@ -359,7 +359,7 @@ func TestSummarizeResourcesTakesNATSRatesFromTheReadsThatWorked(t *testing.T) {
 // -heap-samples, which this sampler is given), so its failure lands in the first or the second
 // sample.
 func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
-	down := endpoints{pprof: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
+	down := endpoints{pprof: "http://127.0.0.1:1", metrics: "http://127.0.0.1:1", natsMon: "http://127.0.0.1:1", pg: unreachablePG, pids: map[string]int{}}
 	now := time.Now()
 
 	var logged bytes.Buffer
@@ -376,14 +376,14 @@ func TestSamplerMarksNoReadThatFailedOnceTheStepEnded(t *testing.T) {
 	for _, s := range ss {
 		others := slices.DeleteFunc(slices.Clone(s.FailedReads), func(r string) bool { return r == readHeap })
 		heaps += len(s.FailedReads) - len(others)
-		if !slices.Equal(others, []string{readPostgres, readGoroutines, readNATS}) {
-			t.Errorf("sample at %s marks %v, want postgres, goroutines and nats", s.At, s.FailedReads)
+		if !slices.Equal(others, []string{readPostgres, readGoroutines, readMetrics, readNATS}) {
+			t.Errorf("sample at %s marks %v, want postgres, goroutines, metrics and nats", s.At, s.FailedReads)
 		}
 	}
 	if heaps != 1 {
 		t.Errorf("samples mark %v and %v, want the one heap read marked once", ss[0].FailedReads, ss[1].FailedReads)
 	}
-	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: nats"} {
+	for _, name := range []string{"sampler: postgres", "sampler: pprof", "sampler: metrics", "sampler: nats"} {
 		if !strings.Contains(logged.String(), name) {
 			t.Errorf("run.log does not log the failed %s read:\n%s", name, logged.String())
 		}

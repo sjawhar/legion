@@ -23,17 +23,11 @@ var handoffPhasePattern = regexp.MustCompile(contracts.HandoffPhasePattern)
 // handoffRequestLimit is the most a handoff write's request may hold. The body travels as a JSON
 // string, whose escaping can make each byte of the object up to six on the wire (a client that
 // writes < as \u003c, or a two-byte character as \u00e9), so a body at the cap must fit six times
-// over beside the actor; the cap itself is checked on the decoded body.
+// over beside the actor; the cap itself is checked on the decoded body. It is the handoff write's
+// own row's BodyLimit, the one JSON row whose limit is not maxJSONRequestBytes (handoffWrite),
+// with errHandoffTooLarge the refusal past it, so the drain, the keyed layer and createHandoff
+// answer a body too large for it alike.
 const handoffRequestLimit = 6*contracts.DispatchHandoffBodyMax + 4<<10
-
-// handoffWritePattern is the handoff write's route pattern, and handoffWriteRoute that route: the
-// one JSON route whose body limit is its own rather than maxJSONRequestBytes (routeBody), with
-// errHandoffTooLarge the refusal past it, so the drain, the keyed layer and createHandoff answer
-// a body too large for it alike.
-const (
-	handoffWritePattern = "/api/v1/issues/{key}/handoffs/{phase}"
-	handoffWriteRoute   = http.MethodPost + " " + handoffWritePattern
-)
 
 var errHandoffTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED",
 	"request body exceeds %d bytes: a handoff body is at most %d bytes", handoffRequestLimit, contracts.DispatchHandoffBodyMax)
@@ -55,7 +49,7 @@ type createHandoffInput struct {
 func (s *server) createHandoff(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	if human {
@@ -68,13 +62,12 @@ func (s *server) createHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input createHandoffInput
-	limit, tooLarge := routeBody(http.MethodPost, handoffWritePattern)
-	if err := decodeJSONWithin(r, &input, limit, tooLarge); err != nil {
-		s.writeHandlerError(w, err)
+	if err := decodeJSONWithin(r, &input, handoffRequestLimit, errHandoffTooLarge); err != nil {
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.Body == nil {
@@ -95,7 +88,7 @@ func (s *server) createHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	handoff, err := s.recordHandoff(r.Context(), r.PathValue("key"), phase, *input.Body, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusCreated, handoff)
@@ -150,14 +143,14 @@ func (s *server) listHandoffs(w http.ResponseWriter, r *http.Request) {
 		order by created_at desc, phase, version desc
 	`, r.PathValue("key"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	handoffs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.HandoffSummary, error) {
 		return scanHandoff(row)
 	})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, handoffs)
@@ -207,7 +200,7 @@ func (s *server) writeHandoff(w http.ResponseWriter, r *http.Request, missing, q
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	handoff.HandoffSummary = summary

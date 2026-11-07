@@ -1,0 +1,7 @@
+kind: Changed
+body: |-
+  The `dispatch_ask`, `dispatch_comment` and `dispatch_doc_edit` descriptions say that
+  `OVERLOADED` (the server had no room for the request) and `EDIT_QUEUE_FULL` (too many writes
+  already waiting for the same document) are refusals sent before anything ran, so the caller
+  waits the `Retry-After` they name and sends the same call again, and that any write to a
+  document can get `EDIT_QUEUE_FULL`, where `dispatch_doc_edit` said only to back off.

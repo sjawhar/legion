@@ -6,15 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // excerptLeases is the pool a reconciliation pass takes its lease on, the one cmd/dispatch gives
 // the loop.
-func excerptLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
+func excerptLeases(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {
@@ -71,9 +70,9 @@ func TestTwoExcerptReconciliationRunnersNeverPassAtOnceAndBothPass(t *testing.T)
 	runExcerpts(t, func(ctx context.Context) { other.RunReferenceExcerptReconciliation(ctx, secondLeases, nil) })
 	// The second runner's boot attempt and at least one retry find the lease held.
 	waitFor(t, 30*time.Second, "the second runner to find the lease held twice", func() bool {
-		return countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", referenceExcerptLease) >= 2
+		return countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", duty.ReferenceExcerptLease) >= 2
 	})
-	if ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease); ran != 0 {
+	if ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", duty.ReferenceExcerptLease); ran != 0 {
 		t.Fatalf("%d passes ran while the first one was held inside its pass; want none:\n%s", ran, logs.Lines("lease="))
 	}
 
@@ -81,7 +80,7 @@ func TestTwoExcerptReconciliationRunnersNeverPassAtOnceAndBothPass(t *testing.T)
 		t.Fatalf("release refs: %v", err)
 	}
 	waitFor(t, 30*time.Second, "both runners to run a pass of their own", func() bool {
-		return countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", referenceExcerptLease) == 2
+		return countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", duty.ReferenceExcerptLease) == 2
 	})
 	if isOwed(t, database, document) {
 		t.Fatal("the document's mention is still owed after both passes")

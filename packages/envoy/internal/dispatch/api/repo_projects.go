@@ -31,7 +31,7 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 		order by repo
 	`)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -40,13 +40,13 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		mapping, err := scanRepoProject(rows)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		mappings = append(mappings, mapping)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mappings)
@@ -73,7 +73,7 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	repo, err := repoProjectPath(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var input struct {
@@ -83,7 +83,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		Actor     *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -97,34 +97,34 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	}
 	renamedTo, err := parseRepoRename(repo, input.RenamedTo)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", input.Project).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actorJSON, err := encodeJSON(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	previous, err := lockRepoProjectWrite(r.Context(), tx, s.deps.Events, repo, actor, input.Project)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	moved := previous != nil && previous.Project != input.Project
 	if moved {
 		if err := refuseRepoProjectInUse(r.Context(), tx, *previous); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -142,7 +142,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		}
 	case renamedTo != nil:
 		if err := refuseRepoRenameChain(r.Context(), tx, repo, *renamedTo); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -153,12 +153,12 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 			where project = $1 and is_default and repo <> $2
 			returning `+repoProjectColumns, input.Project, repo)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		changed, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.RepoProject, error) { return scanRepoProject(row) })
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -169,14 +169,14 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 			is_default = excluded.is_default, renamed_to = excluded.renamed_to
 		returning `+repoProjectColumns, repo, input.Project, actorJSON, isDefault, renamedTo))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var events []model.Event
 	appendMappingEvent := func(mapping model.RepoProject, deleted bool) bool {
 		event, err := s.appendEvent(r.Context(), tx, repoProjectEvent(mapping, actor, deleted))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return false
 		}
 		events = append(events, event)
@@ -194,7 +194,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)
@@ -216,18 +216,18 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, err := repoProjectPath(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
 	previous, err := lockRepoProjectWrite(r.Context(), tx, s.deps.Events, repo, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if previous == nil {
@@ -235,20 +235,20 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := refuseRepoProjectInUse(r.Context(), tx, *previous); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `delete from repo_projects where repo = $1`, repo); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, repoProjectEvent(*previous, actor, true))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)

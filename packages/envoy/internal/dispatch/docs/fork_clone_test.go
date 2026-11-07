@@ -260,7 +260,7 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 func TestEveryForkLeavesTheWriteAuthoringUnderItsForksClientID(t *testing.T) {
 	server := websocket.NewServer()
 	server.RoomIdleTimeout = time.Hour
-	service := &Service{srv: newRoomServer(server)}
+	service := &Service{srv: newRoomServer(server, nil)}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

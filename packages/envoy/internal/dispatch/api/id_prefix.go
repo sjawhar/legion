@@ -139,7 +139,7 @@ func (s *server) resolveIDPrefixes(route apiRoute, handler http.HandlerFunc) htt
 			// route answers for that {id} rather than for its block.
 			document, err := s.documentRefKey(r.Context(), r.PathValue("id"))
 			if err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 			if document != "" {
@@ -170,7 +170,7 @@ func (s *server) resolvePathValue(
 ) bool {
 	whole, err := s.wholeID(r.Context(), kind, scope, prefix, viewer)
 	if err != nil {
-		s.writeIDPrefixError(w, err)
+		s.writeIDPrefixError(w, r, err)
 		return false
 	}
 	if whole == "" {
@@ -210,13 +210,13 @@ func (s *server) wholeID(
 // writeIDPrefixError writes what wholeID could not resolve a prefix through: the 409 of a prefix
 // two items or more carry, listing them (writeAmbiguousID), and otherwise the 500 of a database
 // that could not be read.
-func (s *server) writeIDPrefixError(w http.ResponseWriter, err error) {
+func (s *server) writeIDPrefixError(w http.ResponseWriter, r *http.Request, err error) {
 	var ambiguous *refs.ErrPrefixAmbiguous
 	if errors.As(err, &ambiguous) {
 		writeAmbiguousID(w, ambiguous)
 		return
 	}
-	s.writeHandlerError(w, err)
+	s.writeHandlerError(w, r, err)
 }
 
 // itemNotFound is the 404 an item prefix that names nothing gets on a route whose own is

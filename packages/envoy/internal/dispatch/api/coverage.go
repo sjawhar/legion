@@ -42,12 +42,12 @@ func (s *server) getIssueCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 	issueKey := r.PathValue("key")
 	if err := s.requireIssueExists(r.Context(), issueKey); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	coverage, err := s.issueCoverage(r.Context(), s.deps.Store.Pool, issueKey)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, coverage)

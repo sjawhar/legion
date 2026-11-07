@@ -45,12 +45,15 @@ var (
 )
 
 // ownTransactionFunctions are the functions that run in a transaction of their own, never their
-// caller's, and commit it before they return (see TestCopyLockComesBeforeEveryPendingRowAndEvent):
+// caller's, and end it before they return (see TestCopyLockComesBeforeEveryPendingRowAndEvent):
 // each settlement settleOwedNow runs opens and commits its own, and SettleIssueDocuments, which
 // settleIssueBeforeClose calls, refuses a joined context; sweepClosedIssueAsks begins and commits
-// its own.
+// its own; and settleRoomWithin calls settlePass in a loop, each pass opening a transaction of its
+// own and committing or rolling it back, so what one pass took is released before the next pass
+// takes the copy lock.
 var ownTransactionFunctions = []string{
 	"docs.Service.settleOwedNow",
+	"docs.settlement.settlePass",
 	"api.server.settleIssueBeforeClose",
 	"api.server.sweepClosedIssueAsks",
 }
@@ -90,7 +93,7 @@ var ownTransactionFunctions = []string{
 // markSettlementPending, clearSettlementPending, lockProjectCopies and events.Broker.Append each
 // run theirs. Nor does it tell transactions apart, so a function that commits one transaction and
 // takes the copy lock in the next reads as one, except across a call of a function
-// ownTransactionFunctions lists: that function runs in a transaction of its own and commits it, so
+// ownTransactionFunctions lists: that function runs in a transaction of its own and ends it, so
 // what it takes does not order its caller's later calls. Its own body is checked as every other is,
 // and a call of it that takes the copy lock is still refused after its caller took a pending row or
 // appended an event, whose transaction can still be open while it waits. The guard fails when a
@@ -845,7 +848,7 @@ func (c *orderCheck) evaluate(node ast.Node) {
 
 func (c *orderCheck) call(call *ast.CallExpr) {
 	// held leaves out what a function running in a transaction of its own takes: that
-	// transaction has committed once the call returns.
+	// transaction has ended once the call returns.
 	var effect, held lockEffect
 	for _, callee := range c.graph.callees(call) {
 		effect |= callee.reach

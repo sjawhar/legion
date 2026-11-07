@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -45,7 +44,7 @@ func TestTwoResumptionRunnersResumeAnOwedSettlementOncePerPeriod(t *testing.T) {
 	done := make(chan struct{}, 2)
 	for _, runner := range []struct {
 		service *Service
-		leases  *pgxpool.Pool
+		leases  *store.RawPool
 	}{{first, firstLeases}, {other, secondLeases}} {
 		go func() {
 			defer func() { done <- struct{}{} }()

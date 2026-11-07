@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  Logging never makes a request wait: each line is handed to one writer goroutine through a
+  buffer of 4,096 lines, a line that finds it full is dropped and counted, and one WARN `dropped N
+  log records` follows once there is room. Every exit, a refused boot's included, writes the lines
+  still buffered first.

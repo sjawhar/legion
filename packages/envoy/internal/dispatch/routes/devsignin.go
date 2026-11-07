@@ -89,8 +89,7 @@ func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err := r.ctx.People.Record(req.Context(), email); err != nil {
-		slog.Error("dispatch: dev sign-in could not record the person", "email", email, "error", err)
-		writeError(w, http.StatusInternalServerError, "record person")
+		writeUnservedOr500(w, req, err, slog.LevelError, "dispatch: dev sign-in could not record the person", "record person", "email", email)
 		return
 	}
 	if !r.issueSession(w, req, email, "") {

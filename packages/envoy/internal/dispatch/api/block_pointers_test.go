@@ -281,12 +281,16 @@ func TestABrowserWritePointingAtAMissingBlockIsSavedAndUnresolved(t *testing.T) 
 }
 
 // setBlockAttributes writes typed-block state through the live room's own service call, as the
-// answer route does (answerAsk's WriteBlock): inside a transaction joined with Docs.Join, the
-// only way a document write runs, committed when the write succeeds. It returns
-// SetBlockAttributes' own error, which a caller testing a refusal asserts on;
-// setLiveBlockAttributes is the same write for a caller that wants it to succeed.
+// answer route does (answerAsk's WriteBlock): holding the document's writer gate, inside a
+// transaction joined with Docs.Join, the only way a document write runs, committed when the
+// write succeeds. It returns SetBlockAttributes' own error, which a caller testing a refusal
+// asserts on; setLiveBlockAttributes is the same write for a caller that wants it to succeed.
 func setBlockAttributes(database *store.Store, documentService docs.API, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
-	ctx := context.Background()
+	ctx, release, err := documentService.AcquireDocumentWriter(context.Background(), artifactID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
 		return err

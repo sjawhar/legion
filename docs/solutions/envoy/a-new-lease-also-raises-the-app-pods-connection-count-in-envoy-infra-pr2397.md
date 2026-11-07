@@ -15,7 +15,7 @@ module: packages/envoy/infra/gcp
 
 Extends docs/solutions/envoy/a-new-duty-exclusive-caller-raises-lease-pool-size-and-a-shortfall-is-silent-pr2233.md.
 
-- Raising `leasePoolSize` raises `store.ConnectionsPerProcess` (`packages/envoy/internal/dispatch/store/pool.go`),
+- Raising `leasePoolSize` raises `store.ConnectionsPerProcess` (`packages/envoy/internal/dispatch/store/pools.go`),
   and `dispatchConnectionsPerPod` in `packages/envoy/infra/gcp/dispatch.go` must equal it. Set both in
   the same commit.
 - `TestDispatchConnectionsPerPodIsTheServers` is the only check. It lives in `packages/envoy/infra`,

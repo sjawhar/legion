@@ -17,9 +17,12 @@ import (
 
 // appendOutOfOrder appends two events through broker so they commit out of id order: tx A
 // appends on issue first (the lower id, low) and stays open, then tx B appends on issue second
-// (high) and commits. commitLow commits A; until it runs, low is an id below a committed one that
-// is not yet visible. A that the test never commits rolls back when the test ends.
-func appendOutOfOrder(t *testing.T, database *store.Store, broker *events.Broker, first, second string) (low, high int64, commitLow func()) {
+// (high) and commits. commitLow commits A and rollbackLow rolls it back, which notifies nothing
+// and leaves low a gap for good; until one of them runs, low is an id below a committed one that
+// is not yet visible. A that the test ends neither way is rolled back when the test ends.
+func appendOutOfOrder(
+	t *testing.T, database *store.Store, broker *events.Broker, first, second string,
+) (low, high int64, commitLow, rollbackLow func()) {
 	t.Helper()
 	ctx := t.Context()
 	open, err := database.Pool.Begin(ctx)
@@ -56,12 +59,19 @@ func appendOutOfOrder(t *testing.T, database *store.Store, broker *events.Broker
 	if highEvent.ID <= lowEvent.ID {
 		t.Fatalf("event ids %d (open) and %d (committed) are not out of commit order, so this test proves nothing", lowEvent.ID, highEvent.ID)
 	}
-	return lowEvent.ID, highEvent.ID, func() {
+	commitLow = func() {
 		t.Helper()
 		if err := open.Commit(ctx); err != nil {
 			t.Fatalf("commit the lower id: %v", err)
 		}
 	}
+	rollbackLow = func() {
+		t.Helper()
+		if err := open.Rollback(ctx); err != nil {
+			t.Fatalf("roll back the lower id: %v", err)
+		}
+	}
+	return lowEvent.ID, highEvent.ID, commitLow, rollbackLow
 }
 
 // holdClusterTransactionID opens a transaction in the test cluster's postgres database and takes

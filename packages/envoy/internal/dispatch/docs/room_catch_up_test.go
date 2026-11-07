@@ -862,7 +862,7 @@ func TestAJoinedTransactionAnnouncesEachDocumentOnceWithItsLastVersion(t *testin
 		t.Fatalf("begin the transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	agent := model.Actor{Kind: "session", ID: "agent-session"}
 	for _, paragraph := range []string{"Agent's first.", "Agent's second."} {

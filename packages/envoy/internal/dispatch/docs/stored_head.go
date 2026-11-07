@@ -45,24 +45,16 @@ func (s *Service) flushOtherRooms(ctx context.Context, tx Queryer, artifactID st
 
 // readStoredHead is the stored head a read of artifactID compares a resident room's cursor
 // against (roomHoldsHead): the greatest stored version, as the gate and a version capture read it
-// (currentUpdateCursor). It reads through the caller's transaction when there is one, since a
-// second connection of the shared pool taken under it is what deadlocks the pool
-// (store.ErrNestedAcquire), and otherwise on the pool that owns loads, as a cold read reads the
-// store's stamp (PgVersioned.DocumentStamp), so a caller holding a pooled connection it did not
-// join, settlement's transaction, takes no second one either. It takes no lock and waits for
-// nothing. It is the one place a read learns the head.
+// (currentUpdateCursor). It reads where every read this service makes for its caller reads
+// (readQuerier): through the caller's transaction when there is one, since a second connection of
+// the shared pool taken under it is what deadlocks the pool (store.ErrNestedAcquire), else through
+// the pool its context names, a settlement's own, and otherwise through the request pool, on which
+// a pinned read runs this statement on the connection it already holds (store.PinConnection) and
+// so takes none. It is one statement of the read that asked for it, not a load of a document, so
+// it does not belong on the pool that owns loads: a room's load there would queue behind it
+// (INFRA-592). It takes no lock and waits for nothing. It is the one place a read learns the head.
 func (s *Service) readStoredHead(ctx context.Context, artifactID string) (int64, error) {
-	var q Queryer
-	if tx, joined := txFromContext(ctx); joined {
-		q = tx
-	} else {
-		rooms, err := s.store.Pool.Rooms()
-		if err != nil {
-			return 0, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
-		}
-		q = rooms
-	}
-	head, err := currentUpdateCursor(ctx, q, artifactID)
+	head, err := currentUpdateCursor(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return 0, ctxErr

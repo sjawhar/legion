@@ -1,0 +1,66 @@
+kind: Changed
+body: |-
+  A request's body, and a read's answer, are now bounded on the silence between their bytes and on
+  the rate those bytes keep, never on how long the whole transfer takes: 20 seconds without a byte
+  ends either, and so does an average below 32 KB/s once it has had a minute's grace. An upload
+  over a slow uplink is therefore taken however long it needs - a 26 MiB file at 1 Mbit/s takes
+  about three and a half minutes - and a large answer read over a slow downlink is written in full.
+  The floor counts the bytes the server has handed to the connection, which run ahead of what the
+  client has read by what the kernel still holds for it, so a client reading below the floor is cut
+  later than that minute: about three minutes into a multi-MiB answer.
+  An answer's writes are given the time the kernel's send buffer takes to drain at that floor
+  besides the 20 seconds, because a write blocks until the kernel drains what it already holds
+  rather than until the client's next read: a client that stops reading is cut within 20 seconds
+  and 4 MiB at 32 KB/s, about two and a half minutes, while one that keeps reading at or above the
+  floor is never cut by a blocked write, where a 4 MiB answer written in one call was cut at 15 to
+  17 seconds for every reader below about 200 KB/s.
+  A file version download is bounded that way too: its own 5-minute deadline bounds the work
+  before its answer - reading the row and opening the file store - and stops at the answer's
+  first byte, so a reader steadily above the floor is sent a whole file however long that takes,
+  where a 25 MiB file read below about 85 KB/s was cut at 5 minutes and left the client a 200
+  short of its Content-Length with nothing logged. A download its reader does cut - one that
+  stops reading, or falls below the floor - is logged once at INFO, naming the artifact, the
+  version, the bytes written and the file's size, and its connection is closed under it.
+  A bound of the same shape now holds the file store to sending, judged on the time the
+  download's reads of the bucket's body themselves take: a bucket that leaves one of those reads
+  unfinished for 20 seconds, which is a bucket sending below about 1.6 KB/s since each read waits
+  for about 32 KB of new bytes, and one whose bytes over that reading time fall below 32 KB/s
+  after a minute's grace, are both cut, logged at ERROR naming the store and closed under their
+  client, where they held the request's goroutine, the bucket's connection and the request's own
+  room to run until that client hung up, so patient clients during a bucket incident filled the
+  read class and every read was then answered `429 OVERLOADED`. That reading time is left out of
+  what the reader's own floor is judged on, so a slow bucket is cut as the store's fault instead
+  of taking the download's reader down with it. The last bytes of an answer the
+  server has begun writing go out under the bound as well, rather than being left to the
+  connection's buffers after the request with no deadline on them, and after the request's
+  pinned database connection is given back rather than while it still holds it: a download whose
+  reader does not take them is cut there too, where it held the connection and the goroutine
+  until TCP gave up.
+  A write whose client is already sending now reads its whole body off the connection before it
+  asks admission for room, where the server has none for it: it waits for room holding no unit,
+  with nothing of its request left on the wire, so the time its body takes is none of its wait
+  and a client that hangs up while the write is queued is noticed at once - the write leaves the
+  queue there and then and is recorded as `status=499`, where it held its place for its whole
+  wait and was then answered a `429 OVERLOADED` nobody read. A write admitted before its body -
+  one the server had room for, and one whose client asked to be told to continue
+  (`Expect: 100-continue`) and has therefore sent nothing, which the layers that refuse such a
+  request early still ask no body of - gives its admission units back while the body arrives and
+  takes them again once it has arrived, at the place in the queue where it arrived. Either way,
+  clients trickling bodies, which are unauthenticated at that point because every layer reads the
+  body before a handler resolves its caller, can no longer hold every write unit of a process and
+  have every other write answered `429 OVERLOADED`. A body that arrives to find no room left is
+  itself answered `429 OVERLOADED`, with the body already read, and nothing of that write runs or
+  commits: the refusal cancels its handler where it stands, so a client that obeys `Retry-After`
+  and sends the write again stores it once. An upload refused that way stored its file, committed
+  its artifact row and had only its `201` replaced by the 429, so such a client uploaded the file
+  twice. Before, a body had 60 seconds in
+  all from the first read of it and an answer the read's own deadline from its first byte, which
+  refused an honest 25 MiB upload on a 1 Mbit/s uplink with `400 REQUEST_BODY_UNREADABLE` and cut
+  off a large answer at 20 seconds, while 24 trickling clients still held every write unit for a
+  minute at a time. A body that stops arriving, or whose framing the server cannot read, is still
+  answered `400 REQUEST_BODY_UNREADABLE` (or the answer its layer had already written, such as a
+  refused upload's `409 ISSUE_CLOSED`) with the connection closed after it, and a client that went
+  away mid-body is now answered nothing and recorded as `status=499` rather than written a 400
+  nobody reads, a keyed write's client as well as an unkeyed one's. Every route still bounds its
+  body in bytes as it did: 1 MiB for a JSON route, 26 MiB for an upload. The document and delivery
+  websockets are mounted outside the routes and neither bound touches them.

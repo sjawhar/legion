@@ -100,7 +100,7 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	// reader with it. Recorded, as every actor a row holds is (model.Actor.Recorded).
 	caller, _, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	actor := caller.Recorded()
@@ -114,7 +114,7 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	var input createGoingRequestInput
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	words := strings.TrimSpace(input.Words)
@@ -162,12 +162,12 @@ func (s *server) createGoingRequest(w http.ResponseWriter, r *http.Request) {
 	// only runs out its deadline.
 	answering, err := store.ForConcurrentRead(context.WithoutCancel(r.Context()))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	request, err := s.recordGoingRequest(r.Context(), actor, project, words)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.detached.goDetached(func() { s.startGoingRun(answering, request) })
@@ -264,7 +264,7 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 	// a token row, the sign-in issuer's confirmation - worth paying once.
 	actor, _, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	id := r.PathValue("id")
@@ -281,7 +281,7 @@ func (s *server) streamGoingAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// The whole credential, through model.Actor.SameCredential and never SameAs alone, which

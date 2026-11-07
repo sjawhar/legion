@@ -101,8 +101,8 @@ type roomState struct {
 	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
 	settleWarming  bool
 	settleFailures int
-	// settling counts the settlements running on this state (settleRoomWithin), which hold it
-	// across their database work.
+	// settling counts the settlements running on this state (settleRoomWithin), from before their
+	// wait for a settlement slot to the end of their database work, which they hold it across.
 	settling   int
 	closed     bool
 	failed     error
@@ -118,6 +118,14 @@ type roomState struct {
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.
 	released bool
+	// lastUsed is when the room this state holds was last used: its load, the return of a
+	// Server.Apply on it, or the last browser leaving it (noteRoomUsed). It is the order the
+	// budget of resident peerless rooms closes them in, least recently used first
+	// (peerlessRoomsOverBudget), and the start of the window the budget leaves a room alone for
+	// (roomBudgetMinIdle). weight is the heap that room is taken to hold, from the bytes
+	// its load decoded (roomWeight); both are read by the budget alone.
+	lastUsed time.Time
+	weight   int64
 }
 
 // documentUpdateClass is what the room's update observer recorded for one update, which its
@@ -178,6 +186,14 @@ func (s *Service) lockState(room string) *roomState {
 // lockExistingState returns room's state locked, or nil when the service holds none.
 func (s *Service) lockExistingState(room string) *roomState {
 	return s.lookUpState(room, false)
+}
+
+// roomGone reports whether room's state is no longer this service's to write into: the service is
+// stopping, or the room has been closed or has failed. Whoever closed or failed it - or the
+// shutdown - answers for the work left on it, so a settlement that meets it writes nothing more
+// and ends. The caller holds state.mu.
+func (s *Service) roomGone(state *roomState) bool {
+	return s.stopping.Load() || state.closed || state.failed != nil
 }
 
 // newRoomState is a document's record with nothing of a room on it yet.

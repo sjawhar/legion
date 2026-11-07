@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-592",
+  "previousHandoff": "test handoff v3 on Dispatch (round 17, commit a0bdfe4a)",
+  "round": 18,
+  "headSha": "4c269bf3639efd135af438046b357aa0833d7df2",
+  "codeHeadSha": "4c269bf3639efd135af438046b357aa0833d7df2",
+  "loadRule": "Pod 0989947d-6fcb-4699-8d2a-77ef6a90ee06 (2 CPUs). LOADTEST_ROOT /legion/scratch/tmp/infra-592-tester/lt re-seeded by main fb42efb6 (the merge 4c269bf3's main side; #2444's migration). Adjacent base/head pairs with nothing else of mine running (00:17-00:37Z). Superuser Postgres: the stack's own, on the issue volume. Memory sampled every 2 s by mem-sampler-infra-592-tester: peak 10.71 GiB of 19, 4,839 samples. Go tests -p 1, GOMAXPROCS=2, GOMEMLIMIT=12GiB; -race with CGO_ENABLED=1.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Read implement handoff v4. My red test passes unmodified; I read both scratch memory runs myself (PRs #2691/#2692, jobs 125596466643/125596791565) and confirmed each is its stated commit plus the same five-run, two-column-only test change; I re-ran their suites and drove the download cut on a real process for both row- and store-backed versions."
+  },
+  "failed": 0,
+  "failures": [],
+  "notes": [
+    "The 15 KB/s reader of an 8 MiB row-held file was cut at 68.9 s this round against 96.3 s in round 17; the PR body cites 70 s and 96 s, both measured. The cut moves with what the kernel holds.",
+    "The api suite took 4,030 s against 1,759 s in round 17, every test slower in proportion, after main's #2665 (test databases as file copies of their template) entered the branch; not a failure, recorded for whoever reads suite times on this pod.",
+    "10x reads 47.1/s on this 2-CPU pod; the base itself served 49.6 reads/s at 1x with 1,816 requests not 2xx and read p50 9.4 s."
+  ],
+  "architectChecks": {
+    "downloads": "PASS. Red test TestARowBackedDownloadToAReaderThatStopsIsCutAndLoggedAborted byte-identical to 4e89452d's, 3/3 pass; the fix (5574341f) makes cutDownload log and panic(http.ErrAbortHandler), called by both branches. Real process (throwaway download_bounds_tester_test.go, 25 MiB, 16 KiB receive buffer, one download at a time): store-backed 60 KB/s 200 whole in 7m16.89s (elapsed_ms 421,814); stopped reader cut at elapsed_ms 53,007 after 1,081,344 bytes (bound 20 s + 1,081,344/32,768 s = 53.0 s), INFO cut line, access line aborted=true, client 'unexpected EOF' against Content-Length 26,214,400. Row-backed 60 KB/s whole in 7m16.89s (elapsed_ms 422,445); stopped reader cut at elapsed_ms 82,091 after 2,061,052 bytes (bound 82.9 s), INFO line, aborted=true, unexpected EOF. Real binary on the stack (8 MiB row-held, one Write): 40/60/100/150 KB/s complete (209.7/139.8/83.9/55.9 s); 15 KB/s cut at elapsed_ms 68,860 after 1,703,936 bytes, aborted=true; stopped reader cut at elapsed_ms 50,082 after 1,048,245 bytes, aborted=true.",
+    "memory": "Implementer's scratch runs: PR #2692 head 021b5f54 = 4c269bf3 + {edit_memory_test.go: two-column case only; memory_harness_test.go: peakRuns 5}, job 125596791565 success: 'a two-column table: a cold one-word edit and its settlement, 175 MiB above idle at least (226 MiB, 203 MiB, 200 MiB, 175 MiB, 199 MiB)'. PR #2691 head 065b422d = fb42efb6 + the same change, job 125596466643 success: '176 MiB above idle at least (223 MiB, 178 MiB, 176 MiB, 179 MiB, 196 MiB)'. Spreads overlap; the least, the test's measure since #2665, is equal. dispatch-memory at 4c269bf3 itself: success.",
+    "merge": "round_shape.py 31efca5d (base 2c25dfcc) -> 4c269bf3 (base fb42efb6): 25 files' own diff differs. Entered: docs/compaction.go, compaction_sweep.go, compaction_sweep_test.go, compaction_test.go, room_load_bench_test.go (main's #2444; the PR's lines put the compaction on store.RawPool and duty.DocumentCompactionLease and measure the requests and rooms pools). Left: outbox/compaction_lease_test.go (main moved the compaction out of the outbox). .legion paths: this issue's implement.json and test.json only; 14 pr2402-* fragments, none deleted on main, no issue key. Conflicts recomputed: 680e4505 7 files, 4c269bf3 0; resolution_check.py: routes_table.go matches main (GET /api/v1/credential-requests/{id} is gone on main too, #2649), publisher.go's compaction loop moved to docs/compaction_sweep.go by main, pool.go/pools.go keep main's compaction pool (2) and horizon pool (2), counted. Budget re-summed: main fb42efb6 sharedPoolSize 64 + Rooms 4 + health 1 + lease 13 + outbox 2 + compaction 2 + registry 1 + horizon 2 + listeners 5 = 94; head SharedPoolSize 48 + background 6 + live 4 + settlements 4 + Rooms 4 + health 1 + lease 15 (13 names + 2) + outbox 2 + compaction 2 + horizon 2 + registry 1 + listeners 5 = 94 = dispatchConnectionsPerPod; TestDispatchConnectionsPerPodIsTheServers passes. The PR adds no connection.",
+    "drives": "TestAWriteBothTheCapAndTheReservationRefuseDoesNotHoldBackTheReads passes 3/3 and under -race; envoy-client dispatch-http.test.ts 55/55 with 'repeats a write cut off for silence under the key its first attempt carried'; refused at resume: comment 429 at 3.55 s, upload 429 at 3.77 s, no row of theirs; queued write hang-up status=499 elapsed_ms=400.",
+    "tests": "New and carried request, answer, download and admission tests 45/45 over three counts; -race 17/17, no DATA RACE; hub 0/100; upload-lock 0/100; room test PASS. Multiprocess suite (-timeout 60m): ok 1,559.7 s, 159 top-level PASS, 1 SKIP. api suite: 1,501 PASS, 15 SKIP, one --- FAIL, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves's own byte-order refusal; TestAnAnsweredAsksPartEdgesAreListedSince passed, so no re-run was needed.",
+    "load": "1x: head 3.93 events/s, 58.1 reads/s, 293 reads and 12 writes refused 429 (write refusal ~2.0-2.1 s) in a stall; base 3.99 events/s, 49.6 reads/s, 1,816 not 2xx, read p50 9.4 s. 10x: head 4.66 events/s, 47.1 reads/s, 98,864 read and 6,326 write refusals all 429, 0 connection failures, write refusal p50 2,015 / p99 2,328 / max 6,617 ms; base 1.44 events/s, 0.1 reads/s, 107,343 not 2xx.",
+    "ci": "At 4c269bf3, 02:53Z: 29 lanes success (dispatch-memory, lint, test, typecheck among them); dispatch and envoy-go in progress; ci-ok not reported. Unread: dispatch, envoy-go, ci-ok."
+  },
+  "leftoverCheck": "After stack.sh stop and proc kill of the sampler: ps -eo pid,args | grep -v grep | grep -E 'memory.usage_in_bytes|sleep 2|series18|r18-|dl3.sh|go test|loadgen|infra-592-tester/|postgres' printed 0 lines.",
+  "raceNote": "Every -race run of mine used CGO_ENABLED=1 and ended ok.",
+  "evidence": "dispatch://INFRA-592/artifact/infra-592-tester-r18-tar-gz",
+  "proof": [
+    {
+      "criterion": "A download to a reader that stops is cut within its bound, logged and aborted, row-held and store-held alike; a steady reader above the floor of either completes",
+      "surface": "real envoy-dispatch processes (row-held; store-held through a loopback S3 via the AWS SDK), raw TCP readers with a 16 KiB receive buffer",
+      "command": "go test -v ./cmd/dispatch/ -run '^TestTesterDownloadBoundsOnTheRealBinary$' (throwaway, in the evidence)",
+      "observed": "60 KB/s whole for both (7m16.9s); stopped readers cut at 53.0 s and 82.1 s, each within its bound, aborted=true, client unexpected EOF",
+      "headSha": "4c269bf3639efd135af438046b357aa0833d7df2",
+      "negativeControl": "round 17 at 31efca5d: the row-held stopped reader's access line carried no aborted=true; 7dc94d85 cut the store-held 60 KB/s reader at 5m13s"
+    },
+    {
+      "criterion": "Excess load is refused early with a retryable 429 and nothing is dropped (10x)",
+      "surface": "INFRA-589's 2-core load reproduction, adjacent pair on one pod",
+      "command": "run-step.sh t18-{base,head}-10x-a --events 40 --sessions 1000 --requests 600",
+      "observed": "head 4.66 events/s, 47.1 reads/s, 105,190 refusals all 429, 0 connection failures",
+      "headSha": "4c269bf3639efd135af438046b357aa0833d7df2",
+      "negativeControl": "main fb42efb6: 1.44 events/s, 0.1 reads/s, 107,343 not 2xx"
+    }
+  ]
+}

@@ -80,7 +80,9 @@ type loadedSource struct {
 // flight instead of each making its own set of GitHub calls, no lock is held
 // across a GitHub call, and two sources — of one project or of two — never
 // wait on each other here; the source row still orders what every process
-// writes.
+// writes. An importer On derives shares those flights, so the ticker's
+// importer on the background pool and the routes' on the request pool join
+// one flight per source rather than one each.
 type Importer struct {
 	store  *store.Store
 	github *githubapp.Client
@@ -88,17 +90,20 @@ type Importer struct {
 
 	// owner outlives every caller: the process stopping (Close) is the only
 	// thing that cancels a flight, since a flight runs on behalf of callers
-	// that have since left.
+	// that have since left. It, the counter and the group below are held by
+	// pointer and carried into every importer On derives, so one process has
+	// one set of flights however many pools it syncs through, and one Close
+	// ends them all.
 	owner   context.Context
 	abandon context.CancelFunc
-	running syncCount
+	running *syncCount
 	// syncs is keyed on the source, project and repository both, not on the
 	// project: Sync answers that source's row, and SyncProject needs one
 	// result per repository. Two sources of one project cannot corrupt each
 	// other without a mutex here, because every projection takes
 	// lockProjectSources (`order by id for update`) and judges heldElsewhere
 	// inside that lock.
-	syncs singleflight.Group
+	syncs *singleflight.Group
 }
 
 // NewImporter wires the importer to the database, the GitHub App client (nil
@@ -106,7 +111,25 @@ type Importer struct {
 // event broker.
 func NewImporter(database *store.Store, github *githubapp.Client, broker *events.Broker) *Importer {
 	owner, abandon := context.WithCancel(context.Background())
-	return &Importer{store: database, github: github, events: broker, owner: owner, abandon: abandon}
+	return &Importer{
+		store:   database,
+		github:  github,
+		events:  broker,
+		owner:   owner,
+		abandon: abandon,
+		running: &syncCount{},
+		syncs:   &singleflight.Group{},
+	}
+}
+
+// On is this importer reading and writing through database instead: the same GitHub App client,
+// event broker and flights, so a sync of one source on either importer joins the other's instead
+// of making its own set of GitHub calls, and one Close ends both. cmd/dispatch runs the ticker on
+// the background pool's store this way, while the routes sync on the request pool's.
+func (i *Importer) On(database *store.Store) *Importer {
+	derived := *i
+	derived.store = database
+	return &derived
 }
 
 // Close ends the importer's flights and waits for them: architecture.Run is
@@ -114,7 +137,8 @@ func NewImporter(database *store.Store, github *githubapp.Client, broker *events
 // background.Wait and waitIntakes, then waitUntilIdle and pool.Close), and a
 // flight runs on a context the caller's cancellation no longer reaches, so
 // without this a sync still fetching when the process stops would write into
-// a closing pool. It is safe to call twice, and on a nil importer.
+// a closing pool. It is safe to call twice, on an importer On derived, and on
+// a nil importer.
 func (i *Importer) Close() {
 	if i == nil {
 		return

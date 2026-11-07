@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -678,6 +679,7 @@ func deferPastWindow(events []*batchEvent) []outcome {
 }
 
 // recordBatch writes what each event of a batch came to, in one statement and so all of it or
+// recordBatch writes what each event of a batch came to, in one statement and so all of it or
 // none, and reports whether holder still held the publisher hold when it did. What is true whoever
 // holds the hold is written regardless: the destinations an event reached are added to its
 // published_destinations, and an event that reached every destination is marked published, its
@@ -685,7 +687,8 @@ func deferPastWindow(events []*batchEvent) []outcome {
 // publish_error), a hold-back (next_attempt_at alone, the earlier of its delay out and its until)
 // and a release are written only while the hold is holder's and has not lapsed, checked in the
 // same statement, so a process that lost the hold mid-batch schedules nothing beside the holder
-// that took it. Each row is guarded on published_at is null.
+// that took it. Each row is guarded on published_at is null. The rows the write marked published,
+// and only those - a row the guard skipped was marked by another write - are counted in Published.
 //
 // A write that fails leaves the events it covered (one owner's, or the batch end's remainder) as
 // they were read, which is what a process that dies between NATS's acknowledgements and this write
@@ -726,6 +729,7 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 		}
 	}
 	var holds bool
+	var marked int64
 	if err := deps.lanes.statement(func() error {
 		return deps.Store.Pool.QueryRow(ctx, `
 		with hold as (
@@ -765,13 +769,41 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 			left join reached r on r.id = o.id
 			where e.id = o.id and e.published_at is null
 			  and (o.state = 'published' or h.mine or r.id is not null)
+			returning e.published_at
 		)
-		select mine from hold
-	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds)
+		select (select mine from hold), (select count(published_at) from recorded)
+	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds, &marked)
 	}); err != nil {
 		return false, fmt.Errorf("record the batch's outcome: %w", err)
 	}
+	publishedEvents.Add(uint64(marked))
 	return holds, nil
+}
+
+// publishedEvents counts the events this process's outbox has marked published (recordBatch).
+var publishedEvents atomic.Uint64
+
+// Published is how many events this process's outbox has marked published since it started: the
+// dispatch_outbox_published_total counter of the metrics endpoint. One outbox runs per process
+// (cmd/dispatch), so the count is the process's.
+func Published() uint64 { return publishedEvents.Load() }
+
+// Lag is how long the oldest event the outbox still owes a publish has waited: the age of the
+// oldest event with no published_at that is not a pending subscription command, which the outbox
+// never publishes (readBatchSQL), and zero when there is none. An event backed off after a
+// failed publish, or held back behind its owner's earlier events, counts: an agent waits for it
+// all the same. One statement, on the events_unpublished index's rows.
+func Lag(ctx context.Context, pool *store.Pool) (time.Duration, error) {
+	var seconds float64
+	if err := pool.QueryRow(ctx, `
+		select coalesce(greatest(extract(epoch from now() - min(created_at)), 0), 0)::float8
+		from events
+		where published_at is null
+		  and coalesce(payload ->> 'pending', 'false') <> 'true'
+	`).Scan(&seconds); err != nil {
+		return 0, fmt.Errorf("read the outbox's lag: %w", err)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // resolveDestinations gives every event of a batch that has an owner and can be read its envelope

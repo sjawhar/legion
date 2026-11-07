@@ -50,7 +50,7 @@ func TestAnUploadsReadBackTreeGoesWhenItsRequestEnds(t *testing.T) {
 		t.Fatalf("begin the upload's transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	if _, err := service.ReplaceText(joined, artifactID, uploadedReadBackText, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("upload the document: %v", err)
 	}

@@ -1,60 +1,216 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 )
 
 // An answer given before a request's body is read reaches some clients as a failed connection
 // rather than as the answer (INFRA-258). An HTTP/1.1 client that sends its whole
 // body before it reads the answer - WebKit and Firefox uploading a file - is still sending when
 // net/http, finding the body unread, writes the answer and closes the connection; the close resets
-// it, and the client drops the answer with it. So every layer's early answer - the keyed layer's
-// KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED, a refused path parameter, a
-// handler's refusal made before it decodes - waits until the body is off the connection, read and
-// discarded, never spooled, up to the route's own limit (routeBody) and for at most
-// bodyDrainLimit. The keyed layer reads a repeat's body itself when it finds the key held by a
-// first request still running, and judges the repeat once that body has arrived
-// (answerDrainedRepeat).
+// it, and the client drops the answer with it. So every layer's early answer - admission's 429
+// OVERLOADED, the keyed layer's KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED,
+// a refused path parameter, a handler's refusal made before it decodes - waits until the body is
+// off the connection, up to the route's own limit (apiRoute.bodyLimit) and within the bounds the
+// request's body arrives under (transferBounds). A write the server has no room for reads its
+// body into a spool of its own before it waits for that room (drainedBody.readWhole), so its
+// 429 has nothing left to wait for; every other early answer reads what is left of the body and
+// discards it, spooling none of it. The keyed layer reads a repeat's body itself when it finds
+// the key held by a first request still running, and judges the repeat once that body has
+// arrived (answerDrainedRepeat).
 
-// bodyDrainLimit is the longest a drain waits for the rest of a request's body, counted from when
-// the drain begins: a minute carries a whole upload (routeBody) over a link of 450 KB/s or
-// more. A body still arriving then is not waited for: its answer goes out as it stood, and the
-// connection closes after it, so a client that stopped sending does not hold its request open - nor
-// whatever the layer that answered it holds - for as long as it cares to.
-const bodyDrainLimit = time.Minute
-
-// drainTime is how long a drain waits for a body (bodyDrainLimit; drainReadLimit in a test).
-func (s *server) drainTime() time.Duration {
-	if s.drainReadLimit > 0 {
-		return s.drainReadLimit
-	}
-	return bodyDrainLimit
+// transferBounds is what a transfer on a request's connection must keep to, its body arriving and
+// its answer going out alike: no silence longer than idle, and, once it has had its grace, an
+// average of floor bytes a second or better. The bound is on the silence and on the rate, never on
+// the transfer's length, so a body or an answer that keeps moving is carried however long it takes
+// - a 26 MiB upload over a slow uplink takes minutes - while one that stops is cut within idle of
+// its last bytes and one that dribbles for ever is cut at the floor. An answer's writes go into
+// the connection's kernel send buffer, which holds megabytes and wakes a blocked writer only once
+// much of it has drained, so each of them is given what that buffer takes to drain at the floor
+// besides the idle bound (movingDeadline.drain): an answer whose client stopped reading is cut
+// within idle plus that drain rather than within idle alone.
+//
+// One bound covers every layer that reads a request's body - the read before admission
+// (drainedBody.readWhole), the keyed layer's spool (readKeyedBody), the handler's own decode
+// (decodeJSON, an upload's multipart parse) and the drain an early answer waits behind
+// (drainBeforeAnswer) - because what it bounds is the connection the body arrives on, which they
+// share. The admission units are not what it bounds: a request holds none of them while its body
+// arrives, having either not asked for them yet (readWhole) or given them back (drainedBody.park).
+type transferBounds struct {
+	idle  time.Duration
+	grace time.Duration
+	floor int64
 }
 
-// readFor bounds a drain of the body of the request w answers to drainTime from now, a read
-// deadline on its connection (http.ResponseController.SetReadDeadline), past which a read fails
-// and the drain ends; it answers what lifts the bound, which the drain calls only once the body has
-// reached its end. Lifted, the connection has no read deadline, which is what it has between
-// requests on this server, whose http.Server sets no ReadTimeout (cmd/dispatch): a deadline left in
-// place there would end the read net/http keeps on an idle connection once the body has ended, and
-// cancel the request's context under its answer. A drain that ends short of the body's end - its
-// read failed, or the body ran past the route's limit - leaves the deadline in place, since net/http
-// reads on after the answer itself: it discards up to 256 KiB more of a body whose Content-Length
-// leaves that little unread before it writes the answer's header, and again when it closes the body
-// once the handler returns. With the deadline those reads end where the drain's did and the
-// connection closes; lifted, a client that stopped sending would hold the connection open after its
-// answer, and withhold the answer itself where its body ran past the limit. A writer with no
-// connection of its own (a test's recorder) bounds nothing.
-func (s *server) readFor(w http.ResponseWriter) (lift func()) {
-	controller := http.NewResponseController(w)
-	if err := controller.SetReadDeadline(time.Now().Add(s.drainTime())); err != nil {
-		return func() {}
+// belowFloor reports whether moved bytes over elapsed is slower than the floor allows, once
+// elapsed is past the grace. Bounds with no floor (a test's) are below no floor, and neither is
+// a transfer still inside its grace. Both floors are judged here on the same grace and the same
+// rate - the one on an answer's writes (movingDeadline.tooSlow) and the one on a download's
+// reads of the file store (storeBody.Read) - so whichever end of a download dribbles is cut at
+// the same pace, each on the time that end itself spent.
+func (b transferBounds) belowFloor(moved int64, elapsed time.Duration) bool {
+	return b.floor > 0 && elapsed > b.grace && moved*int64(time.Second) < b.floor*int64(elapsed)
+}
+
+// defaultTransferBounds is what the deployment runs under.
+//
+// The idle bound is the read's own deadline (defaultReadDeadline, 20 s): long enough to outlast a
+// pause a client's own stack imposes - a retransmission burst, a handover between mobile cells -
+// and short enough that a connection nobody is sending on, or reading from, costs about what a
+// read that uses its whole deadline costs.
+//
+// The floor (32 KiB/s) is judged only after a minute's grace, so nothing is cut for starting
+// slowly: under it a whole upload (apiRoute.bodyLimit, 26 MiB) still has a quarter of an hour, and
+// a 1 Mbit/s uplink, which carries that upload in about three and a half minutes, is four times
+// above it. What the floor ends is the client that holds a request open for ever by sending or
+// reading just enough to push the idle bound out again.
+var defaultTransferBounds = transferBounds{idle: 20 * time.Second, grace: time.Minute, floor: 32 << 10}
+
+// orDefault is b where a test set one (server.transfer) and defaultTransferBounds everywhere else,
+// so a body or an answer that stalls in a test is the test's own choice rather than twenty seconds
+// of wall clock.
+func (b transferBounds) orDefault() transferBounds {
+	if b.idle <= 0 {
+		return defaultTransferBounds
 	}
-	return func() { _ = controller.SetReadDeadline(time.Time{}) }
+	return b
+}
+
+// movingDeadline is the deadline a transfer keeps on its connection: set at its first bytes and
+// pushed out at every read or write after them (arm), taken off at its end (lift). One type serves
+// both directions - the read deadline a request's body arrives under (drainedBody) and the write
+// deadline its answer goes out under (boundedAnswer) - differing only in which deadline set is and
+// in whether the kernel holds what has already been handed over (buffered). A writer with no
+// connection of its own (a test's recorder) bounds nothing: set answers http.ErrNotSupported,
+// which nothing here reads.
+type movingDeadline struct {
+	set     func(time.Time) error
+	bounds  transferBounds
+	armed   bool
+	started time.Time
+	// moved is how many bytes of the transfer have moved, which the floor is judged on.
+	moved int64
+	// buffered is whether the kernel holds what has been handed over, so that the read or write
+	// about to run waits on that buffer draining rather than on the far end's next byte: an
+	// answer's writes are buffered that way (boundedAnswer), a body's reads are not, since a
+	// read returns with whatever has arrived.
+	buffered bool
+	// outside is time the transfer spent waiting on something that is not the far end, which
+	// the floor leaves out of what it judges: a download's answer is written as fast as the
+	// file store feeds it, so the time its reads spend inside the store's body is none of its
+	// reader's doing (serveFileVersion, storeBody.reading, leaveOutOfAnswerFloor). Nil for
+	// every other transfer, whose waiting is all the far end's.
+	outside func() time.Duration
+}
+
+// arm gives the bytes about to move the idle bound from now to move, and what the kernel already
+// holds of the transfer the time that takes to drain at the floor besides (drain), pushing the
+// deadline out from wherever it stood, so a transfer that keeps moving is never cut and one that
+// stops is cut within that bound of its last bytes. A transfer that has had its grace and is
+// moving slower than the floor is given no time at all: the deadline is now, so the read or write
+// about to run fails as the idle bound fails one. Both are a deadline on the connection, which
+// net/http sees and closes the connection over, rather than an error only this layer knows.
+func (d *movingDeadline) arm() {
+	now := time.Now()
+	if !d.armed {
+		d.armed, d.started = true, now
+	} else if d.tooSlow(now) {
+		_ = d.set(now)
+		return
+	}
+	_ = d.set(now.Add(d.bounds.idle + d.drain()))
+}
+
+// drain is how long what the kernel already holds of the transfer takes to leave at the floor,
+// which is time the deadline allows on top of the idle bound. The layer writing an answer cannot
+// see the connection's queue - a handler is given a http.ResponseWriter and nothing else - so the
+// bound accounts for it instead: a write hands its bytes to a send buffer of up to maxSendBuffer
+// and blocks once that buffer is full, and the kernel wakes it not at the next byte the client
+// reads but once a large share of the buffer has drained. A client reading at the floor drains
+// what the buffer holds within min(moved, maxSendBuffer) over the floor, so no client at or above
+// the floor is cut by a blocked write, while one that stops reading is still cut within idle plus
+// that drain (148 s at the deployment's 20 s, 4 MiB and 32 KiB/s). A transfer whose bytes the
+// kernel does not hold this way (a body's reads) and one with no floor (a test's bounds) are given
+// nothing: their deadline stays the idle bound.
+func (d *movingDeadline) drain() time.Duration {
+	if !d.buffered || d.bounds.floor <= 0 {
+		return 0
+	}
+	return time.Duration(min(d.moved, maxSendBuffer())) * time.Second / time.Duration(d.bounds.floor)
+}
+
+// sendBufferLimit is what a connection's kernel send buffer is taken to hold at most where the
+// kernel does not say: Linux's own default maximum, 4 MiB.
+const sendBufferLimit = 4 << 20
+
+// maxSendBuffer is the most a connection's kernel send buffer grows to, which is the most a
+// blocked write may be waiting for the kernel to drain (drain). It is the third field of
+// /proc/sys/net/ipv4/tcp_wmem, read once because it is a boot-time setting; a file that is
+// missing (every system but Linux), unreadable or not three numbers is sendBufferLimit.
+var maxSendBuffer = sync.OnceValue(func() int64 {
+	limits, err := os.ReadFile("/proc/sys/net/ipv4/tcp_wmem")
+	if err != nil {
+		return sendBufferLimit
+	}
+	fields := strings.Fields(string(limits))
+	if len(fields) < 3 {
+		return sendBufferLimit
+	}
+	largest, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil || largest <= 0 {
+		return sendBufferLimit
+	}
+	return largest
+})
+
+// tooSlow reports whether the transfer has moved its bytes slower than the floor allows, once it
+// has had its grace. A transfer with no floor (a test's) is never too slow.
+//
+// The time it judges is the time since the transfer's first bytes less whatever the transfer
+// waited on something other than its far end (outside): a download's writes wait on the file
+// store between them, and a store below the floor is judged by a floor of its own (storeBody)
+// rather than counted against the reader here, which cut every download that took longer than
+// the grace at the store's pace and blamed its reader for it.
+//
+// The bytes it judges are the ones the server has handed off - the ones the connection's writes
+// accepted - which run ahead of what the client has read by what the kernel still holds for it:
+// up to the send buffer and the client's receive window. A reader below the floor is therefore
+// cut later than the grace, and the later the larger the answer: with a 4 MiB send buffer a
+// multi-MiB answer's reader is cut about three minutes in rather than a minute. Subtracting what
+// the kernel holds would cut such a reader at the floor itself, but that queue is the one this
+// layer cannot see (drain), and the floor is here to end the transfer that would otherwise never
+// end rather than to time a client's own pace.
+func (d *movingDeadline) tooSlow(now time.Time) bool {
+	elapsed := now.Sub(d.started)
+	if d.outside != nil {
+		elapsed -= d.outside()
+	}
+	return d.bounds.belowFloor(d.moved, elapsed)
+}
+
+// lift takes the bound off, which a transfer does at its end. Lifted, the connection carries no
+// deadline, which is what it carries between requests on this server, whose http.Server sets
+// neither ReadTimeout nor WriteTimeout (cmd/dispatch): a deadline left in place there would end
+// the read net/http keeps on an idle connection, and cancel the request's context under its
+// answer, or fail a later answer on the same keep-alive connection.
+func (d *movingDeadline) lift() {
+	if d.armed {
+		_ = d.set(time.Time{})
+	}
 }
 
 // expectsContinue reports whether r's client asked to be told to continue before it sends its body
@@ -65,109 +221,566 @@ func expectsContinue(r *http.Request) bool {
 }
 
 // errUploadTooLarge is an upload route's answer to a body past its limit, errHandoffTooLarge the
-// handoff write's, and errJSONTooLarge every other route's (routeBody, decodeJSON).
+// handoff write's, and errJSONTooLarge every other route's (apiRoute.bodyLimit, bodyTooLarge,
+// decodeJSON).
 var (
 	errUploadTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED", "artifact blob exceeds 25 MB")
 	errJSONTooLarge   = errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
 )
 
+// bodyTooLarge is the route's answer to a body past its limit: the one its handler gives on
+// reading past it, read from the limit the route's own row carries (apiRoute.BodyLimit, upload,
+// handoffWrite), so a route the table makes an upload, or gives a limit of its own, is answered
+// as that row says without naming it anywhere else.
+func bodyTooLarge(route apiRoute) *apiError {
+	switch route.BodyLimit {
+	case maxUploadRequestBytes:
+		return errUploadTooLarge
+	case handoffRequestLimit:
+		return errHandoffTooLarge
+	default:
+		return errJSONTooLarge
+	}
+}
+
 // drainBeforeAnswer serves a route whose requests carry a body - every route but a GET - so that
 // whatever layer answers a request, and however little of its body that layer read, the answer
 // is written only once the rest of the body is read and discarded: at most the route's limit and
-// one byte more, in io.Discard's buffer, for at most drainTime (readFor). A body that runs past the
-// limit is answered as the limit answers it, 413 with the route's own refusal, in place of the
-// answer the layer gave, since no such request is taken whoever answers it; the connection then
-// closes, as net/http closes one whose body runs past what it will discard. The one answer the
-// limit does not replace is a 401: a caller that resolves to nobody is refused before any limit is
-// judged (TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding), and a page whose session
+// one byte more, in io.Discard's buffer, and within the bound the body arrives under
+// (movingDeadline.arm). A body that runs past the limit is answered as the limit answers it, 413 with
+// the route's own refusal, in place of the answer the layer gave, since no such request is taken
+// whoever answers it; the connection then closes, as net/http closes one whose body runs past what
+// it will discard. The one answer the limit does not replace is a 401: a caller that resolves to
+// nobody is refused before any limit is judged
+// (TestUnauthenticatedLargeIssueBodyIsRejectedBeforeDecoding), and a page whose session
 // lapsed under a write reads that 401 as the cue to sign in again. A body that stops arriving - its
 // time up, its client gone - leaves the answer as the layer gave it, and the connection closes
 // after it. A body a layer already read to its end, or past the limit itself (its handler's 413),
 // is left as it is, and so is the body of a client that asked to be told to continue before
 // sending it (Expect: 100-continue) and was never told: it sends nothing, and the first read would
-// tell it to send all of it.
-func (s *server) drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
-	limit, tooLarge := routeBody(method, pattern)
+// tell it to send all of it. A body already read whole into its spool before the request asked
+// admission for room (drainedBody.readWhole) has nothing left to drain, and the layers below
+// read it from there. A request whose body failed and whose handler answered nothing is
+// answered here (refuseUnreadBody).
+func (s *server) drainBeforeAnswer(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
+	limit, tooLarge := route.bodyLimit(), bodyTooLarge(route)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil || r.Body == http.NoBody {
 			handler(w, r)
 			return
 		}
-		body := &drainedBody{ReadCloser: r.Body}
+		control := http.NewResponseController(w)
+		body := &drainedBody{
+			ReadCloser:     r.Body,
+			movingDeadline: movingDeadline{set: control.SetReadDeadline, bounds: s.transfer.orDefault()},
+			ctx:            r.Context(),
+			length:         r.ContentLength,
+			limit:          limit,
+			askedContinue:  expectsContinue(r),
+		}
+		defer body.close()
 		r.Body = body
-		handler(&drainingWriter{
+		answer := &drainingWriter{
 			ResponseWriter: w,
 			body:           body,
-			limit:          limit,
 			tooLarge:       tooLarge,
-			askedContinue:  expectsContinue(r),
-			readFor:        s.readFor,
-		}, r)
+		}
+		handler(answer, r)
+		answer.refuseUnreadBody()
 	}
 }
 
-// drainedBody is a request's body that counts what was read of it and whether it ended.
+// drainedBody is a request's body: the bound every layer that reads it shares, the spool it is
+// read into before its request asks admission for room, the admission units its reads park while
+// it arrives, what has arrived of it, whether it ended, and how.
 type drainedBody struct {
 	io.ReadCloser
-	read    int64
-	touched bool
-	ended   bool
+	movingDeadline
+	// ticket is the request's admission hold, which admitted hands to the body on the request it
+	// was given (admit; the drain sits outside admission, serveRoute); nil for a request
+	// admission did not count or has not admitted yet, whose body parks nothing.
+	ticket *admission.Ticket
+	// refuse cancels the handler's own context with the refusal that would not let the request
+	// take its units back (resume). admitted hands it over with the ticket (admit), so a body
+	// that holds one holds the other, and a request admission did not count holds neither. The
+	// handler then writes nothing and commits nothing, whether or not it read that refusal from
+	// the Read that ended its body, and its answer is the refusal (admission.WriteUnserved).
+	refuse context.CancelCauseFunc
+	// ctx is the request's own context, which the units are taken back under (resume). It is
+	// the one outside the handler's, so a refusal of those units does not cancel it.
+	ctx context.Context
+	// length is how many bytes the client said its body holds (Content-Length), or -1 where it
+	// said nothing: the body has ended once that many have arrived, whether or not the layer
+	// reading it goes on to read the end after them.
+	length int64
+	// limit is the route's own body limit (apiRoute.bodyLimit): the spool reads one byte past
+	// it and no more, as every other reader of a body stops there.
+	limit int64
+	// askedContinue is a client that asked to be told to continue before it sends its body
+	// (Expect: 100-continue). It has sent nothing, and the first read of the body is what tells
+	// it to send all of it, so nothing reads such a body before a layer has had its say
+	// (readWhole, drainingWriter.begin).
+	askedContinue bool
+	// spool is the body read whole off the connection before the request asked for room
+	// (readWhole), which every layer below then reads from; held is where those bytes are kept,
+	// and read how many of them the layers have taken.
+	spool io.Reader
+	held  *spooledBody
+	read  int64
+	// parked is set while the admission units are given back, touched once anything has read
+	// the body, ended once it has ended, and answered once the answer has begun.
+	parked   bool
+	touched  bool
+	ended    bool
+	answered bool
+	// failure is what the read that ended the body on anything but its end answered: the bound
+	// it arrives under passed, its client went away, its connection broke.
+	failure error
+	// spoilt is the spool's own failure - a temporary file Dispatch could not write or read back
+	// - which is the server's fault rather than the request's and is answered as one.
+	spoilt error
+	// refusal is the 429 of a body that arrived and found the server with no room to take its
+	// units back; the answer carries it (drainingWriter.begin).
+	refusal *admission.Refusal
+}
+
+// readWhole reads the body off the connection and into the spool, up to the route's limit and
+// one byte more, before its request asks admission for a unit (admitted), and reports whether it
+// arrived. The request holds no unit while it reads, and once the body is off the connection
+// net/http's own read of that connection runs, so a client that hangs up while its request waits
+// for room cancels the request there and then instead of being answered a 429 nobody reads at
+// the end of its wait.
+//
+// A client that asked to be told to continue has sent nothing and is read nothing: the first
+// read would tell it to send its whole body, which a layer about to refuse it never asks for
+// (TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody). A body that did not arrive is
+// answered by the answer's writer (refuseUnreadBody), and nothing of the request runs.
+func (b *drainedBody) readWhole() bool {
+	if b.ended || b.askedContinue {
+		return true
+	}
+	held, err := spoolBody(b, b.limit)
+	b.held = held
+	if err != nil {
+		var spill *spillError
+		if errors.As(err, &spill) {
+			b.spoilt = err
+		}
+		return false
+	}
+	spool, err := held.reader()
+	if err != nil {
+		b.spoilt = fmt.Errorf("reread a request's body from its spool: %w", err)
+		return false
+	}
+	b.spool = spool
+	return true
+}
+
+// close gives up the spool's temporary file, if it took one, once the request is answered.
+func (b *drainedBody) close() { b.held.close() }
+
+// oversize reports whether the body runs past the route's limit, which is what the spool's one
+// byte past the limit tells it.
+func (b *drainedBody) oversize() bool { return b.moved > b.limit }
+
+// admit takes the ticket the request was admitted with and the cancellation that ends its
+// handler where the units the body asks back are refused (resume), which the layer outside the
+// drain hands over together (admitted). A body given them parks the ticket while the rest of
+// the body arrives.
+func (b *drainedBody) admit(ticket *admission.Ticket, refuse context.CancelCauseFunc) {
+	b.ticket, b.refuse = ticket, refuse
+}
+
+// park gives the request's admission units back while its body arrives, since what a client
+// still sending holds is the connection and not the server's room to work: the units an admitted
+// request holds are otherwise held until its handler returns (admitted), so clients trickling
+// MaxWriteLimit bodies - unauthenticated, since a body is read before any handler resolves its
+// caller - held every write unit and had every other write on the process refused 429 OVERLOADED.
+// A body read before its request asked for room parks nothing, since the request held no unit
+// while it arrived (readWhole) and has ended by the time it holds one; neither does one that has
+// ended, whose request runs on the units it took back (resume).
+func (b *drainedBody) park() {
+	if b.parked || b.ended || b.ticket == nil {
+		return
+	}
+	b.parked = true
+	b.ticket.Park()
+}
+
+// resume takes the parked units back, now the body has ended and the request goes on to run on
+// them, and answers what its reader is told. The units come back at the place the request
+// arrived, ahead of every request that arrived after it, and the queue costs it one wait over
+// its whole life (admission.Ticket.Resume). A request whose answer has already begun takes
+// nothing back: its work is over, and the units it parked are another request's. ctx's error is
+// its client having gone, which the handler it ends answers as it answers any other gone client
+// (admission.WriteUnserved).
+//
+// A refusal is the request's answer, kept for the answer's writer to give as a 429 with the body
+// already read, and the handler is cancelled under it with the refusal as its cause (refuse).
+// Returning the refusal from the read that ended the body is not enough on its own: an upload's
+// multipart parse reads the body through a bufio.Reader, which holds back the error that came
+// with the last bytes once it has read the closing boundary from them, so the handler went on to
+// store the file and commit the artifact row and only then had its 201 replaced by the 429, and a
+// client that obeyed Retry-After uploaded the file twice. Cancelled, the handler's next statement
+// and its commit fail whether it reads that refusal or not, so nothing of the request is written.
+func (b *drainedBody) resume() error {
+	if !b.parked || b.answered {
+		return nil
+	}
+	b.parked = false
+	err := b.ticket.Resume(b.ctx)
+	var refusal *admission.Refusal
+	if errors.As(err, &refusal) {
+		b.refusal = refusal
+		b.refuse(refusal)
+	}
+	return err
+}
+
+// complete reports whether every byte the client said its body holds has arrived, which ends the
+// body whether or not the layer reading it reads the end after them: a JSON decode stops at its
+// value's last byte and a multipart parse at its closing boundary, and the request must have its
+// units back before its handler runs on. A body sent without a Content-Length ends at its end.
+func (b *drainedBody) complete() bool {
+	return b.length >= 0 && b.moved >= b.length
+}
+
+// offConnection reports whether the whole body is off the connection and the bound it arrived
+// under is lifted, which is what decides whether the connection may carry another request after
+// this one's answer. A body that ended without failing took the last byte its client sent off
+// the connection and lifted the bound there (end), whether it ended at the length its client
+// promised or at its own end; one that failed left the rest of itself on the connection and
+// keeps the bound, and one the drain stopped at the route's limit never reached either.
+func (b *drainedBody) offConnection() bool {
+	return b.ended && b.failure == nil
+}
+
+// arriving reports whether bytes of the body may still be on their way: the body neither ended
+// nor failed, and its client was not left waiting to be told to continue, having sent nothing
+// and being asked for nothing. What decides the answer's Connection is which of the two a body
+// still on the connection is (drainingWriter.sayTheConnectionCloses).
+func (b *drainedBody) arriving() bool {
+	return !b.ended && b.failure == nil && !(b.askedContinue && !b.touched)
+}
+
+// clientGone reports whether the read that failed this body failed because its client went away
+// rather than because the body itself could not be read. A client that went away cancels the
+// request's context, as does the bound's own deadline, since net/http cancels the request of any
+// connection whose read fails (connReader.handleReadError): the two are told apart by the
+// failure, the deadline's being the bound's. Every other failure - a chunked body whose framing
+// net/http cannot read, a connection that broke under a client still there - leaves that context
+// alone, and such a client is owed the answer its body never let the server give.
+func (b *drainedBody) clientGone() bool {
+	return errors.Is(b.ctx.Err(), context.Canceled) && !errors.Is(b.failure, os.ErrDeadlineExceeded)
 }
 
 func (b *drainedBody) Read(p []byte) (int, error) {
 	b.touched = true
-	n, err := b.ReadCloser.Read(p)
-	b.read += int64(n)
-	if err != nil {
-		b.ended = true
+	if b.spool != nil {
+		// The body is off the connection and in the spool the request read it into before it
+		// asked for room (readWhole): every layer below reads it from there, and what they
+		// read tells a handler's own answer to a body past the limit from an early answer the
+		// limit replaces (drainingWriter.begin).
+		n, err := b.spool.Read(p)
+		b.read += int64(n)
+		return n, err
 	}
-	return n, err
+	if b.ended {
+		// Past the body's end the reads are net/http's own and the layer that reads the end
+		// after the last byte the client promised: the bound is off a body that ended and
+		// stands where one failed (end), and arming it again would leave a deadline on a
+		// connection with no body left to arrive on it.
+		return b.ReadCloser.Read(p)
+	}
+	b.park()
+	b.arm()
+	n, err := b.ReadCloser.Read(p)
+	b.moved += int64(n)
+	if err == nil && !b.complete() {
+		return n, nil
+	}
+	return n, b.end(err)
+}
+
+// end records the body's end - err, or nil where the last byte it promised has arrived - and
+// answers what its reader sees. A body that ended takes its parked units back, and a request the
+// server has no room for is told so there, so no handler runs on units nobody holds. A body that
+// failed keeps its bound, since net/http reads on after the answer itself: it discards up to
+// 256 KiB more of a body whose Content-Length leaves that little unread before it writes the
+// answer's header, and again when it closes the body once the handler returns. With the deadline
+// those reads end where the request's own did and the connection closes; lifted, a client that
+// stopped sending would hold the connection open after its answer, and withhold the answer itself
+// where its body ran past the route's limit.
+func (b *drainedBody) end(err error) error {
+	b.ended = true
+	if err != nil && !errors.Is(err, io.EOF) {
+		b.failure = err
+		return err
+	}
+	b.lift()
+	if refused := b.resume(); refused != nil {
+		return refused
+	}
+	return err
+}
+
+// spooledBodyInMemory is how much of a spooled body is held in memory; the rest of an upload's
+// body waits in a temporary file, as the multipart parser's own spill does, so a 25 MiB upload
+// costs no more memory than the megabyte a JSON body costs.
+const spooledBodyInMemory = 1 << 20
+
+// spooledBody is a request's body read whole before the work that needs it runs: the room a
+// write waits for (drainedBody.readWhole) and the digest a keyed write is judged by
+// (readKeyedBody). Its first spooledBodyInMemory bytes are in memory, and the rest, if any, in a
+// temporary file.
+type spooledBody struct {
+	head  []byte
+	spill *os.File
+	size  int64
+}
+
+// spillError is a spool's temporary file failing: Dispatch's own fault (a full disk, a temporary
+// directory it cannot write), answered as a 5xx, where a body the client did not finish sending
+// is the request's and answered 400.
+type spillError struct{ err error }
+
+func (e *spillError) Error() string {
+	return "spool a request's body to a temporary file: " + e.err.Error()
+}
+
+func (e *spillError) Unwrap() error { return e.err }
+
+// spillWriter is a spooled body's temporary file, whose write failures are spillErrors.
+type spillWriter struct{ file *os.File }
+
+func (w spillWriter) Write(p []byte) (int, error) {
+	n, err := w.file.Write(p)
+	if err != nil {
+		return n, &spillError{err: err}
+	}
+	return n, nil
+}
+
+// spoolBody reads body into a spooledBody, at most one byte past limit, the route's own
+// (apiRoute.bodyLimit), so what it holds says whether the body runs past that limit. A body that
+// fits in spooledBodyInMemory never touches the disk: a route whose limit is no more than that
+// holds even its one byte past the limit in memory.
+func spoolBody(body io.Reader, limit int64) (*spooledBody, error) {
+	read := &spooledBody{}
+	source := io.LimitReader(body, limit+1)
+	inMemory := int64(spooledBodyInMemory)
+	if limit <= inMemory {
+		inMemory = limit + 1
+	}
+	var head bytes.Buffer
+	n, err := io.CopyN(&head, source, inMemory)
+	read.head, read.size = head.Bytes(), n
+	switch {
+	case err != nil && !errors.Is(err, io.EOF):
+		return read, err
+	case err == nil && n <= limit:
+		// The head is full and the limit not reached: the rest waits in a temporary file.
+		spill, err := os.CreateTemp("", "dispatch-request-body-*")
+		if err != nil {
+			return read, &spillError{err: err}
+		}
+		read.spill = spill
+		rest, err := io.Copy(spillWriter{file: spill}, source)
+		read.size += rest
+		if err != nil {
+			return read, err
+		}
+	}
+	return read, nil
+}
+
+// reader is the body again, from its first byte.
+func (b *spooledBody) reader() (io.Reader, error) {
+	if b.spill == nil {
+		return bytes.NewReader(b.head), nil
+	}
+	if _, err := b.spill.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.MultiReader(bytes.NewReader(b.head), b.spill), nil
+}
+
+// close removes the body's temporary file, if it has one.
+func (b *spooledBody) close() {
+	if b == nil || b.spill == nil {
+		return
+	}
+	name := b.spill.Name()
+	_ = b.spill.Close()
+	_ = os.Remove(name)
 }
 
 // drainingWriter is the answer's writer: its first header, write or flush drains the body first
 // (drainBeforeAnswer).
 type drainingWriter struct {
 	http.ResponseWriter
-	body          *drainedBody
-	limit         int64
-	tooLarge      *apiError
-	askedContinue bool
-	readFor       func(http.ResponseWriter) (lift func())
-	begun         bool
-	replaced      bool
+	body     *drainedBody
+	tooLarge *apiError
+	begun    bool
+	replaced bool
 }
 
 // begin drains what is left of the body, once, before the first byte of the answer, whose status
-// is status. A read that fails - the drain's time up, the client gone, a connection that broke -
-// leaves the answer to be written as it was, and the connection to close after it, the rest of the
-// body unread. Only a body that ended lifts the drain's deadline (readFor); one that failed or ran
-// past the limit keeps it for net/http's own reads after the answer.
+// is status. The drain reads under the bound the body arrives under, whatever is left of it
+// (movingDeadline.arm), and parks the request's admission units while it does, as every other
+// read of the body does: a read that fails - the bound passed, the client gone, a connection that
+// broke - leaves the answer to be written as it was, and the connection to close after it, the
+// rest of the body unread. Only a body that ended lifts that bound (movingDeadline.lift); one
+// that failed or ran past the limit keeps it for net/http's own reads after the answer.
+//
+// A body already read whole off the connection before its request asked for room
+// (drainedBody.readWhole) has nothing left to drain. Where it ran past the route's limit and no
+// layer below read it, the limit answers it here as it answers a body the drain itself finds
+// past the limit: the layer that answered never saw the body, and no such request is taken
+// whoever answers it. Where a layer did read it, its own answer to a body past the limit - a
+// handler's 413 - stands as it does for a body read off the connection.
+//
+// A body that arrived and found the server with no room to take its units back is answered the
+// 429 that refused it, in place of whatever the layer above made of that refusal: the body is
+// off the connection and the client may send the whole request again after Retry-After. Nothing
+// of the request ran, because the refusal cancelled the handler as well (drainedBody.resume),
+// and whatever that handler then tried to write - the refusal itself through
+// admission.WriteUnserved, or an answer to the error its own reader gave it - is this one 429.
+//
+// Every answer goes out saying whether the connection closes after it
+// (sayTheConnectionCloses), and a replaced answer keeps what the server already decided about
+// that connection where it keeps none of the rest of the layer's headers (replaceAnswer): a
+// client told nothing puts the connection back in its idle pool and reads an EOF with no answer
+// and no access line on the next request it writes onto it (INFRA-592).
 func (w *drainingWriter) begin(status int) {
 	if w.begun {
 		return
 	}
 	w.begun = true
 	body := w.body
-	if body.ended || body.read > w.limit || (w.askedContinue && !body.touched) {
-		return
+	body.answered = true
+	tooLarge := w.drain(status)
+	w.sayTheConnectionCloses()
+	switch {
+	case body.refusal != nil:
+		w.replaceAnswer(func() { admission.WriteRefused(w.ResponseWriter, body.refusal) })
+	case tooLarge:
+		w.replaceAnswer(func() {
+			writeError(w.ResponseWriter, w.tooLarge.code, w.tooLarge.status, w.tooLarge.message)
+		})
 	}
-	lift := w.readFor(w.ResponseWriter)
-	_, err := io.CopyN(io.Discard, body, w.limit-body.read+1)
+}
+
+// drain reads what is left of the body and discards it, and reports whether the route's own
+// answer to a body past its limit replaces the answer the layer gave, which is the 413 of a body
+// no layer below read (begin). It writes nothing: the answer follows the Connection the state the
+// drain leaves the connection in decides.
+func (w *drainingWriter) drain(status int) bool {
+	body := w.body
+	if body.refusal != nil {
+		return false
+	}
+	if body.spool != nil {
+		return body.oversize() && body.read == 0 && status != http.StatusUnauthorized
+	}
+	if body.ended || body.oversize() || (body.askedContinue && !body.touched) {
+		return false
+	}
+	_, err := io.CopyN(io.Discard, body, body.limit-body.moved+1)
 	switch {
 	case errors.Is(err, io.EOF):
 		// The body ended inside the limit: the answer stands.
-		lift()
-		return
+		return false
 	case err != nil:
-		w.ResponseWriter.Header().Set("Connection", "close")
-		return
+		// The read failed - the bound passed, the client gone, the connection broken - so what
+		// is left of the body stays on the connection, which closes after the answer.
+		return false
 	case status == http.StatusUnauthorized:
+		return false
+	}
+	return true
+}
+
+// sayTheConnectionCloses puts Connection: close on the answer where the body is not off the
+// connection and nothing of it is still arriving (drainedBody.offConnection, arriving): a read
+// that failed - the bound passed, the client gone, the connection broken - and a client that
+// asked to be told to continue and was never told. net/http will not reuse such a connection,
+// and a client told nothing puts it back in its idle pool and reads an EOF with no answer and
+// no access line on the next request it writes onto it (INFRA-592). It runs before the answer
+// is written, because net/http reads the header the handler left when it writes the status
+// line (its closeAfterReply).
+//
+// A body still arriving is left to net/http, which says the same thing in a better way: after
+// the handler it discards up to 256 KiB of what the client has left to send and gives up on
+// more, setting Connection: close on the answer before it writes the status line and
+// half-closing the connection before it drops it, so a client still sending reads the answer
+// before the reset that follows (closeWriteAndWait, INFRA-258). That weighing runs only while
+// nothing has already said the connection closes, so a Connection: close set here would take
+// the half-close away and a 30 MiB upload's 413 would be lost to the reset again.
+func (w *drainingWriter) sayTheConnectionCloses() {
+	body := w.body
+	if body.offConnection() || body.arriving() {
 		return
 	}
-	// The body runs past the limit: the answer is the limit's.
-	clear(w.ResponseWriter.Header())
-	writeError(w.ResponseWriter, w.tooLarge.code, w.tooLarge.status, w.tooLarge.message)
+	w.ResponseWriter.Header().Set("Connection", "close")
+}
+
+// replaceAnswer writes answer in place of the one a layer gave, with none of that layer's headers
+// - a replaced answer carries neither the Idempotency-Key nor the Retry-After of the answer it
+// stands in for - but with the Connection the server already decided on: the connection-age limit
+// sets Connection: close before any layer runs (cmd/dispatch's maxConnAgeHandler), and the drain
+// sets it on a body still on the connection (sayTheConnectionCloses). Cleared with the rest, a
+// refusal left an aged connection open, since net/http reads the handler's header map when it
+// decides whether to close (closeAfterReply), and the connection age limit was silently off for
+// every refused write.
+func (w *drainingWriter) replaceAnswer(answer func()) {
+	header := w.ResponseWriter.Header()
+	closing := header.Values("Connection")
+	clear(header)
+	if len(closing) > 0 {
+		header["Connection"] = closing
+	}
+	answer()
 	w.replaced = true
+}
+
+// refuseUnreadBody answers a request whose body did not arrive and whose handler wrote nothing,
+// which is what a handler does when the failed read cancelled the request's context under it,
+// and what the request does when its body did not arrive for the read that comes before
+// admission (drainedBody.readWhole): net/http reads a handler that wrote nothing as a 200 with
+// an empty body, and a client that trickled its body would read that as its write having been
+// taken. A handler that answered, however early, answered for itself (begin).
+//
+// A body the bound cut off, and one whose framing could not be read, are refused as the keyed
+// layer refuses a body it could not read, and the connection closes after the answer, the rest
+// of the body unread: that client is still there to read the refusal. A client that went away is
+// written nothing, since nobody is left to read it, and its line carries 499 rather than the 200
+// of a handler that wrote nothing. A body that arrived and found no room to take its units back
+// is the 429 that refused it. A spool Dispatch could not write is none of these: the request was
+// good, the server was not, so it is the 500 a server fault always is. Each of these answers a
+// body that is not off the connection, so each carries Connection: close
+// (sayTheConnectionCloses), the one written to a client that is still there and the one net/http
+// writes for a client that has gone alike.
+func (w *drainingWriter) refuseUnreadBody() {
+	body := w.body
+	if w.begun || (body.failure == nil && body.refusal == nil && body.spoilt == nil) {
+		return
+	}
+	w.begun = true
+	w.sayTheConnectionCloses()
+	switch {
+	case body.refusal != nil:
+		admission.WriteRefused(w.ResponseWriter, body.refusal)
+	case body.spoilt != nil:
+		slog.Error("dispatch: API could not spool a request's body", "error", body.spoilt)
+		writeError(w.ResponseWriter, codeInternal, http.StatusInternalServerError, "internal server error")
+	case body.clientGone():
+		accesslog.ClientGone(body.ctx)
+	default:
+		writeError(w.ResponseWriter, "REQUEST_BODY_UNREADABLE", http.StatusBadRequest,
+			"the request's body did not arrive: nothing was run")
+	}
 }
 
 func (w *drainingWriter) WriteHeader(status int) {
@@ -198,4 +811,183 @@ func (w *drainingWriter) Flush() {
 // Unwrap is the connection's own writer, for http.ResponseController.
 func (w *drainingWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// boundedAnswer is a read's answer written under bounds of its own: its first byte arms a write
+// deadline, pushed out at every byte after it and lifted when the handler returns
+// (movingDeadline), past which a Write fails. A handler whose answer is larger than the sockets
+// between it and its client buffer blocks in Write until the client reads, and a pinned read
+// blocked there holds its request-pool connection - and the admission unit around it - for as
+// long as that client cares to take. Past the bound the write fails, the handler returns, the pin
+// and the unit go back and net/http closes the connection.
+//
+// The bound is the silence between the answer's bytes and the rate they keep, not the answer's
+// length, as it is for the body a request arrives with (drainedBody): a client reading a large
+// answer over a slow downlink is answered all of it however long that takes, where the read's own
+// deadline cut it off at twenty seconds. What one write waits for is not one read of the client's:
+// the kernel takes the answer into a send buffer of megabytes and wakes the blocked write only
+// once much of that buffer has drained, so each write is allowed the time that buffer takes to
+// drain at the floor on top of the idle bound (movingDeadline.drain), and a client that stops
+// reading is cut within idle plus that drain.
+//
+// A file version download (apiRoute.Download) has downloadDeadline's five minutes stopped at
+// this answer's first header or byte (beginsAnswer): the deadline bounds the work before the
+// answer, and from the first byte on this bound alone says how long the answer may take, so a
+// download of a large file to a slow but steady reader is written in full. Such a download also
+// tells this bound to leave the time its reads of the file store take out of what the floor
+// judges (movingDeadline.outside, leaveOutOfAnswerFloor), the store's pace being judged by a
+// floor of its own (storeBody).
+// Only a read is wrapped (serveRoute), and the websockets are mounted outside it, so no
+// long-lived connection is bounded here.
+//
+// A write of the answer that fails, or that takes less than it was given, cuts the answer: its
+// header is already on the wire, so no Connection: close can be added to it, and net/http drops
+// the connection after a response it could not write whole (shouldReuseConnection's werr and
+// contentLength checks) without telling the client anything. The cut is recorded here and the
+// handler aborted for it (cut, servedAsRead), so the line carries aborted=true rather than the
+// status=200 of an answer that went out whole.
+type boundedAnswer struct {
+	http.ResponseWriter
+	movingDeadline
+	// control is the connection's own controller, which set writes the deadline through and
+	// Flush flushes through.
+	control *http.ResponseController
+	// beginsAnswer is what the answer's first header or byte does to the read's own deadline:
+	// a download stops it there, since from the first byte on the transfer bound alone decides
+	// how long the answer may take (servedAsRead, admission.WithDeadlineUntilAnswer). Nil for
+	// every other read, whose deadline runs for its whole length.
+	beginsAnswer func()
+	// failure is what cut the answer: the first write of it that failed or fell short, or the
+	// flush of its last bytes that did (sent). Nil for an answer written whole.
+	failure error
+}
+
+// cut records err as what cut the answer, keeping the first: a Write that fails is followed by
+// whatever the handler does with the error, and the flush after it fails for the same reason.
+// A nil err cuts nothing.
+func (a *boundedAnswer) cut(err error) {
+	if err != nil && a.failure == nil {
+		a.failure = err
+	}
+}
+
+// begin stops the read's deadline at the answer's first header or byte, once: from there the
+// answer is bounded by its transfer alone.
+func (a *boundedAnswer) begin() {
+	if a.beginsAnswer != nil {
+		a.beginsAnswer()
+		a.beginsAnswer = nil
+	}
+}
+
+// answerFloorKey keys the one thing a handler may say about the bound on its own answer: which
+// of its waiting the floor must not judge it on (movingDeadline.outside). It travels on the
+// read's context rather than on the writer because the layers between servedAsRead and a
+// handler wrap that writer as they please, and a handler is given whatever the layer above it
+// passed down; the context reaches it whole whoever wraps what.
+type answerFloorKey struct{}
+
+// boundsAnswerFloor puts set on a read's context, which servedAsRead does for every read it
+// bounds: set hands the answer's floor the time it is to leave out.
+func boundsAnswerFloor(ctx context.Context, set func(func() time.Duration)) context.Context {
+	return context.WithValue(ctx, answerFloorKey{}, set)
+}
+
+// leaveOutOfAnswerFloor tells the floor on ctx's answer to leave the time elapsed reports out of
+// what it judges: a download hands it the time its reads of the file store take
+// (serveFileVersion, storeBody.reading), which is waiting on the store and not on the reader the
+// floor is about. A context no bounded answer is being written on - a test calling a handler
+// directly - is told nothing.
+func leaveOutOfAnswerFloor(ctx context.Context, elapsed func() time.Duration) {
+	if set, ok := ctx.Value(answerFloorKey{}).(func(func() time.Duration)); ok {
+		set(elapsed)
+	}
+}
+
+// answerSlice is how much of one Write goes to net/http at a time. The bound is armed before
+// each slice and the slice counted after it, so an answer written in one call - WriteJSON
+// encodes the whole answer in one Write, and a version held in its row is served in one
+// (serveFileVersion) - is bounded as one written in many: the idle bound is on the silence
+// between its slices rather than on the whole call, and the floor on the rate they keep. Handed
+// to net/http whole, a 25 MiB answer had to leave the server inside one idle bound, which cut
+// off every client below about 1.3 MB/s, where the rule is twenty seconds of silence and
+// 32 KiB/s after the first minute. A slice's own write waits on the kernel's send buffer
+// draining rather than on the client's next read, which is why its deadline carries that drain
+// as well as the idle bound (movingDeadline.arm): armed with the idle bound alone, a 4 MiB
+// answer written in one call cut off every reader below about 200 KB/s.
+const answerSlice = 64 << 10
+
+func (a *boundedAnswer) WriteHeader(status int) {
+	a.begin()
+	a.arm()
+	a.ResponseWriter.WriteHeader(status)
+}
+
+func (a *boundedAnswer) Write(p []byte) (int, error) {
+	a.begin()
+	written := 0
+	for {
+		slice := p[written:]
+		if len(slice) > answerSlice {
+			slice = slice[:answerSlice]
+		}
+		a.arm()
+		n, err := a.ResponseWriter.Write(slice)
+		written += n
+		a.moved += int64(n)
+		switch {
+		case err != nil:
+			a.cut(err)
+			return written, err
+		case n < len(slice):
+			// A writer that took less than it was given and reported no error is a short
+			// write (io.Writer): the answer is incomplete, and net/http drops the
+			// connection over the Content-Length it promised.
+			a.cut(io.ErrShortWrite)
+			return written, io.ErrShortWrite
+		case written >= len(p):
+			return written, nil
+		}
+	}
+}
+
+func (a *boundedAnswer) Flush() {
+	a.arm()
+	_ = a.control.Flush()
+}
+
+// answerSniffed is how much of an answer net/http holds before it writes a header: the 2 KiB
+// buffer it measures a Content-Length from where the handler set none (its
+// bufferBeforeChunkingSize). An answer that stays inside it has not reached the connection at
+// all, so the write that follows the handler cannot block on it; one past it is already on the
+// wire, header and all.
+const answerSniffed = 2 << 10
+
+// sent writes out what net/http still holds of the answer, under the bound, and answers what the
+// flush answered. Without it the response buffer (answerSniffed) and the connection's 4 KiB went
+// out after the bound was lifted, with no deadline on the connection and no WriteTimeout on the
+// server, so a download whose reader stopped before its last bytes held that reader's connection
+// and this goroutine until TCP gave up. servedAsRead calls it after its handler has returned
+// normally, so a panic unwinding - a download's own abort - leaves the connection to net/http.
+//
+// Only an answer past what net/http measures is flushed. One inside it has nothing on the
+// connection to block on, and flushing it would send it chunked where net/http would have
+// measured its Content-Length; an answer that wrote nothing would be answered the 200 a handler
+// that wrote nothing is not answering (accesslog.ClientGone, refuseUnreadBody). A writer with no
+// connection of its own, a test's recorder, holds nothing back and reports none of this
+// (http.ErrNotSupported), as its deadline reports nothing (movingDeadline).
+func (a *boundedAnswer) sent() error {
+	if a.moved <= answerSniffed {
+		return nil
+	}
+	a.arm()
+	if err := a.control.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
+}
+
+// Unwrap is the connection's own writer, for http.ResponseController.
+func (a *boundedAnswer) Unwrap() http.ResponseWriter {
+	return a.ResponseWriter
 }

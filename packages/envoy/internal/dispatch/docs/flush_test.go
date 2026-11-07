@@ -45,7 +45,7 @@ func TestAFlushStoresTheRoomsHeldUpdateOnceWithItsCredit(t *testing.T) {
 	live := service.srv.GetDoc(artifactID)
 	var state []byte
 	var point roomPoint
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		tx, _ := txFromContext(ctx)
 		if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
 			return err

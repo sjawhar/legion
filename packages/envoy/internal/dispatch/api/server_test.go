@@ -20,10 +20,12 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -112,6 +114,21 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// admission replaces the server's admission limiter; nil is the deployment's limits.
+	admission *admission.Limiter
+	// readDeadline replaces the server's read deadline; zero is the deployment's.
+	readDeadline time.Duration
+	// downloadDeadline replaces the deadline a file version download's work before its answer
+	// runs under (downloadDeadline, five minutes); zero is the deployment's.
+	downloadDeadline time.Duration
+	// requestPoolSize and acquireBound replace the request pool's size and its acquire bound
+	// (store.BoundAcquires), each when non-zero, so a test can fill the pool and see a request
+	// refused within a fraction of a second.
+	requestPoolSize int32
+	acquireBound    time.Duration
+	// browserPeers lets the document service admit a browser peer by the X-Dispatch-User header,
+	// as connectBrowserPeer connects one; without it the document websocket refuses every peer.
+	browserPeers bool
 	// takeoverWindow replaces the listener take-over window (Deps.ListenerTakeoverWindow); zero is
 	// testTakeoverWindow. A test proving the window itself passes its own, listenerTakeoverWindow
 	// for the production twelve seconds.
@@ -210,6 +227,22 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if database == nil {
 		database = storetest.Open(t)
 	}
+	if options.requestPoolSize != 0 || options.acquireBound != 0 {
+		config := database.Pool.Config()
+		if options.requestPoolSize != 0 {
+			config.MaxConns = options.requestPoolSize
+			config.MinConns, config.MinIdleConns = 0, 0
+		}
+		if options.acquireBound != 0 {
+			store.BoundAcquires(config, options.acquireBound)
+		}
+		pool, err := pgxpool.NewWithConfig(context.Background(), config)
+		if err != nil {
+			t.Fatalf("open the request pool: %v", err)
+		}
+		t.Cleanup(pool.Close)
+		database.Pool = store.NewPool(pool)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
@@ -219,7 +252,11 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if options.brokerTokens != nil {
 		brokerTokens = options.brokerTokens(database)
 	}
-	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: testServerURL, Settle: settle})
+	documentDeps := docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: testServerURL, Settle: settle}
+	if options.browserPeers {
+		documentDeps.Identity = headerIdentity(database)
+	}
+	documentService := docs.New(documentDeps)
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -242,6 +279,9 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		GitHubAPIBase:          options.githubAPIBase,
 		TestHooksEnabled:       options.testHooks,
 		StreamHeartbeat:        options.streamHeartbeat,
+		Admission:              options.admission,
+		ReadDeadline:           options.readDeadline,
+		DownloadDeadline:       options.downloadDeadline,
 		EnvoyURL:               options.envoyURL,
 		EnvoyTimeout:           options.envoyTimeout,
 		ListenerTakeoverWindow: cmp.Or(options.takeoverWindow, testTakeoverWindow),

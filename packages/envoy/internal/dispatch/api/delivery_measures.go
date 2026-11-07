@@ -52,9 +52,9 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	population, err := s.readDeliveryPopulation(r.Context(), settings, from, to, query, false)
+	population, err := s.readDeliveryPopulation(r.Context(), s.deps.Store.Pool, settings, from, to, query, false)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, deliveryMeasuresCompute(settings, population, from, to, time.Now().UTC()))

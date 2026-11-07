@@ -462,7 +462,7 @@ func TestTwoRebuildsOnTwoProcessesAtOnceReplaceTheHistoryOnce(t *testing.T) {
 	results := make(chan error, 2)
 	for _, service := range []*Service{taskA, taskB} {
 		go func() {
-			results <- joinedWrite(service, func(ctx context.Context) error {
+			results <- joinedWrite(service, artifactID, func(ctx context.Context) error {
 				_, _, err := service.RebuildDocument(ctx, artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
 				return err
 			})

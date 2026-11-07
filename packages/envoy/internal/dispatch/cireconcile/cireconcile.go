@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -47,12 +48,12 @@ const (
 	// Interval is how often the running pass reads GitHub.
 	Interval = 5 * time.Minute
 
-	// Lease names the lease one pass runs under. It is not what makes the pass safe to run twice
-	// -- every write it makes is a compare-and-swap that applies an observation GitHub already
-	// holds, so two passes at once write one record -- it is the GitHub budget: each pass reads
-	// every open pull request of every mapped repository, and N processes passing is N times those
-	// reads for one result.
-	Lease = "ci-reconcile"
+	// Lease names the lease one pass runs under (duty.CIReconcileLease, on duty's lease list). It
+	// is not what makes the pass safe to run twice -- every write it makes is a compare-and-swap
+	// that applies an observation GitHub already holds, so two passes at once write one record --
+	// it is the GitHub budget: each pass reads every open pull request of every mapped repository,
+	// and N processes passing is N times those reads for one result.
+	Lease = duty.CIReconcileLease
 
 	// RequestPace is the pause a running pass leaves between the requests it sends GitHub: two a
 	// second, the pace the webhook redelivery sweep's own requests keep. A caller sets it on Pace;

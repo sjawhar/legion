@@ -345,7 +345,7 @@ func TestHandoffWriteAppendsHandoffRecordedWithoutTheBody(t *testing.T) {
 // spilledHandoff is a handoff body of about 200 KB, well inside the 256 KiB cap, that note names,
 // whose request is about 1.2 MB: a < travels as \u003c, six bytes of a JSON string, which is why
 // the handoff write reads handoffRequestLimit rather than a JSON body's megabyte. A request that
-// size is past what the keyed layer holds in memory (keyedBodyInMemory), so its body spills to a
+// size is past what the keyed layer holds in memory (spooledBodyInMemory), so its body spills to a
 // temporary file and is read back for the handler.
 func spilledHandoff(note string) string {
 	return `{"note":"` + note + `","proof":"` + strings.Repeat("<", 200_000) + `"}`
@@ -393,7 +393,7 @@ func TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion(t *testing.T) 
 
 // A keyed handoff write past the megabyte the keyed layer holds in memory is spooled to a
 // temporary file and read back whole for its handler, and its retry replays the first answer: the
-// layer reads the handoff write's own limit (routeBody), not the megabyte every other JSON route
+// layer reads the handoff write's own limit (apiRoute.bodyLimit), not the megabyte every other JSON route
 // reads.
 func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
 	handler := newTestHandler(t)
@@ -404,9 +404,9 @@ func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int64(len(wire)) <= keyedBodyInMemory || int64(len(wire)) > handoffRequestLimit {
+	if int64(len(wire)) <= spooledBodyInMemory || int64(len(wire)) > handoffRequestLimit {
 		t.Fatalf("the write is %d bytes on the wire, want one past the %d the keyed layer holds in memory and inside the handoff write's %d",
-			len(wire), keyedBodyInMemory, handoffRequestLimit)
+			len(wire), spooledBodyInMemory, handoffRequestLimit)
 	}
 	write := func() *httptest.ResponseRecorder {
 		t.Helper()
@@ -431,7 +431,7 @@ func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
 }
 
 // An answer a handoff write gets before its body is read waits for that body, read and
-// discarded up to the write's own limit (routeBody): a body past handoffRequestLimit is answered
+// discarded up to the write's own limit (apiRoute.bodyLimit): a body past handoffRequestLimit is answered
 // 413 CAP_EXCEEDED in the early answer's place, one byte past the limit read, and a repeat whose
 // key a first write still holds is answered 409 KEY_IN_FLIGHT once a body past a JSON body's
 // megabyte has arrived whole.
@@ -445,7 +445,7 @@ func TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit(t *testing.T) {
 	repeated.Header.Set("Content-Type", "application/json")
 	repeated.SetPathValue("key", issue.Key)
 	repeated.SetPathValue("phase", "implement")
-	holdKeyInFlight(t, database, requestKeyAgentToken, "held", target, requestDigestOf(t, repeated, handoffWritePattern))
+	holdKeyInFlight(t, database, requestKeyAgentToken, "held", target, requestDigestOf(t, repeated, "/api/v1/issues/{key}/handoffs/{phase}"))
 
 	for _, early := range []struct {
 		name     string

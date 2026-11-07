@@ -74,7 +74,7 @@ func answerActBlock(t *testing.T, service *Service, artifactID, blockID string, 
 		}
 		stored = encoded
 	}
-	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+	joined(t, service, artifactID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			update asks set state = 'answered', answer = $3 where block_artifact_id = $1 and block_id = $2
 		`, artifactID, blockID, stored); err != nil {
@@ -97,7 +97,7 @@ func answerWithAct(login string, selected []string, act *model.ActorAct) model.A
 // carry runs inside.
 func nameVersion(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+	joined(t, service, artifactID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := service.NamedVersion(ctx, artifactID, "Named by the agent", model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
 		return err
 	})

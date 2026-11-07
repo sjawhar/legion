@@ -11,7 +11,8 @@ import (
 )
 
 // SettlementResumeInterval is how often the server arms the settlements documents still owe that no
-// settlement committed.
+// settlement committed. A test process shortens it (Deps.SettlementResume); every deployment runs
+// at this period.
 const SettlementResumeInterval = time.Minute
 
 // settlementResumeAge is how long a document's pending-settlement row stands before the resumption
@@ -25,17 +26,18 @@ const settlementResumeAge = time.Minute
 // settlementResumptionLease names the lease each resumption pass runs under (duty.Exclusive). A
 // settlement reads what it settles from the store under the document's lock, whichever process
 // runs it, so one process arming the owed settlements is the whole of the work; every process
-// arming them each period would run each owed document's settlement once per process.
-const settlementResumptionLease = "settlement-resumption"
+// arming them each period would run each owed document's settlement once per process. The name
+// itself is duty's, since the lease pool is sized from duty's list and Exclusive refuses a name
+// that is not on it.
+const settlementResumptionLease = duty.SettlementResumptionLease
 
 // RunSettlementResumption arms the settlement of every document owing one past
-// settlementResumeAge, at start and every SettlementResumeInterval, until ctx ends. Each pass runs
-// under settlementResumptionLease for the period SettlementResumeInterval (duty.RunLeased), so one
-// of the envoy-dispatch processes serving the database runs it per period, in that process. A
-// document nobody opens therefore settles too: its ask blocks reach the open asks without anyone
-// loading it.
+// settlementResumeAge, at start and every settlementResume period, until ctx ends. Each pass runs
+// under settlementResumptionLease for that period (duty.RunLeased), so one of the envoy-dispatch
+// processes serving the database runs it per period, in that process. A document nobody opens
+// therefore settles too: its ask blocks reach the open asks without anyone loading it.
 func (s *Service) RunSettlementResumption(ctx context.Context, leases duty.Leases) {
-	duty.RunLeased(ctx, leases, settlementResumptionLease, SettlementResumeInterval, duty.TickAtStart, func(ctx context.Context) {
+	duty.RunLeased(ctx, leases, settlementResumptionLease, s.settlementResume, duty.TickAtStart, func(ctx context.Context) {
 		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: resume owed document settlements", "error", err)
 		}
@@ -44,10 +46,16 @@ func (s *Service) RunSettlementResumption(ctx context.Context, leases duty.Lease
 
 // resumeOwedSettlements arms the settlement of each document whose pending-settlement row is at
 // least age old. A closed issue's documents are skipped: a closed issue's rooms settle nothing until
-// it reopens, so arming one would only fail.
+// it reopens, so arming one would only fail. The query runs on the background pool, which no
+// request waits on; the settlements it arms each wait for a slot (settlementWorkers), however many
+// documents it finds.
 func (s *Service) resumeOwedSettlements(ctx context.Context, age time.Duration) error {
 	ctx = store.WithTransactionTracking(ctx)
-	rows, err := s.store.Pool.Query(ctx, `
+	background, err := s.backgroundPool()
+	if err != nil {
+		return err
+	}
+	rows, err := background.Query(ctx, `
 		select p.artifact_id::text
 		from doc_settlements_pending p
 		join artifacts a on a.id = p.artifact_id

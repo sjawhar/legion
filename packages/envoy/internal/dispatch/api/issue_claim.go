@@ -141,7 +141,7 @@ func (c *claimConflict) Error() string {
 
 // writeClaimError answers a claim refusal: the 409 ISSUE_CLAIMED body carries the claim
 // itself, and every other failure follows the usual handler mapping.
-func (s *server) writeClaimError(w http.ResponseWriter, err error) {
+func (s *server) writeClaimError(w http.ResponseWriter, r *http.Request, err error) {
 	var conflict *claimConflict
 	if errors.As(err, &conflict) {
 		WriteJSON(w, http.StatusConflict, map[string]any{
@@ -151,7 +151,7 @@ func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	s.writeHandlerError(w, err)
+	s.writeHandlerError(w, r, err)
 }
 
 // holderLiveness is what the listener answered about the claim's holder, read with no
@@ -177,7 +177,7 @@ var errHolderUnjudged = errors.New("claim holder was not covered by the liveness
 // ago, so the two can disagree by that much and only this one decides a write.
 //
 // It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
-// and each process's pool is bounded (store.sharedPoolSize), so a connection held across it is
+// and each process's pool is bounded (store.SharedPoolSize), so a connection held across it is
 // one fewer for that process's other requests, and a row lock held across it stalls every
 // process that writes the issue. An unreachable or unconfigured listener is a 503, never
 // "unknown, therefore free" — Dispatch does not hand one session's work to another on a
@@ -614,7 +614,7 @@ func (s *server) claimCycle(
 		return
 	}
 	if err != nil {
-		s.writeClaimError(w, err)
+		s.writeClaimError(w, r, err)
 		return
 	}
 	if applied.event.ID != 0 {
@@ -630,7 +630,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 		Force bool         `json:"force"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -682,7 +682,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 func (s *server) answerContendedClaim(w http.ResponseWriter, r *http.Request, key string) {
 	current, err := s.readIssueClaim(r.Context(), key)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	message := "the claim on " + key + " changed twice while this request ran, so nothing was applied; read the issue and try again"
@@ -703,7 +703,7 @@ func (s *server) answerContendedClaim(w http.ResponseWriter, r *http.Request, ke
 func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	if !human {
@@ -712,12 +712,12 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 			Actor *model.Actor `json:"actor"`
 		}
 		if err := decodeJSON(r, &input); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		actor, err = bearerSessionActor(r, actor, input.Actor)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}

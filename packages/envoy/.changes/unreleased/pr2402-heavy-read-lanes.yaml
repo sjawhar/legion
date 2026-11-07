@@ -1,0 +1,18 @@
+kind: Changed
+body: |-
+  Four read routes now have a concurrency limit of their own beside the read class: at most one
+  request of each a processor runs at once in a process, and never more than seven. They are
+  `GET /api/v1/search`, the reference closure (`GET /api/v1/issues/{key}/references`),
+  `GET /api/v1/issues/{key}/artifacts` and `GET /api/v1/issues`. A request takes its lane before it
+  takes its class's admission units, so one waiting for a busy lane holds nothing from the other
+  routes; a lane's queue holds twice its limit and its wait is a read's one second, and a request
+  refused by either is answered the same `429 OVERLOADED` with `Retry-After`, its message naming the
+  lane. Four new series report each lane: `dispatch_http_lane_in_flight`,
+  `dispatch_http_lane_queued`, `dispatch_http_lane_limit` and `dispatch_http_lane_refused_total`.
+  The limit is measured: in the seconds after a burst of writes where every request answered
+  slowly, Postgres had three to five of those four statements running at once and was waiting on no
+  lock, and over the two minutes after such a burst they account for 101 of the 124 seconds of
+  statement time the server spends, on a box of three processors - the search union alone 327 ms a
+  call.
+  The width is one a processor because three was best on that three-processor box, and a lane held
+  at three on a 16-processor Dispatch refused, at half the load, requests that server could serve.

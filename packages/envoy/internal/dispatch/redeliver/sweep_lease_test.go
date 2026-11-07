@@ -24,11 +24,6 @@ import (
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
-// webhookRedeliveryLease is the name the running sweep takes its lease under, written here as the
-// string rather than read from the package: the name is the contract between two envoy-dispatch
-// processes, and a test that held a different one would prove nothing.
-const webhookRedeliveryLease = "webhook-redelivery"
-
 // redeliverTestLeases opens the lease pool a running sweep takes webhook-redelivery on, from the
 // Postgres DISPATCH_TEST_DATABASE_URL names; a test that needs it skips (not fails) when the
 // variable is unset, matching every other Postgres-backed test in this module. A lease is an
@@ -55,7 +50,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 	if err := (&store.Store{Pool: pool}).Migrate(ctx); err != nil {
 		t.Fatalf("migrate the lease pool's database: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1`, webhookRedeliveryLease); err != nil {
+	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1`, duty.WebhookRedeliveryLease); err != nil {
 		t.Fatalf("clear an earlier run's recorded sweep: %v", err)
 	}
 	leases, err := pool.Leases()
@@ -107,7 +102,7 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, time.Time{}, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, duty.WebhookRedeliveryLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -127,10 +122,10 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 		defer close(done)
 		sweeper.Run(ctx, time.Hour, leases)
 	}()
-	for deadline := time.Now().Add(20 * time.Second); logs.count("dispatch duty: leased pass skipped", "lease="+webhookRedeliveryLease) == 0; {
+	for deadline := time.Now().Add(20 * time.Second); logs.count("dispatch duty: leased pass skipped", "lease="+duty.WebhookRedeliveryLease) == 0; {
 		if time.Now().After(deadline) {
 			cancel()
-			t.Fatalf("the running sweep never reported skipping the %s lease:\n%s", webhookRedeliveryLease, logs)
+			t.Fatalf("the running sweep never reported skipping the %s lease:\n%s", duty.WebhookRedeliveryLease, logs)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -356,8 +351,8 @@ func TestTheRunningSweepSweepsAtStartThenWaitsBetweenOneAndOnePointOneIntervals(
 					t.Errorf("%d of the %d sweeps that ended ran a sweep, want all of them: the pass the loop runs under the lease is the sweep itself\n%s", attempted, len(gave), logs)
 				}
 				for index := range took {
-					if lease.names[index] != webhookRedeliveryLease || lease.periods[index] != interval {
-						t.Errorf("sweep %d took lease %q for a period of %v, want %s for %v", index+1, lease.names[index], lease.periods[index], webhookRedeliveryLease, interval)
+					if lease.names[index] != duty.WebhookRedeliveryLease || lease.periods[index] != interval {
+						t.Errorf("sweep %d took lease %q for a period of %v, want %s for %v", index+1, lease.names[index], lease.periods[index], duty.WebhookRedeliveryLease, interval)
 					}
 					if !lease.dues[index].Equal(took[index]) {
 						t.Errorf("sweep %d was handed a due time of %v, want %v, the moment its timer fired", index+1, lease.dues[index].Sub(started), took[index].Sub(started))
@@ -424,14 +419,14 @@ func TestNoSweepOfALoneProcessIsSkippedAsAPeriodAlreadyServed(t *testing.T) {
 	// so reading the counts below as the loop's doing would be reading the database's instead.
 	// The shutdown is the one sweep that may fail, since it cancels a listing in flight.
 	for _, failure := range []string{"dispatch duty: take the lease", "dispatch duty: read the loop's last pass"} {
-		if attempts := logs.count(failure, "lease="+webhookRedeliveryLease); attempts != 0 {
+		if attempts := logs.count(failure, "lease="+duty.WebhookRedeliveryLease); attempts != 0 {
 			t.Fatalf("%q for %d of the sweep's attempts:\n%s", failure, attempts, logs)
 		}
 	}
 	if failed := swept.count("webhook redelivery sweep failed") - swept.count("webhook redelivery sweep failed", "context canceled"); failed != 0 {
 		t.Fatalf("%d sweeps failed for something other than the shutdown:\n%s", failed, swept)
 	}
-	if skipped := logs.count("dispatch duty: leased pass skipped", "lease="+webhookRedeliveryLease); skipped != 0 {
+	if skipped := logs.count("dispatch duty: leased pass skipped", "lease="+duty.WebhookRedeliveryLease); skipped != 0 {
 		t.Errorf("%d sweeps were skipped, want none: a wait of at least one interval reaches the next period\n%s", skipped, logs)
 	}
 	// Every sweep lists once and then ends, and the loop draws one wait after each sweep ends and

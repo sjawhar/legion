@@ -1560,6 +1560,12 @@ func TestSanitizeNextRejectsBrowserNormalizedExternalPaths(t *testing.T) {
 		{name: "encoded backslash authority", raw: "/%5Cevil.test/path", want: "/"},
 		{name: "control character", raw: "/issues/\x00", want: "/"},
 		{name: "absolute URL", raw: "https://evil.test/path", want: "/"},
+		// A refused value is "/", the dashboard's own root, so each of these sends the
+		// browser home rather than to whoever the raw value names.
+		{name: "scheme-relative authority", raw: "//evil.test/path", want: "/"},
+		{name: "encoded slash authority", raw: "/%2Fevil.test", want: "/"},
+		{name: "doubly encoded slash authority", raw: "/%2F%2Fevil.test", want: "/"},
+		{name: "javascript scheme", raw: "javascript:alert(1)", want: "/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := sanitizeNext(tc.raw); got != tc.want {

@@ -503,13 +503,17 @@ func TestACompactionHoldsNoSharedOrRoomsConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the compaction pool: %v", err)
 	}
-	before, compactionAcquires := database.Pool.Use(), compactionPool.Stat().AcquireCount()
+	// Use reports every pool this store has opened unless it is asked about some, and the
+	// compaction's own pool is one of them: the question here is the request pool's and the
+	// document-rooms pool's, so those are the two it is asked about.
+	measured := []string{store.RequestsPool, store.RoomsPool}
+	before, compactionAcquires := database.Pool.Use(measured...), compactionPool.Stat().AcquireCount()
 	var during store.ConnectionUse
-	duringCompactionFold(versioned, artifactID, func() { during = database.Pool.Use() })
+	duringCompactionFold(versioned, artifactID, func() { during = database.Pool.Use(measured...) })
 	if result := compactUnderTail(t, versioned, artifactID); result.outcome != compactCompacted {
 		t.Fatalf("compaction = %+v, want it compacted", result)
 	}
-	after := database.Pool.Use()
+	after := database.Pool.Use(measured...)
 	if during.InUse != 0 {
 		t.Fatalf("%d shared or rooms connections in use inside the compaction's fold, want none", during.InUse)
 	}

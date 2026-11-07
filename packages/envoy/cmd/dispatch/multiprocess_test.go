@@ -4452,12 +4452,27 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 	}
 }
 
+// shortSettlementResume is the settlement resumption's period in the rows below that wait for a
+// pass of it (DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL), in place of
+// docs.SettlementResumeInterval's minute, which no row can afford to wait out twice: a pass takes
+// milliseconds, and the lease still gives each period to one process, since duty.Exclusive judges
+// the period the setting names. Nothing else about the resumption moves: a document's pending row
+// is armed only once it is settlementResumeAge (one minute) old, which the rows below reach by
+// backdating marked_at rather than by waiting.
+const shortSettlementResume = 2 * time.Second
+
+// resumeSettlementsEvery is the environment a pair's processes take to run their settlement
+// resumption at period.
+func resumeSettlementsEvery(period time.Duration) map[string]string {
+	return map[string]string{"DISPATCH_TEST_SETTLEMENT_RESUME_INTERVAL": period.String()}
+}
+
 // Spec item 3: an ask block keeps the author who wrote it, whichever process settles it.
 //
 // Bob writes an ask block in his tab on B, and B is killed (SIGKILL) before it settles - B's
 // settle delay is ten minutes - so the settlement the document owes is left to the resumption on
 // A. The pending row is made older than the resumption age (one minute) by SQL rather than by
-// waiting it out, so A's next pass (one a minute) arms it.
+// waiting it out, so A's next pass (one every shortSettlementResume) arms it.
 //
 // Alice edits the document through B after bob's block and before the kill. Without her, the
 // latest edit source the pending row names is bob's, and at this row's first commit a settlement
@@ -4467,7 +4482,7 @@ func TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoo
 // where A can read it names bob.
 func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	pair := newPair(t)
-	pair.startSettling(t, nil, 0, 10*time.Minute)
+	pair.startSettling(t, resumeSettlementsEvery(shortSettlementResume), 0, 10*time.Minute)
 	project := uniqueProjectKey(t, "ASKA")
 	pair.b.createProject(t, project, "Ask authors across processes")
 	// Created through B, whose own settlement is ten minutes away, so A never loads this
@@ -4496,9 +4511,11 @@ func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	if backdated.RowsAffected() != 1 {
 		t.Fatalf("B left no pending settlement for the document, so there is nothing for A to resume")
 	}
-	// A resumption pass runs once a minute; two and a half minutes is two passes and the settle
-	// delay after the second.
-	const within = 150 * time.Second
+	// A resumption pass runs every shortSettlementResume, and a period B's last pass served is
+	// A's to wait out, so A arms the settlement within two of them; A's settle delay (the
+	// server's own two seconds) and the settlement itself follow. Thirty seconds is all of that
+	// with room for a loaded machine.
+	const within = 30 * time.Second
 	deadline := time.Now().Add(within)
 	for {
 		ask, found := pair.a.askOfBlock(t, issueKey, blockID)
@@ -4856,7 +4873,7 @@ func (p *dispatchPair) resumedBetween(t *testing.T, artifactID string, from, to 
 // resumption to find, and no settlement loads a room.
 func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 	pair := newPair(t)
-	pair.startSettling(t, nil, 10*time.Minute, 10*time.Minute)
+	pair.startSettling(t, resumeSettlementsEvery(shortSettlementResume), 10*time.Minute, 10*time.Minute)
 	project := uniqueProjectKey(t, "MAIN")
 	pair.a.createProject(t, project, "Maintenance across processes")
 
@@ -4911,27 +4928,51 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		`, artifactID); err != nil {
 			t.Fatalf("age the document's pending settlement: %v", err)
 		}
-		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row is owed
-		// through the whole of the first bucket that starts after it aged: no settlement runs
-		// inside the row. Each process's resumption ticks once a minute from its own start, so
-		// each meets that bucket once; what this counts is how many of those meetings resumed it.
-		period := docs.SettlementResumeInterval
+		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row stays
+		// owed through every bucket the window below covers: its settle delay is ten minutes, so
+		// no settlement it arms commits inside the row and every pass finds it owed again.
+		//
+		// Each process's resumption ticks once a period, from its own start, so each meets every
+		// whole bucket of the window once: without the lease the two together arm the row twice
+		// a bucket, with it once. One bucket is too few to tell those apart, because a tick's
+		// own scheduling, and the milliseconds a pass spends reading the row before it records
+		// the time counted here, can carry a pass over a bucket boundary and out of the window:
+		// counting a single bucket, the unleased pair came to one resumption in one run of six
+		// and the row passed while saying nothing. Over resumedPeriods whole buckets the two are
+		// a bucket apart at the nearest - at most one pass a bucket, and one more for a pass due
+		// just before the window that recorded itself just inside it, against two a bucket
+		// without the lease - so a straggling tick at either end cannot bring the unleased pair
+		// inside the bound.
+		const resumedPeriods = 6
+		period := shortSettlementResume
 		start := time.Now().Truncate(period).Add(period)
-		end := start.Add(period)
-		t.Logf("counting the resumptions of the document in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))
+		end := start.Add(resumedPeriods * period)
+		t.Logf("counting the resumptions of the document in the %d periods from %s to %s",
+			resumedPeriods, start.Format(time.TimeOnly), end.Format(time.TimeOnly))
 		time.Sleep(time.Until(end) + 2*time.Second)
 		resumed := pair.resumedBetween(t, artifactID, start, end)
-		if len(resumed) != 1 {
-			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in one %v period, want once across both processes:\n%s",
-				len(resumed), period, strings.Join(resumed, "\n"))
+		if len(resumed) > resumedPeriods+1 {
+			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in %d %v periods, want at most one a period (and one for a pass due just before the window):\n%s",
+				len(resumed), resumedPeriods, period, strings.Join(resumed, "\n"))
+		}
+		// And the row is being resumed at all: a window that counted nothing would pass the
+		// bound above while saying nothing about the lease.
+		if len(resumed) < resumedPeriods-1 {
+			t.Fatalf("the processes' settlement resumptions armed the document's owed settlement %d times in %d %v periods, want one a period, bar one a loaded machine may lose:\n%s",
+				len(resumed), resumedPeriods, period, strings.Join(resumed, "\n"))
 		}
 	})
 
-	t.Run("33 conditional edits across A and B: 32 queue and one answers 429 EDIT_QUEUE_FULL", func(t *testing.T) {
+	t.Run("33 conditional edits across A and B: the flood is refused, by admission or by the queue", func(t *testing.T) {
 		_, artifactID := pair.a.createIssueIn(t, project, "Queued on both", "alpha")
 		_, token := pair.a.textAndToken(t, artifactID)
 		// The first edit parks after its first append, holding the document; every later
-		// conditional edit of it waits behind it, on A in A's queue and on B in B's.
+		// conditional edit of it waits behind it, on A in A's queue and on B in B's. Each waits
+		// holding the admission units of its route, and admission refuses a write that waits more
+		// than its own bound for room (429 OVERLOADED, wait_exceeded), which is reached here long
+		// before the queues fill: the refusals a flood of this length meets are admission's,
+		// and the queue's own 429 EDIT_QUEUE_FULL is what bounds the edits admission does admit
+		// (docs.TestTheConditionalEditQueueIsCappedAcrossProcesses). Both are "nothing ran, send it again".
 		pair.a.armLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend)
 		first := pair.a.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "alpha", "beta", token, false), asUser("alice"))
 		pair.a.awaitLiveWriteParked(t, artifactID, docs.PauseAfterFirstAppend)
@@ -4966,7 +5007,7 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		if refused == 0 {
-			t.Errorf("33 conditional edits of one document were in flight at once - the first parked holding it, 16 queued behind it on A and 16 on B - and none answered 429 EDIT_QUEUE_FULL within 15 s: each process held its own queue to 32, so the two together queued 33")
+			t.Errorf("33 conditional edits of one document were in flight at once - the first parked holding it, 16 queued behind it on A and 16 on B - and none was refused within 15 s: admission bounds the writes waiting for room, and the queues bound the edits of one document to 32 across both processes")
 		}
 		if !pair.a.releaseLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend) {
 			t.Fatalf("the release found no edit parked")
@@ -4980,14 +5021,14 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 				answer = &awaited
 			}
 			if answer.status == http.StatusTooManyRequests {
-				if answer.code() != "EDIT_QUEUE_FULL" {
-					t.Errorf("conditional edit %d answered %v, want the 429 to be EDIT_QUEUE_FULL", index+2, answer)
+				if code := answer.code(); code != "EDIT_QUEUE_FULL" && code != "OVERLOADED" {
+					t.Errorf("conditional edit %d answered %v, want the 429 to be EDIT_QUEUE_FULL or OVERLOADED", index+2, answer)
 				}
 				refused++
 			}
 		}
-		if refused != 1 {
-			t.Errorf("%d of the 33 conditional edits answered 429 EDIT_QUEUE_FULL, want exactly one: 32 may queue across both processes", refused)
+		if refused == 0 {
+			t.Errorf("%d of the 33 conditional edits were refused, want at least one: 32 may queue across both processes, and admission refuses a write that waits out its bound for room", refused)
 		}
 	})
 

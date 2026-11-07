@@ -345,7 +345,7 @@ func committedEdit(t *testing.T, service *Service, artifactID string, op model.E
 		t.Fatalf("begin the edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{op}, lostEditAgent, nil); err != nil {
 		t.Fatalf("the agent's edit: %v", err)

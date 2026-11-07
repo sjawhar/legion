@@ -36,11 +36,6 @@ const (
 	BlockIndexReconcileInterval = 30 * time.Second
 )
 
-// blockIndexLease names the lease one block-index tick runs under. The index it writes is the
-// same whichever process writes it, so two processes indexing the same batch is work done twice
-// for one result.
-const blockIndexLease = "block-index"
-
 // BlockIndexCursors is where a tick's keyset reads start, as the tick before it left them
 // (BlockIndexTick.Cursor): the owed documents, and, for each owner kind the window arm walks
 // ("document", "comment", "message", "ask"), the owner its batch of that kind starts after. A
@@ -106,8 +101,10 @@ type BlockIndexTick struct {
 // of its own blocks (comment_block_state, message_block_state and ask_block_state owed_at, set by
 // migrations 0143-0144's and 20261101143212's triggers on every write and by rebuild-refs), which
 // a build older than item blocks leaves owed.
-// One tick per lease, at start, then every blockIndexStep while a batch is full and every
-// BlockIndexReconcileInterval once none is, until ctx ends.
+// One tick per lease (duty.BlockIndexLease: the index it writes is the same whichever process
+// writes it, so two processes indexing the same batch is work done twice for one result), at
+// start, then every blockIndexStep while a batch is full and every BlockIndexReconcileInterval
+// once none is, until ctx ends.
 //
 // The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
 // that pass returned, and so is the period each runs under: that wait, blockIndexStep while a batch
@@ -121,7 +118,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+	duty.RunLeasedAfterEachPass(ctx, leases, duty.BlockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
 		var wait time.Duration
 		wait, cursors = s.blockIndexTick(ctx, cursors, liveAhead, &logged)
 		return wait
@@ -202,11 +199,16 @@ type liveAheadDocuments map[string]owedDocument
 // document, item or source it cannot index for a reason of its own is logged and left owed, so
 // one never holds back the rest of its batch. liveAhead is the documents the calling loop's
 // earlier ticks found live ahead, which this tick counts again without reading and keeps up to
-// date.
+// date. Its statements run on the background pool (store.Pool.Background), which no request
+// waits on.
 func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCursors, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	after := cursors.Documents
 	tick := BlockIndexTick{Cursor: BlockIndexCursors{Documents: after}}
-	owed, err := s.owedDocuments(ctx, after)
+	background, err := s.backgroundPool()
+	if err != nil {
+		return tick, err
+	}
+	owed, err := owedDocuments(ctx, background, after)
 	if err != nil {
 		return tick, err
 	}
@@ -223,7 +225,7 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		}
 		delete(liveAhead, document.id)
 		cold := s.srv.GetDoc(document.id) == nil
-		indexed, ahead, err := s.indexOwedDocument(ctx, document)
+		indexed, ahead, err := s.indexOwedDocument(ctx, background, document)
 		switch {
 		case ctx.Err() != nil:
 			return tick, ctx.Err()
@@ -246,12 +248,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		tick.Cursor.Documents = ""
 	}
 
-	items, err := refs.ListOwed(ctx, s.store.Pool, refs.BlockGrammarOwed, blockIndexItemBatch)
+	items, err := refs.ListOwed(ctx, background, refs.BlockGrammarOwed, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range items {
-		indexed, err := refs.ReindexOwed(ctx, s.store.Pool, item, s.serverURL)
+		indexed, err := refs.ReindexOwed(ctx, background, item, s.serverURL)
 		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
@@ -265,12 +267,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		}
 	}
 
-	itemBlocks, err := refs.OwedItemBlocks(ctx, s.store.Pool, blockIndexItemBatch)
+	itemBlocks, err := refs.OwedItemBlocks(ctx, background, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, item := range itemBlocks {
-		indexed, err := refs.IndexOwedItemBlocks(ctx, s.store.Pool, item, s.serverURL)
+		indexed, err := refs.IndexOwedItemBlocks(ctx, background, item, s.serverURL)
 		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
@@ -284,12 +286,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		}
 	}
 
-	texts, err := refs.ListOwed(ctx, s.store.Pool, refs.RefsGrammarOwed, blockIndexItemBatch)
+	texts, err := refs.ListOwed(ctx, background, refs.RefsGrammarOwed, blockIndexItemBatch)
 	if err != nil {
 		return tick, err
 	}
 	for _, source := range texts {
-		indexed, err := s.reindexOwedText(ctx, source)
+		indexed, err := s.reindexOwedText(ctx, background, source)
 		if err != nil {
 			if ctx.Err() != nil {
 				return tick, ctx.Err()
@@ -303,18 +305,18 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, cursors BlockIndexCur
 		}
 	}
 
-	windowsFull, err := s.windowDrift(ctx, cursors.Windows, &tick)
+	windowsFull, err := s.windowDrift(ctx, background, cursors.Windows, &tick)
 	if err != nil {
 		return tick, err
 	}
-	if err := s.retireWholeText(ctx, cursors.Retire, &tick); err != nil {
+	if err := s.retireWholeText(ctx, background, cursors.Retire, &tick); err != nil {
 		return tick, err
 	}
 	tick.Full = documentsFull || len(items) == blockIndexItemBatch ||
 		len(itemBlocks) == blockIndexItemBatch || len(texts) == blockIndexItemBatch ||
 		windowsFull || tick.Retired > 0
 
-	if err := s.store.Pool.QueryRow(ctx, `
+	if err := background.QueryRow(ctx, `
 		select (select count(*) from document_block_versions where version is null),
 		       (select count(*) from block_grammar_owed),
 		       (select count(*) from refs_grammar_owed),
@@ -348,25 +350,28 @@ var windowItemKinds = []refs.ItemKind{refs.ItemComment, refs.ItemMessage, refs.I
 // the messages and the asks. The documents are held to blockIndexDocumentBatch of the shared
 // batch, the bound the owed-document arm reads under, because a document's windows cost the
 // same read of the document that arm makes; an item's windows are one transaction of its own,
-// so its kind may take the whole batch.
-func (s *Service) windowOwners() []windowOwner {
+// so its kind may take the whole batch. Every statement runs on the tick's background pool,
+// which no request waits on.
+func (s *Service) windowOwners(pool *store.Pool) []windowOwner {
 	owners := []windowOwner{{
 		name:  "document",
 		batch: blockIndexDocumentBatch,
 		list: func(ctx context.Context, after string, limit int) ([]string, error) {
-			return refs.DocumentsOwedWindows(ctx, s.store.Pool, after, limit)
+			return refs.DocumentsOwedWindows(ctx, pool, after, limit)
 		},
-		window: s.windowDocument,
+		window: func(ctx context.Context, id string) (bool, error) {
+			return s.windowDocument(ctx, pool, id)
+		},
 	}}
 	for _, kind := range windowItemKinds {
 		owners = append(owners, windowOwner{
 			name:  string(kind),
 			batch: blockIndexWindowBatch,
 			list: func(ctx context.Context, after string, limit int) ([]string, error) {
-				return refs.ItemsOwedWindows(ctx, s.store.Pool, kind, after, limit)
+				return refs.ItemsOwedWindows(ctx, pool, kind, after, limit)
 			},
 			window: func(ctx context.Context, id string) (bool, error) {
-				return s.windowItem(ctx, kind, id)
+				return s.windowItem(ctx, pool, kind, id)
 			},
 		})
 	}
@@ -386,8 +391,8 @@ func (s *Service) windowOwners() []windowOwner {
 // read as the blocks routes read it and windowed under its own row (windowItem). Either way the
 // write stamps the state the owner's blocks are in, so an owner this arm has served is no
 // longer listed.
-func (s *Service) windowDrift(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) (bool, error) {
-	owners := s.windowOwners()
+func (s *Service) windowDrift(ctx context.Context, pool *store.Pool, cursors map[string]string, tick *BlockIndexTick) (bool, error) {
+	owners := s.windowOwners(pool)
 	next := make(map[string]string, len(owners))
 	tick.Cursor.Windows = next
 	budget, full := blockIndexWindowBatch, false
@@ -428,8 +433,8 @@ func (s *Service) windowDrift(ctx context.Context, cursors map[string]string, ti
 // block row and no reference: the index of this item's blocks stands, and only its windows are
 // missing. An item whose stored text no longer splits into the blocks the index holds is marked
 // owed a block index instead, which the transaction commits for the owed arm to act on.
-func (s *Service) windowItem(ctx context.Context, kind refs.ItemKind, id string) (bool, error) {
-	tx, err := s.store.Pool.Begin(ctx)
+func (s *Service) windowItem(ctx context.Context, pool *store.Pool, kind refs.ItemKind, id string) (bool, error) {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -454,7 +459,7 @@ func (s *Service) windowItem(ctx context.Context, kind refs.ItemKind, id string)
 // settlement writes the next version, which writes them. A document the server cannot read has
 // no block to window; its blocks came from its version's own markdown and the next version write
 // windows them.
-func (s *Service) windowDocument(ctx context.Context, artifactID string) (bool, error) {
+func (s *Service) windowDocument(ctx context.Context, pool *store.Pool, artifactID string) (bool, error) {
 	markdown, blocks, err := s.TextWithBlocks(ctx, artifactID)
 	switch {
 	case ctx.Err() != nil:
@@ -464,7 +469,7 @@ func (s *Service) windowDocument(ctx context.Context, artifactID string) (bool, 
 	case err != nil:
 		return false, err
 	}
-	tx, err := s.store.Pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -631,18 +636,18 @@ func (owner wholeTextOwner) pass(ctx context.Context, pool *store.Pool, after st
 	return int(tag.RowsAffected()), next, nil
 }
 
-// retireWholeText walks one slice of each kind's window owners, the kinds in order, and deletes
-// the whole-text rows the windows have replaced. The kinds share blockIndexRetireBatch as a
-// budget of rows deleted, not of keys read as the window arm's batch is: each kind's pass reads
-// at most what the kinds before it left of the budget, so one tick deletes at most
-// blockIndexRetireBatch rows and reads at most len(wholeTextOwners) times as many owner keys.
-// It adds what it deleted to tick.Retired and leaves each kind's cursor in tick.Cursor.Retire.
-// Every kind's cursor goes there before the first pass, so a kind the budget leaves nothing for,
-// and a kind after one whose pass returned an error, keep the cursor they had. That matters
-// because this walk reads every window owner of a kind, not only the owners that owe a delete:
-// a cursor dropped back to the empty string costs the kind a whole lap over its owners, one
-// slice every BlockIndexReconcileInterval for as long as the slices retire nothing.
-func (s *Service) retireWholeText(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) error {
+// retireWholeText walks one slice of each kind's window owners, the kinds in order, on the tick's
+// background pool, and deletes the whole-text rows the windows have replaced. The kinds share
+// blockIndexRetireBatch as a budget of rows deleted, not of keys read as the window arm's batch
+// is: each kind's pass reads at most what the kinds before it left of the budget, so one tick
+// deletes at most blockIndexRetireBatch rows and reads at most len(wholeTextOwners) times as many
+// owner keys. It adds what it deleted to tick.Retired and leaves each kind's cursor in
+// tick.Cursor.Retire. Every kind's cursor goes there before the first pass, so a kind the budget
+// leaves nothing for, and a kind after one whose pass returned an error, keep the cursor they had.
+// That matters because this walk reads every window owner of a kind, not only the owners that owe
+// a delete: a cursor dropped back to the empty string costs the kind a whole lap over its owners,
+// one slice every BlockIndexReconcileInterval for as long as the slices retire nothing.
+func (s *Service) retireWholeText(ctx context.Context, pool *store.Pool, cursors map[string]string, tick *BlockIndexTick) error {
 	next := make(map[string]string, len(wholeTextOwners))
 	for _, owner := range wholeTextOwners {
 		next[owner.kind] = cursors[owner.kind]
@@ -653,7 +658,7 @@ func (s *Service) retireWholeText(ctx context.Context, cursors map[string]string
 		if budget <= 0 {
 			break
 		}
-		retired, after, err := owner.pass(ctx, s.store.Pool, cursors[owner.kind], budget)
+		retired, after, err := owner.pass(ctx, pool, cursors[owner.kind], budget)
 		if err != nil {
 			return err
 		}
@@ -689,16 +694,16 @@ func (liveAhead liveAheadDocuments) forgetUnlisted(after string, owed []owedDocu
 	}
 }
 
-// owedDocuments lists, in id order, at most blockIndexDocumentBatch documents owed a block index
-// past after, each with its latest markdown version, its pending settlement's marked_at and
+// owedDocuments lists on pool, in id order, at most blockIndexDocumentBatch documents owed a block
+// index past after, each with its latest markdown version, its pending settlement's marked_at and
 // whether its issue is open. A document with no markdown version has nothing to index and is
 // listed with version 0, which indexOwedDocument passes over.
-func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocument, error) {
+func owedDocuments(ctx context.Context, pool *store.Pool, after string) ([]owedDocument, error) {
 	var cursor any
 	if after != "" {
 		cursor = after
 	}
-	rows, err := s.store.Pool.Query(ctx, `
+	rows, err := pool.Query(ctx, `
 		select b.artifact_id::text,
 		       coalesce((select max(v.number) from artifact_versions v
 		                 where v.artifact_id = b.artifact_id and v.markdown is not null), 0),
@@ -741,18 +746,19 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 // belongs to that document (reindexScope). The last two name no text of their own, which is why
 // refs.ReindexOwed answers an error for either rather than settling such a row. Each row is
 // settled only while it still holds the enqueued_at it was listed with, so a write that lands
-// meanwhile leaves it owed for the next tick, which reads its newer text.
-func (s *Service) reindexOwedText(ctx context.Context, source refs.Owed) (bool, error) {
+// meanwhile leaves it owed for the next tick, which reads its newer text. pool is the tick's,
+// the background pool, as every other statement of a tick runs there.
+func (s *Service) reindexOwedText(ctx context.Context, pool *store.Pool, source refs.Owed) (bool, error) {
 	switch source.Kind {
 	case "comment", "ask", "message":
-		return refs.ReindexOwed(ctx, s.store.Pool, source, s.serverURL)
+		return refs.ReindexOwed(ctx, pool, source, s.serverURL)
 	case "artifact":
-		return s.drainOwedDocument(ctx, source)
+		return s.drainOwedDocument(ctx, pool, source)
 	case "scope":
-		if err := s.reindexScope(ctx, source.ID); err != nil {
+		if err := s.reindexScope(ctx, pool, source.ID); err != nil {
 			return false, err
 		}
-		return refs.SettleOwed(ctx, s.store.Pool, source)
+		return refs.SettleOwed(ctx, pool, source)
 	}
 	return false, fmt.Errorf("re-index %s %s: not a kind the queue holds", source.Kind, source.ID)
 }
@@ -786,8 +792,8 @@ func oweDocumentIndex(ctx context.Context, exec refs.Execer, artifactID string) 
 // drained the row. The row is settled first and only while it holds the enqueued_at it was listed
 // with, in the transaction that owes the index, so a write that lands meanwhile leaves the row
 // owed and owes nothing. A document that is gone has its row settled all the same.
-func (s *Service) drainOwedDocument(ctx context.Context, source refs.Owed) (bool, error) {
-	tx, err := s.store.Pool.Begin(ctx)
+func (s *Service) drainOwedDocument(ctx context.Context, pool *store.Pool, source refs.Owed) (bool, error) {
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -809,14 +815,14 @@ func (s *Service) drainOwedDocument(ctx context.Context, source refs.Owed) (bool
 // text holds no such candidate is read and left alone, which is most of a document's scope, and a
 // source that fails leaves the row owed, so the next tick re-reads the whole scope; every write it
 // makes is the same write a second pass would make.
-func (s *Service) reindexScope(ctx context.Context, doc string) error {
-	sources, err := refs.ScopeSources(ctx, s.store.Pool, doc)
+func (s *Service) reindexScope(ctx context.Context, pool *store.Pool, doc string) error {
+	sources, err := refs.ScopeSources(ctx, pool, doc)
 	if err != nil {
 		return err
 	}
 	for _, source := range sources {
 		if source.Kind != "artifact" {
-			if _, err := refs.ReindexScopeSource(ctx, s.store.Pool, source.Kind, source.ID, s.serverURL); err != nil {
+			if _, err := refs.ReindexScopeSource(ctx, pool, source.Kind, source.ID, s.serverURL); err != nil {
 				return err
 			}
 			continue
@@ -826,14 +832,14 @@ func (s *Service) reindexScope(ctx context.Context, doc string) error {
 		// the document is left alone unless it writes a `#id` at all. A version write owes the
 		// document's own row beside this scope's (migration 20261103205041), so what this covers
 		// is a question that settles with no version written after it.
-		body, _, found, err := refs.SourceText(ctx, s.store.Pool, source.Kind, source.ID)
+		body, _, found, err := refs.SourceText(ctx, pool, source.Kind, source.ID)
 		if err != nil {
 			return err
 		}
 		if !found || !refs.HoldsQuestionCandidate(body, s.serverURL) {
 			continue
 		}
-		if err := oweDocumentIndex(ctx, s.store.Pool, source.ID); err != nil {
+		if err := oweDocumentIndex(ctx, pool, source.ID); err != nil {
 			return err
 		}
 	}
@@ -841,11 +847,11 @@ func (s *Service) reindexScope(ctx context.Context, doc string) error {
 }
 
 // indexOwedDocument indexes one owed document at its latest version with the full version index
-// (indexRenderedVersion): references, excerpts, blocks, block texts and the indexed version. It
-// reads the document the server serves (TextWithBlocks) with no transaction held, then, under the
-// document's owner row, which every version write holds first, re-checks that the latest version
-// is still the one listed and the document still owed; otherwise another writer has indexed it or
-// will, and it does nothing.
+// (indexRenderedVersion), in a transaction on pool: references, excerpts, blocks, block texts and
+// the indexed version. It reads the document the server serves (TextWithBlocks) with no
+// transaction held, then, under the document's owner row, which every version write holds first,
+// re-checks that the latest version is still the one listed and the document still owed;
+// otherwise another writer has indexed it or will, and it does nothing.
 //
 // The live text is indexed only where it is the latest version's text: when the document owes no
 // settlement, or owes one but its live markdown equals the version's stored markdown byte for
@@ -874,7 +880,7 @@ func (s *Service) reindexScope(ctx context.Context, doc string) error {
 //
 // A pair the index inserts takes the version's created_at, and the source_seq of the event that
 // recorded the version (stampVersionEvent).
-func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) (indexed, liveAhead bool, err error) {
+func (s *Service) indexOwedDocument(ctx context.Context, pool *store.Pool, document owedDocument) (indexed, liveAhead bool, err error) {
 	if document.version == 0 {
 		return false, false, nil
 	}
@@ -891,7 +897,7 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 
-	tx, err := s.store.Pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, false, err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -233,6 +236,45 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 	unconfigured := dispatchRequest(t, withoutStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
 	if unconfigured.Code != http.StatusServiceUnavailable || responseCode(t, unconfigured) != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("serve a cleared row with no store: status=%d body=%s, want 503 FILE_STORE_UNAVAILABLE", unconfigured.Code, unconfigured.Body.String())
+	}
+}
+
+// blockedOpen is a store whose Get never answers until its caller's context ends: the bucket
+// whose open outlasts the download's own deadline. Its uploads are the memory store's.
+type blockedOpen struct{ *filestest.Memory }
+
+func (b blockedOpen) Get(ctx context.Context, sha string) (*files.Object, error) {
+	<-ctx.Done()
+	return nil, fmt.Errorf("get file %s: %w", sha, context.Cause(ctx))
+}
+
+// A download whose deadline passes while the store is opening the object is answered 503
+// REQUEST_TIMEOUT, as every read past its deadline is, and not the 502 a store that failed is:
+// the deadline is the request's own end, not an outage of the bucket's, and the ERROR line that
+// names an outage is not written for it. The open is bounded at files.OpenTimeout (30 s) below
+// the download's five minutes, so a deployment reaches this only where the row's read took the
+// rest of them; a test's own DownloadDeadline reaches it in a quarter of a second.
+func TestADownloadWhoseDeadlinePassesWhileTheStoreOpensIsRefusedRequestTimeout(t *testing.T) {
+	logged := captureLog(t)
+	memory := filestest.NewMemory()
+	handler, _, _ := newTestServer(t, testServerOptions{
+		files: blockedOpen{Memory: memory}, downloadDeadline: 250 * time.Millisecond,
+	})
+	issue := fileIssue(t, handler)
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts",
+		map[string]string{"name": "slow.bin"}, "slow.bin", "application/octet-stream", []byte("slow bytes"), "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+	}
+	version := decodeBody[uploaded](t, response)
+
+	served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
+	if served.Code != http.StatusServiceUnavailable || responseCode(t, served) != admission.CodeRequestTimeout {
+		t.Fatalf("a download whose deadline passed in the open: status=%d body=%s, want 503 %s",
+			served.Code, served.Body.String(), admission.CodeRequestTimeout)
+	}
+	if strings.Contains(logged.String(), "read a file version from the file store") {
+		t.Fatalf("a deadline that passed in the open was logged as a store outage:\n%s", logged.String())
 	}
 }
 

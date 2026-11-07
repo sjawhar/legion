@@ -294,7 +294,7 @@ func TestTheEventFeedResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	// subscriptions below would be sent nothing while A is open for that reason alone.
 	subscribeEvents(t, rig.dial(t, withBearer("agent-token")), "starter", nil)
 
-	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.served.deps.Events, issue.Key, other.Key)
+	low, high, commitLow, _ := appendOutOfOrder(t, rig.database, rig.served.deps.Events, issue.Key, other.Key)
 	resume := func(sub string) *socketClient {
 		t.Helper()
 		client := rig.dial(t, withBearer("agent-token"))

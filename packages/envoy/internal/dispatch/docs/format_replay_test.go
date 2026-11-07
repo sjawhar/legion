@@ -293,7 +293,7 @@ func formattingChurnRound(t *testing.T, seed uint64) {
 			// The churn's own deletes can take the words the replace looks for, which is no
 			// failure of the room's: the round writes nothing then.
 			if strings.Count(roomMarkdown(t, service, artifactID), find) == 1 {
-				if err := joinedWrite(service, applyOps(service, artifactID, reuseAgent, model.EditOp{
+				if err := joinedWrite(service, artifactID, applyOps(service, artifactID, reuseAgent, model.EditOp{
 					Op:   "replace",
 					Find: find,
 					With: fmt.Sprintf("Churn paragraph %d now holds", round/7),

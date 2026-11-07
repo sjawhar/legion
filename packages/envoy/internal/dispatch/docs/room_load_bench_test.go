@@ -190,7 +190,7 @@ func writeRoomLoadComment(tb testing.TB, service *Service, artifactID string, in
 	tb.Helper()
 	markID := fmt.Sprintf("comment-%02d", index)
 	quote := fmt.Sprintf("Paragraph %d revision", 8+16*index)
-	err := joinedWrite(service, func(ctx context.Context) error {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: markID, By: roomLoadActor}, quote, nil); err != nil {
 			return err
 		}

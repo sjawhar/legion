@@ -1222,12 +1222,17 @@ func answerSource(ctx context.Context, service *Service, original string, source
 // test, so it can run off the test's goroutine.
 func closeSource(ctx context.Context, service *Service, original, blockID string, source model.Ask, answer *model.AskAnswer, between func()) error {
 	alice := model.Actor{Kind: "user", ID: "alice"}
+	gated, release, err := takeWriterGates(service, ctx, original)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin closing the source: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-	closing, ledger := service.Join(ctx, tx)
+	closing, ledger := service.Join(gated, tx)
 	defer ledger.Discard()
 	owner, _, err := lockArtifactOwner(ctx, tx, original)
 	if err != nil {

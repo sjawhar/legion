@@ -12,23 +12,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// compactionSweepLease names the lease a sweep pass runs under, and compactionSweepPeriod the
-// period one pass serves (duty.Exclusive): a pass reads the rows of every document with rows to
-// fold, so two envoy-dispatch processes sweeping, or one process sweeping again after a restart,
-// inside one aligned hour is that whole read again for what the queue already compacts.
-const (
-	compactionSweepLease  = "document-compaction"
-	compactionSweepPeriod = time.Hour
-)
+// compactionSweepPeriod is the period one sweep pass serves (duty.Exclusive): a pass reads the
+// rows of every document with rows to fold, so two envoy-dispatch processes sweeping, or one
+// process sweeping again after a restart, inside one aligned hour is that whole read again for
+// what the queue already compacts. The lease it runs under is duty.DocumentCompactionLease,
+// which this pass took over from the daily compaction the outbox used to tick.
+const compactionSweepPeriod = time.Hour
 
 // RunCompactionSweep compacts, once an aligned hour across every process that serves the database
-// and across restarts (duty.Exclusive, compactionSweepLease), every document due a compaction by
+// and across restarts (duty.Exclusive, duty.DocumentCompactionLease), every document due a compaction by
 // the queue's own rule (checkCompaction): a row after its first older than compactMaxTailAge, or
 // compactMinRows of them older than compactTail. It runs until ctx ends. Its ticks are
 // duty.RunLeased's, a ticker's of compactionSweepPeriod: the first at the moment it starts, so a
@@ -39,7 +36,7 @@ const (
 // is required, as it is of every leased loop.
 func (s *Service) RunCompactionSweep(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	duty.RunLeased(ctx, leases, compactionSweepLease, compactionSweepPeriod, duty.TickAtStart, s.compactionSweepPass)
+	duty.RunLeased(ctx, leases, duty.DocumentCompactionLease, compactionSweepPeriod, duty.TickAtStart, s.compactionSweepPass)
 }
 
 // compactionSweepPass lists the documents with rows to fold (compactionCandidates) and tries each
@@ -74,6 +71,10 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// The sweep yields to the requests as the queue's worker does, each document from the
+		// moment this pass reaches it: the pass lists what is already due, so every document on
+		// its list is due now (requestYield.await).
+		s.compactions.yield.await(ctx, time.Now())
 		attempt := s.tryCompaction(ctx, room, false)
 		switch attempt.try {
 		case tryCompacted:
@@ -105,7 +106,7 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 // gave a row after their first that no compaction has folded since (appendUpdateTxClass,
 // writeCompaction). It reads that table alone, so the pass reads no row of a document with nothing
 // to fold, and it drains the list before it returns.
-func compactionCandidates(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+func compactionCandidates(ctx context.Context, pool *store.RawPool) ([]string, error) {
 	rows, err := pool.Query(ctx, `select artifact_id::text from doc_compaction_owed`)
 	if err != nil {
 		return nil, fmt.Errorf("list the documents to compact: %w", err)
@@ -125,7 +126,7 @@ const warnCompactionForget = "dispatch: take a document with nothing to fold off
 // (lockDocumentRoom), which every append that names a document takes too, so an append committing
 // meanwhile either committed before the delete reads the rows, which then keeps the entry, or
 // names the document again after it.
-func forgetCompactionCandidate(ctx context.Context, pool *pgxpool.Pool, room string) (bool, error) {
+func forgetCompactionCandidate(ctx context.Context, pool *store.RawPool, room string) (bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin forget the document's compaction entry: %w", err)

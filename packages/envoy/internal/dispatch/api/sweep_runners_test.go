@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -29,7 +27,7 @@ const (
 )
 
 // sweepLeases is the pool a leased loop takes its lease on, the one cmd/dispatch gives it.
-func sweepLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
+func sweepLeases(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {

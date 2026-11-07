@@ -74,8 +74,8 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 	other.compactionSweepTick(ctx, excerptLeases(t, second))
 	requireRowsAsStored(t, database, due, rows)
 
-	ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", compactionSweepLease)
-	skipped := countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", compactionSweepLease)
+	ran := countExcerptLeaseLines(logs, "dispatch duty: leased pass ran", duty.DocumentCompactionLease)
+	skipped := countExcerptLeaseLines(logs, "dispatch duty: leased pass skipped", duty.DocumentCompactionLease)
 	if ran != 1 || skipped != 1 {
 		t.Fatalf("the two ticks ran %d passes and skipped %d, want one of each:\n%s", ran, skipped, logs.Lines("lease="))
 	}
@@ -83,7 +83,7 @@ func TestTheCompactionSweepRunsOnceAnHourAcrossProcesses(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `
 		select boundary = to_timestamp(floor(extract(epoch from now()) / 3600) * 3600)
 		from duty_passes where lease = $1 and period_ns = $2
-	`, compactionSweepLease, compactionSweepPeriod.Nanoseconds()).Scan(&thisHour); err != nil {
+	`, duty.DocumentCompactionLease, compactionSweepPeriod.Nanoseconds()).Scan(&thisHour); err != nil {
 		t.Fatalf("read the sweep's duty record: %v", err)
 	}
 	if !thisHour {
@@ -395,5 +395,5 @@ func waitOutTheSweepHour(t *testing.T, database *store.Store) {
 // compactionSweepTick is one tick of the sweep, due now, as RunCompactionSweep's ticker makes one:
 // the pass, when this process takes the lease and no process has swept this hour.
 func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, compactionSweepLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
+	duty.Exclusive(ctx, leases, duty.DocumentCompactionLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
 }

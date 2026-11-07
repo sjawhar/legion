@@ -19,10 +19,10 @@ Treat the numbers as order-of-magnitude figures.
   `notifications.role.reviewer`, confirmed by a flush.
 - The "busy pool" case keeps a full shared pool busy. The table's first two rows ran 32
   goroutines of `select pg_sleep(0.01)` back to back on the 16-connection shared pool production
-  then had. Since the shared pool holds 64, the test fills a shared pool of 8 of its own with 16
-  such goroutines (`busySharedPool`), so it does not hold 64 server connections while other
-  packages' tests share the server; on 2026-10-27 that read 1,050-1,260 ev/s at 50 ms and 517-566
-  at 150 ms for the one-window design.
+  then had. Since the shared (request) pool holds 48, the test fills a shared pool of 8 of its own
+  with 16 such goroutines (`busySharedPool`), so it does not hold 48 server connections while
+  other packages' tests share the server; on 2026-10-27 that read 1,050-1,260 ev/s at 50 ms and
+  517-566 at 150 ms for the one-window design.
 - The single-issue burst: 100 events on one issue, every one of them bound for the same three
   destinations.
 - The rate is (events marked published) / (time from start until none is left).

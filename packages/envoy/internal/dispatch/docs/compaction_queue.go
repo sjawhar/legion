@@ -235,7 +235,9 @@ func warnCompaction(ctx context.Context, message, room string, err error) {
 // a time, on the compaction pool. Shutdown stops it (shutDown, awaitStopped) and Quiesce pauses it
 // (pause); a room either drops is left to a later note.
 type compactionQueue struct {
-	step   func(ctx context.Context, room string, retrying bool) compactionNext
+	step func(ctx context.Context, room string, retrying bool) compactionNext
+	// yield holds each fold back while the requests press (requestYield.await).
+	yield  *requestYield
 	cancel context.CancelFunc
 	// wake tells the worker the queue changed: a room was queued, or the queue stopped or resumed.
 	wake chan struct{}
@@ -272,11 +274,13 @@ type compactionEntry struct {
 	index int
 }
 
-// startCompactionQueue creates a compaction queue whose worker runs step, and starts the worker.
-func startCompactionQueue(step func(ctx context.Context, room string, retrying bool) compactionNext) *compactionQueue {
+// startCompactionQueue creates a compaction queue whose worker runs step once yield lets it, and
+// starts the worker.
+func startCompactionQueue(step func(ctx context.Context, room string, retrying bool) compactionNext, yield *requestYield) *compactionQueue {
 	ctx, cancel := context.WithCancel(store.WithTransactionTracking(context.Background()))
 	q := &compactionQueue{
 		step:   step,
+		yield:  yield,
 		cancel: cancel,
 		wake:   make(chan struct{}, 1),
 		done:   make(chan struct{}),
@@ -285,6 +289,13 @@ func startCompactionQueue(step func(ctx context.Context, room string, retrying b
 	}
 	go q.run(ctx)
 	return q
+}
+
+// held is how many documents the queue holds, the one in flight included (CompactionsQueued).
+func (q *compactionQueue) held() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.rooms)
 }
 
 // note queues room for its first check, firstCheck from now, unless the queue takes no notes. A
@@ -333,7 +344,8 @@ func (q *compactionQueue) signal() {
 	}
 }
 
-// run is the worker: it waits for the earliest room's time, runs its step, and queues the room
+// run is the worker: it waits for the earliest room's time, waits again while the requests press
+// (requestYield.await, from the moment that room came due), runs its step, and queues the room
 // again or drops it as the step decided, until the queue is shut.
 func (q *compactionQueue) run(ctx context.Context) {
 	defer close(q.done)
@@ -355,6 +367,7 @@ func (q *compactionQueue) run(ctx context.Context) {
 			timer.Stop()
 			continue
 		}
+		q.yield.await(ctx, entry.at)
 		next := q.step(ctx, entry.room, entry.retry > 0)
 		if q.afterStep != nil {
 			q.afterStep(entry.room, entry.retry, next)

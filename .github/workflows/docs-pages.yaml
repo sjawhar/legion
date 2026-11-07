@@ -134,7 +134,7 @@ on:
       - 'packages/envoy/migrationid/*'
       - 'packages/envoy/roleholder/*'
       - 'packages/envoy/sessiontiming/*'
-      # ci.yaml's *dispatch_server, 61 patterns:
+      # ci.yaml's *dispatch_server, 63 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/going/*'
       - 'packages/envoy/going/goingtest/*'
@@ -142,6 +142,7 @@ on:
       - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
       - 'packages/envoy/internal/dispatch/accesslog/*'
+      - 'packages/envoy/internal/dispatch/admission/*'
       - 'packages/envoy/internal/dispatch/agentsecrets/*'
       - 'packages/envoy/internal/dispatch/agentstream/*'
       - 'packages/envoy/internal/dispatch/api/*'
@@ -165,6 +166,7 @@ on:
       - 'packages/envoy/internal/dispatch/githubapp/ratelimit/*'
       - 'packages/envoy/internal/dispatch/identity/*'
       - 'packages/envoy/internal/dispatch/itemblocks/*'
+      - 'packages/envoy/internal/dispatch/logging/*'
       - 'packages/envoy/internal/dispatch/model/*'
       - 'packages/envoy/internal/dispatch/outbox/*'
       - 'packages/envoy/internal/dispatch/pmdoc/**'
