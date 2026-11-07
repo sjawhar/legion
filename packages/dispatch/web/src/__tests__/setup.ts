@@ -2,7 +2,6 @@
 // one: Bun's preload list is the one order that holds, and an import written first inside a file
 // is not (`register-dom.ts` and package.json's `test:web` script say why).
 import { afterAll, afterEach, expect, jest } from "bun:test";
-import * as jestDomMatchers from "@testing-library/jest-dom/matchers";
 import { configure } from "@testing-library/react";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
@@ -18,13 +17,16 @@ import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
 import { type Writes, watchWriteStores } from "../features/writes/write-store";
+import { reportableJestDomMatchers } from "./jest-dom-matchers";
 import { forgetTestAnswers, requestsThatReachedNetwork } from "./network";
 import { resetRouteAnswers } from "./send-answers";
 
 // The DOM assertions (`toBeInTheDocument`, `toHaveAttribute`, `toHaveFocus`, …): one matcher that
 // says what it asks for and prints the element it read when it fails, in place of a hand-written
-// read of an attribute compared with `toBe`. `jest-dom.d.ts` declares them for `bun:test`.
-expect.extend(jestDomMatchers);
+// read of an attribute compared with `toBe`. `jest-dom.d.ts` declares them for `bun:test`, and
+// `jest-dom-matchers.ts` gives them the matcher context they build that message with, which
+// `expect.extend` does not hand them in a form they can read.
+expect.extend(reportableJestDomMatchers());
 
 // Testing Library reads a global `jest` to tell whether fake timers are installed:
 // `jestFakeTimersAreEnabled` (@testing-library/dom@10.4.1, dist/@testing-library/dom.esm.js:171)

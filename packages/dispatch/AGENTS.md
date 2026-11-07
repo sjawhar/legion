@@ -1379,6 +1379,13 @@ The DOM is asserted with `@testing-library/jest-dom`'s matchers, which the prelo
 `__tests__/jest-dom.d.ts` declares for `bun:test`: `toBeInTheDocument`, `toHaveAttribute`,
 `toHaveClass`, `toHaveFocus`, `toHaveTextContent` and their kin, in place of a hand-written read
 of an attribute compared with `toBe`.
+The preload registers them through `__tests__/jest-dom-matchers.ts` rather than directly:
+`expect.extend` hands a matcher a `utils` whose methods read the object they live on, jest-dom
+destructures them, and the first one it calls while building a failure message throws
+`Expected this to be instanceof ExpectMatcherUtils` — so a failing assertion would name neither
+what it asked for nor what it found.
+The wrapper binds that context, and `__tests__/jest-dom-messages.test.ts` holds it in place by
+reading the message a failing `toHaveAttribute` throws.
 An exact `textContent` comparison stays `toBe`, since `toHaveTextContent` matches a substring and
 normalises whitespace.
 
