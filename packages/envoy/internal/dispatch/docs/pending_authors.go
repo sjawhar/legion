@@ -10,6 +10,7 @@ import (
 	"math"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
@@ -747,36 +748,123 @@ func readOwedSettlement(ctx context.Context, q Queryer, room string) (owed bool,
 	return true, &actor, nil
 }
 
-// persistLastActor records lastActor on room's pending-settlement row, in a transaction of its own
-// holding the document's advisory lock, and answers whether it wrote the row: closing an issue
-// keeps the latest edit source its settlement names once the room has gone. It leaves the latest
-// person sender (last_person) as it is: lastActor is the room's memory, which can be older than
-// the row, since a joined write sets it at commit after a browser edit its transaction saw
-// (Ledger.creditRooms) while that edit's append lands later and records the browser's editor. The
-// row is the order the edits landed in.
+// settlementRowFacts is one reading of a document's pending-settlement row - whether a row was
+// there and, where it was, the age it carries (marked_at) and the latest edit source it names
+// (last_actor, kept as the stored jsonb text, empty for none, which Postgres renders one way for
+// one value however it was written) - with the document's stored update head read beside it (the
+// max version currentUpdateCursor reads). A close for a closed issue reads it at its snapshot and
+// again under the document's advisory lock before it writes, and writes the row only where the
+// two readings agree (persistLastActor).
+type settlementRowFacts struct {
+	present   bool
+	markedAt  time.Time
+	lastActor string
+	head      int64
+}
+
+// unchangedSince is whether the row reads now as it read at snapshot. Each fact catches a writer
+// of its own:
+//   - the row being there, or not, catches the settlement, which deletes the row whether or not
+//     it wrote a version (clearSettlementPending), and the append that writes one again;
+//   - marked_at catches every append, which stamps it now() as it marks the document owed
+//     (markUpdateOwed), so a row deleted and written again carries an age no reading of the row
+//     before it holds;
+//   - last_actor catches a write that names a newer edit source without moving that age: a
+//     committed write, a seed or a rebuild (recordLatestEditSource).
 //
-// creditSeq is the credit sequence the close read lastActor at (closeRecordLocked), and the row is
-// written only while the room's record still reads closed and still stands at that sequence, the
-// condition the record's own clearing takes (lastActorPersisted). The two closes write it at
-// different points. The append gate's close snapshots the source under the room's close gate and
-// writes it after the close and outside that gate (closeRefusedAppendRoom), and the issue can
-// reopen inside that window: ygo takes a room out of its map before CloseRoom waits for the flush,
-// and the wait for a caller inside the room lets the gate go between tries (closeWhenFree), so a
-// newer room can load, its edit's append can write that edit's own source to this row under the
-// same advisory lock, and the issue can close a second time. Writing the snapshot then would put
-// the older source back and the settlement would name the person whose edit is not the latest. A
-// "still closed" check alone would miss exactly that run, since the second close leaves the flag
-// as the first did; the credit sequence is what the newer edit moved (creditContentChange). The
-// issue-open lane's close snapshots under the record's lock alone and writes before it closes the
-// room, while the room is still live (setRoomIssueOpen): a keystroke the room takes in between
-// moves the credit sequence, and that keystroke's own append writes the row where it is stored.
+// The stored head is compared only where the row was absent at the snapshot, which is the one
+// reading the three facts above can return to: a row written again carries a new marked_at,
+// while no row and no row again read alike however many rows stood between them. That gap is a
+// real run - no row, an append writes one, the settlement that covers it deletes it - and the
+// head is what that append moved. The settlement's version is no token there, since it writes
+// one only where the document now reads differently from the latest version while it clears the
+// row whatever it writes. Comparing the head on every reading would instead make a close stand
+// down behind its own flush, whose repairs append updates of their own and name no edit source,
+// and a row left naming nobody is a worse answer than one naming the editor of an edit that is
+// no longer the latest.
+func (facts settlementRowFacts) unchangedSince(snapshot settlementRowFacts) bool {
+	if facts.present != snapshot.present {
+		return false
+	}
+	if !snapshot.present {
+		return facts.head == snapshot.head
+	}
+	return facts.markedAt.Equal(snapshot.markedAt) && facts.lastActor == snapshot.lastActor
+}
+
+// readSettlementRowFacts reads room's pending-settlement row and the document's stored update
+// head in one statement, so the two are one moment's reading of the document. marked_at is not
+// null on a row that exists (migration 0063), so a null there is no row.
 //
-// The record is read after the advisory lock is taken, the order settlement takes the two in, and
-// its lock is let go before the statement runs: the advisory lock holds off every other writer of
-// this row for as long as this transaction lasts (append_writes.go), so nothing is gained by
-// keeping the record locked across the statement, and every user of the record's lock - a
-// keystroke's credit, a connect - would wait on a database round trip meanwhile.
-func (s *Service) persistLastActor(ctx context.Context, room string, lastActor model.Actor, creditSeq uint64) (bool, error) {
+// It takes no lock and waits for none: a plain select reads the row as the reader's own snapshot
+// of the database holds it, whatever writer has it locked meanwhile, so a caller that holds the
+// room's close gate waits here on nothing that could want that gate (closeRefusedAppendRoom).
+// The write reads it again through its own transaction, under the document's advisory lock, so
+// no append can land between that reading and the statement (persistLastActor).
+func readSettlementRowFacts(ctx context.Context, q Queryer, room string) (settlementRowFacts, error) {
+	var (
+		markedAt  *time.Time
+		lastActor []byte
+		head      int64
+	)
+	if err := q.QueryRow(ctx, `
+		select pending.marked_at, pending.last_actor,
+			coalesce((select max(version) from doc_updates where artifact_id = $1), 0)
+		from (values (1)) as one_row(x)
+		left join doc_settlements_pending as pending on pending.artifact_id = $1
+	`, room).Scan(&markedAt, &lastActor, &head); err != nil {
+		return settlementRowFacts{}, fmt.Errorf("read the document's pending settlement and stored head: %w", err)
+	}
+	facts := settlementRowFacts{head: head}
+	if markedAt != nil {
+		facts.present = true
+		facts.markedAt = *markedAt
+		facts.lastActor = string(lastActor)
+	}
+	return facts, nil
+}
+
+// persistLastActor records the latest edit source snapshot holds on room's pending-settlement
+// row, in a transaction of its own holding the document's advisory lock, and answers whether it
+// wrote the row: closing an issue keeps the latest edit source its settlement names once the room
+// has gone. It leaves the latest person sender (last_person) as it is: that source is the room's
+// memory, which can be older than the row, since a joined write sets it at commit after a browser
+// edit its transaction saw (Ledger.creditRooms) while that edit's append lands later and records
+// the browser's editor. The row is the order the edits landed in.
+//
+// The document can move between the close's snapshot and this write, and the row is then not this
+// close's to write. Two things decide, both taken at that snapshot (closeSnapshot). The room's
+// record must still read closed at the credit sequence the source was read at (recordClosedAt),
+// the condition the record's own clearing takes (lastActorPersisted): a reopen this process
+// heard, or an edit it observed since, moves one of the two. And the row must read as it did
+// (settlementRowFacts.unchangedSince), because the record answers for neither a settlement nor
+// another process's append: a settlement deletes the row and clears the record's source without
+// moving the credit sequence, so the record alone lets this run through - a close snapshots
+// (alice, N); the issue reopens, a room loads and its settlement deletes the row; the issue closes
+// again with no edit, so that close snapshots no source at the same N and writes nothing; this
+// write then finds the record closed at N and puts alice back on a row a settlement had taken
+// (INFRA-1470).
+//
+// The two closes write at different points. The append gate's close snapshots the source, the row
+// and the head under the room's close gate and writes after the close and outside that gate
+// (closeRefusedAppendRoom), and the issue can reopen inside that window: ygo takes a room out of
+// its map before CloseRoom waits for the flush, and the wait for a caller inside the room lets the
+// gate go between tries (closeWhenFree), so a newer room can load, its edit's append can write
+// that edit's own source to this row under the same advisory lock, and the issue can close a
+// second time. Writing the snapshot then would put the older source back and the settlement would
+// name the person whose edit is not the latest. The issue-open lane snapshots the source under the
+// record's lock and reads the row immediately before this write, so its window is this
+// transaction's first two round trips, and it writes while the room is still live
+// (setRoomIssueOpen): a keystroke the room takes in between moves the credit sequence, and that
+// keystroke's own append writes the row where it is stored.
+//
+// The row and the head are read here through tx, not the pool, so the advisory lock this
+// transaction holds covers them. The record is read after that lock is taken, the order settlement
+// takes the two in, and its lock is let go before the statement runs: the advisory lock holds off
+// every other writer of this row for as long as this transaction lasts (append_writes.go), so
+// nothing is gained by keeping the record locked across the statement, and every user of the
+// record's lock - a keystroke's credit, a connect - would wait on a database round trip meanwhile.
+func (s *Service) persistLastActor(ctx context.Context, room string, snapshot closeSnapshot) (bool, error) {
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin the latest-edit-source transaction: %w", err)
@@ -785,10 +873,17 @@ func (s *Service) persistLastActor(ctx context.Context, room string, lastActor m
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return false, err
 	}
-	if !s.recordClosedAt(room, creditSeq) {
+	if !s.recordClosedAt(room, snapshot.creditSeq) {
 		return false, nil
 	}
-	if err := markSettlementPending(ctx, tx, []string{room}, &lastActor, true, false, nil, false); err != nil {
+	row, err := readSettlementRowFacts(ctx, tx, room)
+	if err != nil {
+		return false, err
+	}
+	if !row.unchangedSince(snapshot.row) {
+		return false, nil
+	}
+	if err := markSettlementPending(ctx, tx, []string{room}, snapshot.lastActor, true, false, nil, false); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -802,8 +897,9 @@ func (s *Service) persistLastActor(ctx context.Context, room string, lastActor m
 // stands at creditSeq, the credit sequence of that snapshot (closeRecordLocked). A reopen this
 // process heard, or an edit it observed since, answers false. A settlement that took the source
 // since, or an append another process made, moves neither the flag nor the sequence, so this
-// check does not see them. Its caller holds the document's advisory lock and no record lock
-// (persistLastActor).
+// check does not see them; the row's own facts, read beside it, do
+// (settlementRowFacts.unchangedSince). Its caller holds the document's advisory lock and no
+// record lock (persistLastActor).
 func (s *Service) recordClosedAt(room string, creditSeq uint64) bool {
 	state := s.lockExistingState(room)
 	if state == nil {

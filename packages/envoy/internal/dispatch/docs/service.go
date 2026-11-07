@@ -2868,15 +2868,30 @@ func (s *Service) refuseClosedIssueAppend(room string, instance *roomInstance) {
 // close and outside the gate, and only where a check passed: that write takes the document's
 // advisory lock (persistLastActor), which the paths a close is made from hold, so taking it under
 // the close gate would let the two lock orders meet. The row is what a late write can get wrong,
-// since the issue can reopen and a newer room's edit can write its own source to that row while
-// this close stands between its snapshot and its write, so the write reads the record under that
-// advisory lock and commits nothing unless the record still reads closed at the credit sequence
-// the snapshot was taken at (persistLastActor, persistClosedLastActor).
+// since the issue can reopen, a newer room's edit can write its own source to that row and a
+// settlement can take that row away while this close stands between its snapshot and its write.
+// So the snapshot carries the row and the document's stored head as well as the source
+// (closeSnapshot), and the write commits nothing unless the record still reads closed at the
+// credit sequence the source was read at and the row still reads as it did (persistLastActor,
+// persistClosedLastActor).
+//
+// The row is read here, inside the check and under the gate, so that reading and the record's
+// are one moment of the room's. It is a read on a pooled connection under a lock, which is safe
+// in this one direction only: nothing that holds a pooled connection waits on a close gate. A
+// repair holding the settlement's transaction refuses rather than waits (roomServer.holdOpen
+// try-locks), and every other taker of a gate is a close - CloseRoom and closeOwned through
+// closeWhenFree, and closeInstance - each of which holds no transaction where it waits: the
+// settlement that closes a room on a replaced history has rolled its own back first
+// (reloadReplacedRoom), the catch-up's close reads in a transaction that ends before it
+// (roomCatchUps.closeReplaced), and shutdown's, the issue lane's and the evictions' closes carry
+// a context with no transaction in it. The read itself waits for no writer either: it takes no
+// lock (readSettlementRowFacts). A record holding no source is left unread, since a close with
+// nothing to write has nothing to guard.
 func (s *Service) closeRefusedAppendRoom(ctx context.Context, room string, instance *roomInstance) {
 	var (
-		lastActor *model.Actor
-		creditSeq uint64
-		recorded  bool
+		snapshot closeSnapshot
+		recorded bool
+		guarded  bool
 	)
 	err := s.srv.closeOwned(room,
 		func() bool {
@@ -2885,9 +2900,10 @@ func (s *Service) closeRefusedAppendRoom(ctx context.Context, room string, insta
 			}
 			if !recorded {
 				if state := s.lockExistingState(room); state != nil {
-					lastActor, creditSeq = s.closeRecordLocked(state)
+					snapshot = s.closeRecordLocked(state)
 					recorded = true
 					s.unlockState(room, state)
+					guarded = s.readCloseRowFacts(ctx, room, &snapshot)
 				}
 			}
 			return true
@@ -2897,8 +2913,8 @@ func (s *Service) closeRefusedAppendRoom(ctx context.Context, room string, insta
 		slog.Warn("dispatch: close a document room of an issue that closed or reopened; its browsers keep the admission they had",
 			"room", room, "error", err)
 	}
-	if recorded {
-		s.persistClosedLastActor(ctx, room, lastActor, creditSeq)
+	if recorded && guarded {
+		s.persistClosedLastActor(ctx, room, snapshot)
 	}
 }
 
@@ -2979,14 +2995,15 @@ func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance
 // document's pending-settlement row (persistLastActor, lastActorPersisted), the one part of a
 // close's bookkeeping the record's flag is no proof of: the load that wrote that flag wrote the
 // flag alone, and a record kept across a room's retirement can hold a source no settlement has
-// taken (unusedLocked). This lane snapshots that source under the record's lock and writes it
-// before its close, while the room is still live, through the same guard as the gate's close: it
-// commits only while the record still reads closed at the credit sequence the source was read at,
-// so a keystroke the room takes in between, whose own append writes the row where it is stored,
-// is not overwritten (closeRecordLocked, persistClosedLastActor, persistLastActor). It runs the
-// rest of that bookkeeping - the generation bump, the settle failures reset and the settle
-// timer's stop - not at all, and leaves nothing armed by skipping it: a settlement reads the
-// record's closed flag at the same check it reads the generation at, so that flag ends the
+// taken (unusedLocked). This lane snapshots that source under the record's lock, reads the row
+// and the document's stored head immediately after, and writes before its close, while the room
+// is still live, through the same guard as the gate's close: it commits only while the record
+// still reads closed at the credit sequence the source was read at and the row still reads as it
+// did, so a keystroke the room takes in between, whose own append writes the row where it is
+// stored, is not overwritten (closeRecordLocked, persistClosedLastActor, persistLastActor). It
+// runs the rest of that bookkeeping - the generation bump, the settle failures reset and the
+// settle timer's stop - not at all, and leaves nothing armed by skipping it: a settlement reads
+// the record's closed flag at the same check it reads the generation at, so that flag ends the
 // settlement whose timer already fired and the one a leftover timer fires
 // later (settleRoomWithin), and a settlement that returns there reports no failure, so the count
 // the reset would clear cannot grow while the flag stands. A recheck reads only rooms that hold a
@@ -3009,37 +3026,59 @@ func (s *Service) setRoomIssueOpen(ctx context.Context, room string, open, notif
 		return
 	}
 	var (
-		lastActor *model.Actor
-		creditSeq uint64
+		snapshot  closeSnapshot
+		reopenSeq uint64
 		reopened  bool
 	)
 	if open {
 		state.closed = false
 		if state.lastActor == nil {
-			reopened, creditSeq = true, state.creditSeq.Load()
+			reopened, reopenSeq = true, state.creditSeq.Load()
 		}
 	} else {
-		lastActor, creditSeq = s.closeRecordLocked(state)
+		snapshot = s.closeRecordLocked(state)
 	}
 	s.unlockState(room, state)
 	if reopened {
-		s.restoreLastActor(ctx, room, creditSeq)
+		s.restoreLastActor(ctx, room, reopenSeq)
 	}
 	if !open {
-		s.persistClosedLastActor(ctx, room, lastActor, creditSeq)
+		// The row and the head come after the record's lock has gone, not under it: no user of
+		// that lock may wait on a database round trip, and read here they are as new as this
+		// lane can read them, so the window the write holds across is the two round trips its
+		// own transaction opens with (persistLastActor). A reading that failed leaves the write
+		// unmade and the record's source where it is, as a refused write does.
+		if s.readCloseRowFacts(ctx, room, &snapshot) {
+			s.persistClosedLastActor(ctx, room, snapshot)
+		}
 	}
 	s.closeRoomForIssue(ctx, room)
 }
 
+// closeSnapshot is what a close for a closed issue reads before it writes the record's latest
+// edit source to the document's pending-settlement row, and what that write commits against:
+// lastActor, the source the record held, with creditSeq, the credit sequence it was read at
+// (closeRecordLocked), and row, the row and the document's stored head as they read then
+// (readSettlementRowFacts). The two are read one after the other rather than together, since the
+// record is read under its lock and the row on a pooled connection, which no holder of that lock
+// may wait on. A write that lands between them is in the row's reading and not the record's, so
+// it can only refuse this close's write, never let a late one through (persistLastActor).
+type closeSnapshot struct {
+	lastActor *model.Actor
+	creditSeq uint64
+	row       settlementRowFacts
+}
+
 // closeRecordLocked gives a document's record, state, what a close for a closed issue leaves on
 // it, and answers the latest edit source it held with the credit sequence that source was read
-// at, for its caller to write to the document's pending-settlement row once the record's lock
-// has gone (persistClosedLastActor). A record that already reads closed takes the snapshot
-// alone: the generation bump, the settle-failures reset and the settle timer's stop are a
-// close's, and leaving them out of a second one arms nothing (setRoomIssueOpen). Its callers are
-// the two closes a closed issue makes, the issue-open lane's and the append gate's refusal's
-// (setRoomIssueOpen, closeRefusedAppendRoom). Its caller holds state.mu.
-func (s *Service) closeRecordLocked(state *roomState) (lastActor *model.Actor, creditSeq uint64) {
+// at, for its caller to fill out and write to the document's pending-settlement row once the
+// record's lock has gone (readCloseRowFacts, persistClosedLastActor). A record that already
+// reads closed takes the snapshot alone: the generation bump, the settle-failures reset and the
+// settle timer's stop are a close's, and leaving them out of a second one arms nothing
+// (setRoomIssueOpen). Its callers are the two closes a closed issue makes, the issue-open lane's
+// and the append gate's refusal's (setRoomIssueOpen, closeRefusedAppendRoom). Its caller holds
+// state.mu.
+func (s *Service) closeRecordLocked(state *roomState) closeSnapshot {
 	if !state.closed {
 		state.closed = true
 		state.roomGeneration = s.nextRoomGeneration()
@@ -3052,26 +3091,45 @@ func (s *Service) closeRecordLocked(state *roomState) (lastActor *model.Actor, c
 	// document's advisory lock before it takes state.mu, so taking that lock here while holding
 	// the state would invert the lock order. The authors are already in the document's pending
 	// authors or in flight to them; only the latest edit source lives in the state alone.
-	return state.lastActor, state.creditSeq.Load()
+	return closeSnapshot{lastActor: state.lastActor, creditSeq: state.creditSeq.Load()}
 }
 
-// persistClosedLastActor writes lastActor, the latest edit source the record of a closing
-// document held, to the document's pending-settlement row and then forgets it on the record
-// (persistLastActor, lastActorPersisted), so the settlement after the issue reopens still names
-// the person whose edit it is. A record that held no source writes no row and still clears what
+// readCloseRowFacts gives snapshot the pending-settlement row and the stored head its write
+// commits against, and answers whether the close may write at all. A record holding no source
+// writes no row, so there is nothing to guard and nothing is read. A reading that failed answers
+// false: its caller then writes nothing and leaves the record's source where it is, which is
+// what a refused write leaves too (persistClosedLastActor).
+func (s *Service) readCloseRowFacts(ctx context.Context, room string, snapshot *closeSnapshot) bool {
+	if snapshot.lastActor == nil {
+		return true
+	}
+	row, err := readSettlementRowFacts(ctx, s.store.Pool, room)
+	if err != nil {
+		slog.Error("dispatch: read a closing document's pending settlement for its latest edit source", "room", room, "error", err)
+		return false
+	}
+	snapshot.row = row
+	return true
+}
+
+// persistClosedLastActor writes the latest edit source the record of a closing document held to
+// the document's pending-settlement row and then forgets it on the record (persistLastActor,
+// lastActorPersisted), so the settlement after the issue reopens still names the person whose
+// edit it is. A record that held no source writes no row and still clears what
 // it marked unsettled. Neither caller holds the room's close gate here (setRoomIssueOpen,
 // closeRefusedAppendRoom): the write takes the document's advisory lock, and a close is made
 // from paths that hold that lock.
 //
-// The write is refused where the record no longer reads closed at creditSeq, the credit sequence
-// this source was read at: the issue reopened inside the window the snapshot and the write stand
-// apart in, and a newer room's edit has written a newer source to that row (persistLastActor).
-// A refused write leaves the record alone as well: the record a later edit or a reopen moved on
-// is not this close's to clear, and clearing is what a written row buys.
-func (s *Service) persistClosedLastActor(ctx context.Context, room string, lastActor *model.Actor, creditSeq uint64) {
-	persisted := lastActor == nil
-	if lastActor != nil {
-		written, err := s.persistLastActor(ctx, room, *lastActor, creditSeq)
+// The write is refused where the record no longer reads closed at the credit sequence this
+// source was read at - the issue reopened inside the window the snapshot and the write stand
+// apart in, and a newer room's edit has written a newer source to that row - or where the row
+// itself has moved since the snapshot read it, a settlement's deletion of it included
+// (persistLastActor). A refused write leaves the record alone as well: the record a later edit
+// or a reopen moved on is not this close's to clear, and clearing is what a written row buys.
+func (s *Service) persistClosedLastActor(ctx context.Context, room string, snapshot closeSnapshot) {
+	persisted := snapshot.lastActor == nil
+	if snapshot.lastActor != nil {
+		written, err := s.persistLastActor(ctx, room, snapshot)
 		if err != nil {
 			slog.Error("dispatch: record closing document's latest edit source", "room", room, "error", err)
 		} else {
@@ -3079,7 +3137,7 @@ func (s *Service) persistClosedLastActor(ctx context.Context, room string, lastA
 		}
 	}
 	if persisted {
-		s.lastActorPersisted(room, creditSeq)
+		s.lastActorPersisted(room, snapshot.creditSeq)
 	}
 }
 
