@@ -304,18 +304,7 @@ func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 // waiting call is blocked in registerReply, so what the row reads is its own ordering and not how
 // fast the host is.
 func TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "sessions.json")
-	key := parkedRecord(t, state)
-	r := newRig(t, state) // never logged in: the helper holds no launcher credential
-	// The peer is pinned by pid rather than read off the socket, as
-	// TestAReclaimedIdentityKeepsItsEnrollmentID's comment explains: a kernel without
-	// SO_PEERPIDFD identifies no peer at all, and what is under test is the register's reply.
-	r.callerPID.Store(int64(os.Getpid()))
-	gate, release := testGate(t)
-	r.fake.mu.Lock()
-	r.fake.renewGate = gate
-	r.fake.mu.Unlock()
-	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+	r, _, _, release := reclaimedIdentityRig(t)
 
 	// The register that admits the session and starts its enroll loop, whose renew is then held
 	// at the gate. With no wait asked for it answers at once, on the identity as it stands.
@@ -326,8 +315,9 @@ func TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential(t *testing.T) {
 	}
 
 	// The same session again, this time asking to wait: it must wait for the confirmation the
-	// gate holds, which is what the old `wait > 0 && credential` condition would not do.
-	replies := registerWaitBlocked(t, r, Request{Op: "register", WaitSeconds: 10, SessionID: &id})
+	// gate holds, although the helper holds no launcher credential. A wait taken only while a
+	// credential is held would answer at once here.
+	replies := registerWaitBlocked(t, r, &id)
 	release()
 	select {
 	case got := <-replies:
@@ -336,5 +326,35 @@ func TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("register --wait never answered after the confirming renew was released")
+	}
+}
+
+// TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment: the broker answers
+// that it will not honour the enrollment the session took from its record, so no confirmation can
+// ever arrive for that id, and the enroll the session falls through to wants a launcher
+// credential nobody has installed. NO_CREDENTIAL is then the whole answer, and no wait can change
+// it: `register --wait N` must give it at once, or the launcher gate's unconditional `--wait 10`
+// (scripts/agent-secrets-session) stalls every launch ten seconds for the rest of the session's
+// life.
+func TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment(t *testing.T) {
+	r := reclaimedIdentityRigRefusingRenew(t)
+
+	// The register that admits the session and starts its enroll loop, whose confirming renew the
+	// fake refuses. With no wait asked for it answers at once, on the identity as it stands.
+	id := testSessionID
+	if first := r.call(t, Request{Op: "register", SessionID: &id}); first.Code != CodeNoCredential {
+		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
+	}
+	waitFor(t, func() bool {
+		sess := r.srv.Registry.Get(os.Getpid())
+		return sess != nil && sess.identity().ConfirmRefused
+	})
+
+	// The same session again, this time asking to wait. Nothing can confirm the refused id, so the
+	// answer is the one the helper already has and the caller must not pay the wait for it.
+	started := time.Now()
+	resp := r.call(t, Request{Op: "register", WaitSeconds: 5, SessionID: &id})
+	if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
+		t.Fatalf("register --wait 5 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the broker has refused the inherited enrollment and no confirmation can come", resp, elapsed)
 	}
 }

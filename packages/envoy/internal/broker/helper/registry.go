@@ -65,6 +65,15 @@ type Session struct {
 	// for whether or not the helper holds a launcher credential — rather than answering
 	// "enrolled" with an id the broker may refuse.
 	confirmed bool
+	// confirmRefused says the broker ANSWERED that it will not honour enrollmentID
+	// (confirmInherited's confirmRefused). The id stays — the record must still name it, and
+	// enrollLoop enrols afresh — but no confirmation is coming for it, so nothing waits for
+	// one: a `register --wait` on a helper holding no launcher credential would otherwise burn
+	// its whole wait, on every call for the rest of the session's life, for the NO_CREDENTIAL
+	// answer the helper already has. It is true only beside a non-empty, unconfirmed
+	// enrollmentID: every place that writes confirmed writes this one too (setEnrolledAt,
+	// inheritLocked, lapseLocked).
+	confirmRefused bool
 	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
 	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
 	// re-pinned session's prior one, the one its record named (takeLapsed, from Recover).
@@ -102,6 +111,9 @@ type identity struct {
 	// Confirmed says the broker itself answered with EnrollmentID; an inherited one has not
 	// been shown to be live yet (Session.confirmed).
 	Confirmed bool
+	// ConfirmRefused says the broker answered that it will NOT honour EnrollmentID, so no
+	// confirmation is coming for it (Session.confirmRefused).
+	ConfirmRefused bool
 	// LapsedID is the enrollment of this session's runtime that must still be revoked: one
 	// whose renew the broker refused, or one a restart or a reclaim inherited. A record keeps
 	// it in its own field, never folded into the live one, so a restart can tell the
@@ -113,7 +125,15 @@ func (s *Session) identity() identity {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return identity{RuntimeID: s.runtimeID, SessionID: s.sessionID, Key: s.key, Thumbprint: s.thumbprint,
-		Generation: s.generation, EnrollmentID: s.enrollmentID, Confirmed: s.confirmed, LapsedID: s.lapsedID}
+		Generation: s.generation, EnrollmentID: s.enrollmentID, Confirmed: s.confirmed, ConfirmRefused: s.confirmRefused, LapsedID: s.lapsedID}
+}
+
+// awaitingConfirmation reports an enrollment the session took from a record that the broker has
+// neither confirmed nor refused. confirmInherited's renew may still make it this session's own,
+// with no launcher credential, so enrollLoop tries that renew and a register that asked to wait
+// waits for it.
+func (i identity) awaitingConfirmation() bool {
+	return i.EnrollmentID != "" && !i.Confirmed && !i.ConfirmRefused
 }
 
 // RuntimeID and SessionID are the single-field readings a log line or a reply needs; anything
@@ -241,7 +261,7 @@ func (s *Session) inherit(id string) {
 // inheritLocked is inherit's body, for a caller already holding s.mu: Session.rename installs the
 // enrollment the replacement key already holds this way too, inside its own critical section.
 func (s *Session) inheritLocked(id string) {
-	s.enrollmentID, s.confirmed = id, false
+	s.enrollmentID, s.confirmed, s.confirmRefused = id, false, false
 }
 
 // setEnrolledAt records an enrollment an attempt that began at generation produced. A rename
@@ -256,13 +276,29 @@ func (s *Session) setEnrolledAt(id string, generation uint64) bool {
 	if s.generation != generation {
 		return false
 	}
-	s.enrollmentID, s.confirmed, s.lastError = id, true, ""
+	s.enrollmentID, s.confirmed, s.confirmRefused, s.lastError = id, true, false, ""
 	select {
 	case <-s.ready:
 	default:
 		close(s.ready)
 	}
 	return true
+}
+
+// refuseInheritedAt records the broker's refusal of the enrollment an inherited identity arrived
+// holding, for a confirmation that began at generation. A rename since then has made that
+// confirmation the OLD identity's, whose enrollment this session no longer has, so the refusal
+// is dropped; the enrollment id is checked for the same reason, since a refusal speaks only for
+// the id it was asked about. Nothing else can change the generation, so a refusal that is kept
+// means no confirmation can arrive for the id this session holds: it stays — the record must
+// still name it, and enrollLoop enrols afresh — but nothing waits for one
+// (identity.awaitingConfirmation).
+func (s *Session) refuseInheritedAt(id string, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generation == generation && s.enrollmentID == id {
+		s.confirmRefused = true
+	}
 }
 
 // readyCh is the channel that closes when the session next enrolls (or already has).
@@ -315,7 +351,7 @@ func (s *Session) lapseLocked(reason string) {
 	if s.enrollmentID != "" {
 		s.lapsedID = s.enrollmentID
 	}
-	s.enrollmentID, s.confirmed, s.lastError = "", false, reason
+	s.enrollmentID, s.confirmed, s.confirmRefused, s.lastError = "", false, false, reason
 	select {
 	case <-s.ready:
 		s.ready = make(chan struct{})

@@ -258,22 +258,11 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 // The row holds that renew at the fake's renew gate until it has read the register's reply, so
 // what fixes the assertions below is this row's own ordering and not how fast the host is.
 // That also pins the other half of the rule — an inherited id is not an enrolled one. The
-// broker may have revoked it while the session was away, and only an enroll shows otherwise,
-// so the reply reads NO_CREDENTIAL rather than claiming a grant the session may not have.
+// broker may have revoked it while the session was away, and only its own answer shows
+// otherwise, so the reply reads NO_CREDENTIAL rather than claiming a grant the session may
+// not have.
 func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "sessions.json")
-	key := parkedRecord(t, state)
-	r := newRig(t, state)
-	gate, release := testGate(t)
-	r.fake.mu.Lock()
-	r.fake.renewGate = gate
-	r.fake.mu.Unlock()
-	// The peer is pinned by pid rather than read off the socket: a kernel without
-	// SO_PEERPIDFD (gVisor) identifies no peer at all, and what is under test here is the
-	// register's reply, not how the helper learns who called it. PeerOf itself stays proved
-	// by the package's other rows on CI.
-	r.callerPID.Store(int64(os.Getpid()))
-	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+	r, key, state, release := reclaimedIdentityRig(t)
 	if _, ok := r.srv.Registry.Dormant(testSessionID); !ok {
 		t.Fatal("the record must be parked first")
 	}
@@ -446,6 +435,50 @@ func parkedRecord(t *testing.T, state string) *ecdsa.PrivateKey {
 	_ = gone.Process.Kill()
 	_, _ = gone.Process.Wait()
 	return recordNamed(t, state, pid, 1, testSessionID, "enr-before")
+}
+
+// reclaimedIdentityRig builds the fixture the rows that read a reclaimed identity share: a
+// helper that was never logged in, one parked record enrolled as enr-before whose key the fake
+// broker knows, and that record's confirming renew held at the fake's renew gate until the
+// returned release is called. It returns the rig, the key the record carries, the state path its
+// records are saved to, and that release.
+//
+// The peer is pinned by pid rather than read off the socket: a kernel without SO_PEERPIDFD
+// (gVisor) identifies no peer at all, and what these rows have under test is the register's
+// reply, not how the helper learns who called it. PeerOf itself stays proved by the package's
+// other rows on CI.
+//
+// The gate is taken after the rig starts, as testGate asks: the open it registers for cleanup
+// then runs before the fake server's own Close, which waits for any request still held at the
+// gate.
+func reclaimedIdentityRig(t *testing.T) (*rig, *ecdsa.PrivateKey, string, func()) {
+	t.Helper()
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	key := parkedRecord(t, state)
+	r := newRig(t, state)
+	gate, release := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.renewGate = gate
+	r.fake.mu.Unlock()
+	r.callerPID.Store(int64(os.Getpid()))
+	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+	return r, key, state, release
+}
+
+// reclaimedIdentityRigRefusingRenew is that same fixture with the broker refusing the confirming
+// renew rather than the gate holding it: the row that reads a refusal needs that renew to reach
+// the session on its own, so the gate is opened here, before the register that starts the enroll
+// loop. The enrollment the refusal speaks for is the record's own, which reclaimedIdentityRig has
+// already seeded, so the fake refuses a renew of an enrollment it knows rather than one it never
+// had.
+func reclaimedIdentityRigRefusingRenew(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRig(t)
+	r.fake.mu.Lock()
+	r.fake.refuseRenewNext = 1 // 401 ENROLLMENT_NOT_LIVE, the broker's one verdict that a row has ended
+	r.fake.mu.Unlock()
+	release()
+	return r
 }
 
 // requireReclaimable fails unless the identity parked for testSessionID is still whole: the

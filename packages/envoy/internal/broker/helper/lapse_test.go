@@ -246,7 +246,7 @@ func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 	r.fake.enrollGate = gate
 	r.fake.revokeFailFirst = 0 // the lapsed id's next revoke lands; the re-enrollment then waits at the gate
 	r.fake.mu.Unlock()
-	replies := registerWaitBlocked(t, r, Request{Op: "register", WaitSeconds: 10})
+	replies := registerWaitBlocked(t, r, nil)
 	open()
 	freshEnrollment(t, replies, lapsed)
 }
@@ -268,7 +268,7 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 	r.fake.refuseRenewNext = 1                // and that renew is refused whenever the gate lets it through
 	r.fake.renewGate = renewGate
 	r.fake.mu.Unlock()
-	replies := registerWaitBlocked(t, r, Request{Op: "register", WaitSeconds: 10})
+	replies := registerWaitBlocked(t, r, nil)
 	r.fake.mu.Lock()
 	r.fake.revokeFailFirst = 0 // the first lapsed id's revoke lands, and the session enrolls again
 	r.fake.mu.Unlock()
@@ -286,7 +286,7 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	replies = registerWaitBlocked(t, r, Request{Op: "register", WaitSeconds: 10})
+	replies = registerWaitBlocked(t, r, nil)
 	releaseEnroll()
 	third := freshEnrollment(t, replies, first, second)
 
@@ -375,15 +375,15 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 	}
 }
 
-// registerWaitBlocked starts req, a `register --wait` from this process, against the rig's one
-// session, and returns its answer's channel once the call is blocked in registerReply's select.
-// The call answering first fails the test: a register that waits must not answer before the
-// enrollment it waits for has reached the session.
-func registerWaitBlocked(t *testing.T, r *rig, req Request) <-chan registerAnswer {
+// registerWaitBlocked starts a `register --wait 10` from this process for sessionID — nil for a
+// register that names none — against the rig's one session, and returns its answer's channel
+// once the call is blocked in registerReply's select. The call answering first fails the test: a
+// register that waits must not answer before the enrollment it waits for has reached the session.
+func registerWaitBlocked(t *testing.T, r *rig, sessionID *string) <-chan registerAnswer {
 	t.Helper()
 	replies := make(chan registerAnswer, 1)
 	go func() {
-		resp, err := Call(r.sock, req, 20*time.Second)
+		resp, err := Call(r.sock, Request{Op: "register", WaitSeconds: 10, SessionID: sessionID}, 20*time.Second)
 		replies <- registerAnswer{resp, err}
 	}()
 	deadline := time.Now().Add(10 * time.Second)

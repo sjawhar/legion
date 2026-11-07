@@ -429,13 +429,16 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // revoked early, or one an older broker named no expiry for, stays held until a call is refused,
 // so the first register after that still waits the full N. A session the helper cannot
 // enroll for want of a credential gets Code NO_CREDENTIAL and that reason in Error, so a launcher
-// can say what the session will do. Both the credential and the identity are read once, before
-// the wait, and that one credential reading decides NO_CREDENTIAL, whatever a login or a refusal
-// changed meanwhile; it no longer says the wait was skipped, since a session confirming an
-// inherited enrollment waits with no credential held. A session whose enrollment lapsed waits for
-// its re-enrollment, since a lapse reopens its ready channel (markLapsed). The reply's id, state
-// and error come from one snapshot, so a lapse landing after the wait cannot give it an id from
-// before and a state from after.
+// can say what the session will do. The credential is read once, before the wait, and that one
+// reading decides NO_CREDENTIAL, whatever a login or a refusal changed meanwhile; the identity is
+// read once too, and only when that credential reading has not already settled the wait.
+// NO_CREDENTIAL does not say the wait was skipped, since a session confirming an inherited
+// enrollment waits with no credential held. That wait ends with the broker's REFUSAL of the
+// confirmation as surely as with the confirmation itself: nothing can confirm the id once it has
+// been refused (Session.refuseInheritedAt), so no later register waits for one again. A session
+// whose enrollment lapsed waits for its re-enrollment, since a lapse reopens its ready channel
+// (markLapsed). The reply's id, state and error come from one snapshot, so a lapse landing after
+// the wait cannot give it an id from before and a state from after.
 //
 // The wait ends early when the session is retired (its stop closes), and a retire can also land
 // just as the wait runs out, so the reply is built only after a last membership check: a session
@@ -443,9 +446,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // has.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
-	held := sess.identity()
-	inherited := held.EnrollmentID != "" && !held.Confirmed
-	if wait > 0 && (credential || inherited) {
+	if wait > 0 && (credential || sess.identity().awaitingConfirmation()) {
 		select {
 		case <-sess.readyCh():
 		case <-time.After(wait):
@@ -457,9 +458,10 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	}
 	st := sess.snapshot()
 	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID(), Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
-	// A session that is still enrolling — including one holding an id inherited from a record
-	// that no enroll has confirmed — cannot reach the broker at all while the helper holds no
-	// credential, so the launcher is told that rather than left with an id it cannot use.
+	// A session that still reads enrolling after the wait has only an enroll ahead of it — a
+	// confirmation that succeeded would have made the state enrolled — and an enroll reaches the
+	// broker for nobody while the helper holds no credential, so the launcher is told that
+	// rather than left with an id it cannot use.
 	if resp.State != "enrolled" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -919,7 +921,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// machine that has logged in again would be handed a NEW enrollment, abandoning the
 		// pending requests and grants of the one the session came back for. Only the broker
 		// REFUSING it falls through to the enroll below; see confirmInherited.
-		if pass := sess.identity(); pass.EnrollmentID != "" && !pass.Confirmed {
+		if pass := sess.identity(); pass.awaitingConfirmation() {
 			lease, outcome := s.confirmInherited(ctx, sess, pass)
 			switch outcome {
 			case confirmStopped:
@@ -942,7 +944,12 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 				continue
 			}
 			// confirmRefused: the broker answered that it will not honour that enrollment,
-			// so the session needs a new one.
+			// so the session needs a new one. The refusal is recorded on the session because
+			// the id stays until the enroll below replaces it: without it a `register --wait`
+			// would read an unconfirmed inherited enrollment and wait out the caller's whole
+			// wait, on every call for the rest of the session's life, for a confirmation that
+			// can no longer come.
+			sess.refuseInheritedAt(pass.EnrollmentID, pass.Generation)
 		}
 		var id string
 		var lease time.Time
@@ -1465,7 +1472,7 @@ func (s *Server) Recover(ctx context.Context) {
 		if key != nil {
 			// The recorded key holds this enrollment at the broker, so the session carries it
 			// — but inherited, not confirmed: it may have been revoked while the helper was
-			// down, and only the enroll this session is about to make shows otherwise.
+			// down, and only the session's own renew shows otherwise (Session.inherit).
 			if rec.EnrollmentID != "" {
 				sess.inherit(rec.EnrollmentID)
 			}
