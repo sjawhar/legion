@@ -24,7 +24,7 @@
 # roles uses Oh My Pi's tools and the image's toolchain as its own App (full-agent-tools). Tree 2
 # runs through its planner beside tree 1, carrying the repository-configuration fixture, whose
 # skills, language servers, CodeGraph index and settings its planner uses in its checkout
-# (repository-tools), supplies the capability report every session sends at its start (full-agent),
+# (repository-tools), supplies the capability report measured at an idle tick (full-agent, INFRA-927),
 # and is then moved to backlog. Tree 3 waits for a slot while tree 1's first two children hold
 # the cap, takes one the moment they leave, supplies the held
 # phase the controller checkpoint needs and, held, the planner whose workspace turns a capability off
@@ -4209,14 +4209,15 @@ on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
 pass
 
 begin full-agent
-# Every live session measured the six live capability rows at its boot and reported them with its
-# ready (LEGION-663): tree 1's and tree 2's roles are live, and tree 2's planner, finished and idle,
-# still runs the process of its first boot, whose report the fixture makes the fullest: two MCP
-# servers connected and an extension discovered. The daemon renders each row present from the live
+# Every live session measures the six live capability rows at an idle tick of the 5 s interval it
+# already runs and sends them on a `claims/ready` of its own (LEGION-663, INFRA-927): the report
+# follows the session's first idle measurement rather than its boot, which is why the rows are
+# waited for. Tree 1's and tree 2's roles are live, and tree 2's planner, finished and idle, still
+# runs the process of its first boot, whose report the fixture makes the fullest: two MCP servers
+# connected and an extension discovered. The daemon renders each row present from the live
 # reports, every row's detail naming the pod of a live claim; the planner's own view carries its
-# report at its running incarnation; the log's report line for that incarnation holds the rows; and
-# no live row has read open so far. The newest session's report may be seconds away, so the rows
-# are waited for.
+# report at its running incarnation; the log's report line for that incarnation holds the rows;
+# and no live row has read open so far.
 live_names='["subagents", "web-search", "mcp", "repository-extensions", "dispatch-envoy-tools", "github"]'
 live_rows_of() { jq -c --argjson names "$live_names" '[.capabilities[] | select(.name | IN($names[]))]'; }
 live_rows_present() { daemon_state | live_rows_of | jq -e 'length == 6 and all(.status == "present")' >/dev/null; }
@@ -4232,7 +4233,8 @@ pods=$(jq -c '[.issues[] | (.architect, (.workers // {})[].claim) | .locator.san
 jq -e --argjson pods "$pods" 'all(.detail as $d | ($d | contains("pod ")) and any($pods[]; . as $p | $d | contains($p)))' <<<"$rows" >/dev/null ||
   fail "a live capability row's detail names no pod of a live claim (pods $pods): $rows"
 while IFS= read -r line; do note "$line"; done < <(jq -r '.[] | "\(.name): \(.status): \(.detail)"' <<<"$rows")
-# Tree 2's planner's view: its first boot's report, every row proved, at its running incarnation.
+# Tree 2's planner's view: the report of its first idle measurement, every row proved, at its
+# running incarnation.
 planner_view=$(claim_view "$tree2" planner)
 jq -e --argjson names "$live_names" '(.capabilities.ok | sort) == ($names | sort) and .capabilities.open == [] and .capabilities.incarnation == .locator.incarnation' <<<"$planner_view" >/dev/null ||
   fail "tree 2's planner view does not carry every live row proved by its running process: $(jq -c '{locator, capabilities}' <<<"$planner_view")"
@@ -5750,16 +5752,17 @@ note "every tick on $project the controller received ($(jq length "$evidence/con
 pass
 
 begin full-agent-negative
-# A live row a session's check fails reads open, named by the session's pod, from the ready that
-# reported it until that process is gone (LEGION-663). Tree 3, held, is the one live tree without a
-# pull request while a controller runs, and its finished, idle planner the role whose workspace can
-# take a configuration no pull request carries: a workspace .omp/config.yml turns web_search off,
-# the planner's generation is killed (end_claim_process kill), and its relaunch, reading the file
-# at its boot, reports web-search failing. The daemon runs it all the same (dispatch://LEGION-663: run, and
-# report): the row reads open with the planner's pod, role, issue and the fact, the report's
-# warning carries the relaunch's incarnation, the next tick names the row to the controller, and
-# the planner answers. With the file removed and the planner killed once more, the relaunch proves
-# the row and the daemon renders it present again.
+# A live row a session's check fails reads open, named by the session's pod, from the
+# `claims/ready` that carried the report until that process is gone (LEGION-663). Tree 3, held, is
+# the one live tree without a pull request while a controller runs, and its finished, idle planner
+# the role whose workspace can take a configuration no pull request carries: a workspace
+# .omp/config.yml turns web_search off, the planner's generation is killed (end_claim_process
+# kill), and its relaunch reads the file at its first idle measurement, which it makes on its own
+# interval rather than at its boot (INFRA-927), and reports web-search failing. The daemon runs it
+# all the same (dispatch://LEGION-663: run, and report): the row reads open with the planner's
+# pod, role, issue and the fact, the report's warning carries the relaunch's incarnation, the next
+# tick names the row to the controller, and the planner answers. With the file removed and the
+# planner killed once more, the relaunch proves the row and the daemon renders it present again.
 workspace3=/legion/workspaces/$repo/${tree3,,}
 pod3=$(claim_sandbox "$tree3" planner) || fail "tree 3's planner has no Sandbox"
 # The teardown removes the file, best effort, should the run end between its write and its removal.

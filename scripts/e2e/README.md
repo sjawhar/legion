@@ -2081,7 +2081,7 @@ Four roots run under `admission_cap: 4`, a cap of issues at work rather than of 
   Children 3 and 4, filed while the root stands in `accepting` and holds no slot of its own, hold its sign-off:
   the daemon refuses it `SIGNOFF_CHILD_IN_WORKFLOW` naming both, the proof human parks them one at a time, the refusal after the first park names the one that remains, and the sign-off lands only once the last has left.
 
-- Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and a Python root, and a `.omp/config.yml`), whose tools its planner uses in its checkout (`repository-tools`), supplies the capability report every session sends at its start (`full-agent`), and is then moved to backlog.
+- Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and a Python root, and a `.omp/config.yml`), whose tools its planner uses in its checkout (`repository-tools`), supplies the capability report every session measures at an idle tick of the 5 s interval it already runs rather than at its boot (`full-agent`, INFRA-927), and is then moved to backlog.
 
 - Tree 3 is set todo while tree 1's root, its two children and tree 2's root hold the whole cap, and waits in the line until the first two of those children leave.
   It supplies the held phase the controller checkpoint needs and, held, the planner whose workspace turns a capability off and on again (`full-agent-negative`), and is taken out from an operator shell (`controller-walk`).
@@ -2365,9 +2365,9 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `full-agent`
 
-  every live session measured the six live capability rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) at its boot and reported them with its ready (LEGION-663).
+  every live session measured the six live capability rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) at an idle tick of the 5 s interval it already runs and sent them on a `claims/ready` of its own (LEGION-663, INFRA-927).
   With tree 1's and tree 2's roles live and tree 2's finished planner still the process of its first boot, `legion state --json` renders all six `present` (waited for:
-  the newest session's report may be seconds away), each row's detail naming the pod of a live claim;
+  each live session's first idle measurement, which follows its boot rather than happening at it), each row's detail naming the pod of a live claim;
   tree 2's planner's claim view carries `capabilities` with all six under `ok`, `open` empty and `incarnation` equal to its locator's;
   the daemon log's `capabilities: session reported` line for that incarnation carries `rows` whose `mcp` detail names `fixture-omp-mcp` and `fixture-root-mcp` and whose `repository-extensions` detail names `fixture.ts`;
   and no `capability <live row> is open` line has been logged.
