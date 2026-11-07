@@ -47,7 +47,7 @@ func init() {
 	// Register after variable initialization: the handlers use commands for help.
 	secretForms = []secretForm{
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
-			"List every agent secret under your own cloud sign-in: its name, owner, tier, kind, max\ngrant, default grant, whether it has a value, and its deletion and earliest purge once it is\ndeleted. Name the store the rows are in."}, cmdSecretList},
+			"List every agent secret under your own cloud sign-in: its name, owner, tier, kind, max\ngrant, default grant, whether it has a value, and its deletion once it is deleted, with the\nearliest purge beside it on Secrets Manager; --json also prints each one's store, secret\nname, github-owners, requesters, scopes and admin mark, and its created and last-changed\ntimes where the store gives them. Name the store the rows are in."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
 			"Print an agent secret's name, store, secret name, owner, tier, kind, github-owners,\nrequesters, scopes, admin mark, max grant, default grant, its created and last-changed\ntimes, its deletion once it is deleted, with the earliest purge beside it on Secrets\nManager, and its versions; --json prints those and whether it has a value. Never print\nits value."}, cmdSecretShow},
 		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind " + strings.Join(policy.Kinds, "|") + "|none] [--github-owners LOGINS] [--requesters LIST] [--scopes LIST] [--admin true] [--max-grant DURATION] [--default-grant session] [--profile P]",
