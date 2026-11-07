@@ -45,15 +45,19 @@ type ConsumerSpec struct {
 	AckWait  time.Duration
 	NakDelay time.Duration
 	// HandlerLimit is how long one message's handling may run before it is cut. The bounded part
-	// of a handler is at most five reads of AckWait each — recordedPullRequest, prepareRepository
-	// (the repository preparation, the slowest of them: a Dispatch read and the daemon's own
-	// GitHub work), prepareArtifact, resolveReviewPermission and resolveReviewBody — so 25 s at
-	// the daemon's 5 s window, while readMapping is on the mapping path a fact never takes. On top
-	// of those comes ApplyFact's wait on the one advisory lock every fact of all four consumers
-	// queues on. Ten minutes is about twenty-four times that bounded part, and short enough that a
-	// wedged handler's message returns to the stream within one operator's look. Production sets
-	// nothing, so defaultHandlerLimit applies; tests set a short one. There is no legion.yaml key
-	// for it.
+	// of a handler is at most three reads, each of AckWait, and a review is the one fact that
+	// makes all three: whether its pull request is recorded (recordedPullRequest), its truncated
+	// body (resolveReviewBody) and its author's permission (resolveReviewPermission). Every other
+	// fact makes one read or none — prepareRepository reads for a DispatchIssue, prepareArtifact
+	// for a DispatchArtifact, recordedPullRequest for a PullRequestChecks, and readMapping on the
+	// mapping path, which answers before the rest of them run. So the bounded part is 15 s at the
+	// daemon's 5 s window. On top of it comes ApplyFact's wait on the one advisory lock every fact
+	// of all four consumers queues on. Ten minutes is about forty times that bounded part, and
+	// short enough that a wedged handler's message returns to the stream within one operator's
+	// look. Those figures hold at the default worker_rpc_timeout_seconds (5 s), which the daemon
+	// passes as AckWait: an operator who raises that key widens each read, and ten minutes is the
+	// smaller multiple of the bounded part. Production sets no HandlerLimit, so
+	// defaultHandlerLimit applies; tests set a short one. There is no legion.yaml key for it.
 	HandlerLimit time.Duration
 	Logger       *slog.Logger
 	// Now is the clock Consumers reads when it records a consumer opened or a message handled,
@@ -668,7 +672,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	// A handler the limit cut is silent otherwise: held in progress, it shows neither as repeated
 	// preparation work nor as a rising delivery count, so this line is all an operator has of it.
 	// A live parent context is what tells the limit from the daemon shutting its consumers down.
-	cut := ctx.Err() == nil && errors.Is(work.Err(), context.DeadlineExceeded)
+	// The outcome belongs in the test because the line claims the message was naked and will be
+	// delivered again: a deadline can pass after the work committed its fact, or on a read that
+	// ignores the context it was handed, and the handling still asks for the acknowledgement
+	// below. Such a message was never cut, and saying it was would send an operator looking for a
+	// redelivery that is not coming of a fact that is already applied.
+	cut := outcome.nak && ctx.Err() == nil && errors.Is(work.Err(), context.DeadlineExceeded)
 	if outlived || cut {
 		// Metadata is parsed, never read: it tokenizes the acknowledgement subject and allocates.
 		// Neither line is the ordinary message's, so neither is that work.

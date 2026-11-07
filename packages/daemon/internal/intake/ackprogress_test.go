@@ -22,37 +22,54 @@ import (
 // well past its acknowledgement window is delivered once and prepared once, because consumeMessage
 // reports it in progress while its handler runs (keepInProgress).
 //
-// The first row is that claim, on the daemon's own consumers. The second is the control, and it is
-// what makes the first row's pass mean something: it holds a message of its own for the same time,
-// on a consumer with the same acknowledgement window and no progress signal at all, and JetStream
-// delivers that message again. Without the control, the first row would pass just as well on timing
-// that never produced a redelivery, and would prove nothing about the signal.
+// The first row is that claim, on the daemon's own consumers, and it makes three assertions of one
+// held backlog. The signal itself is the one that fails every run when the keeper is gone: the row
+// counts the progress signals the daemon's client put on the wire (watchProgressSignals) between
+// one acknowledgement window after the hold began and the moment the hold was freed, and asks for
+// at least one. Nothing but the keeper publishes a signal there, so an empty window is a keeper
+// that did not report the held fact, whatever JetStream went on to do about it.
 //
-// Both rows hold the first of a backlog of three events rather than one message alone. A held
-// message's redelivery is served to a pull request of the client's that is still open: the daemon
-// asks for one message at a time (jetstream.PullMaxMessages(1) in consumeConsumer), so while its
-// handler holds a message it has no request open, and the redelivery waits for the request the
-// library sends after the handler returns — just after the acknowledgement the handler's end sent,
-// which the server usually takes first. That race is why a one-message row is not a test: measured
-// here, one run of six lost the redelivery entirely. A backlog is what the daemon pays the cost on
-// in production as well (dispatch://INFRA-456), and it lets the first row assert what A1 asks of
-// every event rather than of one.
+// The other two assertions are what that signal buys, and they are what A1 is worth having: every
+// event of the backlog is prepared exactly once, and the consumer's delivered count equals the
+// backlog, so a redelivered copy shows even when the daemon dropped it as a duplicate and no
+// second preparation did. Neither of them fails reliably when the keeper is gone, and the reason
+// is the daemon's own client. It asks for one message at a time (jetstream.PullMaxMessages(1) in
+// consumeConsumer) and nats.go calls the handler inline, sending the next pull request only after
+// the handler returns (nats.go v1.53.1, the handler call in pullSubscription's message loop), so
+// no request of the daemon's is open while the fact is held. A redelivery can only reach the
+// daemon through the request that follows the handler, which races the acknowledgement the
+// handler's end sent — the server works the two on separate queues, o.ackMsgs and o.nextMsgReqs —
+// and the acknowledgement usually wins. A backlog does not settle that race for the held message:
+// measured with the keeper removed, the two of them caught it in 12 runs of 20, and the signal
+// assertion caught it in 20.
 //
-// The control asks for one message more than the backlog holds, so its own request is still open
-// when the window expires and the redelivery lands in it the moment the server makes it, in every
-// run rather than in most of them. That is the one way the control's client differs from the
-// daemon's, and it differs there so the control is a fact rather than a coin toss.
+// The second row is the control, and it is what says the hold is long enough for the server to
+// redeliver at all: the same backlog, the same window and the same hold, on a consumer that
+// reports nothing in progress, and JetStream delivers the held message again. It is deterministic
+// where the first row's delivered count is not, and the one way its client differs from the
+// daemon's is why: it asks for one message more than the backlog holds
+// (jetstream.PullMaxMessages(heldBacklog+1)), so a request of its own is still open when the
+// window expires and the redelivery lands in it the moment the server makes it.
+//
+// Both rows hold the first of a backlog of three events rather than one message alone, because a
+// backlog is what the daemon pays the cost on in production as well (dispatch://INFRA-456), and it
+// lets the first row assert what A1 asks of every event rather than of one.
 
 // heldBacklog is how many Dispatch issue events each row publishes, each under a key of its own.
 const heldBacklog = 3
 
 // heldOnce holds the first delivery that reaches it until the test releases it, and lets every
 // later one straight through. Both rows hold their first delivery this way, so both rows put the
-// same hold on the same window.
+// same hold on the same window. It also keeps the two instants that bound the hold, which is the
+// span a row that watches the wire asks its question over.
 type heldOnce struct {
 	once    sync.Once
 	entered chan struct{}
 	release chan struct{}
+
+	mu    sync.Mutex
+	from  time.Time
+	until time.Time
 }
 
 func newHeldOnce() *heldOnce {
@@ -66,6 +83,9 @@ func (h *heldOnce) hold(ctx context.Context) {
 	first := false
 	h.once.Do(func() {
 		first = true
+		h.mu.Lock()
+		h.from = time.Now()
+		h.mu.Unlock()
 		close(h.entered)
 	})
 	if !first {
@@ -85,8 +105,21 @@ func (h *heldOnce) hold(ctx context.Context) {
 func (h *heldOnce) releaseAfter(t *testing.T, wait time.Duration) {
 	t.Helper()
 	<-h.entered
-	timer := time.AfterFunc(wait, func() { close(h.release) })
+	timer := time.AfterFunc(wait, func() {
+		h.mu.Lock()
+		h.until = time.Now()
+		h.mu.Unlock()
+		close(h.release)
+	})
 	t.Cleanup(func() { timer.Stop() })
+}
+
+// window is when the first delivery was held and when releaseAfter freed it: from is zero until a
+// delivery has been held, and until is zero until the timer has fired.
+func (h *heldOnce) window() (from, until time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.from, h.until
 }
 
 // publishHeldBacklog publishes the rows' backlog on the Dispatch durable's subject: heldBacklog
@@ -126,11 +159,15 @@ func issueConsumer(t *testing.T, stream jetstream.Stream, durable string, ackWai
 	return consumer
 }
 
-// The fix: the first fact of a backlog is held for three acknowledgement windows, and JetStream
-// still delivers every event of that backlog once and has every one of them prepared once.
+// The fix: the first fact of a backlog is held for three acknowledgement windows, the daemon
+// reports it in progress for as long as it holds, and JetStream still delivers every event of
+// that backlog once and has every one of them prepared once.
 func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredOnceAndPreparedOnce(t *testing.T) {
 	pool := migratedPool(t)
 	js, stream := testJetStream(t)
+	// Watched before the daemon opens, so no signal of the held fact's can be made before the
+	// subscription that counts it exists.
+	progress := watchProgressSignals(t, js)
 	spec := consumerSpec(&lockedBuffer{})
 	// The hold must cost the handling nothing but time: this row is the progress signal's, and the
 	// limit that cuts a handler which never ends is R2's.
@@ -165,6 +202,22 @@ func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredOnceAndPreparedOnce(t *
 		return len(prepared) == heldBacklog
 	})
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+
+	// The signal itself, which is the assertion that fails every run when the keeper is gone. The
+	// window opens one acknowledgement window after the hold began, so nothing made before the
+	// held message could have expired is counted, and closes when the hold was freed. The keeper
+	// ticks every third of AckWait and the hold is three of them, so about six ticks fall inside
+	// it; the row asks for one, because one signal in that window is the whole claim — the daemon
+	// reported a fact whose window had passed — and a loaded runner that delays the other five
+	// says nothing about the fix.
+	from, until := held.window()
+	if until.IsZero() {
+		t.Fatalf("the row's hold was never freed, so it has no window to count the daemon's progress signals in")
+	}
+	if signals := progress(from.Add(spec.AckWait), until); signals < 1 {
+		t.Errorf("the daemon made no progress signal for the held fact between %s after it was held and its release %s later, want at least one: nothing reported it in progress past its acknowledgement window",
+			spec.AckWait, until.Sub(from))
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -269,17 +322,26 @@ const progressEvery = 20 * time.Millisecond
 
 // countedProgress is a delivery that counts the progress signals made for it and passes each one
 // to the message it wraps, so a row can tell a tick the keeper made before stop() returned from
-// one it made after.
+// one it made after. A row that gives it a blocks channel also holds every signal inside
+// InProgress until that channel is closed, which is how it puts a tick in flight and keeps it
+// there for as long as it has questions to ask about one.
 type countedProgress struct {
 	jetstream.Msg
 	mu      sync.Mutex
 	signals int
+	blocks  chan struct{}
 }
 
 func (c *countedProgress) InProgress() error {
 	c.mu.Lock()
 	c.signals++
+	blocks := c.blocks
 	c.mu.Unlock()
+	// The signal is counted before the wait, so a row watching reported() sees the tick it is
+	// holding while it still holds it.
+	if blocks != nil {
+		<-blocks
+	}
 	return c.Msg.InProgress()
 }
 
@@ -289,10 +351,11 @@ func (c *countedProgress) reported() int {
 	return c.signals
 }
 
-// The first claim, on keepInProgress itself: once stop() has returned, no tick is in flight. The
-// row drives the keeper directly rather than through a consumer loop, since that is all the
-// function needs — a delivery, an interval and the stop it hands back. The delivery is real, and
-// fetched rather than consumed, so the signals counted here are signals the server took.
+// The first claim, on keepInProgress itself: stop() returns only once the keeper's goroutine has
+// ended, so once it has returned no tick is in flight. The row drives the keeper directly rather
+// than through a consumer loop, since that is all the function needs — a delivery, an interval
+// and the stop it hands back. The delivery is real, and fetched rather than consumed, so the
+// signals counted here are signals the server took.
 func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
 	js, stream := testJetStream(t)
 	publishIssueEvent(t, js, "CAPTURE-310", 1)
@@ -304,16 +367,46 @@ func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
 		t.Fatalf("fetch the row's message: %v", err)
 	}
 
-	counted := &countedProgress{Msg: message}
+	// The keeper's first tick is held inside InProgress until the row frees it, so the row asks
+	// its question of a stop() that has a tick in flight for certain rather than of one that
+	// happens to have caught a tick.
+	counted := &countedProgress{Msg: message, blocks: make(chan struct{})}
 	stop := keepInProgress(context.Background(), counted, progressEvery, slog.New(slog.NewTextHandler(&lockedBuffer{}, nil)))
-	// A wait that fails leaves the keeper running, so the row ends it either way.
+	free := sync.OnceFunc(func() { close(counted.blocks) })
+	// A wait that fails leaves the keeper running on a tick nothing freed, so the row frees the
+	// tick first and ends the keeper after it: stop() waits for the goroutine that tick holds, and
+	// the defers run in that order.
 	defer stop()
+	defer free()
 	testwait.Eventually(t, "the keeper has reported the message in progress", func() bool { return counted.reported() > 0 })
 
-	stop()
+	// stop() runs in a goroutine because what the row asks of it first is that it does not return.
+	returned := make(chan struct{})
+	go func() {
+		stop()
+		close(returned)
+	}()
+	// Three intervals: a stop() that waited for nothing would have returned many times over by
+	// now, and the tick it would be leaving behind is still inside InProgress.
+	select {
+	case <-returned:
+		t.Fatalf("stop() returned while a progress signal was still in flight, want it to wait for it: it returns only once the keeper's goroutine has ended, which is what lets its caller nak the message after it")
+	case <-time.After(3 * progressEvery):
+	}
+
+	free()
+	testwait.Eventually(t, "stop() returned once the signal it was waiting on was freed", func() bool {
+		select {
+		case <-returned:
+			return true
+		default:
+			return false
+		}
+	})
+
 	stopped := counted.reported()
-	// Three intervals: a keeper still running would have ticked three times over by now, and one
-	// tick is enough to fail the row.
+	// Three intervals again: a keeper still running would have ticked three times over by now, and
+	// one tick is enough to fail the row.
 	time.Sleep(3 * progressEvery)
 	if after := counted.reported(); after != stopped {
 		t.Errorf("the keeper reported the message in progress %d more times after stop() returned, want none: stop returns only once its goroutine has ended, so no tick can still be in flight",
@@ -321,16 +414,17 @@ func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
 	}
 }
 
-// progressSignal is the acknowledgement-protocol payload a progress signal carries, nats.go's
-// ackProgress (jetstream/message.go).
+// progressSignal is the acknowledgement-protocol payload a progress signal carries, the
+// ackProgress of nats.go v1.53.1.
 const progressSignal = "+WPI"
 
 // watchProgressSignals answers how many messages the daemon's client reported in progress within a
 // span, by watching the subject every acknowledgement of this server is published on. The wire is
 // the only place a tick shows: nothing in the daemon's log says one was made, the consumer's info
 // keeps no count of them, and the message's own state is the same either way. Every consumer of
-// the server shares the subject, which costs the row that uses this nothing: it drives one
-// message.
+// the server shares the subject, so what this counts is the daemon's client whole; that costs the
+// two rows using it nothing, because each asks over a span in which the daemon has one message of
+// the row's in hand and nothing else to work.
 func watchProgressSignals(t *testing.T, js jetstream.JetStream) func(from, until time.Time) int {
 	t.Helper()
 	var mu sync.Mutex
@@ -489,8 +583,13 @@ func TestTheProgressSignalStopsBeforeTheNakThatKeepsItsDelay(t *testing.T) {
 	}
 }
 
-// The third claim: a handler that never ends is cut at HandlerLimit, and its message is naked and
-// delivered again rather than held in progress for good.
+// The third claim: a handler that never ends is cut at HandlerLimit, its message naked and
+// delivered again. The cut is what keeps a message reported in progress from being held for good,
+// and it is all this row proves. While the handler holds the message the daemon has no pull
+// request open (the comment above the first row of this file), so even a daemon that reported
+// nothing in progress would not have this message delivered again before the cut: what the row
+// measures is the cut itself, the redelivery the nak after it brings, and the attributes of the
+// warn line that names the cut. It says nothing about the keeper.
 func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
 	pool := migratedPool(t)
 	js, _ := testJetStream(t)
@@ -534,8 +633,8 @@ func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
 	cut := entered[1].Sub(entered[0])
 	mu.Unlock()
 	if cut < spec.HandlerLimit/2 || cut > 2*spec.HandlerLimit {
-		t.Errorf("the held fact was delivered again %s after its first delivery, want about its %s handler limit: a redelivery at its %s acknowledgement window is the progress signal missing, and none at all is a handler held for good",
-			cut, spec.HandlerLimit, spec.AckWait)
+		t.Errorf("the handler that never ends was cut and its fact delivered again %s after its first delivery, want about its %s handler limit plus the %s the nak after the cut asks for: the limit is the only thing that ends this handling",
+			cut, spec.HandlerLimit, spec.NakDelay)
 	}
 	line := logLine(logs.String(), "an intake handler outran its limit and was cut")
 	if line == "" {

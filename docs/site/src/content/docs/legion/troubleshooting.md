@@ -885,8 +885,12 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   The daemon is handling none of them: each delivery fails and is put back to retry (the database
   out of reach, say), or the message in hand does not finish. Search the daemon's log for
   `retryable intake processing failure` and the other warnings naming a `subject` of that
-  consumer, whose `error` says what fails. A consumer that stops is not a stall: it stops the
-  daemon (`workflow intake stopped: …`).
+  consumer, whose `error` says what fails. A handler that does not finish writes none of those
+  while it holds: intake reports its message in progress, and the stall is all that shows until
+  the handler passes its ten-minute limit and the daemon writes `an intake handler outran its
+  limit and was cut`, so search for that line too
+  ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)). A consumer that
+  stops is not a stall: it stops the daemon (`workflow intake stopped: …`).
 - **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
   served all the same. The three consumers are read at the same time, each within two seconds,
   so one consumer's read that does not answer leaves the others' as they are. `read the consumer's
@@ -945,6 +949,21 @@ notice comes once per handoff commit, from whichever pass finds it first.
   still records each open pull request GitHub lists, applies a lost close, merge or push, settles a
   head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
   waits for the backlog to drain.
+- **`an intake handler outran its limit and was cut`** (a warning with `consumer`, `event_id`,
+  `fact` and `limit`). One message's handling ran past `limit`, ten minutes by default, so the
+  daemon cut it and naked the message: nothing of that event was applied, and JetStream delivers
+  it again. While a handler runs, intake reports its message in progress, so a handler that hangs
+  shows in no other line — neither as the preparation work of a redelivery nor as a rising
+  `delivered` count — and this warning is all an operator has of it. `fact` names what the
+  handling was for: look at what that fact's handling waits on, a Dispatch or GitHub read or the
+  database, since the next delivery of the same event takes the same path and is cut the same way.
+- **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
+  (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
+  than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
+  delivery for `took` rather than let JetStream deliver the event a second time. The fact was
+  applied: this is a fact that is slow, not one that failed, and this is the only line that says
+  how long a fact took. One of them asks nothing of an operator; a `took` creeping towards the
+  ten-minute limit, or many at once, names where to look for the slow read behind them.
 - **`webhook App missing on <repo>: <reason>`** in `legion state` (`repositories.withoutWebhookApp`
   in `--json`). Dispatch's GitHub App, the Envoy App whose webhook carries GitHub's events, is not
   known to be installed on a repository the daemon serves. With `Dispatch's GitHub App is not

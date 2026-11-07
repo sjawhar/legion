@@ -39,13 +39,15 @@ import (
 // to be lost or to arrive late and still have another inside the window before it expires.
 //
 // jetstream.ErrMsgAlreadyAckd ends the keeper with no line at all. nats.go never marks a message
-// acknowledged for a progress signal (jetstream/message.go:438-444), so that error can only mean
-// the handler already ended the message, which is the moment the keeper has nothing left to do.
+// acknowledged for a progress signal (nats.go v1.53.1's (*jetStreamMsg).ackReply, which sets ackd
+// for every acknowledgement type but ackProgress), so that error can only mean the handler
+// already ended the message, which is the moment the keeper has nothing left to do.
 //
 // Every other error is tolerated and logged once per message, at debug. The signal is a
-// fire-and-forget publish (message.go:430-434), so the only consequence of losing one is a
-// redelivery the system already handles, and a line per tick would flood the log for the length of
-// a NATS outage.
+// fire-and-forget publish (the same ackReply, which publishes rather than requests for a caller
+// that does not ask for the server's reply, and InProgress is such a caller), so the only
+// consequence of losing one is a redelivery the system already handles, and a line per tick would
+// flood the log for the length of a NATS outage.
 //
 // An interval that is not positive starts nothing and returns a stop that does nothing, because
 // time.NewTicker panics on such a duration. The guard is this function's own contract rather than
