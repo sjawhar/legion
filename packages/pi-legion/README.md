@@ -37,9 +37,9 @@ controller, installs both the same way.
 
 Released installs come from npm as `@sjawhar/pi-legion`. The tarball ships `dist/legion.js`, which
 bundles every dependency except the Oh My Pi host packages (`@legion/pi-shared`, `@legion/contracts`
-and `@legion/envoy-client` are inlined), `dist/THIRD_PARTY_NOTICES`, the nine Legion skills staged at
+and `@legion/envoy-client` are inlined), `dist/THIRD_PARTY_NOTICES`, the seven Legion skills staged at
 `dist/skills` (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`, `thermonuclear-deep-review`;
+`legion-worker`, `leading-a-work-stream`, `simplify-settled-diff`;
 the manifest's `omp.skills: ["dist/skills"]` is what lets Oh My Pi discover them), and `agents/`,
 the task agents Legion's prompts dispatch (`oracle`; the reviewer's pair
 `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's

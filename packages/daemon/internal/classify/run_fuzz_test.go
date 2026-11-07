@@ -20,16 +20,27 @@ import (
 // redelivers some. A push webhook is sometimes lost for good, in both orders; the run it leaves
 // open then stays open, its judgement the same. Each push arrives at a random position in a random
 // order, sometimes twice, and the record goes through the store's round trip after every fact.
-// LEGION_RUN_FUZZ_ITERS sets the number of histories (the long mode), LEGION_RUN_FUZZ_SEED the
-// seed.
+// LEGION_RUN_FUZZ_ITERS sets the number of histories, LEGION_RUN_FUZZ_SEED the seed. CI's
+// pull-request lane sets the first to a reduced count and every other lane leaves it empty, which
+// is the full count in the source below; a value neither empty nor a positive number fails the
+// test rather than running none of it.
 func TestEveryRandomOrderOfThePushesGivesThePushesFirstJudgement(t *testing.T) {
 	iters, seed := 20000, uint64(1)
 	if s := os.Getenv("LEGION_RUN_FUZZ_ITERS"); s != "" {
-		iters, _ = strconv.Atoi(s)
+		value, err := strconv.Atoi(s)
+		if err != nil || value <= 0 {
+			t.Fatalf("LEGION_RUN_FUZZ_ITERS=%q is no count: %v", s, err)
+		}
+		iters = value
 	}
 	if s := os.Getenv("LEGION_RUN_FUZZ_SEED"); s != "" {
-		seed, _ = strconv.ParseUint(s, 10, 64)
+		parsed, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatalf("LEGION_RUN_FUZZ_SEED=%q is no seed: %v", s, err)
+		}
+		seed = parsed
 	}
+	t.Logf("%d histories from seed %d", iters, seed)
 	rng := rand.New(rand.NewPCG(seed, 7))
 	failures := 0
 	for it := 0; it < iters && failures < 3; it++ {

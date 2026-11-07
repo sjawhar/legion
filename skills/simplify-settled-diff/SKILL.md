@@ -1,11 +1,12 @@
 ---
-name: ce-simplify-code
+name: simplify-settled-diff
 description: "Simplify settled, recently changed code for clarity, reuse, quality, and efficiency while preserving behavior. Use after implementation and before review."
 argument-hint: "[blank to simplify current branch changes, or describe what to simplify]"
 ---
 
 Simplify recently changed code for clarity, reuse, quality, and efficiency while preserving exact behavior. Prioritize readable, explicit code over compact code — fewer lines is not the goal.
 
+Legion's fork of the MIT-licensed Compound Engineering `ce-simplify-code` skill (LICENSE beside this file), renamed so a session that also installs the upstream pool loads one of the two by name.
 
 ## Step 1: Identify scope
 
@@ -15,11 +16,11 @@ Resolve the simplification scope in this order:
 2. **Otherwise, in git**, use the current branch versus its base. Without a usable base, use staged and unstaged changes (`git diff HEAD`).
 3. **Outside git or without a diff**, use files the user named or that were edited earlier in the conversation.
 
-If none of the above produces a non-empty scope, stop and ask the user what to simplify rather than guessing. Use the host's blocking question tool already in the current tool list (match by capability, not by a host-specific name). Presence in the current tool list is proof the tool exists; never call a user-facing question tool to discover whether it exists. If a matching tool is listed but unloaded, use the host's tool-discovery primitive to load that capability — do not search for another host's tool name. Fall back to numbered options on the host's user-visible chat surface only when no such tool is in the list or a real question call errors. Never silently skip the question.
+If none of the above produces a non-empty scope, stop and ask the user what to simplify rather than guessing, with the host's blocking question tool, matched by capability and not by another host's name. A tool in the current list exists; never call a question tool to ask whether it exists. Where the list names one that is not loaded, load it with the host's tool-discovery primitive. Fall back to numbered options on the user-visible chat surface only where the host lists no such tool or a real call to it errors. Never silently skip the question.
 
 **Preflight.** Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs. A pass that drops the documentation drops the files a wrong procedure lives in, which is the failure this rule exists to stop. Read generated, vendored and lockfile content for what it shows and edit none of it. This is never a size gate: explicit small scopes still run, and callers own any size or cost threshold.
 
-When the platform's task-tracking capability is available, show the review, apply, and verification outcomes without creating one task per reviewer. Otherwise continue without simulating a task list in chat.
+Report the review, apply and verification outcomes together; do not open one task per reviewer.
 
 ## Step 2: Launch 3 review agents in parallel
 
@@ -31,7 +32,7 @@ Dispatch three generic subagents — code-reuse, code-quality, and efficiency re
 
 Do not paraphrase these rubrics from memory — read each file and pass it verbatim, or the reviewer loses the gating rules that keep the pass behavior-preserving.
 
-**Bounded dispatch.** Queue the three reviewers and launch only as many as the harness accepts at once; treat a concurrency/active-agent-limit error as backpressure (leave the reviewer queued and retry after a slot frees), not as reviewer failure. If a dispatch fails for a reason that survives correcting the invocation, run that reviewer's pass inline in the parent context using the same prompt asset, and disclose the substitution in one line.
+**Bounded dispatch.** Launch only as many reviewers as the harness accepts at once, and read a concurrency or active-agent-limit error as backpressure: leave the reviewer queued and retry when a slot frees, rather than record it as a reviewer failure. Where a dispatch fails for a reason that survives correcting the call, run that reviewer's pass inline with the same prompt asset and say so in one line.
 
 **Agent.** In Oh My Pi, dispatch each persona as the bundled reviewer, `task(agent="reviewer")`. Each runs as a job of its own, so `wait` for its result and read the findings from what it returns. Which model that agent runs on is the operator's configuration.
 
@@ -51,7 +52,7 @@ An interface or data shape that existed only in an earlier iteration of the curr
 
 **Never simplify away a safety check.** Preserve trust-boundary validation, data-loss protection, security checks, and accessibility affordances. Skip any finding that would thin or remove one.
 
-**Honor caller-passed structure pins.** A plan path passed with the structure-pin constraint is context, not scope. Preserve its `session-settled:` Key Technical Decisions, including deliberate duplication or separation.
+**Honor a plan the caller passed as context.** A plan the brief names as context is not scope: preserve each decision it marks `session-settled:`, including a duplication or a separation it made on purpose.
 
 ## Step 4: Verify behavior is preserved
 

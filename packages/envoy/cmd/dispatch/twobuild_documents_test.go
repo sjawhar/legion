@@ -459,7 +459,10 @@ const socketOpenFor = 3 * time.Second
 // corpusSkipped are the corpus files this row leaves out, each with why. A corpus file is
 // markdown for the parsers' fixtures, which a server does not have to be able to store.
 var corpusSkipped = map[string]string{
-	"requirements-tasks-and-checks.md": "its plan tasks and checks point at blocks of a document no project this row creates holds, and a stored block pointer is held to a block the database has (CheckBlockPointers)",
+	"requirements-tasks-and-checks.md":               "its plan tasks and checks point at blocks of a document no project this row creates holds, and a stored block pointer is held to a block the database has (CheckBlockPointers)",
+	"ask-opening-with-a-list.md":                     "its ask writes its options and no question, which a whole write refuses, whichever build takes it (pmdoc.AskWrittenContentError)",
+	"footnote-definition-ask-opening-with-a-list.md": "its ask writes its options and no question, which a whole write refuses, whichever build takes it (pmdoc.AskWrittenContentError)",
+	"nul-characters.md":                              "it holds U+0000, which no route carries and no document stores (NUL_CHARACTER, decodeJSON)",
 }
 
 func requireCorpusCrossesBuilds(t *testing.T, builds *twoBuilds, writer, reader documentSide, project string) {

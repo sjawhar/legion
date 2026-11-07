@@ -689,11 +689,19 @@ func TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod(t *t
 		},
 		// A clean filter of the agent's, in the clone's legacy workspace config, and a changed file
 		// it filters. The restart's jj meets both in the retained clone; the next pod's has neither.
+		// The live check gives the clone's working copy the whole tree before it snapshots, with the
+		// `jj sparse reset` provisioning runs on a workspace (workspace.Provision's checkout): a
+		// pod's shared clone holds no working tree and no sparse pattern, since workspace.feedClone
+		// clones it with `git clone --no-checkout` and then clears its patterns, so no jj command of
+		// Legion's snapshots a file there. An agent's filter in the clone becomes live only once the
+		// agent gives that working copy a pattern itself, which is an agent's own command like any
+		// other: what the empty patterns take from the plant is reach, not a way in.
 		{
 			name:  "a working-copy filter in the clone",
 			plant: func(rig *initRig, pod *rigPod) { rig.plantFilter(pod.clone(), "clone filter") },
 			live: func(rig *initRig, pod *rigPod) {
 				rig.plantFilter(pod.clone(), "clone filter")
+				rig.jj(pod.clone(), "sparse", "reset", "-R", pod.clone())
 				rig.jj(pod.clone(), "status", "-R", pod.clone())
 			},
 		},
