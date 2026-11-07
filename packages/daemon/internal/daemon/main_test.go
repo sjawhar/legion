@@ -8,6 +8,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 // TestMain takes out of the process every variable that could lead the tests' real git and jj to
@@ -17,7 +18,7 @@ import (
 // lane reduces the runs (ci.yaml) and leaves the steps at the test's own default; the guard keeps
 // all three, so a developer may set any of them by hand. It drops the migrated template
 // isolatedOutboxPool clones its databases from (testpg.Main), makes the one database this run's
-// tests write in (testpg.RunDatabaseMain), removes the directory the tests' Envoy binaries were
+// tests write in (testdb.RunDatabaseMain), removes the directory the tests' Envoy binaries were
 // built into (testbuild.Main), and removes the NATS container the package's tests share
 // (testnats.Main).
 //
@@ -48,7 +49,7 @@ func TestMain(m *testing.M) {
 	}
 	fixtureenv.MustGuard("LEGION_KEPT_PROPERTY_SEED", "LEGION_KEPT_PROPERTY_RUNS", "LEGION_KEPT_PROPERTY_STEPS")
 	os.Exit(testpg.Main("legion_daemon_test", func() int {
-		return testpg.RunDatabaseMain("legion_daemon_run", func() int {
+		return testdb.RunDatabaseMain("legion_daemon_run", func() int {
 			return testbuild.Main(func() int { return testnats.Main(m) })
 		})
 	}))

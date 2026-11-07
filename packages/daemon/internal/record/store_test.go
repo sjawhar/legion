@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -26,10 +27,10 @@ var _ Store = NewStore()
 // The tests that apply part of the migration set by hand and count what Migrate then applies
 // need one. The record has no in-memory implementation — its transaction and locking semantics
 // are PostgreSQL's — so without LEGION_TEST_PG_DSN there is nothing to run against and the test
-// is skipped (testpg.Database).
+// is skipped (testdb.Database).
 func emptyStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), testpg.Database(t, "legion_record_test"))
+	st, err := store.Open(context.Background(), testdb.Database(t, "legion_record_test"))
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}

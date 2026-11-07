@@ -25,7 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -904,7 +904,7 @@ func registerLaunch(t *testing.T, d *daemon, launch runtime.SpawnSpec) (string, 
 // them. The admission slot index, unique across the whole database, is a second reason.
 func blockersDatabase(t *testing.T) string {
 	t.Helper()
-	return testpg.Database(t, "legion_blockers_test")
+	return testdb.Database(t, "legion_blockers_test")
 }
 
 // blockersGitHub is GitHub's REST API as this daemon's boot and its outbox call it: a repository's
