@@ -627,6 +627,15 @@ func TestAReferenceResolvesAPrefixWithinTheProjectDocumentItNames(t *testing.T) 
 func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "QMP", "A spec with a question", "# Spec\n\nA passage.")
+	// The create path seeds the spec through the document service and queues that document's
+	// settlement once its transaction commits, after the response (issue_create.go,
+	// Docs.ScheduleSettlement); a settlement writes a version of its own wherever the document
+	// reads differently from the newest one. Wait for it here, because without this wait it can
+	// commit after the version seeded below, which the document does not hold: it then writes
+	// the create path's spec over that version, and the newest version is a spec with no
+	// `:::ask{#q1}` block: the question map is empty and every read in this test answers 200
+	// with no questions.
+	awaitSettled(t, database, issue.PrimaryArtifactID)
 	seedExec(t, database, "a version declaring a question block", `
 		insert into artifact_versions (artifact_id, number, markdown)
 		values ($1::uuid, (select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1::uuid), $2)
@@ -712,6 +721,10 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 func TestTheQuestionMapRouteReadsEveryUuidSpellingAsTheCanonicalID(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "QMU", "A spec with a question", "# Spec\n\nA passage.")
+	// Wait for the settlement the create path queues for this spec, as the seed below writes a
+	// version over it; TestTheQuestionMapRouteAnswersEverySourceKind's comment above says why a
+	// settlement that commits later empties the question map this test reads.
+	awaitSettled(t, database, issue.PrimaryArtifactID)
 	seedExec(t, database, "a version declaring a question block", `
 		insert into artifact_versions (artifact_id, number, markdown)
 		values ($1::uuid, (select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1::uuid), $2)

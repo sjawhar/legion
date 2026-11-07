@@ -1,0 +1,5 @@
+kind: Changed
+body: The worker guide says the pod test server serves a database the role's own login owns, so a test may create a schema or a trusted extension in it, and gives the command that runs Go's race detector in a pod (`CGO_ENABLED=1 go test -race`), which the image's `CGO_ENABLED=0` otherwise refuses.
+time: 2026-11-05T22:25:24.881740702Z
+custom:
+    Issue: pr2833

@@ -101,7 +101,7 @@ test("an Inbox reply's `#q2` names the question of the document its comment is a
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
-        <AskThread ask={answeredAsk} showComposer={false} thread={thread} />
+        <AskThread ask={answeredAsk} order="oldest" showComposer={false} thread={thread} />
       </QueryClientProvider>
     </MemoryRouter>
   );

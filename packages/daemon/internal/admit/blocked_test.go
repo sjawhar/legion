@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -781,7 +782,7 @@ func (s *countingStore) DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project
 func TestPromotionReadsTheMirrorOnceWhateverTheNumberOfBlockedRoots(t *testing.T) {
 	pool := migratedPool(t)
 	store := &countingStore{Store: record.NewStore()}
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Clock: func() time.Time { return fixedNow }}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission := New(store, engine, 1, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission.now = func() time.Time { return fixedNow }

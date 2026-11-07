@@ -54,6 +54,13 @@ signin_domain=example.com
 pod_audience=example-broker-pod
 launcher_service=example-launcher
 launcher_account=system:serviceaccount:example-system:example-launcher
+# The account requestseed's worker pods run as, which BROKER_SERVICES binds to the launcher's
+# service below: that binding is the deployment saying the launcher launches those pods, and
+# without it the launcher's own token login enrols its own pod alone and every seeded pod is
+# refused 403 POD_NOT_LAUNCHED (enroll.Service.podUnderTokenLogin). It is a different account
+# from launcher_account, which it must be: the broker refuses a BROKER_SERVICE_LOGINS account
+# that BROKER_SERVICES also binds for that service's pods.
+pod_account=system:serviceaccount:example:example-worker
 dispatch_account=system:serviceaccount:example-ns:example-dispatch
 
 # The namespace and key the fake secrets sit under; the key is an example ARN in AWS's
@@ -165,6 +172,7 @@ exec env \
   BROKER_K8S_OIDC_ISSUER="$issuer_url" \
   BROKER_K8S_OIDC_AUDIENCE="$pod_audience" \
   BROKER_SERVICE_LOGINS="$launcher_service=$launcher_account" \
+  BROKER_SERVICES="$launcher_service=$pod_account" \
   BROKER_API_ACCOUNTS="dispatch=$dispatch_account" \
   BROKER_SIGNIN_ISSUER="$issuer_url" \
   BROKER_SIGNIN_CLIENT_ID="$signin_client" \

@@ -1,9 +1,8 @@
-import { describe, expect, setSystemTime, test } from "bun:test";
+import { afterAll, describe, expect, setSystemTime, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -12,8 +11,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import * as os from "node:os";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import {
   type ActiveDispatchConfig,
   type DispatchConfigResolution,
@@ -30,6 +30,8 @@ import {
   type SectionOff,
 } from "../envoy-config";
 import { type EnabledEnvoySettings, envoySettings as resolveEnvoy } from "../envoy-settings";
+
+afterAll(removeTemporaryDirectories);
 
 // Both sections resolve one `credential` object (`ActiveDispatchConfig`, `EnabledEnvoySettings`).
 // What this file is about is which file and which variable a section reads, so each resolution is
@@ -63,7 +65,7 @@ function envoySettings(...args: Parameters<typeof resolveEnvoy>): EnvoyWithToken
 }
 
 function tempDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "envoy-config-"));
+  return temporaryDirectory("envoy-config-");
 }
 
 function writeFile(file: string, contents: unknown): string {
@@ -462,11 +464,11 @@ describe("readEnvoyConfig", () => {
   // The same rule on real filesystems: a tmpfs directory linked in as ~/.config/opencode is another
   // device than the temporary directory's.
   const shm = "/dev/shm";
-  test.skipIf(!existsSync(shm) || statSync(shm).dev === statSync(os.tmpdir()).dev)(
+  test.skipIf(!existsSync(shm) || statSync(shm).dev === statSync(tmpdir()).dev)(
     "a move across real filesystems names the file to create, and no mv command",
     () => {
       const home = tempDir();
-      const elsewhere = mkdtempSync(path.join(shm, "envoy-config-"));
+      const elsewhere = temporaryDirectory("envoy-config-", shm);
       try {
         mkdirSync(path.join(home, ".config"));
         symlinkSync(elsewhere, path.join(home, ".config", "opencode"));

@@ -372,8 +372,10 @@ SCHEMA_SCRIPT = (
 TAGGED_TESTS = ".github/scripts/go-tagged-tests.sh"
 NATS_MATRIX_STEP = "Test the container-backed NATS matrix (natslive)"
 NATS_MATRIX_SCRIPT = f"""\
-pattern=$(../../{TAGGED_TESTS} natslive ./internal/testnats)
-go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/"""
+rig=$(../../{TAGGED_TESTS} natslive ./internal/testnats)
+go test -count=1 -tags natslive -run "$rig" ./internal/testnats/
+cap=$(../../{TAGGED_TESTS} natslive ./internal/bus)
+go test -count=1 -timeout 5m -tags natslive -run "$cap" -v ./internal/bus/"""
 # One call per package, never one union -run over the three: a name an untagged test of one
 # package shares with a natslive test of another would then run a second time unremarked.
 INFRA_NATSLIVE_STEP = "Live tests of envoy-infra against nats-server (natslive)"
@@ -381,7 +383,7 @@ INFRA_NATSLIVE_PACKAGES = ["./core", "./seed", "./gcp"]
 INFRA_NATSLIVE_SCRIPT = f"""\
 for pkg in {" ".join(INFRA_NATSLIVE_PACKAGES)}; do
   pattern=$(../../../{TAGGED_TESTS} natslive "$pkg")
-  go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+  go test -count=1 -timeout 30m -tags natslive -run "$pattern" "$pkg"
 done"""
 MEMORY_STEP = "Memory tests of the Dispatch server"
 MEMORY_SCRIPT = f"""\
@@ -475,7 +477,7 @@ def race_pkgs(job):
 def race_step(job):
     """The one go command of a race job's step, pinned to the text this declaration builds."""
     pkgs = race_pkgs(job)
-    text = f"go test -race -timeout {job.timeout} " + " ".join(pkgs)
+    text = f"go test -count=1 -race -timeout {job.timeout} " + " ".join(pkgs)
     return step_run(job.job, job.step, text, ENVOY, pkgs, race=True)
 
 
@@ -957,9 +959,14 @@ GATES = [
              {"mode": "build", "env": {"GOOS": "linux", "GOARCH": arch}})
             for arch in targets(GO_TARGETS, "envoy")
         ]),
-        # Only what the natslive tag adds to internal/testnats; the unit step ran the rest.
+        # Only what the natslive tag adds, one package at a time: the rig's own matrix, and the
+        # one test of internal/bus that needs a real server image. The rest of internal/testnats
+        # runs in the unit step; the rest of internal/bus runs in envoy-go-race, since
+        # UNIT_TEST_PATTERN leaves the race lane's packages out of the unit step, and the
+        # envoy_go entry of TAG_RUNS, one entry per step, checks the testnats half alone.
         pinned_step("envoy-go", NATS_MATRIX_STEP, ENVOY, NATS_MATRIX_SCRIPT, [
             (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
+            (ENVOY, ["./internal/bus/"], "go test -tags natslive ./internal/bus/", {"tags": "natslive"}),
         ]),
     ], reads=reads(
         (f"{ENVOY}/**", f"{at('envoy-go', 'Check Go formatting')}: gofmt -l . in packages/envoy reads every .go file under it, infra included; the script tests below live here too"),
@@ -983,7 +990,7 @@ GATES = [
     gate("envoy_infra_go", "envoy-infra-go", runs=[
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
                  tags="pulumilive,natslive", mode="vet"),
-        step_run("envoy-infra-go", "Unit test envoy-infra", "go test ./...", INFRA, ["./..."]),
+        step_run("envoy-infra-go", "Unit test envoy-infra", "go test -count=1 ./...", INFRA, ["./..."]),
     ], exact=[
         # One go test per package, each running only what the natslive tag adds to it.
         pinned_step("envoy-infra-go", INFRA_NATSLIVE_STEP, INFRA, INFRA_NATSLIVE_SCRIPT, [

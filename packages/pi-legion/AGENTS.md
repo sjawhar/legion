@@ -71,10 +71,10 @@ shapes that client parses, and the pane's environment — the identity variables
 workspace, the pane's cwd; read by `claim-session.ts`, which resolves it and scopes the overlay's
 `Dispatch:` line to it), `LEGION_GENERATION` (set by the daemon, read by
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
-variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner;
-`GH_CONFIG_DIR`, its issue's owner's directory; `LEGION_GH_PATH`, the real gh the pane's `gh`
-wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty: read by the pane's `gh` and
-`git`, by nothing here), the Envoy
+variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner and one
+per other repository its issue's owner serves; `GH_CONFIG_DIR`, its issue's owner's directory;
+`LEGION_GH_PATH`, the real gh the pane's `gh` wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` set empty: read by the pane's `gh` and `git`, by nothing here), the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
@@ -91,14 +91,18 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 55's end of fix-attempt
+number is the one `DaemonAPIVersion` declares, last bumped by contract 56's end of fix-attempt
 counting and its two recovery operations (the settings block of `GET /legion/v1/state` no longer
 carries `max_fix_attempts` and each pull request in it loses `fixAttempts`, which the strict
 reader every worker's `read_record` parses the state through requires, so the boot gate and
 `legion probe-image` hold plugin and daemon equal and neither order of the two ever runs; the
 controller's `legion` tool gains `compact (issue, role)` and `fresh_session (issue, role)`, which
 post `POST /legion/v1/claims/compact` and `POST /legion/v1/claims/fresh-session`), after
-contract 54's production check
+contract 55's design-gate steps
+(each root issue of `GET /legion/v1/state` carries `gatedSteps`, one entry for each step the
+deployment gates, which a caller from a pod below 55 is served without; `register_gate` takes the
+`step` its document is for; and `POST /legion/v1/controller/secret` answers `designGateSteps` in
+place of `designGate`), after contract 54's production check
 (INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
 default, decides whether a merge that closes an issue opens a check and who works it; the
 `check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
@@ -237,8 +241,9 @@ Contract 5 added `LEGION_GRANT_FILE` to the pane's environment (LEGION-262), the
 hook minted a grant into before a bash command that invoked `legion`; contract 19 removes it with
 that hook. Nothing in a pane runs `legion` from bash: the `legion` tool mints each operation's grant
 in-process and posts it with the request, and `gh` and `git` read the role's GitHub App tokens from
-the gh bundle under the pane's `LEGION_GH_OWNERS_DIR` (one directory per owner, each a `hosts.yml`
-and `config.yml` rendered and refreshed by the daemon: `/var/run/legion/gh` in a pod,
+the gh bundle under the pane's `LEGION_GH_OWNERS_DIR` (one directory per owner and one per other
+repository the issue's owner serves, each a `hosts.yml` and `config.yml` rendered and refreshed by
+the daemon: `/var/run/legion/gh` in a pod,
 `<state_dir>/secrets/<claim>-gh` on tmux; `GH_CONFIG_DIR` names the issue owner's), with
 `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty so no token in the daemon's environment outranks
 the files.

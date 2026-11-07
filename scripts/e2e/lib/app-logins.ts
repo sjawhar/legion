@@ -18,9 +18,10 @@
 //
 // Each App's tokens come from its `github_apps.<role>.token_command`, run as the daemon runs it
 // (internal/appauth, runTokenCommand): `sh -c`, stdin closed, the environment less the NATS seed
-// variables (internal/runtime, WithoutNATSSeeds) with LEGION_GITHUB_OWNER and
-// LEGION_GITHUB_READ_ONLY set empty (the release of every installation, as AppLogin asks), stdout
-// read as the secrets broker's release, and stderr relayed and kept for a failure's message alone.
+// variables (internal/runtime, WithoutNATSSeeds) with LEGION_GITHUB_OWNER, LEGION_GITHUB_REPOS and
+// LEGION_GITHUB_READ_ONLY set empty (the release of every installation, narrowed to nothing, as
+// AppLogin asks), stdout read as the secrets broker's release, and stderr relayed and kept for a
+// failure's message alone.
 // A token stays in this process's memory: it is never printed, written to a file, or handed to
 // another process. An App configured with any other credential source is refused, since every
 // stage proof's file names a token command.
@@ -107,6 +108,7 @@ async function runTokenCommand(field: string, command: string): Promise<string> 
   const env: Record<string, string | undefined> = { ...process.env };
   for (const name of natsSeedVariables) delete env[name];
   env.LEGION_GITHUB_OWNER = "";
+  env.LEGION_GITHUB_REPOS = "";
   env.LEGION_GITHUB_READ_ONLY = "";
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {

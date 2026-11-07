@@ -708,7 +708,9 @@ write_legion_config
 # such as the devbox's dotfiles shim, and realbin puts the real gh first (lib/rig.sh, real_bin_path).
 out=$(HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" "$work/legion" start --check-config --config "$work/legion.yaml") ||
   fail "legion start --check-config refused the run's legion.yaml: $out"
-[ "$(head -n 1 <<<"$out")" = "Config OK: project=$project" ] || fail "legion start --check-config said: $out"
+# The OK line names the design-gate steps the file resolved to; this run's `gates.design` is
+# root-issues, which is the single step spec.
+[ "$(head -n 1 <<<"$out")" = "Config OK: project=$project design-gate-steps=spec" ] || fail "legion start --check-config said: $out"
 note "$(head -n 1 <<<"$out")"
 start_daemon
 daemon_state >"$evidence/boot-state.json" || fail "legion state does not answer"

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -29,7 +30,7 @@ func TestTheStatusRepairKeepsQueuingARowTheOutboxWillNotWrite(t *testing.T) {
 	ctx := context.Background()
 	putOutboxIssue(t, pool, records, staleStatusIssue(phase.Implementing, "in_progress", "todo"))
 	putStatusRepairSlot(t, pool, records, "LEGION-208")
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: time.Now, log: quietLogger()}
 
@@ -67,7 +68,7 @@ func TestTheStatusRepairWritesNothingOverAStatusTheDaemonNeverSaw(t *testing.T) 
 	ctx := context.Background()
 	putOutboxIssue(t, pool, records, staleStatusIssue(phase.Implementing, "in_progress", "todo"))
 	putStatusRepairSlot(t, pool, records, "LEGION-208")
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "testing"}}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: time.Now, log: quietLogger()}
 
@@ -102,7 +103,7 @@ func TestNoOutboxFinishWritesTheRecordsDispatchStatus(t *testing.T) {
 	ctx := context.Background()
 	putOutboxIssue(t, pool, records, staleStatusIssue(phase.Implementing, "todo", "todo"))
 	putStatusRepairSlot(t, pool, records, "LEGION-208")
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: time.Now, log: quietLogger()}
 

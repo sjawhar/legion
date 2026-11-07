@@ -452,7 +452,7 @@ func TestStateSnapshotKeepsStrandedClaimsConsistentWithWorkerStates(t *testing.T
 		startedAt: time.Now(), deployment: func() capabilities.Deployment { return capabilities.Deployment{} },
 		reports: func() map[claim.Token]capabilities.Report { return nil },
 	}
-	state, err := view.State(ctx, tx)
+	state, _, err := view.State(ctx, tx)
 	if err != nil {
 		t.Fatalf("State: %v", err)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -24,21 +25,33 @@ import (
 // noRepositoriesView is the supplier of a daemon whose project maps and refuses no repository.
 func noRepositoriesView() api.RepositoriesView { return api.RepositoriesView{} }
 
-// A tree's root architect is told the project's design gate policy after its addressing, the
-// "Design gate policy" line its shared role prompt reads, and its composed role prompt carries what
-// that policy asks of it under this daemon: register_gate under either policy, with approval first
-// only when the gate is armed. No other claim is told the policy: a child's spec is never gated.
-func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
+// A tree's root architect is told the design-gate steps its deployment gates after its
+// addressing, the "Design gate steps" line its shared role prompt reads, and its composed role
+// prompt carries what those steps ask of it: one registration for each step, on that step's own
+// document, with the approval request first where a person must approve it. No other claim is
+// told the steps: a child's spec is never gated. A two-step deployment and one on `root-issues`
+// give their root architects different prompts, so what a launch is told follows the
+// configuration rather than a policy word that says nothing about which steps hold its tree.
+func TestARootArchitectIsToldTheGatedStepsAndWhatTheyAsk(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
 	instructions := []string{
-		"the tree's work starts only once you register your spec with `register_gate`, under either design gate policy",
-		"With `root-issues`, once the spec's decision blocks are settled (`skill://dispatch-writing-specs`, \"Approval\"), request its approval with `dispatch request-approval` and a `--summary`",
-		"With `off`, request no approval and wait for no `design-approved`",
+		"the tree's work starts only once every step your `Design gate steps` line names holds a registration of its own",
+		"the `spec` step the issue's primary document",
+		"Where the line says `none`, request no approval and wait for no `design-approved`",
 	}
-	for _, policy := range []config.DesignGate{config.DesignGateRootIssues, config.DesignGateOff} {
+	composed := map[string]string{}
+	for _, deployment := range []struct {
+		name  string
+		steps []record.DesignStep
+		line  string
+	}{
+		{"two steps", []record.DesignStep{record.DesignStepDecisions, record.DesignStepSpec}, "Design gate steps: `decisions`, `spec`."},
+		{"root-issues", config.DesignGateRootIssues.Steps(), "Design gate steps: `spec`."},
+		{"off", config.DesignGateOff.Steps(), "Design gate steps: none."},
+	} {
 		for _, tc := range []struct {
 			name, issue string
 			role        claim.Role
@@ -48,24 +61,24 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 			{"a sub-architect", "S1-2", claim.RoleArchitect, false},
 			{"a planner on the root", "S1-1", claim.RolePlanner, false},
 		} {
-			t.Run(string(policy)+"/"+tc.name, func(t *testing.T) {
+			t.Run(deployment.name+"/"+tc.name, func(t *testing.T) {
 				token, err := claim.NewToken("s1", tc.issue, tc.role)
 				if err != nil {
 					t.Fatal(err)
 				}
-				s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: policy, repositories: noRepositoriesView}
+				s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, designSteps: deployment.steps, repositories: noRepositoriesView}
 				spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: tc.issue, Tree: "S1-1", Role: tc.role})
 				if err != nil {
 					t.Fatalf("SpawnSpec: %v", err)
 				}
-				line := "Design gate policy: `gates.design: " + string(policy) + "`."
-				if told := strings.HasSuffix(spec.Prompt.Addressing, " "+line); told != tc.root || !tc.root && strings.Contains(spec.Prompt.Addressing, "Design gate policy") {
-					t.Fatalf("addressing %q; want it to end with %q: %t", spec.Prompt.Addressing, line, tc.root)
+				if told := strings.HasSuffix(spec.Prompt.Addressing, " "+deployment.line); told != tc.root || !tc.root && strings.Contains(spec.Prompt.Addressing, "Design gate steps") {
+					t.Fatalf("addressing %q; want it to end with %q: %t", spec.Prompt.Addressing, deployment.line, tc.root)
 				}
 				if !tc.root {
 					return
 				}
 				var prompt strings.Builder
+				prompt.WriteString(spec.Prompt.Addressing)
 				for _, path := range spec.Prompt.RolePromptPaths {
 					part, err := os.ReadFile(path)
 					if err != nil {
@@ -78,8 +91,12 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 						t.Errorf("the root architect's composed prompt does not say %q", want)
 					}
 				}
+				composed[deployment.name] = prompt.String()
 			})
 		}
+	}
+	if composed["two steps"] == composed["root-issues"] {
+		t.Error("a two-step deployment's root architect is told exactly what a root-issues deployment's is; nothing in its prompt says which steps hold its tree")
 	}
 }
 
@@ -245,16 +262,17 @@ func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
 }
 
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
-// part, told the project's design gate policy and repositories as the operator's controller is,
-// with the deployment's instructions and launch secrets, and with no repository, no git identity
-// and neither App login: it works Dispatch, never a checkout or GitHub, and commits nothing.
+// part, told the design-gate steps the project gates and its repositories as the operator's
+// controller is, with the deployment's instructions and launch secrets, and with no repository,
+// no git identity and neither App login: it works Dispatch, never a checkout or GitHub, and
+// commits nothing.
 func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
 	s := specs{
-		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff, repositories: noRepositoriesView,
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designSteps: config.DesignGateOff.Steps(), repositories: noRepositoriesView,
 		instructions: "/state/deployment-instructions.md", secrets: map[string]string{"ENVOY_TOKEN": "envoy-bearer"},
 		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
 			t.Error("the controller's launch asked for a repository")
@@ -276,7 +294,7 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if !slices.Equal(spec.Prompt.RolePromptPaths, want) {
 		t.Errorf("role prompts = %q, want %q", spec.Prompt.RolePromptPaths, want)
 	}
-	if want := "Design gate policy: `gates.design: off`. The daemon maps no repository to this project now."; spec.Prompt.Addressing != want {
+	if want := "Design gate steps: none. The daemon maps no repository to this project now."; spec.Prompt.Addressing != want {
 		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
@@ -305,7 +323,7 @@ func TestTheControllersLaunchNamesTheProjectsSlackChannels(t *testing.T) {
 	launch := func(channels []string) runtime.SpawnSpec {
 		t.Helper()
 		s := specs{
-			stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateRootIssues,
+			stateDir: t.TempDir(), project: "s1", prompts: composer, designSteps: config.DesignGateRootIssues.Steps(),
 			slackChannels: channels, repositories: noRepositoriesView,
 		}
 		spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
@@ -318,18 +336,18 @@ func TestTheControllersLaunchNamesTheProjectsSlackChannels(t *testing.T) {
 	if _, set := spec.Env["LEGION_SLACK_CHANNELS"]; set {
 		t.Errorf("the spec sets LEGION_SLACK_CHANNELS (%v), the runtime's variable", spec.Env)
 	}
-	want := "Design gate policy: `gates.design: root-issues`. The daemon maps no repository to this project now. Slack channels: `C00000000`, `G00000001`: " +
+	want := "Design gate steps: `spec`. The daemon maps no repository to this project now. Slack channels: `C00000000`, `G00000001`: " +
 		"your session hears each one's app mentions while it holds the controller role; answer each in its thread, " +
 		"and nothing from any other channel (skill://legion-controller/references/slack-mentions.md)."
 	if spec.Prompt.Addressing != want {
 		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}
-	if none := launch(nil); none.Prompt.Addressing != "Design gate policy: `gates.design: root-issues`. The daemon maps no repository to this project now." {
+	if none := launch(nil); none.Prompt.Addressing != "Design gate steps: `spec`. The daemon maps no repository to this project now." {
 		t.Errorf("with no channel: addressing %q, want no Slack line", none.Prompt.Addressing)
 	}
 }
 
-// The controller's addressing gains the project's repositories after its design gate policy, as a
+// The controller's addressing gains the project's repositories after its design gate steps, as a
 // sentence of its own, so `legion controller start`'s operator and the daemon-launched controller
 // both read where the project's issues live; a worker's addressing carries the same clause after
 // a `; `.
@@ -358,14 +376,14 @@ func TestTheControllersAddressingGainsTheProjectsRepositories(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := specs{
-				stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+				stateDir: t.TempDir(), project: "s1", prompts: composer, designSteps: config.DesignGateOff.Steps(),
 				repositories: func() api.RepositoriesView { return tc.view },
 			}
 			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
 			if err != nil {
 				t.Fatalf("SpawnSpec: %v", err)
 			}
-			if want := DesignGateFragment(config.DesignGateOff) + " " + tc.want; spec.Prompt.Addressing != want {
+			if want := DesignGateFragment(config.DesignGateOff.Steps()) + " " + tc.want; spec.Prompt.Addressing != want {
 				t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 			}
 		})

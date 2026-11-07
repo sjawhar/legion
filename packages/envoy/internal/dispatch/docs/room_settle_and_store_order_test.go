@@ -150,7 +150,7 @@ func latestVersionEventActor(t *testing.T, database *store.Store, artifactID str
 // the room's recorded updates and waiting to append, with the room's later updates queued behind
 // it. Both of the store's appends of a room's own update pass it: the flush its persistence worker
 // runs for a classified update (AppendRoomFlush) and the bare append of one no class was recorded
-// for (AppendUpdateWithCredit).
+// for (AppendUpdatesWithCredit).
 type gatedAppends struct {
 	VersionedStore
 	mu      sync.Mutex
@@ -179,9 +179,9 @@ func (g *gatedAppends) AppendRoomFlush(ctx context.Context, room string, flush *
 	return g.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
 }
 
-func (g *gatedAppends) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+func (g *gatedAppends) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
 	g.wait()
-	return g.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
+	return g.VersionedStore.AppendUpdatesWithCredit(ctx, room, updates)
 }
 
 // hold closes the gate to every append that reaches it from now on.

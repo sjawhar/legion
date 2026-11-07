@@ -35,7 +35,7 @@ func TestEveryRedSendsTheWorkBackHoweverManyCameBefore(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	// The review round cap is a rule of its own and still stands: it is set above this drive so
 	// the only notice a round can earn here is the red's own.
-	engine := New(record.NewStore(), Config{Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: redRounds + 1,
+	engine := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: redRounds + 1,
 		Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 

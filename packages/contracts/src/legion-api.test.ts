@@ -968,9 +968,8 @@ test("the state golden names what every blocked issue waits on", () => {
 // tree — and each issue's `tree` names its own root, so a child is told from a root. The computed
 // golden carries a child: LEGION-209 stands in LEGION-208's tree, and all three live trees are
 // named while one issue alone holds a slot. Neither key is required: a daemon at this contract
-// strips both from the state it serves a caller whose pod's plugin is older than 51, and from the
-// one it serves a caller whose pod's claims it cannot read at all, which may be a pod at this
-// contract (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
+// strips both from the state it serves a caller whose pod's plugin is older than 51
+// (`api.stateFor`, `withoutTrees`). So a body without them parses, and a reader of it
 // learns nothing about which trees run rather than losing the whole state; what is refused is a
 // `tree` that is no issue key. A daemon older than this plugin is kept away by the boot gate and
 // `legion probe-image`, not by this schema.
@@ -1629,7 +1628,7 @@ test("the state golden names the wakes the pacing holds, and the key may be abse
 // `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
 // Stage 3 state carries the defaults, the one typed key is a positive integer, the rest rides
 // loosely, and the block cannot be dropped: a plugin from before the field refuses the state.
-// `max_fix_attempts` rode here until contract 55 removed the key.
+// `max_fix_attempts` rode here until contract 56 removed the key.
 test("the state golden carries the daemon's settings with no credential, and the block cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
   expect(state.settings.max_fix_attempts).toBeUndefined();

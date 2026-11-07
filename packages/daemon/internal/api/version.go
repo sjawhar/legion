@@ -651,7 +651,36 @@ package api
 // forward merge that renumbered this entry, d43e0fe9bbb1; read main's own number again at the
 // next merge rather than from this line.)
 //
-// 55: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
+// 55: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
+// gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
+// `spec`), the document its architect registered for that step and that document's
+// `currentVersion` (both absent until one is registered), the `approvedVersion` a person
+// approved (null until one does), the `status` — `unregistered`, `waiting`, `approved` or
+// `changes_requested` — and `changesReason`, what the reviewer asked for, on that last status
+// alone. It is absent, as `designGate` is, from an issue that is not its tree's root, from every
+// issue of a deployment that gates no step and from an issue the workflow does not record, so the
+// wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
+// always been, so a reader that asks one question of one gate reads what it read before.
+// `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
+// contract below 55 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// as a caller below 53 is served a body with no wakes waiting, one below 51 the issues without
+// the admission's trees and each issue's tree, one below 49 without the memory draw and one
+// below 46 without the claim views' update rounds; the five compose, and every reader from 55 on
+// takes the field as optional.
+// `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
+// one word `designGate`, which 55 drops: `legion controller start` is built from this daemon's
+// own tree, so the two always ship together, and a `legion` of this release refuses an answer
+// that names no list at all.
+// (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, then
+// 53 when main landed the issue-key trailer as 52, then 54 when main landed the wake pacing as
+// 53, and main has since landed the optional production check as 54, so this change takes the
+// number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 54 at the forward merge that renumbered this entry, b5482068c554; read main's
+// own number again at the next merge rather than from this line.)
+//
+// 56: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
 // and a file carrying it loads with a warning naming the removal, which boot logs and
 // `legion start --check-config` prints, rather than a refusal, so the settings block of
 // `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer
@@ -660,7 +689,7 @@ package api
 // now sends the work back to the implementer every time it stands, however many came before,
 // and the architect decides when to stop; no pull request is marked blocked and no `pr-blocked`
 // notice is published for a count. `packages/contracts/src/legion-api.ts` mirrors both
-// removals, and its reader of the settings block is loose, so a plugin before 55 reads a state
+// removals, and its reader of the settings block is loose, so a plugin before 56 reads a state
 // without `max_fix_attempts` — but its strict pull-request reader refuses one without
 // `fixAttempts`, and every worker's `read_record` parses the state through it, which is what
 // this number is for: the boot gate and `legion probe-image` hold plugin and daemon equal, so
@@ -707,13 +736,14 @@ package api
 // `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). The
 // removal ships none; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped
 // columns that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
-// (This branch took 47, then 48, then 50, then 52, then 54, as main's own changes took each
-// number before it: main merged the idle-pod release at 48 while this branch was open, landed
-// the memory group at 49, the admission cap over the issues at work at 51, the pane issue key
-// at 52 and INFRA-976's wake pacing at 53, each release declaring its number without these
-// shapes, and INFRA-809's production-check decision has since landed as 54
-// (sjawhar/legion#2855), so this change takes the number above them all, as
+// (This branch took 47, then 48, then 50, then 52, then 54, then 55, as main's own changes took
+// each number before it: main merged the idle-pod release at 48 while this branch was open,
+// landed the memory group at 49, the admission cap over the issues at work at 51, the pane issue
+// key at 52, INFRA-976's wake pacing at 53 and INFRA-809's production-check decision at 54
+// (sjawhar/legion#2855), each release declaring its number without these shapes, and INFRA-1272's
+// design-gate steps have since landed as 55 (cybermonklabs/legion#2848), so this change takes the
+// number above them all, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
-// says. main held 54 at the forward merge that renumbered this entry; read main's own number
-// again at the next merge rather than from this line.)
-const DaemonAPIVersion = 55
+// says. main held 55 at the forward merge that renumbered this entry, 67d356b8bc3d; read main's
+// own number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 56

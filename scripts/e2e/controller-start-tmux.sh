@@ -205,7 +205,9 @@ EOF
 # ---- --check-config --------------------------------------------------------------------------------
 begin check-config-passes
 out=$(legion start --check-config --config "$work/legion.yaml")
-[ "$(head -1 <<<"$out")" = "Config OK: project=$project" ] || fail "got $out"
+# The OK line names the design-gate steps the file resolved to; this file sets no gates key, which
+# is the single step spec.
+[ "$(head -1 <<<"$out")" = "Config OK: project=$project design-gate-steps=spec" ] || fail "got $out"
 # After the OK line, one line per deployment capability the file alone leaves open, in boot's words
 # (LEGION-578): under tmux the secrets and resource-limits rows, each ending with the legion.yaml
 # line that records a decision. A report, so the exit stayed 0.

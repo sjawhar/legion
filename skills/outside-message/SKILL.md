@@ -31,6 +31,10 @@ to the company before.
 Everything else waits for the operator: a first contact with a project that has not enrolled, a bug
 report, a disclosure, and a reply to a maintainer who wrote first.
 
+Hold an extremely high bar. Optimise every upstream report, patch or public post for a human
+reader and for being received well, so each one builds the company's reputation rather than a
+reputation for low-quality or careless submissions.
+
 ## The four steps
 
 1. **Research the audience.** Read the repository's contributing guide, its issue and pull-request
@@ -83,6 +87,17 @@ An ask for an outside message has, in this order:
 
 Link the research, not the message. An ask with no removal line has not had step 4, whatever it
 says.
+
+## One batch, not one ask at a time
+
+An upstream bug report, patch or public post that needs the operator's approval goes into one
+review batch, never a per-message "can I send this" ask. Write its entry — what it is and how
+serious; who receives it and what they do; the exact text or patch; its evidence; a non-author
+reviewer's APPROVE under your stream's reviewer-model rule; what the operator decides; its owner
+— into the batch, add it under the batch's Waiting list, and tell the batch owner. Your stream's
+brief names the batch and its owner. Where your stream's brief names no batch, ask the operator
+for one, or hold the entry until there is a batch; a missing batch is not a reason to send a
+per-message ask.
 
 ## What this skill does not cover
 

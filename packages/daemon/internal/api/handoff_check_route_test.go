@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -33,6 +34,7 @@ func newWorkflowHarness(t *testing.T, cfg workflow.Config) (*harness, *workflow.
 	facts := &factRecorder{}
 	engine := workflow.New(record.NewStore(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      cfg.Steps,
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
@@ -91,6 +93,7 @@ func mergedCloseBehindATestingTurn(t *testing.T) (*harness, *factRecorder, liveC
 	t.Helper()
 	now := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
 	h, engine, facts := newWorkflowHarness(t, workflow.Config{Project: testProject, Repositories: testRepositories,
+		Steps:          config.DesignGateRootIssues.Steps(),
 		ReviewRoundCap: 3, ProductionCheckRole: claim.RoleTester, ProductionCheckBound: 48 * time.Hour,
 		Clock: func() time.Time { return now }})
 	ctx := context.Background()

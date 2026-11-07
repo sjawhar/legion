@@ -266,6 +266,58 @@ func TestSetStatusSendsDaemonActorAndAnswersTheWrittenIssue(t *testing.T) {
 	}
 }
 
+// The gated-steps publish is a PUT on the project, under the daemon's own session, and it always
+// names a list: Dispatch refuses a body with no `steps` rather than reading it as the empty list,
+// so a deployment that gates nothing has to send `[]` for its publish to land.
+func TestGatedStepsPublishSendsTheListUnderTheDaemonSession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []string
+		want  []string
+	}{
+		{name: "two steps", steps: []string{"criteria", "spec"}, want: []string{"criteria", "spec"}},
+		{name: "a deployment that gates nothing", steps: nil, want: []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/api/v1/projects/LEGION/gated-steps" {
+					t.Fatalf("request = %s %s, want PUT /api/v1/projects/LEGION/gated-steps", r.Method, r.URL.Path)
+				}
+				assertBearer(t, r)
+				var body map[string]json.RawMessage
+				decodeJSON(t, r, &body)
+				raw, named := body["steps"]
+				if !named {
+					t.Fatalf("publish = %s, want a steps list Dispatch will not refuse", mustJSON(t, body))
+				}
+				var steps []string
+				if err := json.Unmarshal(raw, &steps); err != nil {
+					t.Fatalf("decode steps: %v", err)
+				}
+				if steps == nil || !reflect.DeepEqual(steps, tc.want) {
+					t.Fatalf("steps = %#v, want %#v", steps, tc.want)
+				}
+				var actor struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				}
+				if err := json.Unmarshal(body["actor"], &actor); err != nil {
+					t.Fatalf("decode actor: %v", err)
+				}
+				if actor.Kind != "session" || actor.ID != "legion-daemon:LEGION" {
+					t.Fatalf("publish actor = %#v, want the legion daemon session", actor)
+				}
+				writeJSON(t, w, map[string]any{"project": "LEGION", "steps": tc.want})
+			}))
+			defer server.Close()
+
+			if err := New(server.URL, dispatchToken).PutGatedSteps(context.Background(), "LEGION", tc.steps); err != nil {
+				t.Fatalf("publish the gated steps: %v", err)
+			}
+		})
+	}
+}
+
 func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/issues/LEGION-5/messages" {

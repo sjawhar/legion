@@ -178,9 +178,9 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 		return err
 	}
 	version := 0
-	if issue.ReadyPendingVersion != nil {
-		version = *issue.ReadyPendingVersion
-		issue.ReadyPendingVersion = nil
+	if issue.ReadyPending != nil {
+		version = issue.ReadyPending.Version
+		issue.ReadyPending = nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -264,11 +264,14 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
 }
 
-// advancePendingReady advances every merger in the tree whose READY was refused while the gate was
-// closed, now that a human approved the gate's current version. That version may be later than
-// the one the refusal named: the READY stands until the gate reopens, whatever the human revised
-// in between. A READY refused while the tree had no design gate at all names no version — the
-// issues table takes only a positive `ready_pending_version` — so it is found the same way a
+// advancePendingReady advances every merger in the tree whose READY was refused while a required
+// step of the design gate was closed, now that every required step is open
+// (classify.DesignGatesOpen). gates is every gate the root holds by its step. The refusal named
+// one step and one version of it (Engine.handoff), and a version of that step later than the one
+// it named releases the READY all the same: the READY stands until the gate reopens, whatever the
+// human revised in between. No second READY is asked for, however many steps were closed when the
+// first was refused. A READY refused while the tree had no design gate at all names no version —
+// the issues table takes only a positive `ready_pending_version` — so it is found the same way a
 // known-version refusal is found once there is a packet to release: the merger's phase row still
 // carries the READY completion's summary. A non-empty summary while in merging can only be a
 // refused READY's: handoff()'s READY_REQUIRED guard (engine.go:334) refuses a non-READY merger
@@ -277,8 +280,13 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // mistake — even though the issue itself records no pending version for it. A held READY whose
 // head a push or a reopen moved was voided then (voidMovedHeldReady), so a packet this advances
 // names the head GitHub showed when the route accepted it.
-func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
+//
+// Every caller but one acts on a fact about a gate. The other is the admission pass
+// (AdvanceOpenTrees), which is what releases a READY a step that has since left gates.design
+// refused: no gate fact is coming for that step, since an approval of its document is ignored
+// once the deployment stops gating it.
+func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gates map[record.DesignStep]record.DesignGate) error {
+	if !classify.DesignGatesOpen(e.cfg.Steps, gates) {
 		return nil
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, rootKey); err != nil || lingers {
@@ -292,8 +300,14 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		if issue.Phase != phase.Merging {
 			continue
 		}
-		if issue.ReadyPendingVersion != nil && *issue.ReadyPendingVersion > gate.LatestVersion {
-			continue
+		// The refusal is one value, so a READY that waits on a version names the step whose
+		// document that version is of.
+		approved := 0
+		if issue.ReadyPending != nil {
+			approved = gates[issue.ReadyPending.Step].LatestVersion
+			if issue.ReadyPending.Version > approved {
+				continue
+			}
 		}
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 		if err != nil {
@@ -303,18 +317,19 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		// no refusal to release) or reported one before migration 0016 kept the packet (that READY
 		// is void: posting it would leave a message of the outbox marker alone, and a merge queue
 		// publish without a packet would fail the whole approval). A pending version distinguishes
-		// the two: only the void case names one, since it is set only when a gate exists.
+		// the two: only the void case names one, since it is set only when the step that refused
+		// the READY was registered.
 		if row.Summary == "" {
-			if issue.ReadyPendingVersion == nil {
+			if issue.ReadyPending == nil {
 				continue
 			}
-			issue.ReadyPendingVersion = nil
+			issue.ReadyPending = nil
 			if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 				return err
 			}
-			if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Role: claim.RoleArchitect, Version: gate.LatestVersion,
+			if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Role: claim.RoleArchitect, Version: approved,
 				Reason: fmt.Sprintf("READY_PACKET_MISSING: design version %d is approved, but %s's READY was refused before the daemon kept READY packets, so it has no packet to post; that READY is void and %s stays in merging, and whether it is started over (park_child then rerun_child, for a child) or ended is your decision",
-					gate.LatestVersion, issue.Key, issue.Key)}); err != nil {
+					approved, issue.Key, issue.Key)}); err != nil {
 				return err
 			}
 			continue

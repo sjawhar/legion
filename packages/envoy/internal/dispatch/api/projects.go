@@ -17,7 +17,7 @@ import (
 // as the 0 the subquery answered. It is named here rather than written inside the handler so
 // the plan test explains the statement the route runs.
 const projectListQuery = `
-		select p.key, p.name, coalesce(open_asks.total, 0), p.created_at
+		select p.key, p.name, coalesce(open_asks.total, 0), p.gated_steps, p.created_at
 		from projects p
 		left join (
 			select coalesce(i.project_key, ar.project_key) as project_key, count(*) as total
@@ -44,7 +44,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 	projects := []model.Project{}
 	for rows.Next() {
 		var project model.Project
-		if err := rows.Scan(&project.Key, &project.Name, &project.OpenAsks, &project.CreatedAt); err != nil {
+		if err := rows.Scan(&project.Key, &project.Name, &project.OpenAsks, &project.GatedSteps, &project.CreatedAt); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -99,8 +99,8 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var project model.Project
 	if err := tx.QueryRow(r.Context(), `
-		insert into projects (key, name) values ($1, $2) returning key, name, created_at
-	`, input.Key, input.Name).Scan(&project.Key, &project.Name, &project.CreatedAt); err != nil {
+		insert into projects (key, name) values ($1, $2) returning key, name, gated_steps, created_at
+	`, input.Key, input.Name).Scan(&project.Key, &project.Name, &project.GatedSteps, &project.CreatedAt); err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, "PROJECT_EXISTS", http.StatusConflict, "a project with this key already exists")
 			return

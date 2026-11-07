@@ -29,11 +29,11 @@ import (
 // is counted, as every return to implementing counts one: the implementer's completion of this pass
 // is told from its last by it. The push that answers it is counted nowhere: no head is tallied as
 // a fix attempt any more, and a red that stands sends the work back however many came before it
-// (contract 55). The implementer's start waits for nobody: the role CI leaves with no phase - the
+// (contract 56). The implementer's start waits for nobody: the role CI leaves with no phase - the
 // tester, the reviewer whether or not its round is completed, the merger, and the implementer
 // itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
 // ended by a message on its own topic. Leaving merging also voids a READY the design
-// gate refused there (ReadyPendingVersion).
+// gate refused there (ReadyPending).
 //
 // The CI rule reads nothing of the review round: a round whose request for changes is already in
 // is sent back by the red all the same, with the red named rather than the reviewer's body. A
@@ -78,8 +78,7 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}
 			if tc.readyPending {
-				pending := 4
-				issue.ReadyPendingVersion = &pending
+				issue.ReadyPending = &record.ReadyPending{Step: record.DesignStepSpec, Version: 4}
 			}
 			seedIssue(t, pool, issue)
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
@@ -739,7 +738,7 @@ func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
 			var logged bytes.Buffer
 			at := func(d time.Duration) *Engine {
 				return New(record.NewStore(), Config{
-					Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: "merge-queue", Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+					Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: "merge-queue", Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 					Clock: func() time.Time { return start.Add(d) },
 				}, slog.New(slog.NewTextHandler(&logged, nil)))
 			}

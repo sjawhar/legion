@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'Two envoy-dispatch processes no longer both bind one delivery durable, which routed every GitHub webhook envelope twice: a bind now runs whole under that durable''s own Postgres consumer lease and gives the lease back only once the server reports the durable push-bound, so exclusion no longer rests on the NATS client''s own refusal, which is derived from a flag the server sets a goroutine hop after the first subscriber''s subscription lands. A bind the server does not confirm within five seconds is given up whole and tried again on the next poll.'
+time: 2026-11-07T05:21:41Z
+custom:
+    Issue: pr2913

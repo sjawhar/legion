@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { sessionDirectory, sessionStateRoot, writeAtomically } from "../dispatch-session-directory";
 
-const root = () => mkdtempSync(join(tmpdir(), "dispatch-session-directory-"));
+afterAll(removeTemporaryDirectories);
+
+const root = () => temporaryDirectory("dispatch-session-directory-");
 
 describe("session directory", () => {
   test("DISPATCH_STATE_DIR is the root, else XDG_STATE_HOME's dispatch; empty counts as unset", () => {
