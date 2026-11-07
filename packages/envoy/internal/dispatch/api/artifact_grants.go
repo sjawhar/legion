@@ -45,6 +45,14 @@ const codeHumanOnly = "HUMAN_ONLY"
 // pod's service-account token, are refused by the scope test here.
 //
 // Past Holds the credential is not nil, which is what makes the two names below safe to read.
+//
+// optionalActor's second answer, the `human` one this discards, is the same verdict today: it is
+// true on the cookie branch and on no other. The test below is written against the credential's
+// own fields all the same, and deliberately. What "human" means is being loosened as this
+// release migrates to OAuth scopes, and a gate that read it would widen with it, silently, the
+// day something else is allowed to call itself human; a gate that reads `person` with no token
+// id and no session can be widened only by someone editing this line. The `_` is the discard
+// that says so, not an answer nobody had.
 func (s *server) grantingPerson(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, _, err := s.optionalActor(r)
 	if err != nil {

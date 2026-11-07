@@ -46,7 +46,7 @@ import {
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-import { openCommentThread } from "./view-threads";
+import { openCommentThreadReplies } from "./view-threads";
 
 /** The other session every row writes as, so an edit a row makes is another session's. */
 const session = { actor: { id: "e2e-view", kind: "session" as const }, as: "agent" as const };
@@ -285,7 +285,7 @@ test("a view block shows the same in a comment, a reply, an ask in the Inbox and
 
     // A root comment's card shows a clipped preview until the reader opens its thread, where
     // the comment and its replies are drawn in full.
-    const replies = await openCommentThread(page, comment.id);
+    const replies = await openCommentThreadReplies(page, comment.id);
     const openThread = page
       .locator(`[data-turn="comment:${comment.id}"]`)
       .filter({ has: page.getByRole("list", { exact: true, name: "Replies" }) })

@@ -10,7 +10,7 @@ import type {
 import { borderDefault, dangerText, linkText, textMutedOnSurface } from "../../theme/classes";
 import { documentSummaryQuery, issueSummaryQuery } from "../refs/reference-target";
 import { buildReferencePath } from "../refs/routes";
-import { registerViewFrame, viewFrameLoading } from "./frame-budget";
+import { registerViewFrame, setViewFrameLoading } from "./frame-budget";
 import { readViewAttributes, type ViewFile } from "./view-attributes";
 import type { ViewBlockSlot } from "./view-slots";
 
@@ -205,7 +205,7 @@ function note(words: string): ReactNode {
  * holds beside them what the `HEAD` of the page route answered and whether the page moved away.
  * The budget (`frame-budget.ts`) decides only whether this block is among the four frames that
  * run, and the block reads nothing at all until it says yes; the block tells it back when its
- * frame is loading its page (`viewFrameLoading`), which is the one time the budget may not take
+ * frame is loading its page (`setViewFrameLoading`), which is the one time the budget may not take
  * the slot away. A change of the grants that cover the named files starts a new frame, so a
  * page that lost a grant loses the data it held.
  */
@@ -562,7 +562,7 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
       loads += 1;
       if (loads === 1) {
         // The page is in: the budget may take this slot away now without aborting anything.
-        viewFrameLoading(host, false);
+        setViewFrameLoading(host, false);
         readyTimer = window.setTimeout(() => setSilent(true), READY_DEADLINE_MS);
         return;
       }
@@ -607,11 +607,11 @@ export function ViewBlock({ slot }: { slot: ViewBlockSlot }): ReactNode {
     window.addEventListener("message", onMessage);
     // The navigation starts with the insertion, so the budget holds this slot from here until
     // the page has loaded: a slot taken away in between would abort it.
-    viewFrameLoading(host, true);
+    setViewFrameLoading(host, true);
     parent.appendChild(frame);
     return () => {
       stopped = true;
-      viewFrameLoading(host, false);
+      setViewFrameLoading(host, false);
       scheduleSend.current = undefined;
       element.current = undefined;
       window.removeEventListener("message", onMessage);

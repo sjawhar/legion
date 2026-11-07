@@ -20,14 +20,20 @@ import { expect, type Locator, type Page } from "@playwright/test";
  * thread is still closed, so a thread that opened is never toggled shut again. A block read
  * inside the list the caller is given is a block the open thread was showing.
  *
+ * Both locators are read inside this comment's own turn, and the pass condition is the returned
+ * value: another thread open elsewhere on the page can neither end the retry on an attempt whose
+ * click was lost nor hand the caller another comment's replies. `ThreadReplies` draws its
+ * `<ol aria-label="Replies">` inside the root comment's `<li data-turn="comment:…">` on both
+ * layouts - on a phone the thread dialog holds a turn of its own, with the same `data-turn`,
+ * while the list behind it is `aria-hidden`, so the turn that answers a role query there is the
+ * dialog's.
+ *
  * The comment must have at least one reply: a thread with none draws no list.
  */
-export async function openCommentThread(page: Page, rootId: string): Promise<Locator> {
-  const expand = page
-    .locator(`[data-turn="comment:${rootId}"]`)
-    .getByRole("button", { exact: true, name: "Expand thread" })
-    .first();
-  const replies = page.getByRole("list", { exact: true, name: "Replies" }).first();
+export async function openCommentThreadReplies(page: Page, rootId: string): Promise<Locator> {
+  const turn = page.locator(`[data-turn="comment:${rootId}"]`);
+  const expand = turn.getByRole("button", { exact: true, name: "Expand thread" }).first();
+  const replies = turn.getByRole("list", { exact: true, name: "Replies" }).first();
   await expect(async () => {
     if (await expand.isVisible()) {
       await expand.click();

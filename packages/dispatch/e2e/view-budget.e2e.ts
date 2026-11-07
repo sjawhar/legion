@@ -6,14 +6,14 @@
  *
  * This file runs in Chromium alone, and in no other engine's `testMatch` or `grep`. The byte row
  * is a measure of one build against another, so a second engine would measure that engine's own
- * fetching rather than this change's bytes; the five frame rows rest on `IntersectionObserver`
+ * fetching rather than this change's bytes; the six frame rows rest on `IntersectionObserver`
  * margins, on scroll positions the test sets and on what the frames of one page asked for, which
  * the `view-block`, `view-sandbox` and `view-grants` rows already exercise per engine. Running
  * the measure once, where the number it pins was measured, is what makes it a measure at all.
  *
  * The byte row's title ends `@alone`, which puts it in the `chromium-alone-rows` project: it is
  * measured with the machine to itself, after every four-lane project has finished, since what a
- * page gets fetched before a row looks is not the same under three other lanes' load. The five
+ * page gets fetched before a row looks is not the same under three other lanes' load. The six
  * frame rows stay in the four-lane `chromium` project, where a red elsewhere cannot leave them
  * unrun (e2e/playwright.config.ts, above `aloneProjects`).
  */
@@ -31,7 +31,7 @@ import {
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-import { openCommentThread } from "./view-threads";
+import { openCommentThreadReplies } from "./view-threads";
 
 /**
  * The bytes of JavaScript a build of the base commit - the commit before the `view` block, which
@@ -568,7 +568,7 @@ test("a view block in each of a page's bodies asks for its page once, and loses 
     });
 
     await page.goto(`/issues/${fixture.issue}/conversation`);
-    await openCommentThread(page, fixture.comment);
+    await openCommentThreadReplies(page, fixture.comment);
     const blocks = page.locator('section[data-proof-block-type="view"]');
     await expect(
       blocks,
@@ -615,6 +615,79 @@ test("a view block in each of a page's bodies asks for its page once, and loses 
       page.getByText("sent no ready message", { exact: false }),
       "A5: and no block was left saying its page sent no ready message"
     ).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * The bound on how long a frame that is still loading keeps the budget slot it holds
+ * (`frame-budget.ts`'s `LOAD_DEADLINE_MS`). A loading frame keeps its slot so that no ranking
+ * aborts a navigation in flight, and a navigation that never completes - a stalled connection on
+ * the page route, which is no error page and so fires no `load` - would keep it for the life of
+ * the page: four such frames would stop every other block on the page for ever. The block's own
+ * stall protection is no cover for that window, since its ready deadline starts at the `load`
+ * that never comes.
+ *
+ * Every `GET` of the page route here hangs: it is intercepted and never answered, which is that
+ * stalled connection. The `HEAD` the block sends first is answered as ever, so each block gets
+ * as far as inserting a frame and holding a slot with it.
+ */
+test("a view block waiting behind frames whose pages never answer still gets its turn", async ({
+  browser,
+}) => {
+  // This row waits out the budget's own load deadline, ten seconds, after a document of six
+  // blocks has drawn: that deadline is what the row observes, and the default thirty seconds
+  // leaves it no room (e2e/playwright.config.ts, above `expectTimeout`).
+  test.setTimeout(90_000);
+  const fixture = await seedView();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.route(
+      (url) => PAGE_ROUTE.test(url.pathname),
+      async (route, request) => {
+        // A `GET` is answered by nobody, so the frame making it loads until the page closes.
+        if (request.method() !== "GET") {
+          await route.fallback();
+        }
+      }
+    );
+    await openDocument(
+      page,
+      Array.from({ length: 6 }, (_, index) =>
+        viewDirective({
+          caption: `Attempts, block ${index + 1}.`,
+          data: fixture.dataRef,
+          page: fixture.pageRef,
+        })
+      ).join("\n"),
+      "Pages that hang"
+    );
+    const frames = page.locator('section[data-proof-block-type="view"] iframe');
+    await expect(
+      frames,
+      "A5: the four blocks nearest the screen insert their frames, and those hang"
+    ).toHaveCount(4, { timeout: 30_000 });
+    const below = [5, 6].map((number) => viewBlock(page, `Attempts, block ${number}.`));
+    for (const [index, block] of below.entries()) {
+      await expect(
+        block.getByText("waiting", { exact: true }),
+        `A5: block ${index + 5} waits its turn behind them`
+      ).toBeVisible();
+    }
+
+    // The reader scrolls to the two that waited: they are on the screen and the hanging frames
+    // are not, so the one thing between each of them and a frame of its own is the slot a frame
+    // that will never load is holding.
+    await below[1].scrollIntoViewIfNeeded();
+    for (const [index, block] of below.entries()) {
+      await expect(
+        block.locator("iframe"),
+        `A5: block ${index + 5} takes a slot once a hanging frame's deadline is up`
+      ).toHaveCount(1, { timeout: 30_000 });
+    }
+    await expect(frames, "A5: and four frames run, no more").toHaveCount(4);
   } finally {
     await alice.close();
   }
