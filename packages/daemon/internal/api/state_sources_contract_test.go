@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-// The three fields contract 50 added — `settingSources`, the `daemon` block's `commit` and each
+// The three fields contract 53 added — `settingSources`, the `daemon` block's `commit` and each
 // pull request's `requiresChecks` — are on every state this daemon writes, and every schema of
 // `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so a plugin older than that
 // refuses the whole body for one key it does not know. A caller in a pod whose claims record a
 // contract below settingSourcesContract is therefore served the body without the three, as a
 // caller below memoryContract is served it without the memory draw; a pod at this contract, a pod
 // whose claims record none, and a caller in no pod are served all three.
-func TestTheStateRouteWithholdsWhatContractFiftyAddedFromAnOlderPlugin(t *testing.T) {
+func TestTheStateRouteWithholdsWhatTheSettingSourcesContractAddedFromAnOlderPlugin(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(DaemonAPIVersion))
 	if !carriesSettingSources(t, full) || !carriesCommit(t, full) || !carriesRequiresChecks(t, full) {
 		t.Fatalf("the fixture's state %s carries none of the three fields; this test proves nothing", full)
@@ -50,7 +50,7 @@ func TestTheStateRouteWithholdsWhatContractFiftyAddedFromAnOlderPlugin(t *testin
 			}
 			if tc.whole {
 				// Nothing else of the body moves: the withheld state is the full one with the
-				// three fields cleared, which is what the contract before 50 describes.
+				// three fields cleared, which is what the contract before 53 describes.
 				if want := bodyWithout(t, populatedState(t)); want != string(normalized(t, body)) {
 					t.Errorf("the withheld state differs from the full one with the three fields cleared:\n got %s\nwant %s", body, want)
 				}
@@ -104,7 +104,7 @@ func decodedState(t *testing.T, body []byte) map[string]json.RawMessage {
 	return state
 }
 
-// bodyWithout is the full state with the three fields contract 50 added cleared, encoded and
+// bodyWithout is the full state with the three fields contract 53 added cleared, encoded and
 // normalized, which is what the withheld body must equal. It reads the answer the daemon's own
 // withholding gives on the typed state, rather than deleting the three keys from the full body
 // by name: a rename of one of their tags moves this and the daemon together, and the three

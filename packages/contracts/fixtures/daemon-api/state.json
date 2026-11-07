@@ -803,6 +803,10 @@
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
+    "projects.\u003cKEY\u003e.commit_issue_trailer_repos": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
     "projects.\u003cKEY\u003e.deploys": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
