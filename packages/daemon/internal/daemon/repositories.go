@@ -738,6 +738,13 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 // does not hear it, and the refresher reads it again. The webhook App check's served repositories
 // (servedGaps, kept ones included) replace the last read's with the publication; a failed check
 // keeps nothing out and asks for no read again.
+// What it hands the consumers it works out under the mapping's own equivalence
+// (repositories.Renames), which is never older than the one their filter was built with: the two
+// are rebuilt by one observe, the mapping first (workflowRuntime.connect), so a read landing
+// between the two rebuilds reads the equivalence the operator has just configured and hands the
+// consumers the partner of every pair their filter either already carries or is about to. A read
+// under older renames would narrow that filter instead, and the events arriving under the name
+// the repository moved to would be stepped past by JetStream with nothing to redeliver them.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -1267,13 +1274,16 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 // (refreshMapping), so a record an admission commits is either read here or committed after the
 // swap and heard by the read that follows it.
 //
-// renames is the configuration the rebuild is building from and not the mapping's own, because
-// the rebuilder builds this holder before the mapping holder, which boot registers after it
-// (daemon.go's serve): the pair an operator has just configured has reached the settings and not
-// yet the mapping. Everything the consumers hear now is heard again whatever the rest says, so a
-// rebuild only ever widens the GitHub durable's filter: narrowing it is the mapping read's alone,
-// which serves the mapping that narrowed it in the same hold, and a filter narrowed by anything
-// else steps the consumer past messages nothing redelivers.
+// renames is the configuration the rebuild is building from and not the mapping's own: this is
+// the equivalence the holder is being rebuilt for, and the one the consumers' filter is to be
+// built with. The mapping answers it already — the mapping holder is registered before this one
+// and rebuilt before it (workflowRuntime.connect), so by the time this runs the pair an operator
+// configured has reached both — and a rebuild that runs for anything else (a rotated seed read
+// again) is handed the configuration the daemon runs on, which is what the mapping holds too.
+// Everything the consumers hear now is heard again whatever the rest says, so a rebuild only
+// ever widens the GitHub durable's filter: narrowing it is the mapping read's alone, which
+// serves the mapping that narrowed it in the same hold, and a filter narrowed by anything else
+// steps the consumer past messages nothing redelivers.
 func (w *workflowRuntime) natsHearing(ctx context.Context, tx pgx.Tx, renames ghrepo.Renames) ([]ghrepo.Repository, error) {
 	return w.heardRepositories(ctx, tx, slices.Concat(w.nats.intake().Repositories(), w.repositories.Accepted()), renames)
 }

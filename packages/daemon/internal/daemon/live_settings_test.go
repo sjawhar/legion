@@ -21,8 +21,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -600,10 +602,12 @@ func TestANatsRebuildOpensNoConsumerWhileAMappingReadHoldsTheMappingLock(t *test
 // check runs and reviews GitHub publishes under the name the repository moved to delivered to
 // nothing, and never redelivered, until something unrelated read the mapping again.
 //
-// The mapping holder is registered after the NATS one here, as the daemon's boot registers it
-// (daemon.go's serve, after workflowRuntime.connect), so the consumers are rebuilt before the
-// equivalence reaches the mapping: what they hear is worked out from the configuration the
-// rebuild is handed, not from the mapping's own (workflowRuntime.natsHearing).
+// The two holders are registered as the daemon registers them: the mapping before the consumers
+// (workflowRuntime.connect), so the equivalence reaches the mapping first and the consumers'
+// rebuild follows it. What they hear is worked out all the same from the configuration that
+// rebuild is handed, not from the mapping's own (workflowRuntime.natsHearing). The call below
+// is the registration a daemon with no workflow makes (daemon.go's serve) and decides no order:
+// a second registration of a name keeps the position the first gave it.
 func TestAChangedRepositoryRenamesHasGitHubIntakeHearThePartner(t *testing.T) {
 	url := testnats.URL(t)
 	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
@@ -655,6 +659,120 @@ func TestAChangedRepositoryRenamesHasGitHubIntakeHearThePartner(t *testing.T) {
 	testwait.Eventually(t, "the daemon applying the pull request GitHub published under the name the repository moved to", func() bool {
 		return slices.Contains(heard.repositories(), "cybermonklabs/legion")
 	})
+}
+
+// A mapping read made between the two rebuilds a `repository_renames` change runs — the intake
+// consumers' and the repository mapping's (config.Classes' row, Also) — hands those consumers no
+// narrower a set of repositories than the one their filter was just built with.
+//
+// The read works out what GitHub intake is to hear under the mapping's own equivalence
+// (refreshMapping, repositories.Renames), so the order the two holders are rebuilt in decides
+// what it reads. Rebuilt the other way round — the consumers first — that read answers the pair
+// before the change while the durable already filters on the pair after it, and hands the
+// consumers a set without the name the repository moved to: the pinned nats-server steps a
+// consumer past what its filter does not match, so every merge, check run and review GitHub
+// publishes under the new name is delivered to nothing, with nothing to redeliver it.
+//
+// Nothing here decides that order: the holders are the daemon's own, registered by the daemon's
+// own path (workflowRuntime.connect), the change goes through the real rebuilder.observe, and
+// the read is the real refreshMapping, made from inside the consumers' own rebuild so that it
+// lands in the window whatever the order is. What is asserted is what that read handed the
+// consumers, not which holder ran first.
+func TestAMappingReadBetweenTheRenameRebuildsNarrowsNoGitHubFilter(t *testing.T) {
+	const project = "TRANSFER"
+	url := workflowNATS(t)
+	probe, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("connect to the test NATS server: %v", err)
+	}
+	t.Cleanup(probe.Close)
+	js, err := jetstream.New(probe)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	stream, err := js.Stream(t.Context(), "ENVOY_NOTIFICATIONS")
+	if err != nil {
+		t.Fatalf("open the notification stream: %v", err)
+	}
+
+	// A workflow whose project maps one repository, with a Dispatch and a GitHub of its own, so
+	// the mapping read below is the daemon's own read and not a stand-in for it.
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
+	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: project, Default: true}}}
+	repos := newRepositories(project, ghrepo.Renames{})
+	w := &workflowRuntime{
+		pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: project,
+		installs: &installations{}, repositories: repos, log: quietLogger(), mappingChanged: make(chan struct{}, 1),
+		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now),
+	}
+	if err := w.loadMapping(t.Context()); err != nil {
+		t.Fatalf("read the project's repository mapping: %v", err)
+	}
+	if err := w.nameMapping(t.Context()); err != nil {
+		t.Fatalf("name the mapping as GitHub spells it: %v", err)
+	}
+	cfg := config.Config{Project: project, NatsURLs: []string{url}, WorkerRPCTimeout: time.Second,
+		Projects: map[string]config.Project{project: {}}}
+	rebuild := newRebuilder(w.log, config.Settled(cfg))
+	if err := w.connect(t.Context(), cfg, rebuild, func(string) (string, bool) { return "", false }); err != nil {
+		t.Fatalf("connect the workflow's NATS: %v", err)
+	}
+	t.Cleanup(w.stop)
+	// The registration a daemon with no workflow makes (daemon.go's serve). It decides no order:
+	// a second registration of a name keeps the position the first gave it.
+	rebuild.register(newMappingHolder(w.repositories))
+
+	// The read, made the moment the consumers' own rebuild returns: the first instant of the
+	// window between the two holders, with the filter that rebuild has just written on the
+	// durable.
+	var filterBuiltWith, handed []ghrepo.Repository
+	rebuild.register(&readingNATSHolder{natsHolder: w.nats, read: func() {
+		filterBuiltWith = w.nats.intake().Repositories()
+		if err := w.refreshMapping(t.Context()); err != nil {
+			t.Errorf("read the repository mapping in the window: %v", err)
+			return
+		}
+		handed = w.nats.intake().Repositories()
+	}})
+
+	// The operator configures the transfer while the daemon runs.
+	moved := ghrepo.MustParse("acme-archive/widgets")
+	changed := cfg
+	changed.RepositoryRenames = ghrepo.MustRenames(ghrepo.MustRename("acme/widgets", moved.String()))
+	rebuild.observe(&changed, []config.Change{changeOfPath(t, "repository_renames")})
+
+	if !slices.Contains(filterBuiltWith, moved) {
+		t.Fatalf("the consumers were rebuilt hearing %v, without the name the repository moved to, so a read that leaves it out narrows nothing and this proves nothing", filterBuiltWith)
+	}
+	if !slices.Contains(handed, moved) {
+		t.Fatalf("the mapping read handed the consumers %v, want the name the repository moved to among them: it worked out what GitHub intake hears under renames older than the ones their filter was built with", handed)
+	}
+	for _, repo := range filterBuiltWith {
+		if !slices.Contains(handed, repo) {
+			t.Fatalf("the mapping read handed the consumers %v, narrower than the %v their filter had just been built with", handed, filterBuiltWith)
+		}
+	}
+	if filters := githubFiltersOf(t, stream, project); !slices.Contains(filters, "notifications.github.acme-archive.widgets.>") {
+		t.Fatalf("the GitHub durable consumer filters on %v, want the subject of the name the repository moved to among them", filters)
+	}
+}
+
+// readingNATSHolder is the daemon's own NATS holder with a read of the repository mapping made
+// the moment its rebuild returns, which is the window a `repository_renames` change opens
+// between that rebuild and the mapping's. It answers the NATS holder's own name, so registering
+// it replaces that holder where the daemon registered it and moves no holder's position
+// (rebuilder.register).
+type readingNATSHolder struct {
+	*natsHolder
+	read func()
+}
+
+func (h *readingNATSHolder) rebuild(cfg *config.Config) error {
+	if err := h.natsHolder.rebuild(cfg); err != nil {
+		return err
+	}
+	h.read()
+	return nil
 }
 
 // heardPullRequests is an intake handler that records the repository of every pull request the

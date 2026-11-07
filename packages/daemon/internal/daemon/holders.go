@@ -632,7 +632,11 @@ func (h *apiHolder) settingsRoute(cfg config.Config) api.SettingsRouteAuth {
 //
 // The mapping itself — which repositories Dispatch serves — is read from Dispatch and is no
 // setting of this file's, so a rebuild replaces the equivalence alone, under the mapping's own
-// lock, and every later read compares with the new one.
+// lock, and every later read compares with the new one. It takes no other lock, reaches no
+// consumer and cannot fail, which is why a daemon with a workflow registers it before the
+// intake consumers and has rebuilder.observe build it first: a mapping read between the two
+// rebuilds then works out what GitHub intake is to hear under the equivalence the consumers'
+// filter is built with, never under one older than it (workflowRuntime.connect, refreshMapping).
 type mappingHolder struct{ repositories *repositories }
 
 func newMappingHolder(repositories *repositories) *mappingHolder {

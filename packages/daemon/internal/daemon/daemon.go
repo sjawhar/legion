@@ -1935,7 +1935,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	}
 	// The project's repository mapping as a holder of the deployment's repository equivalence:
 	// a change of `repository_renames` reaches it as it reaches the API server's settings, the
-	// intake consumers and the runtime's gh bundles (config.Row.Also).
+	// intake consumers and the runtime's gh bundles (config.Row.Also). This is the registration
+	// of a daemon with no workflow, which holds no intake consumers for the mapping to be
+	// ordered against. A daemon with one registered the same holder as it opened them
+	// (workflowRuntime.connect), before the consumers and for the order's own sake, and a second
+	// registration of a name keeps the position the first gave it (rebuilder.register), so this
+	// call cannot move the mapping behind them.
 	p.rebuild.register(newMappingHolder(p.repositories))
 
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{

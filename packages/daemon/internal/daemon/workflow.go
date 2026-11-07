@@ -481,7 +481,21 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 		func(held func(ctx context.Context, tx pgx.Tx) error) error {
 			return w.serializeFacts(ctx, held)
 		})
-	rebuild.register(w.nats)
+	// The mapping is registered before the consumers, and that order is this daemon's answer to
+	// a mapping read that would narrow the GitHub durable's filter with renames older than the
+	// ones it was built with. rebuilder.observe builds holders in the order they were registered,
+	// and a `repository_renames` change names both (config.Classes' row, Also). Registered the
+	// other way round, the GitHub durable filters on the new pair's subjects from the swap on
+	// while w.repositories.Renames() still answers the pair before it, and the first mapping
+	// read the rebuild's own hold of mappingMu lets through (refreshMapping) works out what
+	// GitHub intake is to hear under those older renames and hands the consumers the narrower
+	// set: the merges, check runs and reviews GitHub publishes under the name the repository
+	// moved to are then stepped past by JetStream's own filter, and nothing redelivers them.
+	// This way round the gap is the other way about and costs nothing a reader can observe:
+	// the mapping's own rebuild is a lock and an assignment that cannot fail
+	// (mappingHolder.rebuild), it reaches no filter, and the consumers' filter — which only a
+	// rebuild widens — is widened in the very next holder the same observe builds.
+	rebuild.register(newMappingHolder(w.repositories), w.nats)
 	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
 	return nil
 }
