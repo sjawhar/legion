@@ -247,13 +247,48 @@ func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pend
 // destinations it was. subject is also what published_destinations records once it is reached. A
 // role route's subject is its role topic and role its role; forward is how the batch reaches the
 // role's holder (resolveRoleHolders), nil for every other destination, which is published to
-// subject itself.
+// subject itself. dedupeKey is the dedupe key this copy carries in place of the event's own
+// (envelope), "" for every destination that carries the event's: the copy of a new comment sent
+// to a session whose mention failed sets it, to that mention's send's key
+// (destinations.addSession), and so does a role route's copy of a comment the holder it reaches
+// is mentioned in, to that holder's own settled mention, once the holder is known
+// (resolveRoleHolders, roleFallbackKey). mentionKeys is what that choice was
+// made from before a delivered mention counted in it: the dedupe keys of the failed mentions of
+// the comment the event is of, by session (mentionDeliveries.fallbackKeys), carried by a role
+// route alone and nil for every other destination and every other event. settledKeys is carried
+// beside it, by a role route alone as well: the dedupe key of every mentioned session's own
+// settled mention, a delivered one included (mentionDeliveries.settledKeys), which is what the
+// holder's own key is chosen from and what a copy kept for a role no live holder can take
+// carries for whoever forwards it on (roleForward.keep). liveMention is read beside them, by a
+// role route alone again: an attempt of one of the comment's mentions was still live when the
+// batch read them (mentionDeliveries.anyLive), so the settled ones are not all of them yet and a
+// keep of this copy waits for the attempt's lease to end one way or the other
+// (resolveRoleHolders). mentionStates is read beside those two, by a role route alone as well:
+// what each session's copies of the comment wait on (mentionDeliveries.holds) - the states of
+// that session's own attempts, and the attempts that name no session yet whose role it holds -
+// which is asked of the holder a forward names: a forward to a holder a mention of the comment
+// is still being sent to waits for that one holder's mentions, as the keep waits for any of
+// them (mentionHolds.live, roleCopyWaitsForAMention).
+//
+// waiting is that wait, written once the role's holder is known (resolveRoleHolders), and the
+// same mark a copy bound for a session the owner's own work names carries while an attempt of
+// the comment that names no session yet, and whose role the batch could name no holder for, may
+// yet be pinned to that session (destinations.addWorkingSession): the destination makes no send
+// this read and holds its key against the owner's later events instead, the way an event that is
+// not due holds a key it has not reached, and against no copy of its own event (planChains), and
+// the event is marked mentionPending so that it is read again.
 type destination struct {
-	subject string
-	label   string
-	id      string
-	role    string
-	forward *roleForward
+	subject       string
+	label         string
+	id            string
+	role          string
+	dedupeKey     string
+	mentionKeys   map[string]string
+	settledKeys   map[string]string
+	mentionStates mentionHolds
+	liveMention   bool
+	waiting       bool
+	forward       *roleForward
 }
 
 // ownerTopicKey is the destination key of an owner's topic family (destinationKey).
@@ -297,9 +332,23 @@ type batchEvent struct {
 	// destinationsOf are every destination the event has; resolveErr is why the list ends short,
 	// when it does, and resolveLost that the error is the batch's context ending (a
 	// recipient read the process's stop cancelled), which releases the event rather than backing
-	// it off; mentionPending is a session's copy left out of the list for a mention still being
-	// sent, which blocks the event (eventDestinations, settleEvent). A copy so left out is no
-	// destination of the event, so it holds none of the owner's later events back.
+	// it off; mentionPending is a copy of the event a mention still being sent holds back, which
+	// blocks the event (eventDestinations, settleEvent): a mentioned session's own copy, left out
+	// of the list by the mention rule (destinations.leftTo), or a copy that stays in the list
+	// marked waiting - a role route's (destination.waiting, resolveRoleHolders), and the copy of
+	// a session the owner's own work names while an attempt that names no session yet may yet be
+	// pinned to it (destinations.addWorkingSession).
+	//
+	// The two differ because what else delivers the comment differs. A mentioned session's copy
+	// is left out and holds none of the owner's later events back: the mention is on its way to
+	// that very session - its own attempt names it, or an unpinned attempt this read resolved to
+	// it does - so the session has the comment before the owner's later events reach it,
+	// whichever way the send ends. A role copy is nobody else's to deliver - a keep waits for
+	// the role's next claim, and a forward is the holder's one copy - and a copy waiting on an
+	// attempt whose holder could not be named is nobody else's either, that mention being as
+	// likely to be pinned elsewhere, so leaving either out would let the owner's next event
+	// overtake it at that session, and it stays in the list holding its key instead
+	// (planChains).
 	delivered      map[string]struct{}
 	destinationsOf []destination
 	resolveErr     error
@@ -311,7 +360,9 @@ type batchEvent struct {
 	incomplete bool
 	sends      []*chainSend
 	// held are the earlier events of the owner that held a destination of this one back without a
-	// send of this batch: one that is not due, or one whose list is incomplete.
+	// send of this batch: one that is not due, one whose list is incomplete, or one whose own
+	// copy for that destination waits on a mention. A waiting copy of this event is none of them:
+	// the copies of one event have no order among themselves (planChains).
 	held    []blocker
 	outcome outcome
 }
@@ -319,8 +370,11 @@ type batchEvent struct {
 // blocker is what held an event's send to a destination back: an earlier event of its owner that
 // had that destination unreached, or whose list is incomplete and neither names nor reached it. It
 // is either an event of the batch, whose outcome then says when the held one is tried again - its
-// send to the destination failed, or its recipient read did - or one that is not due, until its
-// nextAttempt.
+// send to the destination failed, its recipient read did, or its copy for that destination waits
+// on a mention - or one that is not due, until its nextAttempt. It is never the held event
+// itself: the copies of one event have no order among themselves, so the batch reads a blocker
+// only for the owner's later events, and the outcome read of one is always an outcome the batch
+// has settled already (planChains, holdBack).
 type blocker struct {
 	event *batchEvent
 	until *time.Time
@@ -396,14 +450,15 @@ type chain struct {
 
 // planChains orders each owner's sends. An owner's events are walked in id order, and each
 // destination an event has not reached yet goes on its owner's chain for that destination's key -
-// unless an earlier event of the owner that is not due has that key unreached, or an earlier event
-// whose list is incomplete may still owe that key (below), in which case the event is held back
-// from it (batchEvent.held). Every destination key of every owner is a chain of its own, and a
+// unless an earlier event of the owner that is not due has that key unreached, an earlier event
+// whose list is incomplete may still owe that key (below), or an earlier event's own copy for
+// that key waits on a mention (below), in which case the event is held back from it
+// (batchEvent.held). Every destination key of every owner is a chain of its own, and a
 // chain's sends go one at a time (sendChains), so the order holds per (owner, destination key):
 // event N+1 of an owner reaches a destination only after every earlier unpublished event of that
-// owner bound for it has. A destination that stalls - its send failed, or its event is waiting out
-// a back-off with that destination unreached - holds back that destination's later events of that
-// owner and nothing else.
+// owner bound for it has. A destination that stalls - its send failed, its event is waiting out
+// a back-off with that destination unreached, or its copy waits on a mention - holds back that
+// destination's later events of that owner and nothing else.
 //
 // The one hold wider than a destination is an event whose recipient read failed
 // (batchEvent.incomplete): its list ends at the read, so it may be bound for any session the read
@@ -426,6 +481,39 @@ type chain struct {
 // publish fails and N+1's agent publish succeeds it sees N+1's first copy before N's. Both are
 // JetStream publishes on the same stream, so it takes a stream failing one subject and not the
 // other.
+//
+// A copy that waits on a mention (destination.waiting) goes on no chain and sends nothing, but
+// it holds its key: the owner's later events bound for that key are held behind it, behind the
+// waiting event itself when it is due - which settles blocked for mentionPendingDelay, so the
+// held event is read again beside it - and behind its nextAttempt when it is not. Two copies
+// wait that way, and both for the same reason: nothing else delivers them to that session.
+// A role route's copy waits for the mention that decides its key (resolveRoleHolders): a keep
+// waits for the role's next claim and a forward is the holder's one copy, so a later event let
+// past it would reach the role's holder first - the kept lane is drained in stream order
+// (walkKeptRole in cmd/listener/role_keep.go) and a forward goes straight to the holder's agent
+// subject. The copy of a session the owner's own work names waits for an attempt of the comment
+// that names no session yet and whose role this read could name no holder for
+// (destinations.addWorkingSession): that mention may be pinned to another session, and then
+// nothing but this copy delivers the comment here, so a later event let past it would overtake
+// the comment at that session.
+//
+// A mentioned session's own copy, which the mention rule leaves out of the list entirely, is the
+// other case and holds nothing back: the mention itself delivers that comment to that very
+// session, which is what an attempt naming the session says and what an unpinned attempt the
+// outbox resolved to it says (batchEvent.mentionPending, destinations.leftTo).
+//
+// A waiting copy holds no copy of its own event. The order the outbox keeps is the one between
+// an owner's successive events, and the copies of one event have no order among themselves, so
+// the hold is read for the owner's later events alone (by.event != event). A role forward
+// waiting for an unpinned attempt's live mention is keyed by its holder's agent subject, and
+// that same event's claimant or route copy of that very session can be in the list beside it,
+// waiting on the same attempt or going under the event's own key; both reach a session nothing
+// of this event has reached yet, so neither overtakes the other. An event held by a blocker
+// carrying itself would settle on an outcome settleEvent has not written, whose zero state
+// holdBack reads as released - no delay, and no mentionPendingDelay clamp, which applies to a
+// blocked outcome alone - so the batch would stop with that event released and read it again at
+// once, until the mention's attempt ran out its lease and the copy the wait exists to stop was
+// published after all (TestAWaitingCopyHoldsNoCopyOfItsOwnEvent).
 //
 // A role route that counts as reached with nothing to send (roleForward.skip) goes on no chain: a
 // due event's is reached at once, and a not-due event's holds nothing back, since nothing of it is
@@ -465,14 +553,18 @@ func planChains(events []*batchEvent) []*chain {
 				continue
 			}
 			key := dest.key()
-			if !event.due {
+			if !event.due || dest.waiting {
 				if _, ok := blocked[event.owner][key]; !ok {
-					blocked[event.owner][key] = blocker{until: event.nextAttempt}
+					by := blocker{until: event.nextAttempt}
+					if event.due {
+						by = blocker{event: event}
+					}
+					blocked[event.owner][key] = by
 				}
 				continue
 			}
 			held := len(event.held)
-			if by, ok := blocked[event.owner][key]; ok {
+			if by, ok := blocked[event.owner][key]; ok && by.event != event {
 				event.held = append(event.held, by)
 			}
 			for _, earlier := range unknown[event.owner] {
@@ -564,6 +656,9 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 			routed = *send.standIn
 		}
 		routed.Topic = send.dest.subject
+		if send.dest.dedupeKey != "" {
+			routed.DedupeKey = send.dest.dedupeKey
+		}
 		switch forward := send.dest.forward; {
 		case forward == nil:
 			send.answer = sender.PublishAsync(routed)

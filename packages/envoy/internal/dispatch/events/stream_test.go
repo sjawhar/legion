@@ -14,17 +14,18 @@ import (
 // slowest reader of any open page, and silently skipping the event would leave that page wrong
 // with no resubscribe to repair it.
 func TestStreamDropsASubscriberThatCannotKeepUp(t *testing.T) {
-	stream := NewStream()
-	subscription, cancel := stream.Subscribe()
+	const buffer = 8
+	stream := NewStream[model.Event]()
+	subscription, cancel := stream.Subscribe(buffer)
 	defer cancel()
 
-	for sequence := 1; sequence <= streamBuffer+1; sequence++ {
+	for sequence := 1; sequence <= buffer+1; sequence++ {
 		stream.Publish(model.Event{Seq: sequence})
 	}
 	if count := stream.SubscriberCount(); count != 0 {
 		t.Fatalf("subscriber count after overflow = %d, want 0", count)
 	}
-	for sequence := 1; sequence <= streamBuffer; sequence++ {
+	for sequence := 1; sequence <= buffer; sequence++ {
 		event, open := <-subscription
 		if !open || event.Seq != sequence {
 			t.Fatalf("event %d = %#v (open=%t), want the buffered events in order", sequence, event, open)
@@ -35,14 +36,42 @@ func TestStreamDropsASubscriberThatCannotKeepUp(t *testing.T) {
 	}
 }
 
-// TestStreamCloseAllEndsEverySubscription: the event stream relay ends every events subscription
-// this way when the event log is reset under its cursor, so each page subscribes again against
-// the log as it now stands.
+// TestStreamBuffersAsManyValuesAsItsSubscriberAsked: each subscriber chooses how far behind it may
+// fall, so a slow consumer with a large buffer survives a burst that drops one with a small buffer.
+func TestStreamBuffersAsManyValuesAsItsSubscriberAsked(t *testing.T) {
+	stream := NewStream[int]()
+	small, cancelSmall := stream.Subscribe(1)
+	defer cancelSmall()
+	large, cancelLarge := stream.Subscribe(4)
+	defer cancelLarge()
+
+	for value := 1; value <= 4; value++ {
+		stream.Publish(value)
+	}
+	if count := stream.SubscriberCount(); count != 1 {
+		t.Fatalf("subscriber count after a burst of 4 = %d, want the 4-slot subscriber alone", count)
+	}
+	if value, open := <-small; !open || value != 1 {
+		t.Fatalf("1-slot subscriber received %d (open=%t), want 1 before it was dropped", value, open)
+	}
+	if _, open := <-small; open {
+		t.Fatal("1-slot subscriber remained open after the burst overflowed it")
+	}
+	for want := 1; want <= 4; want++ {
+		if value := <-large; value != want {
+			t.Fatalf("4-slot subscriber received %d, want %d", value, want)
+		}
+	}
+}
+
+// TestStreamCloseAllEndsEverySubscription: the event stream relay ends a generation's
+// subscriptions this way when the event log is reset under its cursor, so each page subscribes
+// again against the log as it now stands.
 func TestStreamCloseAllEndsEverySubscription(t *testing.T) {
-	stream := NewStream()
-	first, cancelFirst := stream.Subscribe()
+	stream := NewStream[model.Event]()
+	first, cancelFirst := stream.Subscribe(1)
 	defer cancelFirst()
-	second, cancelSecond := stream.Subscribe()
+	second, cancelSecond := stream.Subscribe(1)
 	defer cancelSecond()
 	if count := stream.SubscriberCount(); count != 2 {
 		t.Fatalf("subscriber count = %d, want 2", count)

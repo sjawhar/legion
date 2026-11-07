@@ -89,6 +89,7 @@ type Prop = {
   properties?: Record<string, Prop>;
   required?: string[];
   items?: Prop;
+  additionalProperties?: Prop | false;
 };
 
 type Schema = {
@@ -542,8 +543,22 @@ function name(key: string) {
   return key.split("_").map(title).join("");
 }
 
+// mapValues is the value shape of a map property - an object whose keys are the data, declared
+// with `additionalProperties` and no properties of its own - and undefined for every other
+// property, an object with named properties among them, which is rendered as a struct of its own
+// (renderEnvelopeObject).
+function mapValues(prop: Prop): Prop | undefined {
+  if (prop.type !== "object" || prop.properties) return undefined;
+  return prop.additionalProperties === false ? undefined : prop.additionalProperties;
+}
+
 function envelopeKind(prop: Prop, req: Set<string>, key: string) {
   if (prop.type === "object") {
+    const values = mapValues(prop);
+    if (values) {
+      if (values.type !== "string") throw new Error(`unsupported map values for ${key}`);
+      return "map[string]string";
+    }
     if (!prop.properties) throw new Error(`missing object properties for ${key}`);
     return `*Envelope${name(key)}`;
   }
@@ -657,16 +672,19 @@ function renderEnvelope(schema: Schema) {
     .map((key) => enums(key, schema.properties[key], !req.has(key)))
     .filter(Boolean)
     .join("\n");
-  const nestedChecks = keys
-    .filter((key) => schema.properties[key].type === "object")
+  // A map property is the Go map envelopeKind names it, so it has neither a struct of its own nor
+  // required keys to check.
+  const objects = keys.filter(
+    (key) => schema.properties[key].type === "object" && !mapValues(schema.properties[key])
+  );
+  const nestedChecks = objects
     .map((key) => objectChecks(key, schema.properties[key]))
     .filter(Boolean)
     .join("\n");
   const validate = [checks, optionalStringChecks, enumChecks, nestedChecks, "\treturn nil"]
     .filter(Boolean)
     .join("\n");
-  const nested = keys
-    .filter((key) => schema.properties[key].type === "object")
+  const nested = objects
     .map((key) => renderEnvelopeObject(key, schema.properties[key]))
     .join("\n\n");
   return `type Envelope struct {

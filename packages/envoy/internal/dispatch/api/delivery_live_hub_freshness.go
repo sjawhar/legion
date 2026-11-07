@@ -9,9 +9,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 )
 
-// applyFreshness applies one delivery_freshness payload, the settings row's freshness columns as
-// migration 0100's trigger writes them, reading nothing.
-func (h *deliveryHub) applyFreshness(payload string) {
+// applyFreshness applies one delivery_freshness payload to g, the settings row's freshness columns
+// as migration 0100's trigger writes them, reading nothing.
+func (h *deliveryHub) applyFreshness(g *hubGeneration, payload string) {
 	var row struct {
 		LastEventAt     *time.Time `json:"last_event_at"`
 		LastReconcileAt *time.Time `json:"last_reconcile_at"`
@@ -24,46 +24,46 @@ func (h *deliveryHub) applyFreshness(payload string) {
 	now := h.clock.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.fresh.lastEventAt, h.fresh.lastReconcileAt, h.fresh.lastError = row.LastEventAt, row.LastReconcileAt, row.LastError
-	h.judgeLocked(now)
+	g.fresh.lastEventAt, g.fresh.lastReconcileAt, g.fresh.lastError = row.LastEventAt, row.LastReconcileAt, row.LastError
+	h.judgeLocked(g, now)
 	// The threshold moved with the reconcile time: the worker re-arms its timer.
-	signal(h.wakeWork)
+	signal(g.wakeWork)
 }
 
-// verdictLocked is the freshness verdict as of now.
-func (h *deliveryHub) verdictLocked(now time.Time) deliveryFreshnessVerdict {
+// verdictLocked is g's freshness verdict as of now.
+func (g *hubGeneration) verdictLocked(now time.Time) deliveryFreshnessVerdict {
 	stale := []string{}
-	if last := h.fresh.lastReconcileAt; last != nil && now.Sub(*last) > deliveryStaleAfter {
+	if last := g.fresh.lastReconcileAt; last != nil && now.Sub(*last) > deliveryStaleAfter {
 		stale = append(stale, deliveryReconciledSources...)
 	}
-	return deliveryFreshnessVerdict{lastError: h.fresh.lastError, stale: stale, unfetchable: h.fresh.unfetchable}
+	return deliveryFreshnessVerdict{lastError: g.fresh.lastError, stale: stale, unfetchable: g.fresh.unfetchable}
 }
 
-// judgeLocked sends every open page a freshness frame when the verdict changed since the last one,
+// judgeLocked sends every open page a freshness frame when g's verdict changed since the last one,
 // and nothing otherwise; nothing at all before the first recompute set it. A subscription is sent
 // the last one after its first answer (answerLocked).
-func (h *deliveryHub) judgeLocked(now time.Time) {
-	if !h.known {
+func (h *deliveryHub) judgeLocked(g *hubGeneration, now time.Time) {
+	if !g.known {
 		return
 	}
-	verdict := h.verdictLocked(now)
-	if verdict.unfetchable == h.sent.unfetchable && slices.Equal(verdict.stale, h.sent.stale) &&
-		equalStringPointers(verdict.lastError, h.sent.lastError) {
+	verdict := g.verdictLocked(now)
+	if verdict.unfetchable == g.sent.unfetchable && slices.Equal(verdict.stale, g.sent.stale) &&
+		equalStringPointers(verdict.lastError, g.sent.lastError) {
 		return
 	}
-	h.sent = verdict
-	frame := h.freshnessFrameLocked(verdict)
-	for conn := range h.conns {
+	g.sent = verdict
+	frame := g.freshnessFrameLocked(verdict)
+	for conn := range g.conns {
 		conn.Send(frame)
 	}
 }
 
 // freshnessFrameLocked is the freshness frame naming verdict, with the times as last heard.
-func (h *deliveryHub) freshnessFrameLocked(verdict deliveryFreshnessVerdict) DeliveryLiveFreshness {
+func (g *hubGeneration) freshnessFrameLocked(verdict deliveryFreshnessVerdict) DeliveryLiveFreshness {
 	return DeliveryLiveFreshness{
 		Type: "freshness",
 		Freshness: delivery.DeliveryFreshnessView{
-			LastEventAt: h.fresh.lastEventAt, LastReconcileAt: h.fresh.lastReconcileAt,
+			LastEventAt: g.fresh.lastEventAt, LastReconcileAt: g.fresh.lastReconcileAt,
 			LastError: verdict.lastError, UnfetchableCount: verdict.unfetchable,
 		},
 		Stale: verdict.stale,

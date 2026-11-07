@@ -377,3 +377,20 @@ func TestAGoingTerminalWriteForAMissingRunLeavesItsBatchStanding(t *testing.T) {
 		t.Fatalf("the run past its TTL reads %v, want pgx.ErrNoRows: the pass reached its delete", err)
 	}
 }
+
+// jsonEqual reports whether got and want are the same JSON value, whatever order their keys were
+// written in. It lived beside the delivery hub's own tests on main (api/delivery_live_events_test.go),
+// which this branch replaced, so it sits with its one caller now.
+func jsonEqual(t *testing.T, got json.RawMessage, want string) bool {
+	t.Helper()
+	var a, b any
+	if err := json.Unmarshal(got, &a); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &b); err != nil {
+		t.Fatalf("want %q is not JSON: %v", want, err)
+	}
+	gotJSON, _ := json.Marshal(a)
+	wantJSON, _ := json.Marshal(b)
+	return string(gotJSON) == string(wantJSON)
+}

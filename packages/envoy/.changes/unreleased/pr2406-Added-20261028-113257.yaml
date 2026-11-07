@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+    Dispatch serves `GET /api/v1/events/log?after=<event id>&limit=<n>`, which pages the whole event
+    log by id, whatever owns each event (an issue, a document, a project or none): up to 1,000 events
+    a page, oldest first, each as the issue and document event lists serve it, to any signed-in
+    caller, the same audience the live socket has. A bad `after` or `limit` is `400 INVALID_QUERY`.
+    The Stage 3 production audits page it; against a Dispatch from before it, which answers it 404,
+    they read that build's live socket replay instead.
+time: 2026-10-28T11:32:57.672266368Z
+custom:
+    Issue: pr2406

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // The background wait holds for the work a request left running past its client (detached): a
@@ -64,50 +66,65 @@ func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
 	}
 }
 
-// The background wait holds for the event stream relay, which an events subscription starts and
-// which runs on the server's lifetime after its last subscriber leaves, until that lifetime ends.
+// The background wait holds for the event stream relay while an events subscription reads it, and
+// returns once that subscription leaves: the relay's generation stops with its last subscriber,
+// so nothing of it is left for the lifetime to end.
 func TestTheBackgroundWaitHoldsForTheEventStreamRelay(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{}, nil)
-	client := rig.dial(t, withBearer("agent-token"))
-	subscribeEvents(t, client, "events", nil)
-	_ = client.conn.Close()
-	rig.sockets(t, 0)
-	requireBackgroundWaitHoldsUntilTheLifetimeEnds(t, rig, "the event stream relay")
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{})
+	ctx, err := store.ForConcurrentRead(store.WithTransactionTracking(t.Context()))
+	if err != nil {
+		t.Fatalf("mark the subscription's context for the pool: %v", err)
+	}
+	stream := newGatedStream()
+	close(stream.gate)
+	running := served.startEventsSubscription(ctx, stream, "feed", nil)
+	t.Cleanup(running.stop)
+	pollUntil(t, 5*time.Second, "the subscription subscribes to the relay", func() bool {
+		return relaySubscribers(served.eventRelay) == 1
+	})
+	requireBackgroundWaitHoldsUntilTheSubscriberLeaves(t, served, "the event stream relay", func() {
+		running.stop()
+		pollUntil(t, 5*time.Second, "the stopped subscription leaves the relay", func() bool {
+			return relaySubscribers(served.eventRelay) == 0
+		})
+	})
 }
 
-// The background wait holds for the delivery hub, which a delivery view starts and which runs on
-// the server's lifetime after its last view closes, until that lifetime ends.
+// The background wait holds for the delivery hub while a view reads it, and returns once that
+// view closes: the hub's generation stops with its last view.
 func TestTheBackgroundWaitHoldsForTheDeliveryHub(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{}, nil)
-	seedHubSettings(t, rig.database)
-	client := rig.dial(t, asUser("alice"))
-	client.send(t, deliverySubscribe("p", presetView(deliveryLiveTimeline, 7, "")))
-	client.snapshot(t, 10*time.Second, "p")
-	_ = client.conn.Close()
-	rig.sockets(t, 0)
-	requireBackgroundWaitHoldsUntilTheLifetimeEnds(t, rig, "the delivery hub")
+	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	seedHubSettings(t, database)
+	conn := newFakeLiveConn()
+	if !served.deliveryHub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, ""))) {
+		t.Fatal("the hub refused the view")
+	}
+	pollUntil(t, 10*time.Second, "the hub answers the view", func() bool { return len(conn.frames) > 0 })
+	requireBackgroundWaitHoldsUntilTheSubscriberLeaves(t, served, "the delivery hub", func() {
+		served.deliveryHub.Close(conn)
+	})
 }
 
-// requireBackgroundWaitHoldsUntilTheLifetimeEnds requires rig's background wait, with no socket
-// open and nothing detached running, to hold while the server's lifetime lasts, for what (a
-// worker that lifetime runs), and to return once the lifetime ends.
-func requireBackgroundWaitHoldsUntilTheLifetimeEnds(t *testing.T, rig *liveSocketRig, what string) {
+// requireBackgroundWaitHoldsUntilTheSubscriberLeaves requires served's background wait to hold
+// while what (the relay or the hub) still runs for an open subscription, and to return once leave
+// has taken that subscription away, without the server's lifetime ending.
+func requireBackgroundWaitHoldsUntilTheSubscriberLeaves(t *testing.T, served *server, what string, leave func()) {
 	t.Helper()
 	waited := make(chan struct{})
 	go func() {
 		defer close(waited)
-		rig.served.waitBackground()
+		served.waitBackground()
 	}()
 	select {
 	case <-waited:
-		t.Fatalf("the background wait returned while %s still ran on the server's lifetime", what)
+		t.Fatalf("the background wait returned while %s still ran for an open subscription", what)
 	case <-time.After(200 * time.Millisecond):
 	}
-	rig.stop()
+	leave()
 	select {
 	case <-waited:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the background wait never returned once the server's lifetime ended (%s)", what)
+		t.Fatalf("the background wait never returned once %s's last subscriber left", what)
 	}
 }
 

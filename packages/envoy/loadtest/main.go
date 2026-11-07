@@ -17,7 +17,7 @@ import (
 const usage = `usage: loadgen <command> [flags]
 
 commands:
-  proxy            TCP latency proxy toward Postgres
+  proxy            TCP latency proxy (toward Postgres, or toward the listener for --envoy-rtt)
   seed             seed 4 projects, 1,000 issues and 8,000 comments through Dispatch; writes seed.json
   seed-refs        add production-shaped dispatch:// references to that seed: 1,000 cited documents
   refs-shape       check the references answers of the LGA issues against production's shape

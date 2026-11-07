@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -182,8 +183,8 @@ func TestPublisherFansOutToTheFormerName(t *testing.T) {
 // the envelope's own EventID, DedupeKey, SourceEventID, IssuedAt and payload, so a client dedupes
 // the two pushes by event_id and the Legion daemon folds them into one fact. The comparison is of
 // the two structs with the topic equalised, so a field contracts.Envelope grows later is compared
-// too — and a field it grows that cannot be compared with == fails to build here, which is the
-// same signal.
+// too — deeply, since the envelope carries a map of its own and no longer compares with ==
+// (contracts.Envelope.MentionDedupeKeys).
 func TestPublisherCopyDiffersOnlyInTopic(t *testing.T) {
 	for _, method := range publishMethods {
 		t.Run(method.name, func(t *testing.T) {
@@ -199,7 +200,7 @@ func TestPublisherCopyDiffersOnlyInTopic(t *testing.T) {
 				t.Fatalf("%s put %v on the bus, want the envelope and its copy", method.name, bus.topics())
 			}
 			original, copied := bus.published[0], bus.published[1]
-			if original != item {
+			if !reflect.DeepEqual(original, item) {
 				t.Errorf("%s published %+v as the original, want the envelope it was given, %+v", method.name, original, item)
 			}
 			if copied.Topic != "notifications.github.sjawhar.legion.pr.7706.mention" {
@@ -207,7 +208,7 @@ func TestPublisherCopyDiffersOnlyInTopic(t *testing.T) {
 			}
 			equalised := copied
 			equalised.Topic = original.Topic
-			if equalised != original {
+			if !reflect.DeepEqual(equalised, original) {
 				t.Errorf("%s published a copy differing from its envelope in more than Topic:\ncopy     %+v\nenvelope %+v",
 					method.name, copied, original)
 			}

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -20,7 +21,8 @@ import (
 // joined, a comment's thread root's author, a message's author, the sessions a document credits,
 // the sessions a person's reply under a comment reaches (loadCommentRecipients), the sessions an
 // issue's primary document credits (loadPrimaryDocumentAuthors), and what a new comment's mentions
-// delivered. A comment or message that does not exist answers no author, found false.
+// did (mentionDeliveries). A comment or message that does not exist answers no author, found
+// false.
 type lookup interface {
 	followers(askID string) ([]string, error)
 	rootCommentAuthor(commentID string) (model.Actor, bool, error)
@@ -29,20 +31,6 @@ type lookup interface {
 	commentRecipients(commentID string) ([]string, error)
 	primaryDocumentAuthors(issueKey string) ([]string, error)
 	mentionDeliveries(commentID string) (mentionDeliveries, error)
-}
-
-// mentionDeliveries is what a new comment's mentions did for the sessions they resolved to, read
-// from comment_deliveries when the event is published (loadMentionDeliveries). A mention resolved
-// at write time names only a candidate: its send runs after the comment commits and can fail - the
-// listener does not know the session, the receipt times out, the handler is cancelled, the session
-// lacks the delivery mode - and a session whose mention failed has no copy but the outbox's.
-type mentionDeliveries struct {
-	// sent holds each session some attempt of a mention reached.
-	sent map[string]struct{}
-	// pending holds each session no attempt reached yet whose send is still live: an attempt is
-	// pending and its claim, or its creation when no sender has claimed it yet, is younger than
-	// model.DeliveryClaimLapse.
-	pending map[string]struct{}
 }
 
 // wanted is the lookup a batch's first pass over its events runs: it answers nothing and records
@@ -188,6 +176,12 @@ func (l *lookups) mentionDeliveries(commentID string) (mentionDeliveries, error)
 	return l.mentions[id], nil
 }
 
+// readings is what the batch read of each comment's mentions, in no order: what the holders of
+// the roles their unpinned attempts target are resolved for (resolveUnpinnedRoleMentions).
+func (l *lookups) readings() []mentionDeliveries {
+	return slices.Collect(maps.Values(l.mentions))
+}
+
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
 	var author model.Actor
 	if err := json.Unmarshal(raw, &author); err != nil {
@@ -202,8 +196,9 @@ type queryer interface {
 }
 
 // loadLookups reads what want asks for, one statement per kind that asks anything, so a batch costs
-// at most seven reads however many events it holds: ask followers, thread root authors, message
-// authors, document credits (loadDocumentSessionAuthors), mention deliveries, comment recipients
+// at most eight reads however many events it holds: ask followers, thread root authors, message
+// authors, document credits (loadDocumentSessionAuthors), mention deliveries and the fallback
+// copies that own a destination of one (loadMentionDeliveries, two statements), comment recipients
 // (loadCommentRecipients) and primary document authors (loadPrimaryDocumentAuthors). Each read is
 // the per-id read the outbox made before, over a set of ids: the same rows, in the same order for
 // each id. Every kind but the issues' is a uuid, read and answered in its canonical form
@@ -468,50 +463,185 @@ func loadDocumentSessionAuthors(ctx context.Context, db queryer, ids []string) (
 	return loadKeyedSessions(ctx, db, "load document session authors", documentSessionAuthorsQuery, ids)
 }
 
-// mentionDeliveryQuery groups every comment's mention attempts by the comment and the session each
-// was sent to. An attempt pending for longer than model.DeliveryClaimLapse - by its claim, or by
-// its creation when no sender ever claimed it - is abandoned, the same lease the API's claimLapsed
-// gives a sender (internal/dispatch/api), so it no longer holds the outbox's copy back.
+// mentionDeliveryQuery groups every comment's mention attempts by the session each counts under
+// (model.MentionSessionSQL) and by its target, and reports of each group the mode the comment
+// recorded on that mention, whether an attempt was sent, is past the lease a send is waited out
+// for (model.MentionResumedSQL), is live (model.MentionLiveSQL), is abandoned
+// (model.MentionAbandonedSQL), and whether any attempt of it failed or is abandoned
+// (mentionDeliveries.fallbackKeys; that flag and the sent one together say whether the group has
+// settled at all, which is what mentionDeliveries.settledKeys holds a key for). What mode those
+// attempts went in does not matter: every attempt of one mention sends under the mention's own
+// key (model.CommentMentionIdempotencyKey),
+// so the mode comes from comment_mentions - one row per (comment, target), which is what makes
+// min() of it that row's mode - and never from the attempts themselves. Every attempt is opened
+// under that row (claimCommentDeliveryAttempt in internal/dispatch/api), so the mention's mode
+// is there for every attempt a comment's own write recorded; the join is an outer one all the
+// same, and an attempt with no mention row beside it is read under its own mode. What this
+// reading decides is what the outbox holds back while a send is live, and an attempt dropped
+// from it is a send the outbox publishes a copy beside, which is the one outcome every rule
+// here exists to stop.
 var mentionDeliveryQuery = `
-	select comment_id::text, session_id,
-	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and coalesce(claimed_at, created_at) >= now() - ` + model.DeliveryClaimLapseInterval + `)
-	from comment_deliveries
-	where comment_id = any($1::text[]::uuid[]) and session_id is not null
-	group by comment_id, session_id
+	select d.comment_id::text,
+	       ` + model.MentionSessionSQL("d") + `,
+	       d.target,
+	       coalesce(min(m.delivery), min(d.delivery)),
+	       bool_or(d.state = 'sent'),
+	       bool_or(d.state = 'pending' and ` + model.MentionResumedSQL("d") + `),
+	       bool_or(d.state = 'pending' and ` + model.MentionLiveSQL("d") + `),
+	       bool_or(d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `),
+	       bool_or(d.state = 'failed' or (d.state = 'pending' and ` + model.MentionAbandonedSQL("d") + `))
+	from comment_deliveries d
+	left join comment_mentions m on m.comment_id = d.comment_id and m.target = d.target
+	where d.comment_id = any($1::text[]::uuid[])
+	group by 1, 2, 3
 `
 
-// loadMentionDeliveries reads what the mentions of every comment in ids delivered
-// (mentionDeliveries). Only a comment.created whose mentions resolved to a session asks
+// mentionFallbackHoldsQuery lists every destination of every comment in ids a fallback row owns,
+// settled or not: a row settled published or skipped that copy once, so the event's own publish
+// skips the destination for good (mentionDeliveries.held).
+const mentionFallbackHoldsQuery = `
+	select comment_id::text, destination
+	from comment_fallback_copies
+	where comment_id = any($1::text[]::uuid[])
+`
+
+// fallbackChoice is which of one comment's attempts names the dedupe key each of its keys'
+// copies carries: for each session the lowest of the targets whose attempt of it failed, for
+// each target the lowest of the sessions whose attempt of it failed, and for each session the
+// settled mention whose key its settled map holds (settledMention,
+// mentionDeliveries.settledKeys).
+type fallbackChoice struct {
+	targetOf  map[string]string
+	sessionOf map[string]string
+	settledOf map[string]settledMention
+}
+
+// settledMention is the mention of one session whose key that session's settled key is taken
+// from: the target it was sent under, and whether an attempt of it delivered the comment.
+type settledMention struct {
+	target    string
+	delivered bool
+}
+
+// beats reports whether this mention names the session's settled key in place of current. A
+// mention that delivered wins over one that only failed: its key is the one that session's host
+// claimed when the send landed, while the key of a mention that never landed is one no host has
+// claimed. Of two mentions of one kind the lowest target wins, the way fallbackKeys picks among
+// a session's failed targets, so one reading of a comment names one key per session.
+func (m settledMention) beats(current settledMention) bool {
+	if m.delivered != current.delivered {
+		return m.delivered
+	}
+	return m.target < current.target
+}
+
+// loadMentionDeliveries reads what the mentions of every comment in ids did and which of their
+// destinations fallback rows own (mentionDeliveries), in two statements. Only a comment.created
+// that names a mentioned session, or suppresses its route by a mention's target, asks
 // (eventDestinations): every other event, edits, resolutions and reopenings included, suppresses
 // nothing. A comment no attempt was recorded for answers empty sets, so it suppresses nothing
 // either.
+//
+// An attempt that names no session is read under its target alone, as every reading here is, and
+// its target's role is recorded beside it with the state the attempt is in
+// (unpinnedRoleMentions.record), for as long as its send is still coming: that role is all there
+// is to say whose copies of the comment the attempt decides, and its holder is resolved once the
+// batch has read every comment (resolveUnpinnedRoleMentions).
 func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found *lookups) error {
 	if len(ids) == 0 {
 		return nil
+	}
+	of := func(commentID string) mentionDeliveries {
+		deliveries, ok := found.mentions[commentID]
+		if !ok {
+			deliveries = newMentionDeliveries()
+			found.mentions[commentID] = deliveries
+		}
+		return deliveries
 	}
 	rows, err := db.Query(ctx, mentionDeliveryQuery, ids)
 	if err != nil {
 		return fmt.Errorf("load the batch's mention deliveries: %w", err)
 	}
-	var commentID, sessionID string
-	var sent, pending bool
-	_, err = pgx.ForEachRow(rows, []any{&commentID, &sessionID, &sent, &pending}, func() error {
-		deliveries, ok := found.mentions[commentID]
-		if !ok {
-			deliveries = mentionDeliveries{sent: map[string]struct{}{}, pending: map[string]struct{}{}}
-			found.mentions[commentID] = deliveries
-		}
-		switch {
-		case sent:
-			deliveries.sent[sessionID] = struct{}{}
-		case pending:
-			deliveries.pending[sessionID] = struct{}{}
-		}
-		return nil
-	})
+	var commentID, target, mode string
+	var sessionID *string
+	var sent, resending, sending, abandoned, failedSend bool
+	chosen := map[string]*fallbackChoice{}
+	_, err = pgx.ForEachRow(rows,
+		[]any{&commentID, &sessionID, &target, &mode, &sent, &resending, &sending, &abandoned, &failedSend},
+		func() error {
+			deliveries := of(commentID)
+			state := mentionStateOf(sent, resending, sending, abandoned)
+			if sessionID == nil && (state == mentionSending || state == mentionResending) {
+				// An attempt of this target names no session and its send is still coming:
+				// only the role's holder says whose copies it decides, and the mention's own
+				// idempotency key says what any copy of this comment it may yet be pinned to
+				// goes under (unpinnedRoleMentions, unpinnedRoleMentions.keyFor).
+				deliveries.unpinned.record(commentID, target, mode, state)
+			}
+			if sessionID != nil {
+				deliveries.sessions.record(*sessionID, state)
+				if sent || failedSend {
+					pick, ok := chosen[commentID]
+					if !ok {
+						pick = &fallbackChoice{targetOf: map[string]string{}, sessionOf: map[string]string{},
+							settledOf: map[string]settledMention{}}
+						chosen[commentID] = pick
+					}
+					key := contracts.AgentSendDedupeKey(
+						*sessionID, model.CommentMentionIdempotencyKey(commentID, target, mode))
+					settled := settledMention{target: target, delivered: sent}
+					if current, ok := pick.settledOf[*sessionID]; !ok || settled.beats(current) {
+						pick.settledOf[*sessionID] = settled
+						deliveries.settledKeys[*sessionID] = key
+					}
+					if failedSend {
+						if lowest, ok := pick.targetOf[*sessionID]; !ok || target < lowest {
+							pick.targetOf[*sessionID] = target
+							deliveries.fallbackKeys[*sessionID] = key
+						}
+						if lowest, ok := pick.sessionOf[target]; !ok || *sessionID < lowest {
+							pick.sessionOf[target] = *sessionID
+							deliveries.targetFallbackKeys[target] = key
+						}
+					}
+				}
+			}
+			deliveries.targets.record(target, state)
+			return nil
+		})
 	if err != nil {
 		return fmt.Errorf("load the batch's mention deliveries: %w", err)
 	}
+	held, err := db.Query(ctx, mentionFallbackHoldsQuery, ids)
+	if err != nil {
+		return fmt.Errorf("load the batch's fallback copies: %w", err)
+	}
+	var destination string
+	if _, err := pgx.ForEachRow(held, []any{&commentID, &destination}, func() error {
+		of(commentID).held[destination] = struct{}{}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("load the batch's fallback copies: %w", err)
+	}
 	return nil
+}
+
+// mentionDeliveriesOf reads what one comment's mentions did, the read loadMentionDeliveries makes
+// for a batch, over that comment alone: the fallback pass decides one row at a time, and reads
+// its key's attempts as a copy held back for that key reads them (destinations.leftTo). The read
+// is of every mention of that comment, not of that key's alone, which is what lets the pass key
+// a role destination's forward by the holder's own settled mention as the event's own publish
+// does (decideFallbackCopy, roleFallbackKey).
+func mentionDeliveriesOf(ctx context.Context, db queryer, commentID string) (mentionDeliveries, error) {
+	found := &lookups{mentions: map[string]mentionDeliveries{}, failed: map[string]error{}}
+	id := canonicalID(commentID)
+	if err := loadMentionDeliveries(ctx, db, []string{id}, found); err != nil {
+		return mentionDeliveries{}, fmt.Errorf("load mention deliveries of comment %q: %w", commentID, err)
+	}
+	deliveries, ok := found.mentions[id]
+	if !ok {
+		deliveries = newMentionDeliveries()
+	}
+	return deliveries, nil
 }

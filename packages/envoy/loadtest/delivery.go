@@ -13,6 +13,8 @@ type writeRec struct {
 	Marker int64 // the write's counter in the run (markerTag)
 	Kind   string
 	Issue  string
+	// Mentions is how many sessions the comment mentions (-mention-frac); 0 for none.
+	Mentions int
 	// Sent is when the client began the write's request (callResult.start; for an upload, the
 	// POST's, not the GET's before it). Arrival is when the whole request was in Dispatch's
 	// socket (httptrace WroteRequest), or Sent if it never got there (callResult.arrival);

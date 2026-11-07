@@ -438,7 +438,10 @@ func mintAgentToken(t *testing.T, handler http.Handler) agentTokenResponse {
 func hubConnCount(hub *deliveryHub) int {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	return len(hub.conns)
+	if hub.generation == nil {
+		return 0
+	}
+	return len(hub.generation.conns)
 }
 
 // smallSendBuffers shrinks the send buffer of every connection the server accepts, so a socket whose

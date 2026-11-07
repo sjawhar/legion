@@ -63,6 +63,7 @@ POST /api/v1/delivery/session-groups any
 DELETE /api/v1/delivery/session-groups/{id} any
 PATCH /api/v1/delivery/session-groups/{id} any
 GET /api/v1/delivery/timeline any
+GET /api/v1/events/log any
 GET /api/v1/github/app-installation/{owner}/{repo} any
 GET /api/v1/going/capability any
 POST /api/v1/going/requests any

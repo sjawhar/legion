@@ -19,22 +19,27 @@ import (
 // live view's model and thinking switch, a broadcast's recipients, an issue message to a session,
 // a comment's and a document comment's mentions, and a retry from an agent card - claims each
 // attempt before its send and settles it after. A process that dies between the two leaves the
-// attempt pending under a claim no process holds; once that claim lapses (claimLapsed, a minute)
-// the attempt is owed. Nobody has to ask again for it: every pass of the maintenance loop
-// (RunMaintenanceSweep, once a minute across the processes) sends each owed attempt, once, under
-// its own attempt number and so its own idempotency key, as a repeat under the write's key does,
-// so the listener drops a frame that did land (DELIVERY_DUPLICATE_WINDOW_MS in
+// attempt pending under a claim no process holds; once that claim lapses
+// (model.DeliveryClaimFreeSQL, a minute) the attempt is owed. Nobody has to ask again for it:
+// every pass of the maintenance loop (RunMaintenanceSweep, once a minute across the processes)
+// sends each owed attempt, once, under the idempotency key its write gives it (one key for every
+// attempt of a comment mention, model.CommentMentionIdempotencyKey), as a repeat under the write's
+// key does, so the listener drops a frame that did land (DELIVERY_DUPLICATE_WINDOW_MS in
 // packages/contracts).
 //
-// An attempt is owed when it is its message's, or its mention's, latest attempt, still pending,
-// its claim lapsed, and opened over a lease ago: an unclaimed attempt the write itself opened (a
-// broadcast recipient's, a mention's) is its live sender's for the first minute. A pending attempt
-// a later retry overtook is that retry's to answer, so the sweep sends the attempt it found owed
-// and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to its number). A
-// keyed send whose process died between its message's commit and its first attempt has no attempt
-// at all; its key's recovery point names the message, and its first attempt is owed once the key's
-// holder is gone. Only an earlier release leaves such a row: this release's createStoredMessage
-// writes attempt 1 in the transaction that stores the message.
+// An attempt is owed when it is its message's latest attempt, or its mention's to send still -
+// no later attempt of that mention stands in its place, every later one having failed
+// (model.MentionAttemptStandsSQL) - and it is pending, its claim lapsed, and opened over a lease
+// ago: an unclaimed attempt the write itself opened (a broadcast recipient's) is its live
+// sender's for the first minute, and a comment mention's attempt is claimed from the moment its
+// comment commits and stays claimed while its send waits on its recipient's lane (mentionSender),
+// so a live process's queue is never swept out of order. A pending attempt a later retry
+// delivered the write in the place of is that retry's to answer, and the sweep sends the attempt
+// it found owed and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to
+// its number). A keyed send whose process died between its message's commit and its first attempt
+// has no attempt at all; its key's recovery point names the message, and its first attempt is
+// owed once the key's holder is gone. Only an earlier release leaves such a row: this release's
+// createStoredMessage writes attempt 1 in the transaction that stores the message.
 //
 // An owed attempt nothing can send is settled instead of sent: one whose issue closed, since every
 // sender refuses a delivery there (requireOpenIssue, lockedComment), and one whose comment no
@@ -45,6 +50,11 @@ import (
 // of what to send leave them out, so however many accumulate - Legion closes an issue at its merge,
 // and a deploy can strand a delivery in flight - they never crowd what can be sent out of a pass's
 // batch, and are never picked again.
+//
+// A pending mention attempt a later attempt of its mention has already delivered the comment in
+// the place of is settled too, superseded rather than sent: the lane that stood down from it gave
+// its claim back and binds to it no more, and this sweep sends only the attempts that stand, so
+// without this pass it would stay pending for good (settleSupersededMentions).
 //
 // Of two senders that both find an attempt owed - this sweep and a repeat under the write's key, or
 // the sweeps of two processes - the one that claims it sends and the other finds it taken and
@@ -73,11 +83,12 @@ const (
 )
 
 // What an owed attempt is, spelled once for the reads that send it and the ones that settle it.
-// Each reads the attempt row as d; $1 is DeliveryDuplicateWindow, in seconds. A var block, not a
-// const one, because claimLapsed is built from the claim lease's interval at init.
+// Each reads the attempt row as d; $1 is DeliveryDuplicateWindow, in seconds, for the message
+// predicates, while owedCommentAttempt carries its own window (model.MentionSweepWindow). A var
+// block, not a const one, because each is built from the claim lease's interval at init.
 var (
-	owedMessageAttempt = `d.state = 'pending' and ` + claimLapsed + `
-		and d.created_at < now() - interval '1 minute'
+	owedMessageAttempt = `d.state = 'pending' and ` + model.DeliveryClaimFreeSQL + `
+		and d.created_at < now() - ` + model.DeliveryClaimLapseInterval + `
 		and d.created_at > now() - make_interval(secs => $1)
 		and d.attempt = (select max(attempt) from message_deliveries l where l.message_id = d.message_id)`
 	// messageAttemptIssueClosed holds for an attempt of a message on an issue that closed.
@@ -85,12 +96,24 @@ var (
 		select 1 from messages m join issues i on i.key = m.issue_key
 		where m.id = d.message_id and i.closed_at is not null
 	)`
-	owedCommentAttempt = `d.state = 'pending' and ` + claimLapsed + `
-		and d.created_at < now() - interval '1 minute'
-		and d.created_at > now() - make_interval(secs => $1)
-		and d.attempt = (
-			select max(attempt) from comment_deliveries l where l.comment_id = d.comment_id and l.target = d.target
-		)`
+	// owedCommentAttempt is model.OwedMentionAttemptSQL, built from the same lease the outbox's
+	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside the attempts
+	// this sweep sends every attempt past that lease that is not abandoned - one queued behind a
+	// held lane, whose sender writes its claim again, and one a later attempt overtook while its
+	// sender holds it, which that sender sends or settles when its lane reaches it). So the
+	// outbox holds a session's copy back for every attempt a send is still coming for, this
+	// sweep's and a live sender's alike, and waits on no attempt longer than this sweep does;
+	// one no send is coming for while it reads so counts abandoned (model.MentionAbandonedSQL) -
+	// the attempt a lane stood down from among them, for as long as the attempt that overtook it
+	// is pending - and the outbox publishes that copy rather than waiting on it. Should that
+	// overtaking attempt then fail, the stood-down attempt stands again and is this sweep's.
+	owedCommentAttempt = `d.state = 'pending' and ` + model.OwedMentionAttemptSQL("d")
+	// supersededCommentAttempt holds for a pending mention attempt a later attempt of the same
+	// mention has delivered the comment in the place of (model.MentionAttemptDeliveredLaterSQL)
+	// and no sender holds. Nothing sends it, since this sweep sends only the attempts that stand,
+	// so this sweep settles it superseded instead (settleSupersededMentions).
+	supersededCommentAttempt = `d.state = 'pending' and ` + model.DeliveryClaimFreeSQL +
+		` and ` + model.MentionAttemptDeliveredLaterSQL("d")
 	// commentAttemptMentionGone holds for an attempt whose comment no longer holds its mention.
 	commentAttemptMentionGone = `not exists (
 		select 1 from comment_mentions cm where cm.comment_id = d.comment_id and cm.target = d.target
@@ -140,8 +163,9 @@ type owedDelivery struct {
 }
 
 // resumeOwedDeliveries is one pass of the delivery sweep: it settles every owed attempt nothing can
-// send, then reads every other owed attempt and sends each, broadcastDeliveryWorkers at a time,
-// returning once every one has settled. The sends run on a context the pass's own cancellation does
+// send and every attempt a later attempt of its mention superseded, then reads every other owed
+// attempt and sends each, broadcastDeliveryWorkers at a time, returning once every one has
+// settled. The sends run on a context the pass's own cancellation does
 // not reach and are counted in the server's background wait, so a shutdown that cuts the pass short
 // lets the sends it started finish. Only a read of what is owed fails it; a send the listener
 // refuses is recorded on its attempt, and an attempt it could not settle is logged and left to the
@@ -153,6 +177,9 @@ func (s *server) resumeOwedDeliveries(ctx context.Context) error {
 	s.detached.start()
 	defer s.detached.done()
 	if err := s.settleUndeliverable(ctx); err != nil {
+		return err
+	}
+	if err := s.settleSupersededMentions(ctx); err != nil {
 		return err
 	}
 	owed, err := s.owedDeliveries(ctx)
@@ -191,21 +218,21 @@ func (s *server) resumeOwedDeliveries(ctx context.Context) error {
 }
 
 // resumeOwedDelivery sends one owed attempt, as a repeat under its write's key sends it, bound to
-// its number: an attempt a live sender took in the meantime, or that settled, is left as it is, and
-// no attempt of the sweep's own is opened.
+// its number and holding no claim of its own: an attempt a live sender took in the meantime, or
+// that settled, is left as it is, and no attempt of the sweep's own is opened.
 func (s *server) resumeOwedDelivery(ctx context.Context, owed owedDelivery) error {
 	if owed.commentID != "" {
 		comment, err := s.loadComment(ctx, s.deps.Store.Pool, owed.commentID)
 		if err != nil {
 			return err
 		}
-		created, err := s.loadCommentCreatedEvent(ctx, s.deps.Store.Pool, comment.ID)
+		created, err := s.loadCommentCreatedEvent(ctx, s.deps.Store.Pool, comment)
 		if err != nil {
 			return err
 		}
 		_, err = s.deliverResolvedCommentMention(ctx, comment, created,
-			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author, owed.attempt,
-			s.newTakeoverRetry())
+			ResolvedMention{Target: owed.target, Delivery: owed.delivery}, comment.Author,
+			attemptClaim{attempt: owed.attempt}, s.newTakeoverRetry())
 		return err
 	}
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", owed.messageID)
@@ -279,8 +306,8 @@ func (s *server) owedDeliveries(ctx context.Context) ([]owedDelivery, error) {
 		where `+owedCommentAttempt+`
 		  and not `+commentAttemptMentionGone+` and not `+commentAttemptOwnerClosed+`
 		order by d.created_at
-		limit $2
-	`, window, deliverySweepBatch)
+		limit $1
+	`, deliverySweepBatch)
 	if err != nil {
 		return nil, fmt.Errorf("read the owed comment mention attempts: %w", err)
 	}
@@ -339,6 +366,74 @@ func (s *server) settleUndeliverable(ctx context.Context) error {
 	}
 }
 
+// settleSupersededMentions settles superseded every pending mention attempt a later attempt of
+// its mention has already delivered the comment in the place of and no sender holds
+// (supersededCommentAttempt), reading deliverySweepBatch at a time until a read comes back short
+// or a round settles none of what it read. Three paths leave one: a lane that stood down from an
+// attempt while a Retry was in flight that then landed, the sender of that Retry failing to
+// settle it (supersedeOvertakenAttempts), and a reply that turned that Retry's failed attempt
+// into a sent one (replyComment). Nothing binds to such an attempt again - this sweep sends only
+// the attempts that stand, and a keyed repeat requeues only a mention with a single attempt - so
+// without this pass it would stay pending for good. An attempt it cannot settle is logged and
+// left to the next pass.
+func (s *server) settleSupersededMentions(ctx context.Context) error {
+	total := 0
+	for {
+		rows, err := s.deps.Store.Pool.Query(ctx, `
+			select `+commentDeliveryColumns+`
+			from comment_deliveries d
+			where `+supersededCommentAttempt+`
+			order by d.created_at
+			limit $1
+		`, deliverySweepBatch)
+		if err != nil {
+			return fmt.Errorf("read the superseded comment mention attempts: %w", err)
+		}
+		overtaken, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.CommentDelivery, error) {
+			return scanCommentDelivery(row)
+		})
+		if err != nil {
+			return fmt.Errorf("read the superseded comment mention attempts: %w", err)
+		}
+		settled := 0
+		for _, attempt := range overtaken {
+			done, err := s.settleSupersededMention(ctx, attempt)
+			if err != nil {
+				slog.Error("dispatch: settle a comment mention attempt a later attempt superseded",
+					"comment", attempt.CommentID, "target", attempt.Target, "attempt", attempt.Attempt, "error", err)
+				continue
+			}
+			if done {
+				settled++
+			}
+		}
+		total += settled
+		if len(overtaken) < deliverySweepBatch || settled == 0 {
+			if total > 0 {
+				slog.Info("dispatch: settled comment mention attempts a later attempt superseded", "attempts", total)
+			}
+			return nil
+		}
+	}
+}
+
+// settleSupersededMention settles one attempt superseded, through the settle every supersede goes
+// through (supersedeCommentDelivery), and reports whether it is settled: one a sender claimed
+// since, or that settled meanwhile, is left as it stands. The comment's author is the actor, as
+// it is for every other attempt this sweep settles (settleUndeliverableMention).
+func (s *server) settleSupersededMention(ctx context.Context, attempt model.CommentDelivery) (bool, error) {
+	comment, err := s.loadComment(ctx, s.deps.Store.Pool, attempt.CommentID)
+	if err != nil {
+		return false, err
+	}
+	settled, err := s.supersedeCommentDelivery(
+		ctx, comment, attempt, comment.Author, attemptClaim{attempt: attempt.Attempt})
+	if err != nil {
+		return false, err
+	}
+	return settled.State != "pending", nil
+}
+
 // undeliverableDeliveries reads, oldest first, up to deliverySweepBatch of each kind of owed attempt
 // nothing can send, and whether any kind filled its batch.
 func (s *server) undeliverableDeliveries(ctx context.Context) ([]undeliverableAttempt, bool, error) {
@@ -384,8 +479,8 @@ func (s *server) undeliverableDeliveries(ctx context.Context) ([]undeliverableAt
 		where `+owedCommentAttempt+`
 		  and (`+commentAttemptMentionGone+` or `+commentAttemptOwnerClosed+`)
 		order by d.created_at
-		limit $2
-	`, window, deliverySweepBatch)
+		limit $1
+	`, deliverySweepBatch)
 	if err != nil {
 		return nil, false, fmt.Errorf("read the undeliverable comment mention attempts: %w", err)
 	}
@@ -446,7 +541,7 @@ func (s *server) settleUndeliverableAttempt(ctx context.Context, undeliverable u
 		// back to this attempt finds it no longer its own.
 		return scanMessageDelivery(tx.QueryRow(ctx, `
 			update message_deliveries d set state = 'failed', error = $3, claimed_at = now()
-			where d.message_id = $1 and d.attempt = $2 and d.state = 'pending' and `+claimLapsed+`
+			where d.message_id = $1 and d.attempt = $2 and d.state = 'pending' and `+model.DeliveryClaimFreeSQL+`
 			  and `+messageAttemptIssueClosed+`
 			returning `+messageDeliveryColumns,
 			message.ID, undeliverable.attempt, undeliverable.cause))
@@ -509,7 +604,7 @@ func (s *server) settleUndeliverableMention(ctx context.Context, undeliverable u
 	}
 	failed, err := scanCommentDelivery(tx.QueryRow(ctx, `
 		update comment_deliveries d set state = 'failed', error = $4, claimed_at = now()
-		where d.comment_id = $1 and d.target = $2 and d.attempt = $3 and d.state = 'pending' and `+claimLapsed+`
+		where d.comment_id = $1 and d.target = $2 and d.attempt = $3 and d.state = 'pending' and `+model.DeliveryClaimFreeSQL+`
 		  and (`+commentAttemptMentionGone+` or `+commentAttemptOwnerClosed+`)
 		returning `+commentDeliveryColumns,
 		comment.ID, undeliverable.target, undeliverable.attempt, undeliverable.cause))

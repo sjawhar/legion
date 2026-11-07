@@ -393,26 +393,22 @@ test("two live-view sends pressed during an outage go out in press order, each o
 });
 
 // A comment's @-mention is delivered once even when the page gives up on the comment while
-// Dispatch is still delivering it. Dispatch is slow on its own side (the slow-write hook holds
-// the comment 1.2 s once its key is claimed) and the listener takes 2 s to answer the mention's
-// send, so the delivery runs from about 1.2 s to 3.2 s of the row's real time. The page's
-// attempt, silent all that time, is cut off at the 15 s it waits on one silent attempt
-// (`KEYED_SEND_ATTEMPT_MS`), which its own clock is jumped past inside that window - both holds
-// are the server's own time, which no page clock can move, so they are as short as the ordering
-// allows while the 15 s constant is untouched. The first run finishes the delivery regardless;
-// the page's repeat waits on it and is answered with the comment, and the session hears the
-// mention once.
-// SLOW(>=2s): Dispatch's held write and the listener's send delay are real time on the server's
-// side: the page's attempt must be cut off between the delivery's start and its end, so the
-// hook's delay (1.2 s) and the listener's (2 s) are the shortest values that keep that order
-// observable. The page's own 15 s cut-off is driven with `page.clock`.
-test("a comment whose @-mention is cut off mid-delivery by the page is delivered once", async ({
+// Dispatch is still writing it. Dispatch is slow on its own side (the slow-write hook holds the
+// comment 18 s once its key is claimed, before the handler runs), so the page's attempt, silent
+// all that time, is cut off at the 15 s it waits on one silent attempt (`KEYED_SEND_ATTEMPT_MS`),
+// which its own clock is jumped past inside the hold. The first run still commits the comment and
+// answers; the page's repeat under the same key waits on it and is answered with the comment, and
+// the mention, sent after the first run's answer, reaches the session once.
+// SLOW(>=2s): the hook's 18 s hold is the server's own time, which no page clock can move, and the
+// row waits out the first run before its repeat is answered. The page's own 15 s cut-off is the
+// one `page.clock` drives, which lands it early in that hold.
+test("a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once", async ({
   browser,
 }) => {
+  test.setTimeout(120_000);
   const issueKey = await seedAgents();
   const path = `/api/v1/issues/${issueKey}/comments`;
-  await slowWrites("POST", path, 1_200);
-  await setSessionSendDelay(plannerSession.session_id, 2_000);
+  await slowWrites("POST", path, 18_000);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -430,24 +426,22 @@ test("a comment whose @-mention is cut off mid-delivery by the page is delivered
       .click();
     await form.getByRole("button", { exact: true, name: "Send" }).click();
 
-    // The delivery has started and has not finished: the fake listener records a send when it
-    // takes it and answers `send_delay_ms` later (`e2e/fake-envoy.ts`), and Dispatch still has
-    // the attempt `pending`. That is the window the page's cut-off has to land in, and the page's
-    // own clock is what puts it there.
-    await expect.poll(() => getSentMessages(), { timeout: 15_000 }).toHaveLength(1);
-    expect(await plannerAttempts(issueKey)).toEqual([
-      { attempt: 1, comment: expect.any(String), state: "pending" },
-    ]);
+    // The write is held and has not landed: the page has made its one attempt, and the hook waits
+    // before the handler runs, so nothing is committed and no mention has been sent. That is the
+    // window the page's cut-off has to land in, and the page's own clock is what puts it there.
+    await expect.poll(() => posts.length, { timeout: 15_000 }).toBe(1);
+    expect(await plannerAttempts(issueKey)).toEqual([]);
+    expect(await getSentMessages()).toEqual([]);
     await page.clock.fastForward(15_000);
 
     const answer = await landed;
     expect(answer.status()).toBe(201);
     const comment: { id: string } = await answer.json();
-    // The page gave up on its first attempt mid-delivery and asked again under the same key.
+    // The page gave up on its first attempt and asked again under the same key.
     expect(posts.length).toBeGreaterThanOrEqual(2);
     expect(new Set(posts.map((post) => post.key)).size).toBe(1);
-    // The mention's one attempt was delivered, within the first run, not by a later sweep, and it
-    // is the landed comment's.
+    // The mention's one attempt was delivered by the first run's sender, not by a later sweep, and
+    // it is the landed comment's.
     await expect
       .poll(() => plannerAttempts(issueKey), { timeout: 10_000 })
       .toEqual([{ attempt: 1, comment: comment.id, state: "sent" }]);
@@ -458,6 +452,73 @@ test("a comment whose @-mention is cut off mid-delivery by the page is delivered
     await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
   } finally {
     await slowWrites("POST", path, 0);
+    await alice.close();
+  }
+});
+
+// A comment answers once it commits, before its @-mention is sent. The listener takes 4 s to
+// answer the mention's send (inside the listener client's 5 s window, so the send succeeds), and
+// the page is answered while that send is still under way: the mention's attempt reads pending
+// beside the answer, the page never repeats the write, and the mention reaches the session once,
+// by the send that runs after the answer.
+// SLOW(>=2s): the listener's 4 s answer to the mention's send is the server's own time, which no
+// page clock can move, and the row waits out that send to see the attempt it leaves `sent`.
+test("a comment whose @-mention's send is slow is answered before the send, with no repeat, and delivered once @phone", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const issueKey = await seedAgents();
+  const path = `/api/v1/issues/${issueKey}/comments`;
+  await setSessionSendDelay(plannerSession.session_id, 4_000);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts = watchWrites(page, "POST", path);
+    const answered = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === path
+    );
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" }).last();
+    const field = form.getByLabel("Comment");
+    await field.fill("Heads up @");
+    await page
+      .getByRole("listbox", { name: "Mention suggestions" })
+      .getByRole("option", { exact: true, name: "Planner" })
+      .first()
+      .click();
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+
+    const answer = await answered;
+    expect(answer.status()).toBe(201);
+    expect(answer.headers()["idempotency-replayed"]).toBeUndefined();
+    const comment: { id: string; deliveries: { session_id?: string; state: string }[] } =
+      await answer.json();
+    // The answer carries the attempt pending: the send is not part of the request.
+    expect(
+      comment.deliveries
+        .filter((delivery) => delivery.session_id === plannerSession.session_id)
+        .map((delivery) => delivery.state)
+    ).toEqual(["pending"]);
+    await expect(field).toHaveValue("");
+    // The send finishes after the answer, once.
+    await expect
+      .poll(
+        async () =>
+          (await listComments(issueKey))
+            .find((listed) => listed.id === comment.id)
+            ?.deliveries.filter((delivery) => delivery.session_id === plannerSession.session_id)
+            .map((delivery) => ({ attempt: delivery.attempt, state: delivery.state })),
+        { timeout: 20_000 }
+      )
+      .toEqual([{ attempt: 1, state: "sent" }]);
+    expect(
+      (await getSentMessages()).filter((sent) => sent.target_session === plannerSession.session_id)
+    ).toHaveLength(1);
+    // The page asked once.
+    expect(posts).toHaveLength(1);
+    await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+  } finally {
     await setSessionSendDelay(plannerSession.session_id, 0);
     await alice.close();
   }

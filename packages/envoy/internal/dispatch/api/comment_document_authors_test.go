@@ -172,6 +172,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			"body": "@writer, is the day firm?", "anchor": passage(projectDocument, "The plan"),
 			"mentions": []map[string]any{{"target": "session:session-writer"}},
 		}, "alice")
+		settledCommentDeliveries(t, database, id)
 		expect(t, id, true, contracts.AgentSubject("session-editor"))
 		sendsMu.Lock()
 		defer sendsMu.Unlock()
@@ -187,6 +188,7 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			"body": "@editor, is the day firm?", "reply_to": root,
 			"mentions": []map[string]any{{"target": "session:session-editor"}},
 		}, "alice")
+		settledCommentDeliveries(t, database, reply)
 		expect(t, reply, true, contracts.AgentSubject("session-reviewer"), contracts.AgentSubject("session-writer"))
 		sendsMu.Lock()
 		defer sendsMu.Unlock()

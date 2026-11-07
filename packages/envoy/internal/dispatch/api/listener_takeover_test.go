@@ -308,6 +308,11 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 		name, table, column, receipt, path string
 		body                               map[string]any
 		key                                func(id string) string
+		// answersPending is the mention, whose send runs on its recipient's lane after the
+		// response: the request answers its attempt pending, and the claims its tries renewed
+		// and the state they settled are read once that send has finished. A direct message is
+		// sent inside the request, which answers the attempt it settled.
+		answersPending bool
 	}{
 		{
 			name: "a direct message", table: "message_deliveries", column: "message_id", receipt: "message.delivery",
@@ -318,8 +323,9 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 		{
 			// The comment route is the issue's, created below.
 			name: "a mention", table: "comment_deliveries", column: "comment_id", receipt: "comment.delivery",
-			body: map[string]any{"body": "Mentioned during a take-over", "mentions": []map[string]any{{"target": "session:s1"}}},
-			key:  func(id string) string { return id + ":session:s1:steer" },
+			body:           map[string]any{"body": "Mentioned during a take-over", "mentions": []map[string]any{{"target": "session:s1"}}},
+			key:            func(id string) string { return id + ":session:s1:steer" },
+			answersPending: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -405,6 +411,9 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 			if response.Code != http.StatusCreated {
 				t.Fatalf("send: status=%d body=%s", response.Code, response.Body.String())
 			}
+			if tc.answersPending {
+				settledCommentDeliveries(t, database, id)
+			}
 			claimsMu.Lock()
 			observed := slices.Clone(claims)
 			claimsMu.Unlock()
@@ -425,8 +434,12 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 			if receipts := deliveryReceiptsOf(t, database, tc.receipt, tc.column, id); receipts != 1 {
 				t.Fatalf("attempt 1 has %d receipts, want one", receipts)
 			}
-			if !strings.Contains(response.Body.String(), `"state":"sent"`) {
-				t.Fatalf("the request answered %s, want its attempt sent", response.Body.String())
+			answeredState := `"state":"sent"`
+			if tc.answersPending {
+				answeredState = `"state":"pending"`
+			}
+			if !strings.Contains(response.Body.String(), answeredState) {
+				t.Fatalf("the request answered %s, want its attempt %s", response.Body.String(), answeredState)
 			}
 		})
 	}

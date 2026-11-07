@@ -4,10 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
+
+var externalRefPattern = regexp.MustCompile(`^([^/\s]+)/([^/\s#]+)#([1-9][0-9]*)$`)
 
 func (s *server) resolveIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -78,4 +81,29 @@ func validateExternalURL(raw string) error {
 		return errorf(http.StatusBadRequest, "INVALID_URL", "external link URL must be an absolute HTTP(S) URL")
 	}
 	return nil
+}
+
+func externalRef(ref string) (repo string, number string, err error) {
+	match := externalRefPattern.FindStringSubmatch(strings.TrimSpace(ref))
+	if match == nil {
+		return "", "", errorf(http.StatusBadRequest, "INVALID_ISSUE_REF", "invalid issue reference %q", ref)
+	}
+	return canonicalRepo(match[1], match[2]), match[3], nil
+}
+
+func canonicalRepo(owner, repo string) string {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	repo = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(repo)), ".git")
+	return owner + "/" + repo
+}
+
+func externalURL(repo, number string) string {
+	return "https://github.com/" + repo + "/issues/" + number
+}
+
+func externalURLs(repo, number string) []string {
+	return []string{
+		externalURL(repo, number),
+		"https://github.com/" + repo + "/pull/" + number,
+	}
 }

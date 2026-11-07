@@ -11,24 +11,25 @@ import (
 )
 
 type Envelope struct {
-	EventID        string          `json:"event_id"`
-	Source         string          `json:"source"`
-	SourceEventID  string          `json:"source_event_id"`
-	SourceSession  string          `json:"source_session,omitempty"`
-	Topic          string          `json:"topic"`
-	DedupeKey      string          `json:"dedupe_key"`
-	IssuedAt       int64           `json:"issued_at"`
-	ExpiresAt      *int64          `json:"expires_at,omitempty"`
-	KeptAt         *int64          `json:"kept_at,omitempty"`
-	PayloadSummary string          `json:"payload_summary"`
-	PayloadRef     string          `json:"payload_ref,omitempty"`
-	Payload        string          `json:"payload,omitempty"`
-	TraceID        string          `json:"trace_id"`
-	Sender         *EnvelopeSender `json:"sender,omitempty"`
-	InReplyTo      string          `json:"in_reply_to,omitempty"`
-	Supersedes     string          `json:"supersedes,omitempty"`
-	Urgency        string          `json:"urgency,omitempty"`
-	ExpectsReply   string          `json:"expects_reply,omitempty"`
+	EventID           string            `json:"event_id"`
+	Source            string            `json:"source"`
+	SourceEventID     string            `json:"source_event_id"`
+	SourceSession     string            `json:"source_session,omitempty"`
+	Topic             string            `json:"topic"`
+	DedupeKey         string            `json:"dedupe_key"`
+	IssuedAt          int64             `json:"issued_at"`
+	ExpiresAt         *int64            `json:"expires_at,omitempty"`
+	KeptAt            *int64            `json:"kept_at,omitempty"`
+	MentionDedupeKeys map[string]string `json:"mention_dedupe_keys,omitempty"`
+	PayloadSummary    string            `json:"payload_summary"`
+	PayloadRef        string            `json:"payload_ref,omitempty"`
+	Payload           string            `json:"payload,omitempty"`
+	TraceID           string            `json:"trace_id"`
+	Sender            *EnvelopeSender   `json:"sender,omitempty"`
+	InReplyTo         string            `json:"in_reply_to,omitempty"`
+	Supersedes        string            `json:"supersedes,omitempty"`
+	Urgency           string            `json:"urgency,omitempty"`
+	ExpectsReply      string            `json:"expects_reply,omitempty"`
 }
 
 type EnvelopeSender struct {

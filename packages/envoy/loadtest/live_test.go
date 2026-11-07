@@ -14,12 +14,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TestFollowLive serves two sockets the way Dispatch's GET /ws/live does and follows them. The
-// first sends the frames an events subscription gets beside a heartbeat, another subscription's
-// event, an event of another run with an id below the last, and an ended frame, after which the
-// client must subscribe again on the same socket; then it closes with 4001 (max age). The second,
-// which the client must dial on its own, starts the order check over.
-func TestFollowLive(t *testing.T) {
+// TestLiveSocketsFollowTheEventsView serves two sockets the way Dispatch's GET /ws/live does and
+// follows them with a socket that does not resume. The first sends the frames an events
+// subscription gets beside a heartbeat, another subscription's event, an event of another run
+// with an id below the last, and an ended frame, after which the client must subscribe again on
+// the same socket; then it closes with 4001 (max age). The second, which the client must dial on
+// its own, starts the order check over.
+func TestLiveSocketsFollowTheEventsView(t *testing.T) {
 	const nonce = 42
 	event := func(id int, extra string) string {
 		return `{"type":"event","sub":"events","id":"` + strconv.Itoa(id) + `","event":{"id":` + strconv.Itoa(id) + `,"type":"comment.created"` + extra + `}}`
@@ -118,14 +119,18 @@ func TestFollowLive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	frames := make(chan liveFrame, 16)
-	var bytes int64
+	sockets := &liveSockets{
+		url:    url,
+		dialer: &websocket.Dialer{EnableCompression: true},
+		nonce:  nonce,
+		retry:  10 * time.Millisecond,
+		frame:  func(f liveFrame) { frames <- f },
+	}
 	done := make(chan struct{})
 	before := time.Now().UnixNano()
 	go func() {
 		defer close(done)
-		dialer := &websocket.Dialer{EnableCompression: true}
-		followLive(ctx, dialer, url, http.Header{"X-Dispatch-User": {"viewer-0"}}, nonce, 10*time.Millisecond,
-			func(f liveFrame) { frames <- f }, func(n int64) { bytes += n })
+		sockets.run(ctx, 0)
 	}()
 	var got []liveFrame
 	for len(got) < 4 {
@@ -142,11 +147,11 @@ func TestFollowLive(t *testing.T) {
 
 	created0 := time.Date(2026, 10, 27, 5, 0, 0, 123456789, time.UTC).UnixNano()
 	for i, want := range []liveFrame{
-		{id: 41, created: created0, marker: 1234},
-		{id: 40, created: time.Date(2026, 10, 27, 5, 0, 1, 0, time.UTC).UnixNano(), outOfOrder: true},
-		{id: 42},
+		{id: 41, created: created0, marker: 1234, bytes: int64(len(first[2]))},
+		{id: 40, created: time.Date(2026, 10, 27, 5, 0, 1, 0, time.UTC).UnixNano(), outOfOrder: true, bytes: int64(len(first[4]))},
+		{id: 42, bytes: int64(len(afterResubscribe[1]))},
 		// A new connection: 39 is below 42, but the order check started over.
-		{id: 39, created: time.Date(2026, 10, 27, 5, 0, 2, 0, time.UTC).UnixNano()},
+		{id: 39, created: time.Date(2026, 10, 27, 5, 0, 2, 0, time.UTC).UnixNano(), bytes: int64(len(second[1]))},
 	} {
 		f := got[i]
 		if f.at < before || f.at > after {
@@ -160,7 +165,7 @@ func TestFollowLive(t *testing.T) {
 	if len(frames) != 0 {
 		t.Errorf("%d frames beyond the 4 event frames of the events view", len(frames))
 	}
-	if bytes != sent {
+	if bytes := sockets.bytes.Load(); bytes != sent {
 		t.Errorf("bytes = %d, want %d, every message Dispatch sent", bytes, sent)
 	}
 	mu.Lock()
@@ -218,12 +223,15 @@ func TestSummarizeLive(t *testing.T) {
 		{at: 2600 * msNs, id: 20, marker: 2, created: 2500 * msNs},
 		{at: 2610 * msNs, id: 30, marker: 3, created: 2500 * msNs, outOfOrder: true},
 		{at: 2700 * msNs, id: 31}, // no marker, no created_at
+		// A resume's replay of the comment's own event, minutes after it committed: it counts,
+		// but the socket's absence is not a delivery latency.
+		{at: 9000 * msNs, id: 10, marker: 1, created: 1040 * msNs, replay: true},
 	}
 
 	got := summarizeLive(frames, writes, commits)
 
-	if got.Frames != 5 || got.OrderViolations != 1 {
-		t.Fatalf("frames %d order violations %d, want 5 and 1", got.Frames, got.OrderViolations)
+	if got.Frames != 6 || got.OrderViolations != 1 {
+		t.Fatalf("frames %d order violations %d, want 6 and 1", got.Frames, got.OrderViolations)
 	}
 	if want := (stat{N: 4, P50: 110, P90: 110, P99: 110, Max: 120}); got.FrameMsFromCreatedAt != want { // 100 110 110 120
 		t.Errorf("from created_at %+v, want %+v", got.FrameMsFromCreatedAt, want)
