@@ -101,14 +101,33 @@ machine's Application Default Credentials are its own identity, and so does ever
   labels, so they never collide with a label someone else applies.
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
-- **`--kind`** is optional. Use `github-app` for a GitHub App key and `google-login` for an
-  authorized-user Google login. Use `none`, or omit the flag, for a stored secret. A kind also
+- **`--kind`** is optional. Use `github-app` for a GitHub App key, `google-login` for an
+  authorized-user Google login, and `google-service-account` for one Google service account the
+  broker mints an access token as, whose stored value names that account:
+  `{"service_account": "<id>@<project>.iam.gserviceaccount.com"}`. That last one is an
+  administrator's to write and to set a new value for, not a self-service step, even for the
+  person who owns it: the stored value alone chooses which account the broker acts as, so whoever
+  writes it gets a token as any account the broker may impersonate, whatever `--owner` and
+  `--requesters` say. Ask whoever runs your deployment for one.
+  Use `none`, or omit the flag, for a stored secret. A kind also
   writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
   rather than serve its stored key.
 - **`--github-owners`** is required with `--kind github-app`, and refused with any other kind. It
   lists the GitHub accounts the broker mints installation tokens for, separated by spaces, so the
   shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
-- **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
+- **`--requesters`** is optional. It lists who may ask for this secret at all — people by their
+  lowercase sign-in email, services by the name the deployment registers them under — separated
+  by spaces, so the shell quotes it: `--requesters "ada@example.com legion-daemon"`. Nobody else
+  may ask, whatever the owner and tier allow. A secret with such a list bounds its grants to an
+  hour, so give it `--max-grant 1h` or less. A `google-service-account` secret is served to the
+  one person who owns it, so the administrator who writes it gives it that person's own address
+  and nobody else: `--owner <their email> --requesters <their email>`. A comma, an email with a
+  capital letter and a list that names nobody are refused
+  before anything is written. Whether an entry naming a service is one your deployment registers
+  is the broker's to say
+  ([what the broker answers after a write](#what-the-broker-answers-after-a-write)).
+- **`--max-grant`** is optional, and required on a secret whose `--requesters` names who may ask,
+  where it is an hour or less. It is the longest `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
 - **`--default-grant session`** is optional. A request with no `--ttl` for secrets that all carry it
   gets a grant that lasts until its session ends, instead of 12 hours.
@@ -258,6 +277,8 @@ secret_name: example/agent-secrets/demo-deploy-token
 owner: ada@example.com
 tier: agent
 kind: -
+github_owners: -
+requesters: -
 max_grant: -
 default_grant: -
 created: 2026-10-06T20:31:08Z
@@ -281,7 +302,7 @@ input, which is how a value of more than one line goes in. The broker never keep
 reads it from Secrets Manager each time a session reads a grant, so the next read of a live grant
 gets the new one.
 
-## Change its owner, tier, kind or max grant
+## Change its owner, tier, kind, requesters or max grant
 
 ```console
 $ agent-secrets secret retag DEMO_DEPLOY_TOKEN --tier human
@@ -289,13 +310,14 @@ retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-eas
 broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
 ```
 
-Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant`, `--default-grant` or a combination. A retag that
+Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--requesters`, `--max-grant`, `--default-grant` or a combination. A retag that
 sets tags reads the owner and tier tags the secret holds and sends both in one request. On AWS,
 this lets an IAM condition inspect both tags. Every other tag or annotation stays as it is. For a
 secret missing an owner or tier tag, name that tag too.
 
 `--kind none` removes the kind tag and the `mint-service-account` tag written with it,
-`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant, and `--default-grant none` removes the opt-out. A
+`--github-owners none` removes the GitHub owners, `--requesters none` removes the list of who may
+ask, `--max-grant none` removes the max grant, and `--default-grant none` removes the opt-out. A
 removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
 as it was. A retag that names `none` beside another change is refused before it writes anything.
 So is a retag that would leave a `github-app` secret without `--github-owners`, as the broker would
@@ -463,6 +485,22 @@ agent-secrets secret retag: the broker at secrets.internal.example refuses DEMO_
 ```
 
 Here the secret has no value; `secret set DEMO_EMPTY_KEY` gives it one, and the broker serves it.
+
+A `requesters` entry naming a service is answered the same way. This CLI holds no list of the
+services a deployment registers, so it checks such an entry's shape and nothing more; the broker
+is what knows the names, and it refuses a secret naming one it does not register with
+`reason=requesters-malformed`, after the write, with the list already in the store. Retag the
+secret with the name the deployment registers, and the broker serves it:
+
+```console
+$ agent-secrets secret retag DEMO_DEPLOY_TOKEN --requesters "ada@example.com legion-daemn" --max-grant 1h
+retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=agent)
+broker: refusing DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1 (reason=requesters-malformed)
+agent-secrets secret retag: the broker at secrets.internal.example refuses DEMO_DEPLOY_TOKEN after the write to AWS Secrets Manager account 111122223333 in us-east-1 (reason=requesters-malformed)
+$ agent-secrets secret retag DEMO_DEPLOY_TOKEN --requesters "ada@example.com legion-daemon" --max-grant 1h
+retagged DEMO_DEPLOY_TOKEN in AWS Secrets Manager account 111122223333 in us-east-1 (owner=ada@example.com, tier=agent)
+broker: serving DEMO_DEPLOY_TOKEN from AWS Secrets Manager account 111122223333 in us-east-1
+```
 
 When the broker cannot be asked at all (it is unreachable, or its
 [reread limit](/legion/broker/operate/#network-and-trust) refuses the call), the write still stands

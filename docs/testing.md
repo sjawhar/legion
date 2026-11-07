@@ -72,16 +72,17 @@ rather than beside the module's other Postgres-backed packages: together they sh
 service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
 
-`packages/daemon/internal/daemon` is the daemon's slow, Postgres-backed package. The test job now
-runs it only under the race detector, in its race step, once per job; the plain step ("Test the Go
-daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still compiles it
-without the detector. On CI's runners, while the plain step still ran it, it took at most 625 s
-there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to 733.581 s in the
-jobs whose race step timed out (job 125688799071). Under `-race` it took up to 570 s over the 51
-green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709 measured, on main and on
-pull requests, and ran go test's own ten minutes out on main at 2201840998; the race step gives it
-30 minutes. On a busy machine it takes longer still (908 s under `-race` on a shared devbox), so a
-command that runs the whole package, alone or in a pattern that includes it, passes `-timeout 30m`:
+`packages/daemon/internal/daemon` is the daemon's slow, Postgres-backed package. The test
+job now runs it only under the race detector, in its race step, once per job; the plain step
+("Test the Go daemon") leaves it out, and `go vet -tags e2e ./...` in the `typecheck` job still
+compiles it without the detector. On CI's runners, while the plain step still ran it, it took
+at most 625 s there over the 49 green main `test` jobs of 2026-11-01 to 2026-11-03, and up to
+733.581 s in the jobs whose race step timed out (job 125688799071). Under `-race` it took up
+to 570 s over the 51 green `test` jobs of 2026-11-02 and 2026-11-03 that sjawhar/legion#2709
+measured, on main and on pull requests, and ran go test's own ten minutes out on main at
+job 125691048644 of run 41562777668; the race step gives it 30 minutes. On a busy machine it
+takes longer still (908 s under `-race` on a shared devbox), so a command that runs the whole
+package, alone or in a pattern that includes it, passes `-timeout 30m`:
 
 ```sh
 cd packages/daemon
@@ -89,6 +90,41 @@ go test -race -timeout 30m ./internal/daemon/
 ```
 
 A Legion issue pod does not run that whole package either: `skills/legion-worker/references/tools.md` says what the pod runs and where the rest goes.
+
+## A cleanup's closure or argument holds nothing that reaches its object
+
+A `runtime.AddCleanup` or `runtime.SetFinalizer` closure captures, and its argument carries, nothing that reaches the object the cleanup is attached to.
+`runtime.AddCleanup` says what that costs: "If ptr is reachable from cleanup or arg, ptr will never be collected and the cleanup will never run."
+The runtime keeps a cleanup's closure and its argument alive for as long as the object it is attached to, so either of them reaching that object makes the object immortal, and everything the object holds with it.
+In `packages/envoy/internal/dispatch/docs` the object is a room's live document, and two closures held the service and one of its listings, each of which reaches every resident document through ygo's room table:
+every room the tests loaded then stayed in memory with its replica and its trees, which is what took the `envoy-go-race-docs` job over its runner's memory (dispatch://INFRA-1085).
+
+Hold the owner through a `weak.Pointer` instead, and do nothing when its `Value()` is nil, as that package's `keepInstance` (`roomcursor.go`) and `listResident` (`tree.go`) do: the cleanup drops its entry while the owner is alive, and an owner that is gone has no map left to drop it from.
+Hold weakly what the argument would carry as well, and pass `struct{}{}`, which reaches nothing, as `keepInstance` does with the room load its cleanup once took as its argument.
+A pointer to a field of the owner counts as the owner, since a field and the value holding it are one allocation.
+`weak.Make` takes such an interior pointer and that weak pointer dies with the whole allocation, which is how `listResident` holds the listing it was given, `Service.instances` or `Service.replicas`.
+
+Go's own detector finds a closure that reaches its object:
+
+```sh
+cd packages/envoy
+GODEBUG=checkfinalizers=1 go test -count=1 -timeout 29m ./internal/dispatch/docs/
+```
+
+It prints `WARNING: LIKELY CLEANUP/FINALIZER ISSUES`, then one `is reachable from cleanup or cleanup argument` line per site naming that site's file and line, and ends the run with `fatal error: detected possible issues with cleanups and/or finalizers`.
+The rule covers the cleanup's argument as well as its closure, so an argument that reaches the object is the same defect: the room load `keepInstance` passed reached a document of its own, which is the finding this job made on a head where the closure itself was already weak, and the comment on that cleanup names the path it took (dispatch://INFRA-1085).
+A run that reports nothing is no proof on its own: the check runs at a garbage collection, so a short run can pass with the path present.
+`GOGC=10` beside the detector makes a single test likelier to fire it, not certain, so repeat the run before you read a quiet one as a clean one: with this fix reversed, `TestALiveWritesAskBlockKeepsItsWriterWhenAnotherProcessSettlesIt` under `GOGC=10 GODEBUG=checkfinalizers=1` fired in 2 of 3 runs for the implementer and in 1 of 6 for the reviewer, and at the fixed head it was quiet in 9 of 9.
+CI runs that command in `envoy-go-docs-finalizers` (`.github/workflows/ci.yaml`), on every change the `envoy_go_race_docs` filter selects.
+
+That job runs the command with `-v` for a second check Go's detector does not make:
+the package's `TestMain` prints `docs: <built> services built, <alive> still alive after <duration>` once the tests have run, and the line after it names each test that built a service still alive at the end of the run.
+A test that builds a `*Service` gives it a `t.Cleanup` that shuts it down.
+A service a test left running holds its rooms, and their documents, for the rest of the binary's run.
+
+`packages/envoy/internal/dispatch/docs` is the only package of this repository that registers a cleanup today, and no repository-wide check holds that true:
+`grep -rn "runtime.AddCleanup\|runtime.SetFinalizer" --include=*.go .` finds those two sites and nothing else.
+A `runtime.AddCleanup` or `runtime.SetFinalizer` added in another package comes with a detector job of its own, in the same pull request.
 
 ## A database a Go test creates
 

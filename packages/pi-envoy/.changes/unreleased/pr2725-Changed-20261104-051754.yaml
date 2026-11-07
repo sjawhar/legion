@@ -1,0 +1,5 @@
+kind: Changed
+body: The Dispatch skill says that an id written short, 8 or more of its characters, resolves, that an issue key on its own links to its issue, and that `#` with a question block's id links to that question.
+time: 2026-11-04T05:17:54.893883031Z
+custom:
+    Issue: pr2725

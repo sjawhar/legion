@@ -203,6 +203,15 @@ agent-secrets secret delete NAME
 agent-secrets secret restore NAME
 ```
 
+`--requesters` lists who may ask for a secret at all — people by their lowercase sign-in email,
+services by their registered name, separated by spaces — and a secret carrying such a list bounds
+its grants to an hour, so give it `--max-grant 1h` or less; `--requesters none` removes the list
+on retag. `secret create` and `secret retag` check those rules before they write, but neither can
+check whether an entry naming a service is one your deployment registers: this CLI holds no list
+of registered services, so only the broker knows. The reread that follows the write is what
+catches an unregistered name — the broker's refusal prints with its reason and the command exits
+1, with the tag already written — so correct the name with another `secret retag`.
+
 `agent-secrets --help` and `agent-secrets-helper --help` list every form and environment variable.
 
 ## Build

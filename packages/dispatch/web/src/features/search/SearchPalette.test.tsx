@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
@@ -9,7 +9,12 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
+import type {
+  IssueReferenceSummary,
+  SearchResponse,
+  SearchResult,
+  SearchResultsPage,
+} from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
@@ -55,6 +60,29 @@ function searchAnswer(hits: SearchResult[]): SearchResponse & SearchResultsPage 
     total: hits.length,
   };
 }
+
+/**
+ * An issue hit's row is a reference to that issue, which reads the issue's summary to draw it.
+ * No test here is about that read, so every key is answered with the issue the row names and no
+ * documents.
+ */
+let getIssueSummary: Mock<typeof api.getIssueSummary>;
+
+beforeEach(() => {
+  getIssueSummary = spyOn(api, "getIssueSummary").mockImplementation((key) =>
+    Promise.resolve({
+      documents: [],
+      key,
+      project: key.split("-")[0] ?? "",
+      status: "todo",
+      title: `Instrument ${key}`,
+    } satisfies IssueReferenceSummary)
+  );
+});
+
+afterEach(() => {
+  getIssueSummary.mockRestore();
+});
 
 function CurrentRoute(): ReactNode {
   const location = useLocation();

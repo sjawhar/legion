@@ -195,7 +195,7 @@ function describe(event: Event, previousStatus: string | undefined): string | Ag
     case "block.invalid":
       return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
     case "result.recorded":
-      return `recorded ${event.payload.verdict} for check ${event.payload.check_block_id} at ${event.payload.commit_sha.slice(0, 12)} as ${event.payload.role}`;
+      return `recorded ${event.payload.verdict} for check ${event.payload.check_block_id} at ${event.payload.commit_sha} as ${event.payload.role}`;
   }
 }
 
