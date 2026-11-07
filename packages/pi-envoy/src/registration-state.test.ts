@@ -1386,6 +1386,36 @@ describe("reassertRole", () => {
     expect(harness.state.heldRole()).toBe("alpha");
   });
 
+  // dispatch://INFRA-783: a client built before a release named its process hands a role back
+  // without naming one, so the listener cannot free the live holder's claim and marks it
+  // instead. Nothing renews a marked claim, so the holder would lose the role one live window
+  // later while believing it held it. Reading the mark is what keeps that bounded: the very
+  // next heartbeat sees no hold, claims again, and the listener grants a claim from the process
+  // its claim names, which clears the mark.
+  test("a tick whose own hold is marked handed back claims the role again and keeps it", async () => {
+    const harness = createHarness();
+    await harness.hold("alpha", "ses_a");
+    harness.control.getRole = async (role) => ({
+      role,
+      holder: "ses_a",
+      client_instance_id: harness.state.clientInstanceID,
+      handed_back: true,
+      last_seen: 2,
+      state: "live",
+    });
+    harness.claims.length = 0;
+    expect(await reassert(harness, false)).toEqual({ decided: true, regain: "reclaimed" });
+    expect(harness.claims).toEqual([
+      {
+        sessionID: "ses_a",
+        role: "alpha",
+        soft: true,
+        clientInstanceID: harness.state.clientInstanceID,
+      },
+    ]);
+    expect(harness.state.heldRole()).toBe("alpha");
+  });
+
   // The refusal this session's own id carries latches nothing: a latched refusal makes the next
   // pass want no role and hand this one back, which is the opposite of keeping it.
   test("a re-assertion refused by this session's own id records no refusal", async () => {

@@ -123,6 +123,13 @@ const RoleWireSchema = z.object({
   // on the 200 and on the 404 that names a lapsed holder. Optional: a listener predating the
   // field names none, and so does a claim an earlier build wrote.
   client_instance_id: z.string().optional(),
+  // The hand-back mark the claim carries (`internal/store`'s `RoleClaim.HandedBack`): the
+  // holder gave this role back through a release that could not free the claim, so no
+  // registration renews it and the reaper frees the role one live window later. Answered on the
+  // 200 and on the 404 that names a lapsed holder. Optional: the listener omits it where the
+  // claim carries no mark, and a listener predating the field sends none, so an absent one
+  // means no mark.
+  handed_back: z.boolean().optional(),
 });
 
 const RoleHeldWireSchema = z.object({
@@ -341,12 +348,23 @@ function namedProcess(id: string | undefined): string | undefined {
 
 /**
  * Whether a role lookup's answer is this caller's own hold: it names `sessionID` as the holder
- * *and* `clientInstanceID` as the process whose claim stands. A claim standing under this very
- * session id that another process made is not this caller's to renew — reading it as this
- * caller's is how a lane kept heartbeating while a continuation's claim held the role and then
- * lapsed (dispatch://INFRA-783) — while a claim naming no process at all is read as this
- * caller's, since an older listener and a claim an earlier build wrote name none. `undefined`
- * is the lookup's 404: no holder, so no hold of this caller's.
+ * *and* `clientInstanceID` as the process whose claim stands, and it carries no hand-back mark.
+ * A claim standing under this very session id that another process made is not this caller's to
+ * renew — reading it as this caller's is how a lane kept heartbeating while a continuation's
+ * claim held the role and then lapsed (dispatch://INFRA-783) — while a claim naming no process
+ * at all is read as this caller's, since an older listener and a claim an earlier build wrote
+ * name none. `undefined` is the lookup's 404: no holder, so no hold of this caller's.
+ *
+ * A marked claim (`handed_back`) is no hold of anyone's, whoever the holder is: the mark is the
+ * listener's word that this role was handed back, so no registration renews the claim and the
+ * reaper frees the role one live window later. A process that still wants the role must claim
+ * again rather than read the lookup as confirmation. That covers the one case the clients must
+ * read the mark for: a client built before the claim named its process sends no client instance
+ * on a release, so its hand-back marks the live holder's claim instead of freeing it. The
+ * holder sees at its very next heartbeat that it does not hold the role, claims again, and is
+ * granted — a claim from the process the claim names always is — and the fresh claim clears the
+ * mark. A holder that really did hand the role back does not re-take it, because it no longer
+ * asks for a role it has ended.
  *
  * One rule for every client, because every client keeps it: {@link mayActOnRoleRecord} is the
  * other.
@@ -356,7 +374,7 @@ export function roleHeldBy(
   sessionID: string,
   clientInstanceID: string | undefined
 ): boolean {
-  if (info === undefined || info.holder !== sessionID) return false;
+  if (info === undefined || info.holder !== sessionID || info.handed_back === true) return false;
   const holding = namedProcess(info.client_instance_id);
   return holding === undefined || holding === namedProcess(clientInstanceID);
 }

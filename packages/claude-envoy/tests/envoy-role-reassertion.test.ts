@@ -373,6 +373,80 @@ test("a refusal naming this session under another process keeps the record, asks
   }
 })
 
+test("a lookup marked handed back makes the heartbeat claim the role again and keeps the record", async () => {
+  // dispatch://INFRA-783: a `claude` built before a release named its process hands this role
+  // back without naming one, so the listener cannot free this live process's claim and marks it
+  // instead. Nothing renews a marked claim, so without reading the mark this process would go
+  // on believing it holds the role and lose it one live window later. The mark is read, the
+  // very next heartbeat claims again, and the listener grants a claim from the process its
+  // claim names, which clears the mark. The record is kept throughout: removing it is what a
+  // refusal naming another session does, and nothing here says another session has the role.
+  const stateDirectory = join(tmpdir(), `claude-envoy-role-handed-back-${crypto.randomUUID()}`)
+  const roleFile = roleStateFile(stateDirectory, "ses_current")
+  const claims: unknown[] = []
+  let handedBack = true
+  const client: FakeClient = {
+    subscribe: async () => registered(),
+    getInterest: async () => interest(),
+    unsubscribe: async () => undefined,
+    unregisterSession: async () => undefined,
+    setRole: async (input) => {
+      claims.push(input)
+      // The fresh claim clears the mark, as the listener's does.
+      handedBack = false
+      return { claimed: true, interest: interest() }
+    },
+    // This session and this very process — and the hand-back mark, which is why it is no hold.
+    getRole: async () => ({
+      role: "legion-claim",
+      holder: "ses_current",
+      last_seen: 1,
+      state: "live" as const,
+      client_instance_id: INSTANCE,
+      ...(handedBack ? { handed_back: true } : {}),
+    }),
+    replay: emptyReplay,
+  }
+  const session = await startChannelSession({
+    identity: new SessionIdentity("ses_current", "/tmp"),
+    connection: new IdleNats(),
+    notifier,
+    capabilities: CHANNEL_CAPABILITIES,
+    client,
+    heartbeatMs: 25,
+    configFile: { path: join(stateDirectory, "envoy.json"), error: null },
+    stateDirectory,
+    clientInstanceID: INSTANCE,
+    pluginVersion: "source",
+  })
+  const regains: string[] = []
+  session.onRoleRegained(async (role, reason) => {
+    regains.push(`${role} ${reason}`)
+  })
+
+  try {
+    await session.rememberRole("legion-claim")
+    await waitFor(
+      async () => regains.length >= 1,
+      "the heartbeat to claim the marked role again and be granted it",
+      () => `${claims.length} claims so far; regains [${regains.join(", ")}]`,
+    )
+    expect(regains).toEqual(["legion-claim reclaimed"])
+    // One claim: the mark it cleared leaves the later heartbeats confirming the hold.
+    expect(claims).toEqual([
+      { sessionID: "ses_current", role: "legion-claim", soft: true, clientInstanceID: INSTANCE },
+    ])
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_current",
+      role: "legion-claim",
+      client_instance_id: INSTANCE,
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
 test("the age sweep does not reach the record of a process still pressing its refused claim", async () => {
   // A claim refused by the same session id under another process is pressed every heartbeat, so
   // the record it is pressed for must stay readable however long the refusal lasts: the retry

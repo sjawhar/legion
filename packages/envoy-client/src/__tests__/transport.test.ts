@@ -1685,6 +1685,12 @@ describe("roleHeldBy", () => {
     ...(instance === undefined ? {} : { client_instance_id: instance }),
   });
 
+  /** The same answer, with the hand-back mark the listener puts on a claim it could not free. */
+  const handedBack = (holder: string, instance?: string): RoleInfo => ({
+    ...answer(holder, instance),
+    handed_back: true,
+  });
+
   test("the lookup names this session and this process", () => {
     expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(true);
   });
@@ -1707,6 +1713,20 @@ describe("roleHeldBy", () => {
   test("another session's hold, and the 404 that names no holder, are neither of them this one's", () => {
     expect(roleHeldBy(answer("ses_other", "proc-one"), "ses_a", "proc-one")).toBe(false);
     expect(roleHeldBy(undefined, "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("a claim marked handed back is no hold, even of the session and process it names", () => {
+    expect(roleHeldBy(handedBack("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(false);
+    expect(roleHeldBy(handedBack("ses_a"), "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("an unmarked claim is still this one's, however the listener says it is unmarked", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(true);
+    expect(
+      roleHeldBy({ ...answer("ses_a", "proc-one"), handed_back: false }, "ses_a", "proc-one")
+    ).toBe(true);
+    // A listener predating the field sends none, which reads as no mark.
+    expect(Object.hasOwn(answer("ses_a", "proc-one"), "handed_back")).toBe(false);
   });
 });
 
