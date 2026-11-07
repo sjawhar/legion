@@ -1639,8 +1639,14 @@ test("IssuePage keeps version controls in the active Spec tab row", async () => 
     expect(within(toolbar).getByRole("button", { name: "Name version" })).not.toBeNull();
     expect(screen.queryByTestId("spec-document-toolbar")).toBeNull();
 
-    // Every other preset's own address: only the preset whose document is open has a toolbar.
-    for (const preset of ["Tree", "Decisions", "Checks", "Plan"] as const) {
+    // The Tree preset is the issue's own address, and the page draws the spec beside its tree
+    // there, so that document keeps its toolbar: the version picker, Name version and the
+    // approval are controls it has nowhere else (dispatch://INFRA-1196 R18). The three
+    // presets below draw no document of this issue at all, so their row carries no toolbar.
+    await openPreset("Tree");
+    const treeToolbar = await screen.findByTestId("issue-preset-toolbar");
+    expect(within(treeToolbar).getByRole("combobox", { name: "Version" })).not.toBeNull();
+    for (const preset of ["Decisions", "Checks", "Plan"] as const) {
       await openPreset(preset);
       expect(screen.queryByTestId("issue-preset-toolbar")).toBeNull();
       expect(screen.queryByRole("combobox", { name: "Version" })).toBeNull();

@@ -398,9 +398,21 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   // and the `?v=` the issue's own `/spec` address holds, which is the address a reference to a
   // version of the spec resolves to (R19, c-urls).
   const specVersion = address.preset === "spec" ? address.version : undefined;
+  // What the page draws beside the tree where the address names no document preset: the
+  // issue's own address opens the spec there (`refs/routes.ts`'s `issueTabForRoute`). The
+  // Decisions preset draws no document, and a node-menu address draws its own panel, which
+  // carries that document's controls itself.
+  const drawnBesideTree =
+    activeTab === "spec" && (artifactRoute === undefined || isPrimaryArtifactRoute)
+      ? primaryArtifact
+      : undefined;
   // Whose toolbar the preset row draws: the document the preset has open, and on the Tree and
   // Decisions presets, which draw nodes of every document, the focused node's own (R16). A
-  // focus on a node that belongs to no document leaves the row with no toolbar at all.
+  // focus on a node that belongs to no document falls back to the document the page is drawing
+  // beside the tree, because that document is open in front of the reader and its version
+  // picker, its name-a-version control and its approval are controls it has nowhere else
+  // (R18, c-nothing-lost); a preset that draws no document at all leaves the row with no
+  // toolbar.
   const openDocument =
     address.preset === "spec"
       ? primaryArtifact
@@ -408,7 +420,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         ? verificationArtifact
         : address.preset === "plan"
           ? planArtifact
-          : documentOfNode(focused.id, artifactsBySlug(issue.data))?.artifact;
+          : (documentOfNode(focused.id, artifactsBySlug(issue.data))?.artifact ?? drawnBesideTree);
   const openToolbar = openDocument === undefined ? undefined : toolbars.get(openDocument.id);
   const openVersion = openDocument?.id === primaryArtifact.id ? specVersion : undefined;
   // The item an address names (`?ask=`, `?comment=`) is handed to the spec's editor only where

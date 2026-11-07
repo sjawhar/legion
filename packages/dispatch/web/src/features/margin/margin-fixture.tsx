@@ -101,12 +101,19 @@ export const anchoredAsk: Ask = {
   urgency: "med",
 };
 
+/** A link to the comment, at the address the page resolves an anchored one to: its document,
+ *  with the comment named beside it. A comment's own route (`/issues/KEY/comments/<id>`) never
+ *  reaches the margin as a landing - the page redirects an anchored comment to this address
+ *  first (`features/issue/useItemLanding.ts`), and one no document holds lands on its turn in
+ *  the conversation instead (`useMarginSheet.ts`'s `routeItemBesideDocument`). */
 export function CommentLink(): ReactNode {
   const navigate = useNavigate();
 
   return (
     <button
-      onClick={() => navigate(buildIssuePath({ id: "comment-1", key: "CORE-1", kind: "comment" }))}
+      onClick={() =>
+        navigate(`${buildIssuePath({ key: "CORE-1", kind: "spec" })}?comment=comment-1`)
+      }
       type="button"
     >
       Open comment

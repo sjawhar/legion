@@ -146,7 +146,7 @@ export function IssueBody({
         artifacts={artifacts}
         context={view.context}
         emptyLine={EMPTY_STATE_LINES[address.preset]}
-        focusReveal={address.preset !== "spec" && targetKind !== "node"}
+        focusReveal={address.preset !== "spec" && targetKind !== "node" && targetKind !== "turn"}
         isClosed={isClosed}
         onEditing={onEditing}
         onReport={setReport}

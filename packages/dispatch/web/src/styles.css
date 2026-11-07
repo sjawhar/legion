@@ -70,11 +70,18 @@ a {
   html {
     scroll-padding-bottom: 5rem;
   }
-  button:not(.dispatch-inline-link),
-  a:not(.prose a):not(.dispatch-inline-link),
-  input:not([type="checkbox"]):not([type="radio"]),
-  select,
-  textarea {
+  /* `:not(.sr-only:not(:focus))`: a control the page hides from sight and keeps for the
+     keyboard - the shell's "Skip to content" - is no touch target while nothing can touch it.
+     The floor would give it a 44 px box one pixel off the top-left corner of the page, which
+     is a box no reader ever sees and reads as a control reachable only by scrolling sideways
+     (`e2e/page-inventory.ts`, c-nothing-lost at 390 px). It is written into the selector
+     rather than taken back by a rule below, because the floor's own `:not()`s already make it
+     the more specific of the two. Focus paints the control, and the floor applies again. */
+  button:not(.dispatch-inline-link):not(.sr-only:not(:focus)),
+  a:not(.prose a):not(.dispatch-inline-link):not(.sr-only:not(:focus)),
+  input:not([type="checkbox"]):not([type="radio"]):not(.sr-only:not(:focus)),
+  select:not(.sr-only:not(:focus)),
+  textarea:not(.sr-only:not(:focus)) {
     min-width: 44px;
     min-height: 44px;
   }

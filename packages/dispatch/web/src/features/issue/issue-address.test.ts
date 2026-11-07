@@ -56,6 +56,13 @@ test("the address says which preset it opens and which node it names", () => {
     id: "r3",
     kind: "block",
   });
+  // An ask or a comment a conversation address names by its own route is a turn, not an item
+  // beside a document: the conversation places the reader on it and the tree leaves the focus
+  // alone (`IssueBody`'s `focusReveal`).
+  expect(issueAddress({ id: "ask-9", key: "CORE-1", kind: "ask" }, "", "", false).target).toEqual({
+    id: "ask-9",
+    kind: "turn",
+  });
 });
 
 test("an item is found by its own id, and an ask by the address of the ask it was indexed from", () => {

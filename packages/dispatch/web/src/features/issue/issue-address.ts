@@ -22,8 +22,18 @@ import type { ConversationState, Preset } from "./page-words";
 export type AddressTarget =
   /** One block, by the block id a `#b-` fragment or a route's block target holds. */
   | { readonly kind: "block"; readonly id: string }
-  /** One ask, comment or message, by its own id. */
+  /** One ask, comment or message a preset's own address names beside it (`?ask=`, `?comment=`),
+   *  by its own id: the tree is what that address opens, and the item is a node of it. */
   | { readonly kind: "item"; readonly id: string }
+  /** One ask, comment or message a conversation address names by its own route
+   *  (`/asks/<id>`, `/comments/<id>`, `/messages/<id>`). It is the same node of the tree, and
+   *  the page unfolds the path to it as it does for any target; what differs is the landing.
+   *  That address opens the conversation (`refs/routes.ts`'s `issueTabForRoute`), which places
+   *  the reader on the entry's own turn and marks it `aria-current`, so the tree reveals its
+   *  row and leaves the focus alone: a row focused there scrolls the page back off that turn,
+   *  and on a phone it is what the comment's thread restores the focus to when the reader
+   *  closes it. */
+  | { readonly kind: "turn"; readonly id: string }
   /** One node by its own id inside the issue, which is how a document is named by its slug. */
   | { readonly kind: "node"; readonly id: string };
 
@@ -74,7 +84,7 @@ function pinnedVersion(search: string): number | undefined {
 /** The node `route` and `search` name, outside of a `#b-` fragment. */
 function routeTarget(route: IssueRoute): AddressTarget | undefined {
   if (route.kind === "ask" || route.kind === "comment" || route.kind === "message") {
-    return { id: route.id, kind: "item" };
+    return { id: route.id, kind: "turn" };
   }
   if (route.kind === "artifact") {
     const block = "block" in route ? route.block : undefined;

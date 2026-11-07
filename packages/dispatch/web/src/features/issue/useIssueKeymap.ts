@@ -86,6 +86,28 @@ const TAKES_FOCUS: Readonly<Record<keyof typeof PARTS, string | undefined>> = {
 const DRAWING_FRAMES = 20;
 
 /**
+ * How many frames a chord keeps what it showed on screen after it showed it. What a chord
+ * opens mounts over several commits and some of it places its own reader as it does: the
+ * conversation jumps to its newest card the commit its list first renders in
+ * (`conversation/use-follow-latest.ts`), and in the page's one panel that jump scrolls the
+ * same box the chord had just scrolled, leaving the control the chord left the focus on above
+ * the screen. The chord is the reader's own request and the later intent, so it is what
+ * stands - and only until the reader moves the focus off that control, which is them moving
+ * on.
+ */
+const SETTLING_FRAMES = 20;
+
+/** Shows `shown`, which is `found` where the whole part fits the screen and the control the
+ *  chord leaves the focus on where it does not. */
+function showPart(found: HTMLElement, takes: HTMLElement): HTMLElement {
+  const whole = found.getBoundingClientRect().height <= window.innerHeight;
+  const shown = whole ? found : takes;
+  shown.scrollIntoView({ block: whole ? "start" : "center" });
+  bringOnScreen(shown);
+  return shown;
+}
+
+/**
  * Brings the part of the page `part` names on screen and puts the focus in it, once the page
  * has drawn it: a chord navigates, and what it opens is on the page a frame or two later (R9,
  * c-keyboard, which reads both the box and the focus).
@@ -106,10 +128,22 @@ function reachPart(part: keyof typeof PARTS, left = DRAWING_FRAMES): void {
   // it in the middle of the screen rather than at the panel's own top, which is the one place
   // in that column the page's sticky identity block reaches across.
   takes.focus({ preventScroll: true });
-  const whole = found.getBoundingClientRect().height <= window.innerHeight;
-  const shown = whole ? found : takes;
-  shown.scrollIntoView({ block: whole ? "start" : "center" });
-  bringOnScreen(shown);
+  showPart(found, takes);
+  keepPartOnScreen(found, takes, SETTLING_FRAMES);
+}
+
+/** Shows the part again, for `left` frames, whenever what the chord showed has been scrolled
+ *  off the screen by the page drawing itself. The focus leaving the control the chord placed
+ *  ends it: from there the reader is moving by their own keys and the page follows them. */
+function keepPartOnScreen(found: HTMLElement, takes: HTMLElement, left: number): void {
+  if (left <= 0) return;
+  requestAnimationFrame(() => {
+    if (document.activeElement !== takes) return;
+    const whole = found.getBoundingClientRect().height <= window.innerHeight;
+    const box = (whole ? found : takes).getBoundingClientRect();
+    if (box.top < 0 || box.bottom > window.innerHeight) showPart(found, takes);
+    keepPartOnScreen(found, takes, left - 1);
+  });
 }
 
 /**

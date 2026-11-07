@@ -16,6 +16,9 @@ interface UseMarginListenersOptions {
   onSelectCard: (id: string, blockID?: string) => void;
   /** Whether the open document has reported where its blocks and marks sit. */
   placementsPublished: boolean;
+  /** Whether the item the address names is the margin's to land on, rather than a conversation
+   *  entry the conversation itself places the reader on (`useMarginSheet.ts`). */
+  routeItemBesideDocument: boolean;
   routeItemId: string | undefined;
   /** The link's request: a new navigation to the same item is a new one. */
   routeItemKey: string | undefined;
@@ -32,6 +35,7 @@ export function useMarginListeners({
   margin,
   onSelectCard,
   placementsPublished,
+  routeItemBesideDocument,
   routeItemId,
   routeItemKey,
   setHoveredItemId,
@@ -77,14 +81,17 @@ export function useMarginListeners({
     [focusItemId, focusSeq]
   );
   // A hold scrolls the margin's scrollport, and on the issue page that is the one scrollport
-  // the whole panel has - the margin's own cards and the issue's conversation together. With
-  // no document open beside the margin the address names a conversation rather than a passage
-  // of one, and the conversation's own list is what places the reader on it
-  // (`conversation/ConversationTab.tsx`); a hold here would scroll them off the turn the
-  // address named, onto the margin's own copy of the same item.
+  // the whole panel has - the margin's own cards and the issue's conversation together
+  // (dispatch://INFRA-1196 R12). So it holds only what the margin is the landing for: a
+  // passage of the document open beside it, named by a document address (`?ask=`, `?comment=`,
+  // a project document's own item) or focused as a mark. An ask or a comment the address names
+  // by its own route is a conversation entry no document holds - an anchored one never reaches
+  // this, it is redirected to that document's address first - and the conversation's own list
+  // places the reader on its turn; a hold here would scroll them off that turn and onto the
+  // margin's copy of the same item.
   const lands = visibleArtifact !== undefined;
   useCardHold({
-    card: lands ? routeCard : undefined,
+    card: lands && routeItemBesideDocument ? routeCard : undefined,
     composerOpen,
     margin,
     placed,

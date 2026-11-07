@@ -107,6 +107,16 @@ export function useMarginSheet(): MarginSheetModel {
   // reader is already on: following a link back to the card you moved off has to bring you back.
   // `useLocation().key` changes on a same-URL push, which an item id alone cannot see.
   const routeItemKey = routeItemId === undefined ? undefined : `${locationKey}:${routeItemId}`;
+  // Whether the item the address names is the margin's to land on. An ask or a comment named
+  // by its own route (`/issues/KEY/asks/<id>`) reaches this only when no document holds it:
+  // an anchored one is redirected to that document's address first
+  // (`features/issue/useItemLanding.ts`), and what is left lands on its own turn in the
+  // conversation (`features/conversation/ConversationTab.tsx`). On the issue page that
+  // conversation and the margin's own cards share one scrollport (dispatch://INFRA-1196 R12),
+  // so a hold here would scroll the reader off the turn the address named and onto the
+  // margin's copy of the same item. An item a document address names beside it (`?ask=`,
+  // `?comment=`, a project document's own item) is the margin's.
+  const routeItemBesideDocument = issueRoute?.kind !== "ask" && issueRoute?.kind !== "comment";
 
   // The URL names the selection until the reader makes one: the link's item is rendered selected
   // from the first commit, before the asynchronous selection effect has caught the shared margin
@@ -559,6 +569,7 @@ export function useMarginSheet(): MarginSheetModel {
     // page mounted, hidden, until the new page's code has arrived and its throttled reveal
     // commits - and its report would read a press there as the reader working a placed document.
     placementsPublished,
+    routeItemBesideDocument,
     routeItemId,
     routeItemKey,
     setHoveredItemId,

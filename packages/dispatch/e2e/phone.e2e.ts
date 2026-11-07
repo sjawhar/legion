@@ -683,6 +683,13 @@ test("an inline link keeps its line and grows its hit box without covering its n
     await navigateInApp(page, "/");
     const card = page.getByTestId(`ask-${bodyAsk.id}`);
     await expect(card.getByRole("link", { name: "Second choice" })).toBeVisible();
+    // The hit tests below read `document.elementFromPoint`, which answers for the screen and
+    // nothing below it, so the row places the card it is about rather than trusting where the
+    // Inbox opens - as it places the turn above. The issue page puts the window back at the
+    // top as it unmounts (`features/issue/IssuePage.tsx`), so this ask, the second card of
+    // the Inbox, opens below the fold and every point taken in it reads `null`.
+    await card.scrollIntoViewIfNeeded();
+    await expect(card).toBeInViewport();
 
     const measured = await page.evaluate(() => {
       const links = [...document.querySelectorAll("main a")];
