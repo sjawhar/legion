@@ -2080,6 +2080,14 @@ A `legion` of this release against a daemon of an earlier one, which serves no s
 What a contract bump never refreshes is the pod's own `legion` binary:
 the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement, which the update round makes ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
 
+A release that changes what a producer writes **into an envelope** is rolled plugins first, which the contract number above does not cover:
+that number holds a process to the daemon's API, while an envelope's reader is the session's own plugin, so a value this release's producers write reaches a session on whatever pair its pod installed.
+Pin the plugin pair this release publishes, let every role come onto it, and roll Dispatch after.
+The cost of the other order is a silent loss rather than a refusal, measured on INFRA-1225:
+a `@sjawhar/pi-envoy` from before it declares `expects_reply` as the three words `none`, `optional` and `required`, and its replay reads a stored frame against that strict schema, so a frame carrying the `false` a newer Dispatch writes fails the parse and is logged and settled as "not an Envoy envelope".
+A session on such a pair keeps every live delivery, whose card renderer reads the field leniently and simply drops it, and loses from its 72-hour replay window exactly the deliveries the new value marks:
+an answered ask, an approved artifact, and a plain comment mention.
+
 ### Configuration
 
 ```yaml
