@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
@@ -448,16 +449,7 @@ func putInterest(t *testing.T, kv natsgo.KeyValue, item Interest) {
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if condition() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for observable state")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, timeout, testwait.Poll, "observable state", condition)
 }
 
 // pollMatch retries Match() until the expected count is reached or timeout fires.

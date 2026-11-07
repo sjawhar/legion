@@ -10,6 +10,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // newTestRegistry is a registry with the given TTL built from a struct literal, as the cache's unit
@@ -75,13 +76,7 @@ func watchedDelete(key string, revision uint64) watchedEntry {
 // waitUntil polls condition until it holds, failing the test after five seconds.
 func waitUntil(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the registry's expiry")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, 5*time.Second, 5*time.Millisecond, "the registry's expiry", condition)
 }
 
 // waitForCacheSize waits, reading only CacheSize, until the cache holds want entries.

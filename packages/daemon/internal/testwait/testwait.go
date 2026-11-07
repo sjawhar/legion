@@ -46,14 +46,15 @@ func WithinPolling(t *testing.T, bound, poll time.Duration, what string, conditi
 // that keeps a failure text of its own, prints what it read when it gave up, or carries on
 // either way takes the answer rather than the test. The caller gives the pace as well, because
 // a question that costs something — a database read, a walk of /proc — or that is itself an
-// attempt must not be asked a hundred times a second; Poll is this package's own. The condition
-// is asked once more after the deadline, so one that came true during the last sleep is not
-// reported false.
+// attempt must not be asked a hundred times a second; Poll is this package's own.
 func Holds(bound, poll time.Duration, condition func() bool) bool {
-	return waitUntil(time.Now().Add(bound), poll, condition) || condition()
+	return waitUntil(time.Now().Add(bound), poll, condition)
 }
 
-// waitUntil asks condition every poll until it holds or deadline passes, reporting which.
+// waitUntil asks condition every poll until it holds or deadline passes, reporting which. It
+// asks once more after the deadline, so a condition that came true during the last sleep is not
+// reported false: the alternative loses a race against the thing it waits for, and the cost is
+// one more question on the path where the wait has already failed.
 func waitUntil(deadline time.Time, poll time.Duration, condition func() bool) bool {
 	for time.Now().Before(deadline) {
 		if condition() {
@@ -61,5 +62,5 @@ func waitUntil(deadline time.Time, poll time.Duration, condition func() bool) bo
 		}
 		time.Sleep(poll)
 	}
-	return false
+	return condition()
 }

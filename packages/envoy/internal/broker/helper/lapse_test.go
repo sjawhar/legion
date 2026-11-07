@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/goroutinetest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // lapseRig is a logged-in rig whose one session (this test process) enrolls and then has its
@@ -386,17 +387,18 @@ func registerWaitBlocked(t *testing.T, r *rig) <-chan registerAnswer {
 		resp, err := Call(r.sock, Request{Op: "register", WaitSeconds: 10}, 20*time.Second)
 		replies <- registerAnswer{resp, err}
 	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for !blockedInRegisterReply() {
+	if !testwait.Holds(10*time.Second, 10*time.Millisecond, func() bool {
+		if blockedInRegisterReply() {
+			return true
+		}
 		select {
 		case got := <-replies:
 			t.Fatalf("register --wait answered while the re-enrollment was still held: %+v (%v); it must wait for the lapsed session to enroll again", got.resp, got.err)
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the register call never started waiting on the session's ready channel")
-		}
-		time.Sleep(10 * time.Millisecond)
+		return false
+	}) {
+		t.Fatal("the register call never started waiting on the session's ready channel")
 	}
 	return replies
 }

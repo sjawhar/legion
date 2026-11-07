@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 func TestStartingGate_Closed_Returns503(t *testing.T) {
@@ -2637,12 +2638,7 @@ func durableHeldElsewhere(t *testing.T, uri, consumer string) (*bus.Client, *nat
 // timeout passes.
 func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
 	t.Helper()
-	for deadline := time.Now().Add(timeout); !cond(); {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", desc)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, timeout, 50*time.Millisecond, desc, cond)
 }
 
 // bindOutcome is what a bindListenerDurable run in a goroutine returned, and when.

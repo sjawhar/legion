@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // silentCutBound is how long after the cut the listener's client has to report it.
@@ -60,12 +61,9 @@ func freezeUntilTheClientReportsTheCut(t *testing.T, server *testnats.Server, li
 	t.Cleanup(thaw)
 	cut := time.Now()
 
-	for !disconnectedUnderName(output(), "envoy") {
-		if time.Since(cut) > silentCutBound {
-			t.Fatalf("no disconnect line for the listener's client %s into a silent cut:\n%s",
-				time.Since(cut).Round(time.Millisecond), output())
-		}
-		time.Sleep(50 * time.Millisecond)
+	if !testwait.Holds(silentCutBound, 50*time.Millisecond, func() bool { return disconnectedUnderName(output(), "envoy") }) {
+		t.Fatalf("no disconnect line for the listener's client %s into a silent cut:\n%s",
+			time.Since(cut).Round(time.Millisecond), output())
 	}
 	t.Logf("the listener's client reported the cut %s after it began", time.Since(cut).Round(time.Millisecond))
 	return thaw, output

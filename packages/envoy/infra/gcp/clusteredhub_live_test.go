@@ -38,6 +38,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // The tests in this file run what gcp:ClusteredNatsHub deploys on this machine, so they carry the
@@ -662,16 +663,14 @@ func (s *hubServer) count(text string) int { return strings.Count(s.proc.Output.
 func within(t *testing.T, timeout time.Duration, what string, check func() error) time.Duration {
 	t.Helper()
 	start := time.Now()
-	for {
-		err := check()
-		if err == nil {
-			return time.Since(start)
-		}
-		if time.Since(start) > timeout {
-			t.Fatalf("%s: not within %s: %v", what, timeout, err)
-		}
-		time.Sleep(100 * time.Millisecond)
+	var err error
+	if !testwait.Holds(timeout, 100*time.Millisecond, func() bool {
+		err = check()
+		return err == nil
+	}) {
+		t.Fatalf("%s: not within %s: %v", what, timeout, err)
 	}
+	return time.Since(start)
 }
 
 // stepDownStreamLeader asks the cluster to move stream's leadership to the server named preferred,

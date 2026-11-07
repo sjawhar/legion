@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/logtest"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // notServingAfter is the threshold every clock in this file records unless a test says otherwise:
@@ -530,13 +531,11 @@ func (r servingRig) beatsPast(t *testing.T, clock *ServingClock, want time.Time)
 		}
 		wait = min(wait, left-beatsPastMargin)
 	}
-	for deadline := time.Now().Add(wait); ; time.Sleep(10 * time.Millisecond) {
-		if last, _ := r.servingOf(t, clock); last.After(want) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the serving broker's last_serving_at did not pass %s within %s", want, wait)
-		}
+	if !testwait.Holds(wait, 10*time.Millisecond, func() bool {
+		last, _ := r.servingOf(t, clock)
+		return last.After(want)
+	}) {
+		t.Fatalf("the serving broker's last_serving_at did not pass %s within %s", want, wait)
 	}
 }
 

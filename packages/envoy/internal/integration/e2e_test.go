@@ -10,26 +10,12 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 func waitUntil(t *testing.T, timeout time.Duration, desc string, fn func() bool) {
 	t.Helper()
-	if fn() {
-		return
-	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	timeoutCh := time.After(timeout)
-	for {
-		select {
-		case <-timeoutCh:
-			t.Fatalf("timed out waiting for %s", desc)
-		case <-ticker.C:
-			if fn() {
-				return
-			}
-		}
-	}
+	testwait.WithinPolling(t, timeout, testwait.Poll, desc, fn)
 }
 
 func TestE2E_InterestReaperCleanup(t *testing.T) {

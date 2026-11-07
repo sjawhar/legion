@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // refusedLine is the exact line the broker logs for a refused secret: the deployment's alarm
@@ -383,12 +384,8 @@ func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
 
 func await(t *testing.T, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met within 5s")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !testwait.Holds(5*time.Second, 5*time.Millisecond, done) {
+		t.Fatal("condition not met within 5s")
 	}
 }
 

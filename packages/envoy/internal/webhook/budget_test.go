@@ -14,6 +14,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // A request that cannot get room holds nothing the budget has not charged: its next buffer is
@@ -453,11 +455,8 @@ func serveUnsigned(t *testing.T, handler http.Handler, bodies []*testBody, settl
 			codes[i] = rr.Code
 		}()
 	}
-	for deadline := time.Now().Add(10 * time.Second); entered.Load() != int64(len(bodies)); {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d requests entered the handler", entered.Load(), len(bodies))
-		}
-		time.Sleep(time.Millisecond)
+	if !testwait.Holds(10*time.Second, time.Millisecond, func() bool { return entered.Load() == int64(len(bodies)) }) {
+		t.Fatalf("only %d of %d requests entered the handler", entered.Load(), len(bodies))
 	}
 	time.Sleep(settle)
 	finished := make(chan struct{})

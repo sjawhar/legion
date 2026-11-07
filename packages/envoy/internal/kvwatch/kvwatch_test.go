@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // seen is a recording Cache that keeps a copy the way the stores do (kvwatch.Copy): each delivered
@@ -365,13 +366,7 @@ func waitingForTheApplyLock() bool {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, 5*time.Second, 20*time.Millisecond, what, cond)
 }
 
 // The cache is ready once the first watcher has delivered every existing key, and not before. Its
@@ -842,13 +837,7 @@ func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
 // eventuallyWithin is eventually with its own deadline, for a wait that spans a NATS restart.
 func eventuallyWithin(t *testing.T, within time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	testwait.WithinPolling(t, within, 20*time.Millisecond, what, cond)
 }
 
 // staleBound is the default stale bound, which these tests move the injected clock past.

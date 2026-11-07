@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // TestMain removes the NATS server the package's tests share (testnats.Main).
@@ -350,12 +351,8 @@ func awaitRuns(t *testing.T, ctx context.Context, pool *store.Pool, natsClient *
 // not the state it started from.
 func waitFor(t *testing.T, within time.Duration, done func() bool, failure func() string) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatal(failure())
-		}
-		time.Sleep(50 * time.Millisecond)
+	if !testwait.Holds(within, 50*time.Millisecond, done) {
+		t.Fatal(failure())
 	}
 }
 

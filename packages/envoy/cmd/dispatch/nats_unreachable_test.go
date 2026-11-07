@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testwait"
 )
 
 // natsDownCommit is the commit the process started while NATS is down is stamped with, which its
@@ -188,12 +189,8 @@ func (p *dispatchProcess) waitForHealth(t *testing.T, within time.Duration, what
 // waitUntil polls done until it holds, failing the test once within has passed.
 func waitUntil(t *testing.T, within time.Duration, what string, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %v waiting for %s", within, what)
-		}
-		time.Sleep(200 * time.Millisecond)
+	if !testwait.Holds(within, 200*time.Millisecond, done) {
+		t.Fatalf("timed out after %v waiting for %s", within, what)
 	}
 }
 
