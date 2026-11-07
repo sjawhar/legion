@@ -730,15 +730,11 @@ func (b *lockedBuffer) tail() string {
 // len is how much the server has written, and from everything it wrote past offset: what one
 // measured window logged (peakAboveIdle), which tail's last 4,000 bytes do not answer for.
 func (b *lockedBuffer) len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buffer.Len()
+	return b.Len()
 }
 
 func (b *lockedBuffer) from(offset int) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	output := b.buffer.String()
+	output := b.String()
 	if offset >= len(output) {
 		return ""
 	}

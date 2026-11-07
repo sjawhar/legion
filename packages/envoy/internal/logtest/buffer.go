@@ -29,6 +29,14 @@ func (b *Buffer) String() string {
 	return b.written.String()
 }
 
+// Len is how many bytes have been written so far, for a reader that measures the log or marks a
+// place in it rather than reading it whole.
+func (b *Buffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.written.Len()
+}
+
 // Lines is the logged lines that hold substring.
 func (b *Buffer) Lines(substring string) string {
 	var matched strings.Builder
