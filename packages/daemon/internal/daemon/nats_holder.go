@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -33,16 +32,16 @@ type natsHolder struct {
 	// rebuild holds it from before it opens its consumers to after the swap; rebuild says why,
 	// and what that hold costs every other settings change.
 	holdMapping sync.Locker
-	// hearing works out the repositories the new consumers are to hear, on the transaction the
-	// handover is serialized on and for the renames of the configuration being built from
-	// (workflowRuntime.natsHearing). The rebuild asks it inside the hold rather than copying
-	// what the consumers it replaces hear; rebuild says why.
-	hearing func(ctx context.Context, tx pgx.Tx, renames ghrepo.Renames) ([]ghrepo.Repository, error)
-	// serialize runs what it is handed under one hold of the lock every fact applies under
-	// (intake.SerializeFacts), on that hold's own transaction, which a mapping read takes across
-	// its own SetRepositories (refreshMapping); rebuild says why.
-	serialize func(func(ctx context.Context, tx pgx.Tx) error) error
-	log       *slog.Logger
+	// handover hands the consumers this rebuild opened the repositories they are to hear and
+	// swaps them in, under one hold of the lock every fact applies under
+	// (workflowRuntime.natsHandover, intake.SerializeFacts): it works out what those consumers
+	// are to hear for the renames it is handed — the renames of the configuration being built
+	// from — hands it to them, and calls swap, this holder's own swap of its connection, its
+	// consumers and its generation, before the hold is let go. A mapping read holds that same
+	// lock across its own SetRepositories (refreshMapping); rebuild says why the three are one
+	// hold. A handover that returns an error has not called swap, so nothing was swapped.
+	handover func(consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error
+	log      *slog.Logger
 
 	mu         sync.Mutex
 	conn       *nats.Conn
@@ -59,13 +58,12 @@ type natsHolder struct {
 func newNATSHolder(conn *nats.Conn, consumers *intake.Consumers, log *slog.Logger,
 	open func(cfg config.Config) (*nats.Conn, *intake.Consumers, error),
 	holdMapping sync.Locker,
-	hearing func(ctx context.Context, tx pgx.Tx, renames ghrepo.Renames) ([]ghrepo.Repository, error),
-	serialize func(func(ctx context.Context, tx pgx.Tx) error) error,
+	handover func(consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error,
 ) *natsHolder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &natsHolder{open: open, holdMapping: holdMapping, hearing: hearing, serialize: serialize, log: log, conn: conn, consumers: consumers}
+	return &natsHolder{open: open, holdMapping: holdMapping, handover: handover, log: log, conn: conn, consumers: consumers}
 }
 
 func (h *natsHolder) holder() string { return config.HolderNATS }
@@ -118,24 +116,25 @@ func (h *natsHolder) rebuilt(generation uint64) bool {
 //
 // The connection and its consumers are opened under no fact lock (open), because that is the
 // network work: a dial, a reconnect and four consumer opens, which every fact would wait behind
-// were they held under it. What is held under the fact lock (serialize) is the handover alone:
-// the repositories the new consumers are to hear are worked out there (hearing) and set on them
-// there, and the swap happens before the hold is let go, so a mapping read that lands between
-// the two waits and then sets its repositories on the consumers this rebuild swapped in
-// (refreshMapping's SetRepositories). Nothing after the swap can fail, so a rebuild that swapped
-// never reports a failure the rebuilder would log as "the daemon keeps the one it has" — which
-// would leave the holder's digest unrecorded and rebuild NATS again at the next reread.
+// were they held under it. What is held under the fact lock is the handover alone (handover,
+// workflowRuntime.natsHandover): the repositories the new consumers are to hear are worked out
+// there and set on them there, and the swap this rebuild hands it runs before the hold is let
+// go, so a mapping read that lands between the two waits and then sets its repositories on the
+// consumers this rebuild swapped in (refreshMapping's SetRepositories). Nothing after the swap
+// can fail, so a rebuild that swapped never reports a failure the rebuilder would log as "the
+// daemon keeps the one it has" — which would leave the holder's digest unrecorded and rebuild
+// NATS again at the next reread.
 //
 // What those consumers hear is worked out again from the daemon's state and from the
-// configuration this rebuild is building from (hearing, workflowRuntime.natsHearing); it is not
+// configuration this rebuild is building from (handover, workflowRuntime.natsHearing); it is not
 // copied from the consumers being replaced alone. A `repository_renames` change rebuilds this
 // holder (config.Classes' row), and the set the last mapping read left was worked out under the
 // renames before it, so a copy would leave the new pair's partner off the GitHub durable's
 // FilterSubjects: the merges, check runs and reviews GitHub publishes under the name the
 // repository moved to would reach nothing, and nothing redelivers them, until some unrelated
-// thing read the mapping again. Working it out here costs one read of the project's records on
-// the transaction the handover already holds, and no read of Dispatch or GitHub: the renames
-// are the configuration's, and what the mapping serves is already in memory.
+// thing read the mapping again. Working it out here costs one read of the project's records in
+// the hold the handover already has, and no read of Dispatch or GitHub: the renames are the
+// configuration's, and what the mapping serves is already in memory.
 //
 // The open and the handover are held under the mapping's own lock (holdMapping), from before the
 // consumers are opened to after the swap. Opening them is an UpdateConsumer on the very GitHub
@@ -169,20 +168,12 @@ func (h *natsHolder) rebuild(cfg *config.Config) error {
 	var old *nats.Conn
 	var cancel context.CancelFunc
 	var settled chan struct{}
-	err = h.serialize(func(ctx context.Context, tx pgx.Tx) error {
-		heard, err := h.hearing(ctx, tx, cfg.RepositoryRenames)
-		if err != nil {
-			return fmt.Errorf("work out the repositories the rebuilt consumers are to hear: %w", err)
-		}
-		if err := consumers.SetRepositories(ctx, heard); err != nil {
-			return fmt.Errorf("hand the rebuilt consumers the repositories this daemon hears: %w", err)
-		}
+	err = h.handover(consumers, cfg.RepositoryRenames, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		old, cancel, settled = h.conn, h.cancelRun, h.settled
 		h.conn, h.consumers, h.generation = conn, consumers, h.generation+1
 		h.cancelRun, h.settled = nil, nil
-		return nil
 	})
 	h.holdMapping.Unlock()
 	if err != nil {

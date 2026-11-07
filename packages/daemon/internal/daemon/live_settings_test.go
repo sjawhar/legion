@@ -366,11 +366,12 @@ func TestAChangedNatsSeedRebuildsTheNatsClient(t *testing.T) {
 	// The daemon's own open reads what the consumers hear as the rebuild starts
 	// (workflowRuntime.connect); this one, whose consumers hear the boot's set and whose
 	// rebuild is what the test is about, opens with it. The open and the swap run under the
-	// mapping's own lock, the handover under the lock every fact applies under, and what the
-	// rebuilt consumers hear is worked out there (natsHearing), all the daemon's own.
-	w.nats = newNATSHolder(conn, consumers, w.log, open, &w.mappingMu, w.natsHearing,
-		func(held func(context.Context, pgx.Tx) error) error {
-			return w.serializeFacts(t.Context(), held)
+	// mapping's own lock, and the handover — what the rebuilt consumers are to hear, worked out
+	// and handed to them, and the swap — under the lock every fact applies under
+	// (natsHandover), all the daemon's own.
+	w.nats = newNATSHolder(conn, consumers, w.log, open, &w.mappingMu,
+		func(consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error {
+			return w.natsHandover(t.Context(), consumers, renames, swap)
 		})
 	rebuild.register(w.nats)
 	t.Cleanup(w.stop)

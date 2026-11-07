@@ -471,15 +471,15 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	// A rebuild's connection is opened with the set the consumers hear as it starts, and the
 	// consumers it opened are handed, at the swap, the set the daemon is to hear then: worked
 	// out again from the mapping, the records and the renames the rebuild's own configuration
-	// carries (natsHearing), under one hold of the lock every fact applies under (serialize,
-	// intake.SerializeFacts) and under the lock a mapping read is made under (mappingMu).
-	// natsHolder.rebuild is where both holds are explained, and what they cost.
+	// carries (natsHandover, natsHearing), under one hold of the lock every fact applies under
+	// (serializeFacts, intake.SerializeFacts) and under the lock a mapping read is made under
+	// (mappingMu). natsHolder.rebuild is where both holds are explained, and what they cost.
 	rebuildOpen := func(c config.Config) (*nats.Conn, *intake.Consumers, error) {
 		return open(c, w.nats.intake().Repositories())
 	}
-	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, &w.mappingMu, w.natsHearing,
-		func(held func(ctx context.Context, tx pgx.Tx) error) error {
-			return w.serializeFacts(ctx, held)
+	w.nats = newNATSHolder(conn, consumers, w.log, rebuildOpen, &w.mappingMu,
+		func(consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error {
+			return w.natsHandover(ctx, consumers, renames, swap)
 		})
 	// The mapping is registered before the consumers, and that order is this daemon's answer to
 	// a mapping read that would narrow the GitHub durable's filter with renames older than the
@@ -500,13 +500,37 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, rebuil
 	return nil
 }
 
+// natsHandover is the handover of a NATS rebuild (natsHolder.rebuild): under one hold of the
+// lock every fact applies under (serializeFacts, intake.SerializeFacts) it works out, on that
+// hold's own transaction and for renames — the renames of the configuration the rebuild is
+// building from (natsHearing) — what the consumers that rebuild opened are to hear, hands it to
+// them, and calls swap, the holder's own swap of its connection, its consumers and its
+// generation. Holding all three is what keeps a mapping read, which takes that same lock across
+// its own SetRepositories (refreshMapping), from setting its repositories on the consumers the
+// rebuild is replacing; natsHolder.rebuild says what that hold costs. Nothing after the set can
+// fail, so a handover that returns an error never reached swap and the holder serves what it
+// served before.
+func (w *workflowRuntime) natsHandover(ctx context.Context, consumers *intake.Consumers, renames ghrepo.Renames, swap func()) error {
+	return w.serializeFacts(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		heard, err := w.natsHearing(ctx, tx, renames)
+		if err != nil {
+			return fmt.Errorf("work out the repositories the rebuilt consumers are to hear: %w", err)
+		}
+		if err := consumers.SetRepositories(ctx, heard); err != nil {
+			return fmt.Errorf("hand the rebuilt consumers the repositories this daemon hears: %w", err)
+		}
+		swap()
+		return nil
+	})
+}
+
 // serializeFacts runs held under one hold of the lock every fact applies under
 // (intake.SerializeFacts), in a transaction of its own that writes nothing and is rolled back:
 // pg_advisory_xact_lock is held for the transaction's life and let go by a rollback as by a
 // commit, so what held did has no commit behind it that could fail once it has happened. held is
-// handed that transaction, so what it reads of the record it reads under the hold: the NATS
-// holder's rebuild works out there what its consumers are to hear, hands it to them and swaps
-// (natsHolder.rebuild), and a swap reported as a failure would leave the rebuilder logging a
+// handed that transaction, so what it reads of the record it reads under the hold: a NATS
+// rebuild's handover works out there what its consumers are to hear, hands it to them and swaps
+// (natsHandover), and a swap reported as a failure would leave the rebuilder logging a
 // rebuild that happened as one that did not.
 func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := w.pool.Begin(ctx)
