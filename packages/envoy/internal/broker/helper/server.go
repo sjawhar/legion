@@ -419,19 +419,23 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 	return Response{}, false
 }
 
-// registerReply answers a register, first waiting up to wait for the session to enroll. Without a
-// launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
-// not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
-// logged in, or whose credential the broker has refused or that reached its expiry. A credential
-// the broker revoked early, or one an older broker named no expiry for, stays held until a call is
-// refused, so the first register after that still waits the full N. A
-// session the helper cannot enroll for want of a credential gets Code NO_CREDENTIAL and that reason
-// in Error, so a launcher can say what the session will do. The credential is read once, before
-// the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
-// exactly when the wait was skipped for want of a credential, whatever a login or a refusal
-// changed meanwhile. A session whose enrollment lapsed waits for its re-enrollment, since a lapse
-// reopens its ready channel (markLapsed). The reply's id, state and error come from one snapshot,
-// so a lapse landing after the wait cannot give it an id from before and a state from after.
+// registerReply answers a register, first waiting up to wait for the session to enroll. The wait
+// is taken when the caller asked for one and either the helper holds a launcher credential or the
+// session holds an enrollment inherited from a record that no confirmation has accepted yet. Such
+// an enrollment is confirmed by a renew signed with the session's own key alone
+// (Broker.renewIdentity), which needs no launcher credential, so a session that comes back for a
+// parked identity reaches enrolled on a helper nobody logged in — and a caller that asked to wait
+// must be given that answer rather than the snapshot from before it. A credential the broker
+// revoked early, or one an older broker named no expiry for, stays held until a call is refused,
+// so the first register after that still waits the full N. A session the helper cannot
+// enroll for want of a credential gets Code NO_CREDENTIAL and that reason in Error, so a launcher
+// can say what the session will do. Both the credential and the identity are read once, before
+// the wait, and that one credential reading decides NO_CREDENTIAL, whatever a login or a refusal
+// changed meanwhile; it no longer says the wait was skipped, since a session confirming an
+// inherited enrollment waits with no credential held. A session whose enrollment lapsed waits for
+// its re-enrollment, since a lapse reopens its ready channel (markLapsed). The reply's id, state
+// and error come from one snapshot, so a lapse landing after the wait cannot give it an id from
+// before and a state from after.
 //
 // The wait ends early when the session is retired (its stop closes), and a retire can also land
 // just as the wait runs out, so the reply is built only after a last membership check: a session
@@ -439,7 +443,9 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // has.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
-	if wait > 0 && credential {
+	held := sess.identity()
+	inherited := held.EnrollmentID != "" && !held.Confirmed
+	if wait > 0 && (credential || inherited) {
 		select {
 		case <-sess.readyCh():
 		case <-time.After(wait):

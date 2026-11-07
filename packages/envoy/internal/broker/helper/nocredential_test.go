@@ -294,3 +294,47 @@ func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 	}
 	expect("after the broker refused the credential", CodeNoCredential)
 }
+
+// TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential: a renew of an inherited enrollment
+// is signed by the session's own key alone, so a session that comes back for a parked identity
+// still becomes enrolled on a helper holding no launcher credential. A caller that asked to wait
+// must be given that answer, not the snapshot from before it: a register that does not wait here
+// answers NO_CREDENTIAL and `agent-secrets register --wait N` exits 1 for a session the broker
+// confirms milliseconds later. The fake holds the confirming renew at its renew gate until the
+// waiting call is blocked in registerReply, so what the row reads is its own ordering and not how
+// fast the host is.
+func TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	key := parkedRecord(t, state)
+	r := newRig(t, state) // never logged in: the helper holds no launcher credential
+	// The peer is pinned by pid rather than read off the socket, as
+	// TestAReclaimedIdentityKeepsItsEnrollmentID's comment explains: a kernel without
+	// SO_PEERPIDFD identifies no peer at all, and what is under test is the register's reply.
+	r.callerPID.Store(int64(os.Getpid()))
+	gate, release := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.renewGate = gate
+	r.fake.mu.Unlock()
+	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+
+	// The register that admits the session and starts its enroll loop, whose renew is then held
+	// at the gate. With no wait asked for it answers at once, on the identity as it stands.
+	id := testSessionID
+	first := r.call(t, Request{Op: "register", SessionID: &id})
+	if first.Code != CodeNoCredential || first.State == "enrolled" {
+		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL and a state that is not enrolled", first)
+	}
+
+	// The same session again, this time asking to wait: it must wait for the confirmation the
+	// gate holds, which is what the old `wait > 0 && credential` condition would not do.
+	replies := registerWaitBlocked(t, r, Request{Op: "register", WaitSeconds: 10, SessionID: &id})
+	release()
+	select {
+	case got := <-replies:
+		if got.err != nil || !got.resp.OK || got.resp.Code != "" || got.resp.State != "enrolled" || got.resp.EnrollmentID != "enr-before" {
+			t.Fatalf("register --wait after the confirmation: %+v (%v); want OK, enrolled, enr-before and no code", got.resp, got.err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("register --wait never answered after the confirming renew was released")
+	}
+}
