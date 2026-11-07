@@ -272,7 +272,6 @@ func (d *pilotDispatch) EventsAfter(context.Context, string, int64) ([]json.RawM
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *pilotDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *pilotDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
@@ -323,7 +322,6 @@ func (d *filteringDispatch) EventsAfter(context.Context, string, int64) ([]json.
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
-func (d *filteringDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *filteringDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }

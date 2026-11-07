@@ -192,8 +192,6 @@ func (r *statusRecorder) Handoff(_ context.Context, id string) (dispatch.Handoff
 	return handoff, nil
 }
 
-func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }
-
 func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

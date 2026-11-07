@@ -1,10 +1,10 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory } from "../dispatch-http";
+
+afterAll(removeTemporaryDirectories);
 
 // `dispatch inbox` against a stub Dispatch: the three routes the Inbox page reads, answered as the
 // server answers them, so the test pins the lines the command prints rather than the renderer's
@@ -154,7 +154,7 @@ beforeEach(() => {
   whoamiAnswer = LISTED;
   inboxAnswer = LISTED;
   pendingAnswer = LISTED;
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-inbox-"));
+  stateDir = temporaryDirectory("dispatch-inbox-");
   resetAdviceMemory();
   forgetKeyedLayerMemory();
 });

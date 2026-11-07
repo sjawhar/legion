@@ -8,9 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,9 +128,17 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
-	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
-	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
-	GitHubOwners func() []string
+	// GitHubRepositories are the project's repositories as the daemon serves them
+	// (daemon's repositories.Accepted): the controller's gh bundle holds a read-only token per
+	// owner of them, each narrowed to that owner's repositories (appauth.ControllerCredential).
+	GitHubRepositories func() []ghrepo.Repository
+	// Serving is the repository GitHub holds a recorded one under now, which every GitHub call
+	// this server makes is minted for and addressed to (serving): the daemon's one rule
+	// (daemon's repositories.serving, which the Sandbox runtime's own token source is handed
+	// too), so the mapping and the configured renames are read in one place and no caller here
+	// writes a second copy of it. Nil serves a recorded repository under its own name, which a
+	// test that configures no rename and a daemon with no GitHub Apps both want.
+	Serving func(recorded ghrepo.Repository) ghrepo.Repository
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -246,8 +252,7 @@ type HeldSettings struct {
 	// RepositoryRenames is the deployment's repository equivalence (`repository_renames`): the
 	// rule that says which owner's installation holds a repository recorded under the name a
 	// transfer moved it away from, which the controller's gh bundle reads
-	// (appauth.GitHubCredential) and serving reads for the server's own GitHub calls. The zero
-	// value configures none.
+	// (appauth.ControllerCredential). The zero value configures none.
 	RepositoryRenames ghrepo.Renames
 	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
 	MergeRules func(project string) config.MergeRules
@@ -315,13 +320,17 @@ type server struct {
 	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu sync.Mutex
-	tokens       appauth.Tokens
-	githubOwners func() []string
-	githubAPI    string
-	grants       *credential.Grants
-	releaser     store.TreeReleaser
-	trees        TreeLifecycles
+	controllerMu       sync.Mutex
+	tokens             appauth.Tokens
+	githubRepositories func() []ghrepo.Repository
+	// serving is Options.Serving, the daemon's one rule for the repository GitHub holds a
+	// recorded one under now, never nil here: NewServer serves a recorded repository under its
+	// own name where the caller hands none.
+	serving   func(recorded ghrepo.Repository) ghrepo.Repository
+	githubAPI string
+	grants    *credential.Grants
+	releaser  store.TreeReleaser
+	trees     TreeLifecycles
 	// memory, coin and now are Options.Memory, Options.MemoryCoin and Options.Now: what the
 	// spawn's own draw of a tree it opens for the first time reads (drawMemory).
 	memory     config.Memory
@@ -363,6 +372,10 @@ type server struct {
 // secret its registration was issued; and the operator's spawn surface, authenticated by the
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
+	serving := opts.Serving
+	if serving == nil {
+		serving = func(recorded ghrepo.Repository) ghrepo.Repository { return recorded }
+	}
 	s := &server{
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
@@ -380,7 +393,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
-		githubOwners:       opts.GitHubOwners,
+		githubRepositories: opts.GitHubRepositories,
+		serving:            serving,
 		githubAPI:          opts.GitHubAPI,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
@@ -513,25 +527,6 @@ func (s *server) mergeRulesOf(project string) config.MergeRules {
 func (s *server) operatorBearer(given string, carried bool) bool {
 	current := s.settings.load()
 	return current.operatorSet && carried && secureBearerEqual(current.operatorHash, given)
-}
-
-// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
-// other name of its configured pair when the project's owners make that name's owner the one
-// whose installation holds it, and the recorded repository itself otherwise. It is the daemon's
-// one rule, read here over the owners this server already holds (Options.GitHubOwners) rather
-// than written a second time.
-func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	return s.renames().Serving(recorded, s.ownsOwner)
-}
-
-// ownsOwner is whether owner is an owner of the project's repositories, compared without case as
-// GitHub compares owners. A server built with no owners — a test's, a daemon with no GitHub Apps
-// — owns none.
-func (s *server) ownsOwner(owner string) bool {
-	if s.githubOwners == nil {
-		return false
-	}
-	return slices.ContainsFunc(s.githubOwners(), func(o string) bool { return strings.EqualFold(o, owner) })
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
@@ -753,7 +748,7 @@ const wakesWaitingContract = 53
 // version.go: a plugin before it reads the state with a strict schema that knows none of the
 // three — every schema of `packages/contracts/src/legion-api.ts` was strict until INFRA-1048 —
 // and refuses the whole body for one of them.
-const settingSourcesContract = 54
+const settingSourcesContract = 55
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

@@ -622,7 +622,36 @@ package api
 // main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
 // number again at the next merge rather than from this line.)
 //
-// 54: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
+// 54: INFRA-809 -- the project decides whether a merge that closes an issue opens a production
+// check and who works it (`projects.<KEY>.production_check`, `off` or `tester`), and the checking
+// agent names its own next look. `api.CheckView` gains `role`, the role the check records as the
+// one that works it, always emitted; its `nextWakeAt` is now the time the **next look** is due —
+// the moment the checking agent named for itself on a pending report, the retry of a look nobody
+// reported, or the check's own bound where neither stands — where before it was always the bound.
+// The bound needs no field of its own: `nextWakeAt` is the bound whenever no agent's time is set,
+// `openedAt` is on the view and `production_check_hours` is in the settings body.
+// `api.HandoffCompleteRequest` gains `wakeAt`, which a pending check report on a look that is not
+// the check's last must carry and no other report may (`CHECK_WAKE_REQUIRED`,
+// `CHECK_WAKE_UNEXPECTED`, which the daemon also answers a phase completion that carries one),
+// and a report by a role the check does not record is refused (`CHECK_ROLE_MISMATCH`). Which of
+// the two a `handoff_complete` is, is the caller's own live assignment: a session whose task is a
+// look of its issue's production check reports on that look, and every other session's completion
+// is its phase's. A completion of a `done` issue, which runs no phase, from a session working no
+// look is neither, and is refused `CHECK_LOOK_NOT_SERVED` rather than being read as a phase
+// completion missing its commit. The settings body loses its `projects.<KEY>.deploys` block, with every
+// path by which the daemon guessed that production carried a merge; a plugin reads the settings
+// loosely, so that loss alone changes no strictly parsed shape. A plugin below this contract has
+// a strict reader that refuses a state whose check views carry `role`, and its `handoff_complete`
+// sends no `wakeAt`, which this daemon requires of a pending report, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 50 while main stood at 49;
+// sjawhar/legion#2731, dispatch://INFRA-1077, holds 50 on its own branch, and main has since
+// landed the admission cap at 51, the pane issue key at 52 (sjawhar/legion#2839) and INFRA-976's
+// wake pacing at 53 (sjawhar/legion#2805, merged as d43e0fe9 just before this one), so this
+// branch takes the number above them all, as the collision note says. main held 53 at the
+// forward merge that renumbered this entry, d43e0fe9bbb1; read main's own number again at the
+// next merge rather than from this line.)
+//
+// 55: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
 // commit ships (`packages/contracts/src/legion-api.ts` mirrors all three), so a plugin built
 // from here refuses a state an older daemon sends. The `daemon` block names the commit the
 // daemon was built from (`commit`, the release build's own revision, empty in a build that is
@@ -635,7 +664,7 @@ package api
 // ones `settings` withholds among them, so a rotated credential is visible without the
 // credential. `settings` itself is untouched, and stays the loose object it was. `GET
 // /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a contract
-// below 54 is served the state without all three (api's stateFor, withoutSettingSources), as a
+// below 55 is served the state without all three (api's stateFor, withoutSettingSources), as a
 // caller below 53 is served it without the waiting wakes, one below 51 without the admission
 // trees, one below 49 without the memory group and one below 46 without the claim views' update
 // rounds: every schema of `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so
@@ -644,7 +673,8 @@ package api
 // branch took 50; main then landed INFRA-980's admission cap at 51, without these shapes, so
 // this branch took 52; main then landed INFRA-1307's commit trailer at 52, again without these
 // shapes, so this branch took 53; main then landed INFRA-976's wake pacing at 53, again without
-// these shapes, so this branch takes the number above it, as the collision note says. main held
-// 53 at the forward merge that renumbered this entry, e9a6367b88ce; read main's own number again
-// at the next merge rather than from this line.)
-const DaemonAPIVersion = 54
+// these shapes, so this branch took 54; main then landed INFRA-809's production checks at 54,
+// again without these shapes, so this branch takes the number above it, as the collision note
+// says. main held 54 at the forward merge that renumbered this entry, fe85b8289aab; read main's
+// own number again at the next merge rather than from this line.)
+const DaemonAPIVersion = 55

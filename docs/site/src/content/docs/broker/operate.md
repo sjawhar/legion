@@ -848,6 +848,17 @@ few sweeps of the roll finishing. A roll of a four-pod fleet counts five, which 
 sizing was chosen for, and each pod logs the warning above once, when its count first goes above
 four.
 
+**A roll serves two generations of the broker on one database, so a schema change that one of
+them cannot read is staged over two releases.** The per-pod machine login is the current one.
+This release's migration adds the two indexes it needs and drops none, so the pods still running
+the previous image go on serving every token login and every machine token exchange through the
+index they resolve their own statement against; nothing has to be ordered or held, and a roll of
+this release is an ordinary roll. The release after it drops that index, and the per-pod login —
+a launcher credential for each pod of a ServiceAccount rather than one for the account — begins
+there. Each broker reads which of the two schemas it is on at every token login, so an image
+from either release serves either schema: a roll forward and a roll back both work, and a pod of
+this release goes on serving while the next release's pod migrates the database beneath it.
+
 **Before you roll a broker, read the lease refusal.** A broker whose `BROKER_LEASE_SECONDS` is
 too short for its `BROKER_SWEEP_SECONDS` exits at boot instead of serving, and that rule is
 stricter than it was: it walks each renewer's own retry schedule rather than counting two thirds

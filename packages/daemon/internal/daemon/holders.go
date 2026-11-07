@@ -396,10 +396,6 @@ func (h *dispatchHolder) Handoff(ctx context.Context, id string) (dispatch.Hando
 	return h.get().Handoff(ctx, id)
 }
 
-func (h *dispatchHolder) BuildCommit(ctx context.Context) (string, error) {
-	return h.get().BuildCommit(ctx)
-}
-
 func (h *dispatchHolder) ListRepoProjects(ctx context.Context) ([]dispatch.RepoProject, error) {
 	return h.get().ListRepoProjects(ctx)
 }
@@ -518,12 +514,12 @@ func (h *appsHolder) Close() { closeTokens(h.get()) }
 
 func (h *appsHolder) get() appauth.Tokens { return *h.current.Load() }
 
-func (h *appsHolder) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return h.get().Token(ctx, role, owner)
+func (h *appsHolder) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return h.get().Token(ctx, role, repo)
 }
 
-func (h *appsHolder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return h.get().ReadToken(ctx, role, owner)
+func (h *appsHolder) ReadToken(ctx context.Context, role appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	return h.get().ReadToken(ctx, role, owner, repos)
 }
 
 func (h *appsHolder) InstalledOn(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {

@@ -838,14 +838,17 @@ func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 
 // The gate runs under the environment a pane gets from the daemon's own (HOME and OMP_PROFILE here)
 // before the daemon boots: a refusal records no boot, and a daemon stopped while the gate waits
-// stops cleanly, having served nothing.
+// stops cleanly, having served nothing. The plugin is held to this daemon's own number, so the
+// contract below it — the one the previous release pins — is refused like any other.
 func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 	// The daemon holds the plugin to its own DaemonAPIVersion.
 	thisDaemons := `{"daemonApiVersion":` + strconv.Itoa(api.DaemonAPIVersion) + `}`
+	previous := strconv.Itoa(api.DaemonAPIVersion - 1)
 	for _, testCase := range []struct {
 		name, legion, step, want string
 	}{
 		{"another contract", `{"daemonApiVersion":1}`, "yes", "speaks daemon API contract 1"},
+		{"the contract below this one", `{"daemonApiVersion":` + previous + `}`, "yes", "speaks daemon API contract " + previous},
 		{"not loaded", thisDaemons, "no", "is installed but not loaded by omp"},
 		{"stopped while the probe runs", thisDaemons, "hang", ""},
 	} {

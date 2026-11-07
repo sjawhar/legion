@@ -71,6 +71,7 @@
         "pullRequest": 1239,
         "mergeCommit": "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
         "openedAt": "2026-09-22T08:40:12Z",
+        "role": "implementer",
         "looks": 2,
         "lookOpen": true,
         "lastWake": {
@@ -585,16 +586,10 @@
           "C0123ABCD",
           "C0123ABCE"
         ],
-        "deploys": [
-          {
-            "repo": "sjawhar/legion",
-            "workflow": ".github/workflows/release.yaml",
-            "step": "Apply"
-          }
-        ],
         "memory": {
           "config_files": []
-        }
+        },
+        "production_check": "tester"
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -605,10 +600,10 @@
           ]
         },
         "slack_channels": [],
-        "deploys": [],
         "memory": {
           "config_files": []
-        }
+        },
+        "production_check": "off"
       }
     },
     "gates": {
@@ -832,22 +827,6 @@
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
-    "projects.\u003cKEY\u003e.deploys": {
-      "source": "file",
-      "at": "2026-09-22T09:15:02Z"
-    },
-    "projects.\u003cKEY\u003e.deploys[].repo": {
-      "source": "file",
-      "at": "2026-09-22T09:15:02Z"
-    },
-    "projects.\u003cKEY\u003e.deploys[].step": {
-      "source": "file",
-      "at": "2026-09-22T09:15:02Z"
-    },
-    "projects.\u003cKEY\u003e.deploys[].workflow": {
-      "source": "file",
-      "at": "2026-09-22T09:15:02Z"
-    },
     "projects.\u003cKEY\u003e.memory": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
@@ -877,6 +856,10 @@
       "at": "2026-09-22T09:15:02Z"
     },
     "projects.\u003cKEY\u003e.merge_queue_role": {
+      "source": "file",
+      "at": "2026-09-22T09:15:02Z"
+    },
+    "projects.\u003cKEY\u003e.production_check": {
       "source": "file",
       "at": "2026-09-22T09:15:02Z"
     },
@@ -1199,21 +1182,21 @@
       "stalled": false
     },
     {
-      "name": "legion-go-LEGION-dispatch-server",
-      "waiting": 0,
-      "oldestAt": null,
-      "oldestAgeSeconds": null,
-      "lastHandledAt": null,
-      "stalled": false,
-      "unavailable": "read the consumer's info: context deadline exceeded"
-    },
-    {
       "name": "legion-go-LEGION-github",
       "waiting": 412,
       "oldestAt": "2026-09-22T09:05:34Z",
       "oldestAgeSeconds": 754,
       "lastHandledAt": "2026-09-22T09:16:41Z",
       "stalled": true
+    },
+    {
+      "name": "legion-go-LEGION-wake",
+      "waiting": 0,
+      "oldestAt": null,
+      "oldestAgeSeconds": null,
+      "lastHandledAt": null,
+      "stalled": false,
+      "unavailable": "read the consumer's info: context deadline exceeded"
     }
   ]
 }

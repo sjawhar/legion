@@ -322,7 +322,6 @@ var Classes = []Row{
 		Also: []string{HolderLaunchSpecs}},
 	{Field: "Project.SlackChannels", Path: "projects.<KEY>.slack_channels", Class: ClassRebuild, Holder: HolderAPIServer,
 		Also: []string{HolderLaunchSpecs, HolderRuntime}},
-	{Field: "Project.Deploys", Path: "projects.<KEY>.deploys", Class: ClassRebuild, Holder: HolderAPIServer},
 	// The repositories whose commits a pane stamps the issue key into: a pane reads the key from
 	// its own launch environment (LEGION_ISSUE_TRAILER, built in the launch specs), so a change
 	// reaches a role at its next launch. The workflow runtime keeps a copy of its own, but only
@@ -330,9 +329,12 @@ var Classes = []Row{
 	// (logUnservedCommitIssueTrailerRepos), and nothing else in the daemon reads it.
 	{Field: "Project.CommitIssueTrailerRepos", Path: "projects.<KEY>.commit_issue_trailer_repos",
 		Class: ClassLaunch, Holder: HolderLaunchSpecs},
-	{Field: "Deploy.Repo", Path: "projects.<KEY>.deploys[].repo", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "Deploy.Workflow", Path: "projects.<KEY>.deploys[].workflow", Class: ClassRebuild, Holder: HolderAPIServer},
-	{Field: "Deploy.Step", Path: "projects.<KEY>.deploys[].step", Class: ClassRebuild, Holder: HolderAPIServer},
+	// Who works the production check a merge closing one of the project's issues opens: the
+	// workflow engine reads it as it decides the merge (internal/daemon's engineConfig, composed
+	// at every decision), and the state's settings report is rebuilt from it, so a change reaches
+	// the next merge with nothing rebuilt. It decides the checks opened after it, never one
+	// already open: a running check keeps the role its record carries.
+	{Field: "Project.ProductionCheck", Path: "projects.<KEY>.production_check", Class: ClassDecision},
 	{Field: "MergeRules.ByHand", Path: "projects.<KEY>.merge.by_hand", Class: ClassRebuild, Holder: HolderAPIServer,
 		Also: []string{HolderLaunchSpecs}},
 	{Field: "PathPattern.Expression", Path: "projects.<KEY>.merge.by_hand[]", Class: ClassRebuild, Holder: HolderAPIServer,

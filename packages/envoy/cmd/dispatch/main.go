@@ -1669,8 +1669,7 @@ func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL strin
 // adds no statement to the database), and `schema_version`, the highest migration the database
 // has applied, read by the same probe (null when the database did not answer). A deploy check
 // compares commit and schema_version with the commit its image pin names and that commit's
-// migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
-// mid-roll whichever process answers it may serve a build the rest do not.
+// migrations, so neither is ever filled with a guess.
 //
 // `outbox_publisher` says whether this process publishes the events outbox now: true while it
 // holds the outbox's publisher hold and the hold's deadline has not passed, false when it stands

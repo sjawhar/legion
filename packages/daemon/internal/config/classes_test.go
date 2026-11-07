@@ -45,6 +45,7 @@ func settingsConfigTypes() []reflect.Type {
 // row in Classes: a value the loader computes from a key that has one. Nothing may be added here
 // that an operator can write in their file.
 var classesDerived = map[string]string{
+	"Config.Warnings":              "derived: the loader's own lines for the operator about a key the file still sets and this daemon no longer reads, which no key of the file writes",
 	"Kubernetes.PluginsFromBinary": "derived: whether runtime.kubernetes.plugins was filled from the binary's linked pair rather than from the file",
 	"PathPattern.Regexp":           "derived: compiled from projects.<KEY>.merge.by_hand[], which carries the expression",
 }
