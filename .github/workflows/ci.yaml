@@ -2017,6 +2017,9 @@ jobs:
       - name: Typecheck the session message-wait script
         run: bunx tsc --noEmit -p scripts/sessions
 
+      - name: Test the session message-wait script
+        run: bun test scripts/sessions
+
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
