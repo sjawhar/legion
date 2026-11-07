@@ -302,16 +302,20 @@ func StreamCaptures(topic string) bool {
 //
 // That 1000 is what the version gate stands for: serverDefaultsAnUnsetCap reads "nats-server 2.15
 // or later" and this binary takes it to mean "a stream with no cap is capped at 1000". An
-// operator can break that link two ways, and neither reaches a client, so neither is checked in
-// code. A server started with `jetstream { limits { default_max_consumers: <n> } }` runs with
-// <n> in place of the 1000 (server/opts.go:390 and :2555 in v2.15.1), and an account whose own
-// JetStream `max_consumers` is set has that applied to every stream of the account instead
-// (server/consumer.go:1162-1171). At -1, or at any number above this cap, a stream with no cap
-// allows more consumers than this binary compiles, and a start and the keeper then lower what
-// the server allows to 24000 rather than raise it. No deployment of this repository sets either:
-// the hub's rendered jetstream block carries max_file_store, max_memory_store and store_dir and
-// nothing else (infra/gcp/clusteredhub_live_test.go), and it renders no accounts block, so every
-// client runs in the global account with its JetStream limits unset.
+// operator can break that link two ways, and the binary checks neither. A server started with
+// `jetstream { limits { default_max_consumers: <n> } }` runs with <n> in place of the 1000
+// (server/opts.go:390 and :2555 in v2.15.1); at -1, or at any number above this cap, a stream
+// with no cap allows more consumers than this binary compiles, and a start and the keeper then
+// lower what the server allows to 24000 rather than raise it. An account whose own JetStream
+// `max_consumers` is positive has that applied to every stream of the account
+// (server/consumer.go:1162-1171): above this cap, a start and the keeper lower an uncapped
+// stream's limit to 24000 the same way; below it, the server refuses a stream whose cap is above
+// the account's (server/jetstream.go:2560-2562), so the create and the raise are both refused. An
+// account limit of -1 counts as not set and changes nothing, since the server applies its default
+// over it (server/consumer.go:1166-1168). No deployment of this repository sets either: the hub's
+// rendered jetstream block carries max_file_store, max_memory_store and store_dir and nothing else
+// (infra/gcp/clusteredhub_live_test.go), and it renders no accounts block, so every client runs
+// in the global account with its JetStream limits unset.
 //
 // The population the cap must cover is not the live session count. Nothing deletes a session's
 // consumer when the session ends: the only delete is inside SessionConsumers.RestartAtFloor

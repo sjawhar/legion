@@ -12,8 +12,9 @@
 // nats:2.10 both the stream this binary must not touch and the one it must raise and cannot.
 //
 // A real image needs a container runtime, which Envoy's agents do not have, so the file sits
-// behind the natslive tag and the envoy-go CI job runs it by name
-// (.github/workflows/ci.yaml, "Test the container-backed NATS matrix (natslive)"). The runtime is
+// behind the natslive tag, and the envoy-go CI job runs the tests that tag adds to this package,
+// their names read off the source by .github/scripts/go-tagged-tests.sh (.github/workflows/ci.yaml,
+// "Test the container-backed NATS matrix (natslive)"). The runtime is
 // reached only through testnats.StartImageConfig, as every package outside the three container
 // rigs must (TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime, testnats/nats_test.go).
 

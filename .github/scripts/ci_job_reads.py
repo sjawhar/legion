@@ -939,7 +939,10 @@ GATES = [
             for arch in targets(GO_TARGETS, "envoy")
         ]),
         # Only what the natslive tag adds, one package at a time: the rig's own matrix, and the
-        # one test of internal/bus that needs a real server image. The unit step ran the rest.
+        # one test of internal/bus that needs a real server image. The rest of internal/testnats
+        # runs in the unit step; the rest of internal/bus runs in envoy-go-race, since
+        # UNIT_TEST_PATTERN leaves the race lane's packages out of the unit step, and the
+        # envoy_go entry of TAG_RUNS, one entry per step, checks the testnats half alone.
         pinned_step("envoy-go", NATS_MATRIX_STEP, ENVOY, NATS_MATRIX_SCRIPT, [
             (ENVOY, ["./internal/testnats/"], "go test -tags natslive ./internal/testnats/", {"tags": "natslive"}),
             (ENVOY, ["./internal/bus/"], "go test -tags natslive ./internal/bus/", {"tags": "natslive"}),
