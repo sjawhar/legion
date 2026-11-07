@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -191,6 +192,38 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		_, stderr, code := runSecret(tc.args...)
 		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
 			t.Fatalf("%v: exit %d stderr %q; want a usage error naming %q", tc.args, code, stderr, tc.want)
+		}
+	}
+	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+		t.Fatal("a refused create made NEW_KEY")
+	}
+}
+
+// TestSecretCreateRefusesBadAdminAndScopes: --admin takes the one word the broker reads as an
+// administrator's secret, and none removes the tag on retag alone, so neither another value nor
+// none is written on create; --scopes takes the broker's own scope names (policy.ParseScopes),
+// so a comma, a whole https://www.googleapis.com/auth/ URL and an upper-case name are each
+// refused as that flag. Every one of them is refused before the sign-in is read, so a create
+// that names one writes nothing at all.
+func TestSecretCreateRefusesBadAdminAndScopes(t *testing.T) {
+	local := secrets.NewLocal()
+	startSecretBroker(t, servedBy(local))
+	useAWS(t, local, testAccount, adaSignIn)
+	base := []string{"create", "NEW_KEY", "--owner", "me", "--tier", "human", "--max-grant", "1h", "--requesters", "ada@example.com"}
+	for _, tc := range []struct {
+		flag, value, want string
+	}{
+		{"--admin", "yes", `--admin is true, not "yes"`},
+		{"--admin", "none", `--admin is true, not "none"`},
+		{"--scopes", "cloud-platform,bigquery", "--scopes: scopes separates its names with spaces, not commas"},
+		{"--scopes", "https://www.googleapis.com/auth/cloud-platform", "--scopes: scopes names the part of a Google scope"},
+		{"--scopes", "Cloud-Platform", "--scopes: scopes names the part of a Google scope"},
+	} {
+		useStdin(t, "stored-value")
+		args := append(slices.Clone(base), tc.flag, tc.value)
+		_, stderr, code := runSecret(args...)
+		if code != exitUsageError || !strings.Contains(stderr, tc.want) {
+			t.Errorf("%s %q: exit %d stderr %q; want a usage error naming %q", tc.flag, tc.value, code, stderr, tc.want)
 		}
 	}
 	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
