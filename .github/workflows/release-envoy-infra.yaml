@@ -58,8 +58,8 @@ jobs:
     runs-on: ubuntu-24.04
     # Budget (the Budgets note in .github/workflows/ci.yaml's header): 2400 s, the 40 minutes
     # this job carried, plus its slowest retried step alone — the Go module download,
-    # 5 x 300 + 150 = 1650 s. 2400 + 1650 = 4050 s -> 68 min.
-    timeout-minutes: 68
+    # 5 x 180 + 150 = 1050 s, above install-pulumi's 607 s. 2400 + 1050 = 3450 s -> 58 min.
+    timeout-minutes: 58
     permissions:
       contents: read
     outputs:
@@ -147,18 +147,21 @@ jobs:
       # run a failing test five times and call it a download). Five bounded attempts through
       # .github/scripts/ci-retry.sh, the last starting 150 s after the first.
       #
-      # 300 s per attempt: a cold `go mod download` over this module's workspace — an empty
-      # module cache, this repository at this commit — measured 113 s on 2026-11-07, so the bound
-      # is over two and a half times its measured maximum. This job restores no module cache, so
-      # that cold figure is the one every run pays.
+      # 180 s per attempt: a cold `go mod download` over this module's workspace — an empty
+      # module cache, this repository at this commit — measured 113 s on 2026-11-07, the slowest
+      # cold run measured anywhere in this repository (packages/daemon 81 s, packages/envoy
+      # 77 s), so the bound is 1.6 times it. It can be that tight where a tarball fetch's could
+      # not: an attempt the bound kills leaves what it fetched in the module cache, and the next
+      # attempt resumes from there. This job restores no module cache, so that cold figure is
+      # the one every run pays.
       - name: Download the Go modules this job compiles
         if: steps.version.outputs.skip != 'true'
         # Its own retry arithmetic, so an exhausted download fails this step by name rather than
-        # being cut part way by the job: 5 x 300 + 150 = 1650 s -> 28 min.
-        timeout-minutes: 28
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "envoy-infra's Go modules" 300 -- go -C packages/envoy/infra mod download
+          retry_fetch "envoy-infra's Go modules" 180 -- go -C packages/envoy/infra mod download
       # The module's vet, both live-test tags included, and its unit tests, before anything is
       # built: ci.yaml's envoy-infra-go job runs them on a pull request only when its filter selects
       # the job, so the release checks the behaviour it publishes itself, as

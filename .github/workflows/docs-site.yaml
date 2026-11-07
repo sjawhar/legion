@@ -59,8 +59,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Budget (the Budgets note in .github/workflows/ci.yaml's header): 1500 s, the 25 minutes
     # this job carried, plus its slowest retried step alone — the Go module download's two
-    # calls, 2 x (5 x 300 + 150) = 3300 s. 1500 + 3300 = 4800 s -> 80 min.
-    timeout-minutes: 80
+    # calls, 2 x (5 x 180 + 150) = 2100 s, above the Playwright install's 1650 s, the workspace
+    # install's 1050 s and the ci-ok report's 600 s. 1500 + 2100 = 3600 s -> 60 min.
+    timeout-minutes: 60
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.
     services:
@@ -113,18 +114,21 @@ jobs:
       # retried unit is the download, never the build). Five bounded attempts through
       # .github/scripts/ci-retry.sh, the last starting 150 s after the first.
       #
-      # 300 s per attempt: cold `go mod download` runs of these two modules — an empty module
-      # cache, this repository at this commit — measured 81 s and 77 s on 2026-11-07, so the
-      # bound is nearly four times the slower of them. The cache restored above makes the common
-      # run far shorter.
+      # 180 s per attempt: cold `go mod download` runs of these two modules — an empty module
+      # cache, this repository at this commit — measured 81 s and 77 s on 2026-11-07, and the
+      # slowest cold run measured anywhere in this repository is packages/envoy/infra's 113 s,
+      # so the bound is 1.6 times that slowest measurement. It can be that tight where a tarball
+      # fetch's could not: an attempt the bound kills leaves what it fetched in the module cache,
+      # and the next attempt resumes from there. The cache restored above makes the common run
+      # far shorter.
       - name: Download the Go modules the site's binaries compile
         # Its own retry arithmetic, so an exhausted download fails this step by name rather than
-        # being cut part way by the job: two calls, 2 x (5 x 300 + 150) = 3300 s -> 55 min.
-        timeout-minutes: 55
+        # being cut part way by the job: two calls, 2 x (5 x 180 + 150) = 2100 s -> 35 min.
+        timeout-minutes: 35
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
-          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+          retry_fetch "packages/daemon's Go modules" 180 -- go -C packages/daemon mod download
+          retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       # The install retries: five bounded attempts through .github/scripts/ci-retry.sh, the last
       # starting 150 s after the first, so a registry that refuses for a minute costs this job a
       # wait rather than a red run (dispatch://INFRA-1545, R1). The step is named for the command

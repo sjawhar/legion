@@ -134,8 +134,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Budget (the Budgets note in .github/workflows/ci.yaml's header): 600 s, the 10 minutes
     # this job carried, plus its slowest retried step alone — the Go module download,
-    # 5 x 300 + 150 = 1650 s. 600 + 1650 = 2250 s -> 38 min.
-    timeout-minutes: 38
+    # 5 x 180 + 150 = 1050 s, which the workspace install matches.
+    # 600 + 1050 = 1650 s -> 28 min.
+    timeout-minutes: 28
     # Checks out and uploads; nothing here writes to the repository or a registry.
     permissions:
       contents: read
@@ -166,16 +167,19 @@ jobs:
       # reads the module cache and never the proxy (dispatch://INFRA-1545, R1 and its D1: the
       # retried unit is the download, never the build).
       #
-      # 300 s per attempt: a cold `go mod download` of packages/envoy — an empty module cache,
-      # this repository at this commit — measured 77 s on 2026-11-07, so the bound is nearly four
-      # times its measured maximum.
+      # 180 s per attempt: a cold `go mod download` of packages/envoy — an empty module cache,
+      # this repository at this commit — measured 77 s on 2026-11-07, and the slowest cold run
+      # measured anywhere in this repository is packages/envoy/infra's 113 s, so the bound is
+      # 1.6 times that slowest measurement. It can be that tight where a tarball fetch's could
+      # not: an attempt the bound kills leaves what it fetched in the module cache, and the next
+      # attempt resumes from there.
       - name: Download the Go modules the build compiles
         # Its own retry arithmetic, so an exhausted download fails this step by name rather than
-        # being cut part way by the job: 5 x 300 + 150 = 1650 s -> 28 min.
-        timeout-minutes: 28
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+          retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
@@ -218,8 +222,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Budget (the Budgets note in .github/workflows/ci.yaml's header): 4800 s, the 80 minutes
     # this job carried, plus its slowest retried step alone — the Go module download,
-    # 5 x 300 + 150 = 1650 s. 4800 + 1650 = 6450 s -> 108 min.
-    timeout-minutes: 108
+    # 5 x 180 + 150 = 1050 s, which the workspace install matches.
+    # 4800 + 1050 = 5850 s -> 98 min.
+    timeout-minutes: 98
     # Builds and pushes images to ghcr.io; nothing here writes to the repository.
     permissions:
       contents: read
@@ -266,16 +271,16 @@ jobs:
         run: bun run gen:go
         working-directory: packages/contracts
       # The modules the smoke test below compiles, downloaded once and retried, as in the build
-      # job and bounded as there: 300 s against a cold download of packages/envoy measured at
-      # 77 s on 2026-11-07. The arm64 leg restores no module cache, so this leg's download is
-      # the cold one.
+      # job and bounded as there: 180 s, 1.6 times the 113 s of the slowest cold run measured in
+      # this repository (packages/envoy/infra; packages/envoy 77 s on 2026-11-07). The arm64 leg
+      # restores no module cache, so this leg's download is the cold one.
       - name: Download the Go modules the smoke test compiles
         # Its own retry arithmetic, so an exhausted download fails this step by name rather than
-        # being cut part way by the job: 5 x 300 + 150 = 1650 s -> 28 min.
-        timeout-minutes: 28
+        # being cut part way by the job: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+          retry_fetch "packages/envoy's Go modules" 180 -- go -C packages/envoy mod download
       # The image build is a step of its own: what TestSmoke asserts is the container's
       # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
       # of `go test -timeout 5m` across ten runs while the five assertions measured 0.00 s each
