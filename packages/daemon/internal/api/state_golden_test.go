@@ -382,10 +382,13 @@ func populatedState(t *testing.T) State {
 		// implementer is the other kind, a released pod whose wake never brought it back: who
 		// suspended it is read on the operator claim routes, and the entry here carries the same
 		// three keys as every other, which is what a session on the contract before this one
-		// parses.
+		// parses. LEGION-212's tester is the third, a worker that retired while its issue stood in
+		// its phase: only a start of that phase brings it back, so it is a claim nothing will wake
+		// until its architect's retry_or_escalate or a transition queues one.
 		StrandedClaims: []StrandedClaim{
 			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
 			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
+			{Issue: "LEGION-212", Role: claim.RoleTester, State: "retired"},
 		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",

@@ -163,14 +163,17 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 				}
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys gone,
-			// and with the three memory keys and contract 51's two tree keys — `admission.trees`
-			// and each issue's `tree` — gone too, since a pod below this contract's own reader
-			// refuses those as well (memory_test.go and tree_test.go hold those halves).
+			// and with the three memory keys, contract 51's two tree keys — `admission.trees` and
+			// each issue's `tree` — and contract 53's retired entries under `strandedClaims` gone
+			// too, since a pod below this contract's own reader refuses those as well
+			// (memory_test.go and tree_test.go hold two of those halves, and
+			// strandedWithoutRetired below the third).
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)
 			}
 			delete(want["admission"].(map[string]any), "trees")
+			want["strandedClaims"] = strandedWithoutRetired(t, want["strandedClaims"])
 			for _, issue := range want["issues"].(map[string]any) {
 				issue := issue.(map[string]any)
 				views := []any{issue["architect"]}
@@ -198,6 +201,25 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			}
 		})
 	}
+}
+
+// strandedWithoutRetired is the `strandedClaims` of a baseline body with its retired entries gone,
+// the report a pod below retiredStrandedContract is served (api's withoutRetiredStranded). The key
+// is never null, so a body every entry of which is retired keeps it as an empty array.
+func strandedWithoutRetired(t *testing.T, stranded any) []any {
+	t.Helper()
+	rows, ok := stranded.([]any)
+	if !ok {
+		t.Fatalf("the state's strandedClaims is %T, want the array the route always writes", stranded)
+	}
+	kept := []any{}
+	for _, row := range rows {
+		if row.(map[string]any)["state"] == string(supervise.StateRetired) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
 }
 
 // The body a pod a contract behind is served is a copy: the next caller of the same daemon, at
