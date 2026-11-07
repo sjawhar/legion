@@ -33,7 +33,7 @@ report, a disclosure, and a reply to a maintainer who wrote first.
 
 Hold an extremely high bar. Optimise every upstream report, patch or public post for a human
 reader and for being received well, so each one builds the company's reputation rather than a
-name for slop.
+reputation for low-quality or careless submissions.
 
 ## The four steps
 
@@ -95,7 +95,9 @@ review batch, never a per-message "can I send this" ask. Write its entry — wha
 serious; who receives it and what they do; the exact text or patch; its evidence; a non-author
 reviewer's APPROVE under your stream's reviewer-model rule; what the operator decides; its owner
 — into the batch, add it under the batch's Waiting list, and tell the batch owner. Your stream's
-brief names the batch and its owner.
+brief names the batch and its owner. Where your stream's brief names no batch, ask the operator
+for one, or hold the entry until there is a batch; a missing batch is not a reason to send a
+per-message ask.
 
 ## What this skill does not cover
 
