@@ -1,4 +1,9 @@
 import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import {
+  exportJjSessionAttribution,
+  paneAttributionOptions,
+  sessionIdFromTranscript,
+} from "@legion/pi-shared/jj-attribution";
 import { bootLegionClaim } from "@legion/pi-shared/legion-claim-core";
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
@@ -6,7 +11,6 @@ import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-clai
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
 import { requiredEnvironment, requiredSecret } from "./classify";
-import { exportJjSessionAttribution } from "./jj-attribution";
 
 export interface ClaimSession {
   /** Boots the claim behind a root architect's or a phase worker's pane (`legion.ts` calls it for
@@ -16,6 +20,29 @@ export interface ClaimSession {
   /** The claim `sessionID` registered, or undefined: before its registration, and for any other
    * session. */
   readonly capability: (sessionID: string) => ClaimCapability | undefined;
+}
+
+/**
+ * What this pane's jj attribution overlay is written from
+ * (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`): the Oh My Pi session id read
+ * off the transcript (undefined for a subagent's, which owns no claim), the state directory the
+ * daemon names, and the pane's own key and workspace (`paneAttributionOptions`, which holds the
+ * rule both harnesses read those two variables by).
+ */
+export function attributionInputs(
+  sessionFile: string,
+  env: NodeJS.ProcessEnv
+): {
+  readonly sessionId: string | undefined;
+  readonly stateDir: string;
+  readonly issueKey?: string;
+  readonly workspace?: string;
+} {
+  return {
+    sessionId: sessionIdFromTranscript(sessionFile),
+    stateDir: requiredEnvironment(env, "LEGION_STATE_DIR"),
+    ...paneAttributionOptions(env),
+  };
 }
 
 /**
@@ -58,11 +85,10 @@ export function createClaimSession(deps: {
         agentId,
         pluginContract: pkg.legion.daemonApiVersion,
       },
-      afterRegister: () =>
-        exportJjSessionAttribution(
-          sessionFile,
-          requiredEnvironment(process.env, "LEGION_STATE_DIR")
-        ),
+      afterRegister: async () => {
+        const { sessionId, stateDir, ...pane } = attributionInputs(sessionFile, process.env);
+        if (sessionId) await exportJjSessionAttribution(sessionId, stateDir, pane);
+      },
       setCapability: (registered) => {
         capability = registered;
       },
