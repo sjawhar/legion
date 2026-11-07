@@ -161,10 +161,22 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 // bind creates (on first run) or resumes the durable and subscribes to it, throttling its own
 // reconciliation and standby line on this intake's own bindThrottle. stopping is Run's stop
 // deadline (bindDurableConsumer).
+//
+// The undo it hands back drains the subscription through the client, which is what gives up the
+// registration the client keeps of it (bus.Client.DrainSubscription): a bare Unsubscribe would
+// leave a registration the next reconnect binds again, on a durable this process gave up.
 func (j *JobIntake) bind(ctx, stopping context.Context) (*natsgo.Subscription, bindOutcome) {
 	wanted := jobConsumerConfig()
-	return bindDurableConsumer(ctx, stopping, j.nats, j.leases, j.throttle, wanted, func() (*natsgo.Subscription, error) {
-		return subscribeDurable(j.nats, wanted, "", j.deliver)
+	return bindDurableConsumer(ctx, stopping, j.nats, j.leases, j.throttle, wanted, func() (*natsgo.Subscription, func(), error) {
+		sub, err := subscribeDurable(j.nats, wanted, "", j.deliver)
+		if err != nil {
+			return nil, nil, err
+		}
+		return sub, func() {
+			if _, err := j.nats.DrainSubscription(sub); err != nil {
+				slog.Error("dispatch delivery: drain the job intake's subscription", "name", wanted.Durable, "error", err)
+			}
+		}, nil
 	})
 }
 
