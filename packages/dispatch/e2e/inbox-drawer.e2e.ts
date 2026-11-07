@@ -79,7 +79,7 @@ test("a half-typed message in a live conversation survives opening the drawer, a
   }
 });
 
-test("over an issue page the drawer opens from the header, keeps its page, and Escape returns focus to the button @phone", async ({
+test("over an issue page the drawer opens from the header, keeps its page, and Escape returns focus to the button", async ({
   browser,
 }, testInfo) => {
   const { askId, issueKey } = await seedAsk("Which label for the drawer?");
@@ -92,23 +92,13 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
     ).toBeVisible();
     // One name at both widths now: the compact top bar's Peek beside its Inbox count, and the
     // rail's Peek beside the Inbox entry.
-    const peek = "Peek at the inbox without leaving this page";
-    const trigger =
-      testInfo.project.name === "iphone"
-        ? page.locator("header").first().getByRole("button", { name: peek })
-        : page.getByRole("navigation", { name: "Navigation" }).getByRole("button", { name: peek });
+    const trigger = page
+      .getByRole("navigation", { name: "Navigation" })
+      .getByRole("button", { name: "Peek at the inbox without leaving this page" });
     await trigger.click();
     await expect(drawer(page).getByTestId(`ask-${askId}`)).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/issues/${issueKey}$`));
     await attachShot(page, testInfo, "inbox-drawer-over-issue");
-
-    if (testInfo.project.name === "iphone") {
-      // A phone gets the whole screen.
-      const box = await drawer(page).boundingBox();
-      const viewport = page.viewportSize();
-      expect(box?.x).toBe(0);
-      expect(box?.width).toBe(viewport?.width);
-    }
 
     await page.keyboard.press("Escape");
     await expect(drawer(page)).toHaveCount(0);
@@ -117,13 +107,35 @@ test("over an issue page the drawer opens from the header, keeps its page, and E
       page.getByTestId("issue-header").getByRole("heading", { level: 1, name: "Drawer issue" })
     ).toBeVisible();
 
-    if (testInfo.project.name !== "iphone") {
-      // A click outside the panel closes it too.
-      await trigger.click();
-      await expect(drawer(page)).toBeVisible();
-      await page.mouse.click(10, 10);
-      await expect(drawer(page)).toHaveCount(0);
-    }
+    // A click outside the panel closes it too.
+    await trigger.click();
+    await expect(drawer(page)).toBeVisible();
+    await page.mouse.click(10, 10);
+    await expect(drawer(page)).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+// The drawer's phone half: below the phone breakpoint the issue header carries the button that
+// opens it, and the panel it opens takes the whole screen rather than the side panel the row
+// above opens. What the drawer does once open is that row's, at any width.
+test("on a phone the inbox drawer opens from the issue header and covers the screen @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the full-screen drawer is the phone layout");
+  const { askId, issueKey } = await seedAsk("Which label for the drawer?");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issueKey}`);
+    await page.getByRole("button", { name: /^Open inbox/ }).click();
+    await expect(drawer(page).getByTestId(`ask-${askId}`)).toBeVisible();
+    const box = await drawer(page).boundingBox();
+    const viewport = page.viewportSize();
+    expect(box?.x).toBe(0);
+    expect(box?.width).toBe(viewport?.width);
+    await attachShot(page, testInfo, "inbox-drawer-over-issue-phone");
   } finally {
     await context.close();
   }

@@ -25,6 +25,7 @@ import {
 import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import { useDialog } from "../shell/useDialog";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
@@ -107,7 +108,10 @@ function ReviewsDialog({
                   </p>
                   {review.reason === null ? null : (
                     <div className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
-                      <MarkdownBody markdown={review.reason} />
+                      <MarkdownBody
+                        markdown={review.reason}
+                        source={textSourceOf("artifact", artifactId)}
+                      />
                     </div>
                   )}
                 </li>

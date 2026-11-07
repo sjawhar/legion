@@ -28,52 +28,23 @@ const bobSession = {
 
 // Asks and comment threads both render in the margin; Conversation lists one card per thread.
 
-async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  const expanded = open ? "true" : "false";
-  if ((await sheet.getAttribute("data-expanded")) !== expanded) {
-    await page
-      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
-      .click();
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", expanded);
-}
-
 async function expandedThread(page: Page, rootId: string): Promise<Locator> {
   const card = threadCard(page, rootId);
   const timelineThread = page.locator(`[data-turn="comment:${rootId}"]`);
   if ((await card.getAttribute("aria-expanded")) !== "true") {
     await timelineThread.getByRole("button", { name: "Expand thread" }).click();
   }
-  const phoneThread = page.getByRole("dialog", { name: "Thread" });
-  if ((await phoneThread.count()) > 0) {
-    return phoneThread;
-  }
   await expect(card).toHaveAttribute("aria-expanded", "true");
   return card;
-}
-
-async function closeThreadView(page: Page, project: string): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const phoneThread = page.getByRole("dialog", { name: "Thread" });
-  if ((await phoneThread.count()) > 0) {
-    await phoneThread.getByRole("button", { name: "Back" }).click();
-    await expect(phoneThread).toHaveCount(0);
-  }
 }
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an ask is a thread: replies before and after answering, then a live agent reply @phone", async ({
+test("an ask is a thread: replies before and after answering, then a live agent reply", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -106,7 +77,6 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alicePage.clock.install();
   await alicePage.goto(`/issues/${issue.key}`);
   await alicePage.getByRole("tab", { name: "Spec" }).click();
-  await setSheet(alicePage, testInfo.project.name, true);
 
   const margin = alicePage.getByTestId("margin-sheet");
   const card = margin.getByTestId(`ask-${ask.id}`);
@@ -160,9 +130,9 @@ test("an ask is a thread: replies before and after answering, then a live agent 
 // The row above, with the race it can lose made certain: the margin's answered-ask read is held
 // until a reply has been typed into the answered card's thread, so the card moves out of Needs you
 // with the reply in it. The card moves in place, and the reply is still there to send.
-test("an answered ask's thread keeps a reply typed before the card leaves Needs you @phone", async ({
+test("an answered ask's thread keeps a reply typed before the card leaves Needs you", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -189,7 +159,6 @@ test("an answered ask's thread keeps a reply typed before the card leaves Needs 
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await page.getByRole("tab", { name: "Spec" }).click();
-    await setSheet(page, testInfo.project.name, true);
     const margin = page.getByTestId("margin-sheet");
     const card = margin.getByTestId(`ask-${ask.id}`);
     await expect(card).toContainText("Ship the change?");
@@ -221,7 +190,7 @@ test("an answered ask's thread keeps a reply typed before the card leaves Needs 
   }
 });
 
-test("a Conversation reply after an agent-authored reply targets the root without copying its anchor @phone", async ({
+test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -268,9 +237,9 @@ test("a Conversation reply after an agent-authored reply targets the root withou
 });
 // SLOW(>=2s): two browser contexts on one Conversation, and the resolve, reopen and edit the
 // title names, each of which both pages have to show.
-test("resolve, reopen, then edit leaves one comment turn in its final state @phone", async ({
+test("resolve, reopen, then edit leaves one comment turn in its final state", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "THREAD", name: "Thread controls" });
   const issue = await createIssue({
     project: "THREAD",
@@ -305,7 +274,6 @@ test("resolve, reopen, then edit leaves one comment turn in its final state @pho
     const resolvedThread = await expandedThread(bobPage, root.id);
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
-    await closeThreadView(bobPage, testInfo.project.name);
     await conversationFilter(bobPage, "All").click();
     await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(threadCard(alicePage, root.id)).toBeVisible();
@@ -315,7 +283,6 @@ test("resolve, reopen, then edit leaves one comment turn in its final state @pho
     await reopenedThread.getByLabel("Edit comment").fill("Final comment state");
     await reopenedThread.getByRole("button", { name: "Save" }).click();
     await expect(reopenedThread).toContainText("Final comment state");
-    await closeThreadView(alicePage, testInfo.project.name);
     await expect(
       alicePage
         .getByRole("list", { name: "Conversation turns" })
@@ -330,9 +297,7 @@ test("resolve, reopen, then edit leaves one comment turn in its final state @pho
   }
 });
 
-test("only comment authors edit root and reply text in Conversation @phone", async ({
-  browser,
-}, testInfo) => {
+test("only comment authors edit root and reply text in Conversation", async ({ browser }) => {
   await createProject({ key: "EDIT", name: "Comment edits" });
   const issue = await createIssue({
     project: "EDIT",
@@ -372,7 +337,6 @@ test("only comment authors edit root and reply text in Conversation @phone", asy
     await expect(aliceThread.getByLabel("Edit comment")).toHaveCount(0);
     await expect(aliceThread).toContainText("Edited reply");
 
-    await closeThreadView(alicePage, testInfo.project.name);
     await expect(bobThread).toContainText("Edited root");
     await expect(bobThread).toContainText("Edited reply");
     await expect(bobThread).toContainText("edited");
@@ -385,9 +349,7 @@ test("only comment authors edit root and reply text in Conversation @phone", asy
   }
 });
 
-test("an agent comment reply appears in the root Conversation thread @phone", async ({
-  browser,
-}) => {
+test("an agent comment reply appears in the root Conversation thread", async ({ browser }) => {
   await createProject({ key: "AGENT", name: "Agent reply" });
   const issue = await createIssue({
     project: "AGENT",
@@ -458,7 +420,7 @@ test("the phone Conversation opens a full-height thread view with its composer p
 });
 // SLOW(>=2s): two pages of one reader - the Inbox and the issue - an anchored ask seeded and
 // then retracted live on both, and a full-page screenshot.
-test("a session retraction leaves its reason on the card and removes the human's live inbox item @phone", async ({
+test("a session retraction leaves its reason on the card and removes the human's live inbox item", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -486,16 +448,9 @@ test("a session retraction leaves its reason on the card and removes the human's
   const issuePage = await alice.newPage();
   await issuePage.goto(`/issues/${issue.key}`);
   await issuePage.getByRole("tab", { name: "Spec" }).click();
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Open navigation" }).click();
-  }
   const navigation = issuePage.getByRole("navigation", { name: "Navigation" });
   await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("1");
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("1");
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Close navigation" }).click();
-  }
-  await setSheet(issuePage, testInfo.project.name, true);
   const margin = issuePage.getByTestId("margin-sheet");
   await expect(margin.getByTestId(`ask-${ask.id}`)).toBeVisible();
 
@@ -525,14 +480,7 @@ test("a session retraction leaves its reason on the card and removes the human's
     fullPage: true,
     path: testInfo.outputPath("ask-retraction-thread.png"),
   });
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: /Close review panel/ }).click();
-    await issuePage.getByRole("button", { name: "Open navigation" }).click();
-  }
   await expect(issuePage.getByRole("heading", { exact: true, name: "Needs you" })).toHaveCount(0);
-  if (testInfo.project.name === "iphone") {
-    await issuePage.getByRole("button", { name: "Close navigation" }).click();
-  }
 
   // The margin folds a retracted ask away; the Conversation lists it like every other
   // conversation, under All and under Closed, with no control of its own to reveal it.
@@ -691,9 +639,9 @@ test("accepting a later suggestion over an earlier one's text leaves the earlier
   }
 });
 
-test("an orphaned suggestion stays non-actionable through resolve and reopen @phone", async ({
+test("an orphaned suggestion stays non-actionable through resolve and reopen", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
   const issue = await createIssue({
     project: "SUGG",
@@ -741,7 +689,6 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen @ph
     await expect(resolved).toContainText(/Resolved by alice/);
     await expect(resolved.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await resolved.getByRole("button", { name: "Reopen" }).click();
-    await closeThreadView(page, testInfo.project.name);
     await conversationFilter(page, "All").click();
     await expect(
       page
@@ -847,7 +794,7 @@ async function seedSuggestion(
 // A decided suggestion's thread offers no reply, but a reply already out when someone else accepts
 // the suggestion is still the reader's: its composer stays with the draft until the server answers,
 // a refusal hands that draft back beside Retry, and Retry still sends it as a reply.
-test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal @phone", async ({
+test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal", async ({
   browser,
 }) => {
   const { comments, issueKey, suggestionId } = await seedSuggestion("Accepted under a reply");
@@ -887,7 +834,7 @@ test("a suggestion accepted while its thread's own reply is out keeps the reply'
 
 // The composer a decided suggestion's thread keeps for a reply out is only that reply's: once the
 // reply lands it leaves, as the thread offers no new one.
-test("a reply out when its suggestion is accepted lands and leaves no composer behind @phone", async ({
+test("a reply out when its suggestion is accepted lands and leaves no composer behind", async ({
   browser,
 }) => {
   const { comments, issueKey, suggestionId } = await seedSuggestion(

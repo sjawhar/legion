@@ -609,20 +609,21 @@ func TestAPullRequestsAgainAfterABatchAndAnExpiry(t *testing.T) {
 	}
 }
 
-// JetStream refuses one consumer two filters that overlap and takes two that do not, which is why
-// Ensure reduces them first (ReduceFilterSubjects); the overlapping set reduced is taken.
-func TestConsumerFiltersMustNotOverlap(t *testing.T) {
-	_, consumers := sessionConsumersOnStream(t)
+// The filters our code gives a consumer never overlap: Ensure reduces them first
+// (ReduceFilterSubjects), so a set that overlaps becomes the subject that covers it. Overlapping
+// filters cost no second delivery either - JetStream delivers a stored message to a consumer
+// once, whichever of its filters match it - which is what the server's own refusal, narrowed in
+// v2.15.1 from any collision (v2.10.29 server/consumer.go:611, SubjectsCollide) to one filter
+// being a subset of another (v2.15.1 server/consumer.go:909, subjectIsSubsetMatch), was never
+// ours to rely on.
+func TestOverlappingFiltersAreReducedAndAMatchIsDeliveredOnce(t *testing.T) {
+	owner, consumers := sessionConsumersOnStream(t)
 	ctx := context.Background()
 	disjoint := []string{contracts.AgentSubject("ses_filters"), "notifications.github.o.r.>"}
 	if _, err := consumers.create(ctx, "s-ses_disjoint", disjoint, 0); err != nil {
 		t.Fatalf("create with filters that do not overlap: %v", err)
 	}
 	overlapping := []string{"notifications.github.o.r.>", "notifications.github.*.r.pull"}
-	_, err := consumers.create(ctx, "s-ses_overlapping", overlapping, 0)
-	if !errors.Is(err, jetstream.ErrOverlappingFilterSubjects) {
-		t.Fatalf("create with overlapping filters = %v, want the server's overlapping filters error", err)
-	}
 	if _, err := consumers.Ensure(ctx, "ses_overlapping", overlapping, 0); err != nil {
 		t.Fatalf("Ensure with the overlapping filters: %v", err)
 	}
@@ -633,6 +634,17 @@ func TestConsumerFiltersMustNotOverlap(t *testing.T) {
 	if want := []string{"notifications.github.>"}; !slices.Equal(info.Config.FilterSubjects, want) {
 		t.Fatalf("filters = %q, want %q", info.Config.FilterSubjects, want)
 	}
+
+	// A consumer whose two filters both match one subject is delivered that message once.
+	if _, err := consumers.create(ctx, "s-ses_collide", overlapping, 0); err != nil {
+		t.Fatalf("create with the overlapping filters: %v", err)
+	}
+	pull := pullSession(t, consumers, "ses_collide")
+	seq := publishStored(t, owner, "notifications.github.o.r.pull", "a message both filters match")
+	if msg := next(t, pull); msg.StreamSeq != seq {
+		t.Fatalf("the consumer was delivered sequence %d, want %d", msg.StreamSeq, seq)
+	}
+	requireNoMessage(t, pull, 2*time.Second)
 }
 
 // A filter Ensure adds starts at the consumer's position, which an update keeps: a message stored on

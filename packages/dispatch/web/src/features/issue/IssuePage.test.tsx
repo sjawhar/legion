@@ -1,7 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
+import { ID_AMBIGUOUS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
@@ -2061,6 +2063,215 @@ test("IssuePage reports a failed issue read on an item deep link instead of load
   } finally {
     view.unmount();
     getComment.mockRestore();
+    restore();
+  }
+});
+
+// INFRA-869. An address may write an item's id short; the page resolves it, opens the item
+// under the whole id, and rewrites the address to it.
+const WHOLE_ID = "4c9f3e12-1111-4222-8333-444444444444";
+const OTHER_ID = "4c9f3e12-5555-4666-8777-888888888888";
+const SHORT_ID = "4c9f3e12";
+
+/** The comment the ids above name: unanchored, so the landing opens its Conversation turn
+ *  rather than a document. */
+const shortIdComment = { ...itemComment, anchor: null, id: WHOLE_ID };
+
+function GoBack(): ReactNode {
+  const navigate = useNavigate();
+  return (
+    <button onClick={() => navigate(-1)} type="button">
+      Go back
+    </button>
+  );
+}
+
+/** The issue page over a history of its own, so a test can go back from the address it opened
+ *  and see what the page left behind it. */
+function renderLandingHistory(entries: string[]) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const runtime = fakeDocumentRuntime({});
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const view = render(
+    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+      <QueryClientProvider client={queryClient}>
+        <KeymapProvider>
+          <DocumentRuntime.Provider value={runtime.runtime}>
+            <MarginProvider>
+              <CurrentRoute />
+              <GoBack />
+              <Routes>
+                <Route path="/issues/:key/*" element={<IssuePage />} />
+              </Routes>
+            </MarginProvider>
+          </DocumentRuntime.Provider>
+        </KeymapProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  window.setTimeout(runtime.sync);
+  return view;
+}
+
+test("IssuePage reads an item whose address writes its id whole without resolving anything", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences");
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: shortIdComment,
+    replies: [],
+  });
+  const view = renderIssuePage(`/issues/CORE-1/comments/${WHOLE_ID}`);
+
+  try {
+    await waitFor(() => expect(getComment).toHaveBeenCalledWith(WHOLE_ID));
+    await screen.findByRole("tab", { name: /Conversation/ });
+    // The whole id is read once, under itself, and nothing is resolved for it.
+    expect(getComment.mock.calls).toEqual([[WHOLE_ID]]);
+    expect(getReferences).not.toHaveBeenCalled();
+    expect(screen.getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/comments/${WHOLE_ID}`
+    );
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage resolves an address that writes an id short and replaces it with the whole id", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockResolvedValue({
+    edges: [],
+    node: { id: WHOLE_ID, kind: "comment", ref: `dispatch://CORE-1/comment/${WHOLE_ID}` },
+  });
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: shortIdComment,
+    replies: [],
+  });
+  const view = renderLandingHistory(["/issues/CORE-1", `/issues/CORE-1/comments/${SHORT_ID}`]);
+
+  try {
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe(
+        `/issues/CORE-1/comments/${WHOLE_ID}`
+      )
+    );
+    expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/comment/${SHORT_ID}`);
+    // The item is read under the whole id alone: the prefix is no key anything is cached under.
+    await waitFor(() => expect(getComment.mock.calls).toEqual([[WHOLE_ID]]));
+    // The rewrite replaced the address, so Back leaves the page the reader came from rather
+    // than returning to the short address.
+    fireEvent.click(screen.getByRole("button", { name: "Go back" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1")
+    );
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage lists every item an ambiguous id names, each linking to its whole id", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(409, {
+      candidates: [
+        {
+          first_line: "The first note",
+          id: WHOLE_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${WHOLE_ID}`,
+        },
+        {
+          first_line: "The other note",
+          id: OTHER_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${OTHER_ID}`,
+        },
+      ],
+      code: ID_AMBIGUOUS,
+      error: `the id prefix "${SHORT_ID}" names 2 items; write more of the id`,
+    })
+  );
+  const getComment = spyOn(api, "getComment");
+  const view = renderIssuePage(`/issues/CORE-1/comments/${SHORT_ID}`);
+
+  try {
+    await screen.findByText("Several items match that link");
+    const first = await screen.findByRole("link", { name: "The first note" });
+    const other = screen.getByRole("link", { name: "The other note" });
+    expect(first.getAttribute("href")).toBe(`/issues/CORE-1/comments/${WHOLE_ID}`);
+    expect(other.getAttribute("href")).toBe(`/issues/CORE-1/comments/${OTHER_ID}`);
+    // The list is a view of the page at the address the reader followed, not a route of its own.
+    expect(screen.getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/comments/${SHORT_ID}`
+    );
+    expect(getComment).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage lists a match the reader cannot open by its kind alone, with no empty line", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(409, {
+      candidates: [
+        {
+          first_line: "The first note",
+          id: WHOLE_ID,
+          issue_key: "CORE-1",
+          kind: "comment",
+          ref: `dispatch://CORE-1/comment/${WHOLE_ID}`,
+        },
+        // A direct message: no address to open and no line the reader may read.
+        { id: OTHER_ID, kind: "message", ref: "" },
+      ],
+      code: ID_AMBIGUOUS,
+      error: `the id prefix "${SHORT_ID}" names 2 items; write more of the id`,
+    })
+  );
+  const view = renderIssuePage(`/issues/CORE-1/messages/${SHORT_ID}`);
+
+  try {
+    await screen.findByText("Several items match that link");
+    const rows = screen.getAllByRole("listitem");
+    const unreadable = rows.find((row) => row.textContent?.includes("Message"));
+    if (unreadable === undefined) throw new Error("the unreadable match is not listed");
+    expect(unreadable.textContent?.trim()).toBe("Message");
+    expect(unreadable.querySelector("a")).toBeNull();
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage shows its not-found view for an id prefix that names nothing", async () => {
+  const restore = stubIssuePage(issue);
+  const getReferences = spyOn(api, "getReferences").mockRejectedValue(
+    new ApiError(404, { code: "NOT_FOUND", error: `no comment at ${SHORT_ID}` })
+  );
+  const getComment = spyOn(api, "getComment");
+  const view = renderIssuePage(`/issues/CORE-1/comments/${SHORT_ID}`);
+
+  try {
+    expect(await screen.findByText("Comment not found")).not.toBeNull();
+    expect(getComment).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
+    getReferences.mockRestore();
     restore();
   }
 });

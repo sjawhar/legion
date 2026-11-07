@@ -50,7 +50,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("ask cards show urgency accents and copy their session ID, title, and tmux target @phone", async ({
+test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -80,9 +80,6 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
   const copied = await recordClipboard(page);
   try {
     await page.goto("/");
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
 
     await expect(page.locator("[data-inbox-row]")).toHaveCount(3);
     // Each question's own card, where this width draws it: in its own row, or in the reading
@@ -100,9 +97,6 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     // (`RowUrgencyMark`, outside the card).
     await expect(mediumAccent.getByText("Medium", { exact: true })).toHaveCount(0);
     await expect(inboxRow(page, medium.id).getByText("Medium", { exact: true })).toHaveCount(1);
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Close navigation" }).click();
-    }
 
     const blockingCard = await askCard(page, blocking.id);
     // The ask's own reference is on the provenance line; the session's own handles - its ID,
@@ -129,11 +123,7 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
     await blockingCard.getByRole("button", { name: `Copy reference ${reference}` }).click();
     await expect.poll(copied).toEqual(["e2e-session", "e2e-session-title", "dev:4.7", reference]);
-    if (testInfo.project.name === "iphone") {
-      await page.locator("main").screenshot({ path: testInfo.outputPath("askcard-390.png") });
-    } else {
-      await page.screenshot({ fullPage: true, path: testInfo.outputPath("askcard-1280.png") });
-    }
+    await page.screenshot({ fullPage: true, path: testInfo.outputPath("askcard-1280.png") });
   } finally {
     await alice.close();
   }
@@ -293,9 +283,7 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
-test("a later Inbox response clears a hidden ask's pending refresh @phone", async ({
-  browser,
-}, testInfo) => {
+test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
   const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
@@ -356,11 +344,6 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
     // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
     // the socket.
     await listRequested.promise;
-    const isPhone = testInfo.project.name === "iphone";
-    if (isPhone) {
-      // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await firstPinnedRead;
     await createComment(
       hiddenIssue.key,
@@ -376,9 +359,6 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
     const pinnedReadAgain = page.waitForRequest(pinnedRead);
     await putIssueState(visibleIssue.key, { pinned: true });
     await pinnedReadAgain;
-    if (isPhone) {
-      await page.getByRole("button", { name: "Close navigation" }).click();
-    }
     // So the hidden reply reached the page before the held response lands: what follows tests its
     // pending refresh rather than passing without one.
     expect(hiddenFrames).toBeGreaterThan(0);
@@ -452,7 +432,7 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
 
 // SLOW(>=2s): three seeded asks and a live session's interests waited for on the issue's event
 // list, an Inbox of three rows screenshotted, and the margin answer that empties one of them.
-test("inbox shows current asks and answers issue asks in the margin @phone", async ({
+test("inbox shows current asks and answers issue asks in the margin", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -496,9 +476,6 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
   const alice = await asUser(browser, "alice");
   const alicePage = await alice.newPage();
   await alicePage.goto("/");
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Open navigation" }).click();
-  }
 
   const inboxRows = alicePage.locator("[data-inbox-row]");
   await expect(inboxRows).toHaveCount(3);
@@ -510,14 +487,8 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     newestAsk.created_at
   );
   await alicePage.screenshot({ path: testInfo.outputPath("inbox-three-asks.png"), fullPage: true });
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Close navigation" }).click();
-  }
 
   await navigateInApp(alicePage, `/issues/${firstIssue.key}`);
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Open review panel (2 open asks)" }).click();
-  }
   const needsYou = needsYouCards(alicePage);
   const newestAskCard = needsYou.getByTestId(`ask-${newestAsk.id}`);
   const shipOption = newestAskCard.getByRole("radio", { name: "Ship" });
@@ -531,15 +502,9 @@ test("inbox shows current asks and answers issue asks in the margin @phone", asy
     });
   await navigateInApp(alicePage, "/");
   await expect(inboxRows).toHaveCount(2);
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Open navigation" }).click();
-  }
   const navigation = alicePage.getByRole("navigation", { name: "Navigation" });
   await expect(navigation.getByRole("link", { name: "Inbox" })).toContainText("2");
   await expect(navigation.locator('a[href="/projects/CORE"]')).toContainText("2");
-  if (testInfo.project.name === "iphone") {
-    await alicePage.getByRole("button", { name: "Close navigation" }).click();
-  }
 
   const textOnlyAsk = await createAsk(
     secondIssue.key,
@@ -1286,7 +1251,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
   }
 });
 
-test("an unanchored issue-level comment reaches Conversation, not document review @phone", async ({
+test("an unanchored issue-level comment reaches Conversation, not document review", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1311,9 +1276,6 @@ test("an unanchored issue-level comment reaches Conversation, not document revie
       fullPage: true,
     });
 
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    }
     await expect(page.getByLabel("Margin review items")).not.toContainText(
       "No selection needed to comment."
     );
@@ -1591,7 +1553,7 @@ test("clearing the filter lists every question, and Assign to me takes one under
 // `features/inbox/BlockedOnYou.tsx`): open questions whose next move is a person's, on issues
 // assigned to them. Widening the list they are looking at is not more work waiting on them, so
 // no count moves with it; another issue assigned to them is, so they all move together.
-test("the Inbox count, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
+test("the Inbox count, the banner and an Agents card count the reader's own work, whatever the filter lists", async ({
   browser,
 }) => {
   await setLiveSessions([{ session_id: session.actor.id, title: "e2e-session-title" }]);

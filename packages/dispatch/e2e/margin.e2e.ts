@@ -23,7 +23,6 @@ import {
   marginCard,
   markSpan,
   needsYouCards,
-  openedThreadCard,
   selectEditorText,
   setSheet,
 } from "./editor";
@@ -41,8 +40,7 @@ const initialMarkdown = "The quick brown fox";
 async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
   const turn = page.locator(`[data-turn="comment:${rootId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
-  const phoneThread = page.getByRole("dialog", { name: "Thread" });
-  return (await phoneThread.count()) === 0 ? turn : phoneThread;
+  return turn;
 }
 
 test.beforeEach(async () => {
@@ -50,9 +48,9 @@ test.beforeEach(async () => {
 });
 
 // SLOW(>=2s): two browser contexts, three document loads and three composer round trips.
-test("the selection bar comments, suggests, and asks on marks that both users see @phone", async ({
+test("the selection bar comments, suggests, and asks on marks that both users see", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -131,7 +129,6 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     await navigateInApp(bobPage, `/issues/${issue.key}/spec`);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
 
-    await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "quick");
     await barAction(alicePage, "Suggest");
     const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -147,7 +144,6 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(bobPage, suggestion.anchor.mark_id, "quick"),
     ]);
 
-    await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "fox");
     await barAction(alicePage, "Ask");
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -259,7 +255,7 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-test("highlights follow edits in the other browser and preserve their anchor state @phone", async ({
+test("highlights follow edits in the other browser and preserve their anchor state", async ({
   browser,
 }) => {
   await createProject({ key: "FOLLOW", name: "Following highlights" });
@@ -328,10 +324,8 @@ test("highlights follow edits in the other browser and preserve their anchor sta
     await navigateInApp(bobPage, `/issues/${issue.key}/conversation`);
     const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"]`);
     await orphanedTurn.getByRole("button", { name: "Expand thread" }).click();
-    const threadDialog = bobPage.getByRole("dialog", { name: "Thread" });
-    const expandedTurn = (await threadDialog.count()) === 0 ? orphanedTurn : threadDialog;
-    await expect(expandedTurn).toContainText("Text changed.");
-    await expandedTurn.getByRole("link", { name: "View original text" }).click();
+    await expect(orphanedTurn).toContainText("Text changed.");
+    await orphanedTurn.getByRole("link", { name: "View original text" }).click();
     const versionView = bobPage.getByRole("region", { name: "Document version 1" });
     await expect(versionView.locator(`[data-id="${fox.id}"]`)).toHaveText("fox");
   } finally {
@@ -341,9 +335,9 @@ test("highlights follow edits in the other browser and preserve their anchor sta
 });
 
 // SLOW(>=2s): two browser contexts, two suggestion sends and the accept and reject round trips.
-test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text @phone", async ({
+test("accepting a suggestion changes the text in both browsers and names a version; rejecting leaves the text", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "SUG", name: "Suggestions" });
   const issue = await createIssue({
     project: "SUG",
@@ -414,7 +408,6 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       )
       .toBe(true);
 
-    await setSheet(bobPage, testInfo.project.name, false);
     await selectEditorText(bobPage, "quick");
     await barAction(bobPage, "Suggest");
     const rejectComposer = bobPage.getByRole("form", { name: "Comment composer" });
@@ -530,9 +523,9 @@ test("anchored and unanchored comments reach Conversation for both viewers", asy
   }
 });
 
-test("a document mark opens its thread in the margin and stays on the document @phone", async ({
+test("a document mark opens its thread in the margin and stays on the document", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "FOCUS", name: "Focus marks" });
   const issue = await createIssue({
     project: "FOCUS",
@@ -556,43 +549,31 @@ test("a document mark opens its thread in the margin and stays on the document @
     const span = markSpan(page, comment.anchor.mark_id);
     await expectMark(page, comment.anchor.mark_id, "brown");
     await span.click();
-    // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
-    // small viewport); the reader never leaves the document.
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const card = openedThreadCard(page, testInfo.project.name, comment.id);
+    // Proof's model: the thread opens beside the document; the reader never leaves the document.
+    const card = marginCard(page, comment.id);
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(card).toContainText("focus this");
     await expect(card).toContainText("brown");
     await expect(card).toBeInViewport();
-    if (testInfo.project.name === "iphone") {
-      await phoneThread.getByRole("button", { name: "Back" }).click();
-      await expect(phoneThread).toHaveCount(0);
-    } else {
-      await expect(
-        page.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
-      ).toHaveAttribute("aria-selected", "true");
-    }
+    await expect(
+      page.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
+    ).toHaveAttribute("aria-selected", "true");
     await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
     await expect(connectedDot(page)).toHaveText("connected");
 
     // The comment is anchored, so its deep link lands on the document it quotes, with the
-    // thread open beside it — the same place clicking the mark just opened. On a phone the
-    // margin is a collapsed sheet, so only the desktop run can see the card.
+    // thread open beside it — the same place clicking the mark just opened.
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
-    if (testInfo.project.name !== "iphone") {
-      const deepLinked = page
-        .getByTestId("margin-sheet")
-        .getByTestId(`margin-comment-${comment.id}`);
-      await expect(deepLinked).toHaveAttribute("aria-current", "true");
-      await expect(deepLinked).toContainText("focus this");
-    }
+    const deepLinked = page.getByTestId("margin-sheet").getByTestId(`margin-comment-${comment.id}`);
+    await expect(deepLinked).toHaveAttribute("aria-current", "true");
+    await expect(deepLinked).toContainText("focus this");
   } finally {
     await alice.close();
   }
 });
 
-test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread @phone", async ({
+test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread", async ({
   browser,
 }) => {
   await createProject({ key: "REPLY", name: "Anchored replies" });
@@ -703,7 +684,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
   }
 });
 
-test("a viewer who opens the issue after an anchored ask is answered sees it in the margin @phone", async ({
+test("a viewer who opens the issue after an anchored ask is answered sees it in the margin", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SEES", name: "Sees answered asks" });
@@ -727,21 +708,18 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     const alicePage = await alice.newPage();
     await alicePage.goto(`/issues/${issue.key}`);
     await alicePage.getByRole("tab", { name: "Spec" }).click();
-    await setSheet(alicePage, testInfo.project.name, true);
     const aliceCard = marginCard(alicePage, ask.id);
     await expect(aliceCard).toContainText("brown");
     await aliceCard.getByRole("button", { name: "Add a note or answer in your own words" }).click();
     await aliceCard.getByLabel("Your answer").fill("Because it is precise.");
     await aliceCard.getByRole("button", { exact: true, name: "Answer" }).click();
     await expect.poll(() => getAsk(ask.id)).toMatchObject({ ask: { state: "answered" } });
-    await setSheet(alicePage, testInfo.project.name, false);
 
     // Bob's browser context has never had this issue open: no inbox history, no prior query
     // cache. He still sees the answered anchored ask in the margin.
     const bobPage = await bob.newPage();
     await bobPage.goto(`/issues/${issue.key}`);
     await bobPage.getByRole("tab", { name: "Spec" }).click();
-    await setSheet(bobPage, testInfo.project.name, true);
     const bobCard = marginCard(bobPage, ask.id);
     await expect(bobCard).toBeVisible();
     await expect(bobCard).toContainText("brown");
@@ -852,9 +830,9 @@ test("long option labels and descriptions wrap inside the margin ask card @phone
   }
 });
 
-test("a comment a verified service token wrote names its service account in the margin @phone", async ({
+test("a comment a verified service token wrote names its service account in the margin", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "SVC", name: "Service" });
   const issue = await createIssue({
     project: "SVC",
@@ -881,10 +859,9 @@ test("a comment a verified service token wrote names its service account in the 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await setSheet(page, testInfo.project.name, true);
+    const thread = marginCard(page, comment.id);
     // Only an expanded thread carries the author line under each comment.
-    await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
-    const thread = openedThreadCard(page, testInfo.project.name, comment.id);
+    await thread.locator('button[aria-expanded="false"]').click();
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();

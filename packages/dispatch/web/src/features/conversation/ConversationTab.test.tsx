@@ -22,6 +22,7 @@ import type {
   CommentDelivery,
   Event,
   Handoff,
+  IssueAskRow,
   IssueAskThreadRow,
   Message,
   MessageDelivery,
@@ -2278,3 +2279,93 @@ for (const order of ["oldest", "newest"] as const) {
     }
   });
 }
+
+// INFRA-869: a message that is nothing but a reference shows the reference's card under it, as
+// the margin's comments do.
+test("a message that is nothing but a reference shows its card", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue({
+    documents: [],
+    key: "CORE-2",
+    project: "CORE",
+    status: "in_progress",
+    title: "The other issue",
+  });
+  const stub = stubLists({
+    messages: [thread(message("message-1", { body: "dispatch://CORE-2" }))],
+  });
+  const view = render(tab({ "CORE-1": issueState() }, true, newQueryClient()));
+
+  try {
+    const turn = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>('[data-turn="message:message-1"]');
+      if (found === null) throw new Error("the turn has not rendered");
+      return found;
+    });
+    const cards = await within(turn).findByRole("region", { name: "References" });
+    expect(
+      within(cards)
+        .getByRole("link", { name: /The other issue/ })
+        .getAttribute("href")
+    ).toBe("/issues/CORE-2");
+  } finally {
+    view.unmount();
+    stub.restore();
+    getIssueSummary.mockRestore();
+  }
+});
+
+// INFRA-869: a turn's text is its message's, so its `#id` resolves against the question map the
+// server answers for that message (its issue's spec) - the one map the reference graph stores
+// its edges from.
+test("a Conversation turn links the `#q2` the question map of its message names", async () => {
+  const question: IssueAskRow = {
+    ...baseAsk,
+    block_artifact: { id: "spec-1", primary: true, slug: "spec" },
+    block_id: "q2",
+    id: "ask-2",
+    last_reply: null,
+    options: [],
+    question: "Which region?",
+  };
+  const getReferenceQuestions = spyOn(api, "getReferenceQuestions").mockResolvedValue({
+    document: "spec-1",
+    questions: [{ ask: "ask-2", block_id: "q2", reference: "dispatch://CORE-1/ask/ask-2" }],
+  });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    answers: [],
+    ask: question,
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies: [],
+    route: null,
+    route_holder: null,
+    route_status: null,
+    route_status_reason: null,
+  });
+  const stub = stubLists({
+    messages: [thread(message("message-1", { body: "See #q2 for the rollout." }))],
+  });
+  const view = render(tab({ "CORE-1": issueState() }, true, newQueryClient()));
+
+  try {
+    const turn = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>('[data-turn="message:message-1"]');
+      if (found === null) throw new Error("the turn has not rendered");
+      return found;
+    });
+    const link = await waitFor(() => {
+      const found = turn.querySelector<HTMLElement>("a[data-dispatch-ref]");
+      if (found === null) throw new Error("the `#q2` is still plain text");
+      return found;
+    });
+    expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/ask/ask-2");
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-2");
+    expect(getReferenceQuestions).toHaveBeenCalledWith("message", "message-1");
+  } finally {
+    view.unmount();
+    stub.restore();
+    getAsk.mockRestore();
+    getReferenceQuestions.mockRestore();
+  }
+});
