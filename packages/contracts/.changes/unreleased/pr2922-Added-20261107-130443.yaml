@@ -1,0 +1,5 @@
+kind: Added
+body: 'A claim view and an operator''s claim now carry `step`, what the daemon last saw that worker''s agent do: the time of its last step, when its turn began, and the call it is in with that call''s tool, call id, argument length and argument hash. The arguments'' own text is in no field of it.'
+time: 2026-11-07T13:04:43.009042382Z
+custom:
+    Issue: pr2922

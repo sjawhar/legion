@@ -1,0 +1,5 @@
+kind: Added
+body: 'Every Legion session now watches its own tool calls: a call that outlives the deadline its own tool promised has its evidence written to the transcript, its owner told once, and then its own processes ended, its turn ended with the host''s abort and the work started again, and at last the process ended at most twice. A subagent''s session watches nothing, and the controller''s own session tells nobody.'
+time: 2026-11-07T13:04:32.725206393Z
+custom:
+    Issue: pr2922
