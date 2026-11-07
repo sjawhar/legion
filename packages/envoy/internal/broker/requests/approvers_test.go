@@ -50,13 +50,13 @@ func TestAnApprovalStopsWhenItsSecretChangesHands(t *testing.T) {
 			if err != nil || dec.GrantID == "" {
 				t.Fatalf("ApplyDecision(%s) = %+v, %v, want granted", c.approver, dec, err)
 			}
-			if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values[c.secret] != c.value {
-				t.Fatalf("Values before the handover = %v, %v, want %s=%s", values, err, c.secret, c.value)
+			if release, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || release.Values[c.secret] != c.value {
+				t.Fatalf("Values before the handover = %v, %v, want %s=%s", release.Values, err, c.secret, c.value)
 			}
 
 			retag(t, m, c.handedOver)
-			if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
-				t.Fatalf("Values after %s became %s's = %v, %v; want ErrGrantNotLive", c.secret, c.handedOver.Tags[policy.TagOwner], values, err)
+			if release, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values after %s became %s's = %v, %v; want ErrGrantNotLive", c.secret, c.handedOver.Tags[policy.TagOwner], release.Values, err)
 			}
 			again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", c.secret), "")
 			if err != nil || again.ID == req.ID || again.State != "pending" {
@@ -123,8 +123,8 @@ func TestAPendingRequestIsApprovedByWhomTheTagsNameNow(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice, the new owner) = %+v, %v; want granted", dec, err)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["SHARED_KEY"] != "alice-owned-v2" {
-		t.Fatalf("Values after alice approved = %v, %v; want SHARED_KEY=alice-owned-v2", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || release.Values["SHARED_KEY"] != "alice-owned-v2" {
+		t.Fatalf("Values after alice approved = %v, %v; want SHARED_KEY=alice-owned-v2", release.Values, err)
 	}
 	for _, c := range []struct {
 		who   string
@@ -244,8 +244,8 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	}
 
 	retag(t, m, policytest.Secret("ALICE_KEY", policy.OwnerShared, policy.TierHuman, "alice-v1"))
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["ALICE_KEY"] != "alice-v1" {
-		t.Fatalf("Values once shared = %v, %v; want ALICE_KEY still released", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || release.Values["ALICE_KEY"] != "alice-v1" {
+		t.Fatalf("Values once shared = %v, %v; want ALICE_KEY still released", release.Values, err)
 	}
 	granted := int(DefaultGrantLifetime.Seconds())
 	if again, err := m.Create(ctx, enr, signRequestFor(t, m, key, granted, "ALICE_KEY"), ""); err != nil || again.ID != req.ID {
@@ -281,13 +281,13 @@ func TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(mallory) while SHARED_KEY is refused = %+v, %v; want granted", dec, err)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
-		t.Fatalf("Values while SHARED_KEY is refused = %v, %v; want ErrGrantNotLive", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values while SHARED_KEY is refused = %v, %v; want ErrGrantNotLive", release.Values, err)
 	}
 
 	retag(t, m, policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "alice-v3"))
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
-		t.Fatalf("Values once SHARED_KEY is alice's = %v, %v; want ErrGrantNotLive", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values once SHARED_KEY is alice's = %v, %v; want ErrGrantNotLive", release.Values, err)
 	}
 	again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", "SHARED_KEY"), "")
 	if err != nil || again.State != "pending" || again.GrantID != nil {
@@ -314,8 +314,8 @@ func TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover(t *testing.T) {
 	if err != nil || dec.State != "granted" {
 		t.Fatalf("ApplyDecision(alice) once ALICE_KEY is gone = %+v, %v; want granted", dec, err)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
-		t.Fatalf("Values once ALICE_KEY is gone = %v, %v; want ErrGrantNotLive", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values once ALICE_KEY is gone = %v, %v; want ErrGrantNotLive", release.Values, err)
 	}
 }
 
@@ -337,8 +337,8 @@ func TestAnOwnersApprovalSurvivesHerRaisingTheTier(t *testing.T) {
 	}
 
 	retag(t, m, policytest.Secret("ALICE_KEY", otherPerson, policy.TierHuman, "alice-v2"))
-	if values, _, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || values["ALICE_KEY"] != "alice-v2" {
-		t.Fatalf("Values after alice raised the tier = %v, %v; want ALICE_KEY=alice-v2", values, err)
+	if release, err := m.Values(ctx, dec.GrantID, enr, nil); err != nil || release.Values["ALICE_KEY"] != "alice-v2" {
+		t.Fatalf("Values after alice raised the tier = %v, %v; want ALICE_KEY=alice-v2", release.Values, err)
 	}
 }
 

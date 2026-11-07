@@ -14,7 +14,8 @@ import (
 // whose lease lapsed (revoking their grants and cancelling their pending requests), ends the
 // dormant enrollments whose carry window passed, expires overdue
 // pending agent_secret requests (waking each one's owner) and overdue pending machine logins,
-// deletes spent OAuth state (oauthstore.Store.Sweep), and deletes expired browser sessions — all
+// deletes spent OAuth state (oauthstore.Store.Sweep), deletes expired browser sessions, and
+// deletes the airlock placeholders of grants that have ended — all
 // read fresh from Postgres, never from memory, so a restart resumes exactly where the rows are. A
 // lease that ran out while no broker was serving is not lapsed (enroll.Service.EndLapsed), so the
 // first sweep after an outage never ends it for that: the broker's serving clock
@@ -48,7 +49,8 @@ func (s *Sweeper) Run(ctx context.Context) {
 
 // Tick runs one sweep: lapsed enrollments, then the dormant enrollments whose carry window
 // passed, then agent_secret requests, then machine logins, then
-// spent OAuth state, then expired browser sessions. Each
+// spent OAuth state, then expired browser sessions, then the airlock placeholders of grants that
+// have ended. Each
 // sweep's own failure is logged and does not stop the others — they share nothing but the ticker.
 // Lapsed enrollments go first, so a request whose session is gone is cancelled with it rather
 // than expired and its owner woken; the carry sweep follows them, so a lapse that leaves an
@@ -92,5 +94,17 @@ func (s *Sweeper) Tick(ctx context.Context) {
 		slog.Warn("broker sweeper: delete expired browser sessions", "error", err)
 	} else if deleted > 0 {
 		slog.Info("broker sweeper: deleted expired browser sessions", "count", deleted)
+	}
+	// The placeholders of a revoked or expired grant, which the table would otherwise keep for
+	// as long as the grant row lives. Deleting them is safe at the moment the grant ends,
+	// whatever still holds one: every read of a placeholder checks its grant's liveness first
+	// (AirlockConnection), so such a placeholder already opens nothing, and the only thing the
+	// rows still do is answer a 407 a little more slowly. A deleted grant takes its rows with
+	// it through the foreign key's on delete cascade; this is for the far commoner grant that
+	// ends without being deleted.
+	if deleted, err := s.Machine.deleteSpentPlaceholders(ctx); err != nil {
+		slog.Warn("broker sweeper: delete the placeholders of grants that have ended", "error", err)
+	} else if deleted > 0 {
+		slog.Info("broker sweeper: deleted the placeholders of grants that have ended", "count", deleted)
 	}
 }

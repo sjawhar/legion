@@ -69,19 +69,19 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 	}
 
 	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
-		values, expires, err := m.Values(ctx, grantID, enr, nil)
-		if err != nil || len(values) != 1 {
-			t.Fatalf("Values(%s grant) at once = %v, %v; want its value", name, values, err)
+		release, err := m.Values(ctx, grantID, enr, nil)
+		if err != nil || len(release.Values) != 1 {
+			t.Fatalf("Values(%s grant) at once = %v, %v; want its value", name, release.Values, err)
 		}
-		if expires == nil || time.Until(*expires) > 2*time.Minute || time.Until(*expires) < 110*time.Second {
-			t.Fatalf("Values(%s grant) expires %v, want two minutes from now", name, expires)
+		if release.Expires == nil || time.Until(*release.Expires) > 2*time.Minute || time.Until(*release.Expires) < 110*time.Second {
+			t.Fatalf("Values(%s grant) expires %v, want two minutes from now", name, release.Expires)
 		}
 		age(t, m, grantID, 119*time.Second)
-		if _, _, err := m.Values(ctx, grantID, enr, nil); err != nil {
+		if _, err := m.Values(ctx, grantID, enr, nil); err != nil {
 			t.Fatalf("Values(%s grant) at 1m59s = %v, want its value", name, err)
 		}
 		age(t, m, grantID, 2*time.Second)
-		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		if _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 			t.Fatalf("Values(%s grant) at 2m01s = %v, want ErrGrantNotLive", name, err)
 		}
 	}
@@ -262,11 +262,11 @@ func TestAGrantWithNoTTLLastsTwelveHours(t *testing.T) {
 		t.Fatalf("Create(AUTO_TOKEN, no TTL) = %+v, %v; want a grant of %d s", auto, err, want)
 	}
 	age(t, m, *auto.GrantID, DefaultGrantLifetime-time.Minute)
-	if values, _, err := m.Values(ctx, *auto.GrantID, enr, nil); err != nil || len(values) != 1 {
-		t.Fatalf("Values at 11h59m = %v, %v; want its value", values, err)
+	if release, err := m.Values(ctx, *auto.GrantID, enr, nil); err != nil || len(release.Values) != 1 {
+		t.Fatalf("Values at 11h59m = %v, %v; want its value", release.Values, err)
 	}
 	age(t, m, *auto.GrantID, 2*time.Minute)
-	if _, _, err := m.Values(ctx, *auto.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+	if _, err := m.Values(ctx, *auto.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values at 12h01m = %v; want ErrGrantNotLive", err)
 	}
 }
@@ -295,11 +295,11 @@ func TestAHumanTierGrantWithNoTTLLastsFifteenMinutes(t *testing.T) {
 		t.Fatalf("ApplyDecision = %+v, %v; want a grant", approved, err)
 	}
 	age(t, m, approved.GrantID, DefaultHumanGrantLifetime-time.Minute)
-	if values, _, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(values) != 1 {
-		t.Fatalf("Values at 14m = %v, %v; want its value", values, err)
+	if release, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(release.Values) != 1 {
+		t.Fatalf("Values at 14m = %v, %v; want its value", release.Values, err)
 	}
 	age(t, m, approved.GrantID, 2*time.Minute)
-	if _, _, err := m.Values(ctx, approved.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+	if _, err := m.Values(ctx, approved.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values at 16m = %v; want ErrGrantNotLive", err)
 	}
 
@@ -368,9 +368,9 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 		if _, err := m.Store.Pool.Exec(ctx, `update grants set created_at = created_at - interval '7 days' where id=$1`, grantID); err != nil {
 			t.Fatal(err)
 		}
-		values, expires, err := m.Values(ctx, grantID, enr, nil)
-		if err != nil || len(values) != 1 || expires != nil {
-			t.Fatalf("Values(%s grant) a week on = %v, %v, %v; want its value and no expiry", name, values, expires, err)
+		release, err := m.Values(ctx, grantID, enr, nil)
+		if err != nil || len(release.Values) != 1 || release.Expires != nil {
+			t.Fatalf("Values(%s grant) a week on = %v, %v, %v; want its value and no expiry", name, release.Values, release.Expires, err)
 		}
 	}
 	live, err := m.LiveGrants(ctx, enr)
@@ -390,7 +390,7 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 		t.Fatalf("end the session: %v", err)
 	}
 	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
-		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
+		if _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 			t.Fatalf("Values(%s grant) after its session ended = %v, want ErrGrantNotLive", name, err)
 		}
 	}
@@ -449,8 +449,8 @@ func TestAPendingSessionLengthRequestApprovedAfterItsTagGoesGetsTheHumanDefault(
 		expires == nil || time.Until(*expires) > DefaultHumanGrantLifetime || time.Until(*expires) < DefaultHumanGrantLifetime-2*time.Minute {
 		t.Fatalf("grant expires_at = %v, %v; want about %s from now", expires, err, DefaultHumanGrantLifetime)
 	}
-	if values, _, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(values) != 1 {
-		t.Fatalf("Values under max-grant 24h = %v, %v; want the value", values, err)
+	if release, err := m.Values(ctx, approved.GrantID, enr, nil); err != nil || len(release.Values) != 1 {
+		t.Fatalf("Values under max-grant 24h = %v, %v; want the value", release.Values, err)
 	}
 	if got, err := m.Get(ctx, pending.ID); err != nil || got.LifetimeSeconds == nil || *got.LifetimeSeconds != want {
 		t.Fatalf("Get = %+v, %v; want lifetime %d", got, err, want)

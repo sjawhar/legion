@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 
@@ -65,8 +66,12 @@ func TestGoogleServiceAccountMintImpersonatesTheStoredAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if got != "impersonated-access-token" {
-		t.Fatalf("Mint = %q, want the bare access token", got)
+	if got.Value != "impersonated-access-token" {
+		t.Fatalf("Mint = %q, want the bare access token", got.Value)
+	}
+	// The expiry is what makes the airlock's proxy mint again before the token stops working.
+	if want := time.Date(2026, 11, 6, 13, 0, 0, 0, time.UTC); !got.Expires.Equal(want) {
+		t.Fatalf("Mint's expiry = %v, want %v, the expireTime Google answered", got.Expires, want)
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("the IAM endpoint saw %d calls, want 1", calls.Load())
@@ -247,8 +252,8 @@ func TestGoogleServiceAccountResolvesItsOwnCredentialsOnce(t *testing.T) {
 	minter := &secrets.GoogleServiceAccount{BaseURL: server.URL, HTTP: server.Client()}
 	for mint := 1; mint <= 2; mint++ {
 		got, err := minter.Mint(t.Context(), secrets.MintRequest{Name: "GCP_FLEET", Value: serviceAccountValue})
-		if err != nil || got != "impersonated-access-token" {
-			t.Fatalf("mint %d = %q, %v; want the bare access token", mint, got, err)
+		if err != nil || got.Value != "impersonated-access-token" {
+			t.Fatalf("mint %d = %q, %v; want the bare access token", mint, got.Value, err)
 		}
 	}
 	if resolutions.Load() != 1 {

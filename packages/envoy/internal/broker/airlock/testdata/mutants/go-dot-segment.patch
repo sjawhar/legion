@@ -1,0 +1,18 @@
+# go-dot-segment: check drops the refusal of a path that holds a "." or ".." segment, so the
+# entry's allow prefix bounds the path as it is written rather than the path a reader
+# resolves and a service reads. Caught by the comparison fuzz test: the model still answers
+# "path has a dot segment". Applied with patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/airlock.go
++++ b/packages/envoy/internal/broker/airlock/airlock.go
+@@ -277,8 +277,8 @@
+ 		return nil, "sni mismatch"
+ 	case r.HostHeader != r.ConnectHost:
+ 		return nil, "host header mismatch"
+-	case hasDotSegment(r.Path):
+-		return nil, "path has a dot segment"
++	// MUTANT: a path that walks out of the entry's prefix through a dot segment is no
++	// longer refused, so "/v1/../admin" passes a "/v1/" prefix and reaches /admin.
+ 	case !allowOK(sr.Allow, r):
+ 		return nil, "not allowed by rule"
+ 	case sr.Allow != nil && hasMethodOverride(r):

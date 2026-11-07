@@ -218,7 +218,7 @@ func TestGitHubAppMintSendsTheNarrowingAsTheAccessTokensBody(t *testing.T) {
 			}
 			_, tokens := github.take()
 			var got mintedGitHubApp
-			if err := json.Unmarshal([]byte(release), &got); err != nil {
+			if err := json.Unmarshal([]byte(release.Value), &got); err != nil {
 				t.Fatalf("Mint output: %v", err)
 			}
 			if len(got.Installations) != len(tc.owners) {
@@ -415,8 +415,8 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			github.setAnswer(answering(tc.change))
 			release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: tc.narrowing})
-			if release != "" || secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), tc.mentions) || strings.Contains(err.Error(), "token-") {
-				t.Fatalf("Mint = %q, %v (class %s), want nothing released, class upstream naming %q and no token", release, err, secrets.MintErrorClass(err), tc.mentions)
+			if release.Value != "" || secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), tc.mentions) || strings.Contains(err.Error(), "token-") {
+				t.Fatalf("Mint = %q, %v (class %s), want nothing released, class upstream naming %q and no token", release.Value, err, secrets.MintErrorClass(err), tc.mentions)
 			}
 			for _, quoted := range gitHubValues {
 				if strings.Contains(err.Error(), quoted) {
@@ -430,12 +430,12 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 	}
 
 	github.setAnswer(answering(func(a map[string]any) { a["repositories"] = []map[string]string{{"name": "Proofs"}} }))
-	if release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: proofs}); err != nil || !strings.Contains(release, "token-2") {
-		t.Fatalf("Mint with GitHub naming the repository in its own case = %q, %v; want ada's token", release, err)
+	if release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: proofs}); err != nil || !strings.Contains(release.Value, "token-2") {
+		t.Fatalf("Mint with GitHub naming the repository in its own case = %q, %v; want ada's token", release.Value, err)
 	}
 	github.setAnswer(asGitHubAnswers)
-	if release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}}); err != nil || !strings.Contains(release, "token-1") || !strings.Contains(release, "token-2") {
-		t.Fatalf("Mint with no narrowing and GitHub's whole answer = %q, %v; want every listed owner's token", release, err)
+	if release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"}}); err != nil || !strings.Contains(release.Value, "token-1") || !strings.Contains(release.Value, "token-2") {
+		t.Fatalf("Mint with no narrowing and GitHub's whole answer = %q, %v; want every listed owner's token", release.Value, err)
 	}
 	if revoked := github.takeRevoked(); len(revoked) != 0 {
 		t.Fatalf("revokes of released tokens = %q, want none", revoked)
@@ -467,8 +467,8 @@ func TestGitHubAppMintDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing
 
 	release, err := app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"},
 		GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}})
-	if err != nil || !strings.Contains(release, "token-2") {
-		t.Fatalf("Mint for an installation that holds no actions = %q, %v; want ada's token", release, err)
+	if err != nil || !strings.Contains(release.Value, "token-2") {
+		t.Fatalf("Mint for an installation that holds no actions = %q, %v; want ada's token", release.Value, err)
 	}
 	_, tokens := github.take()
 	asked := []tokenRequest{
@@ -496,8 +496,8 @@ func TestGitHubAppMintDropsActionsWhereTheInstallationDoesNotHoldThem(t *testing
 	})
 	release, err = app.Mint(t.Context(), secrets.MintRequest{Value: value, GitHubOwners: []string{"acme-org", "ada"},
 		GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}})
-	if release != "" || secrets.MintErrorClass(err) != "narrowing" || !strings.Contains(err.Error(), "contents: read") {
-		t.Fatalf("Mint refused twice = %q, %v (class %s); want nothing released and class narrowing naming the read access", release, err, secrets.MintErrorClass(err))
+	if release.Value != "" || secrets.MintErrorClass(err) != "narrowing" || !strings.Contains(err.Error(), "contents: read") {
+		t.Fatalf("Mint refused twice = %q, %v (class %s); want nothing released and class narrowing naming the read access", release.Value, err, secrets.MintErrorClass(err))
 	}
 	if _, tokens := github.take(); len(tokens) != 2 {
 		t.Fatalf("%d token requests for a refusal that stands, want the asked-for set and one more without actions", len(tokens))
@@ -523,8 +523,8 @@ func TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke(t *testing.T) {
 	app := secrets.GitHubApp{Base: github.server.URL, HTTP: github.server.Client()}
 
 	release, err := app.Mint(t.Context(), secrets.MintRequest{Value: githubAppValue(t, "123456", key), GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", ReadOnly: true}})
-	if release != "" || secrets.MintErrorClass(err) != "upstream" {
-		t.Fatalf("Mint = %q, %v (class %s), want nothing released and class upstream", release, err, secrets.MintErrorClass(err))
+	if release.Value != "" || secrets.MintErrorClass(err) != "upstream" {
+		t.Fatalf("Mint = %q, %v (class %s), want nothing released and class upstream", release.Value, err, secrets.MintErrorClass(err))
 	}
 	if revoked := github.takeRevoked(); len(revoked) != 1 {
 		t.Fatalf("revokes at GitHub = %q, want one", revoked)
@@ -561,8 +561,8 @@ func TestGitHubAppMintReadsTheAnswerToANarrowingAtTheMaximum(t *testing.T) {
 	}
 
 	release, err := app.Mint(t.Context(), secrets.MintRequest{Value: githubAppValue(t, "123456", key), GitHubOwners: []string{"acme-org", "ada"}, GitHubNarrowing: &secrets.GitHubNarrowing{Owner: "ada", Repositories: names, ReadOnly: true}})
-	if err != nil || !strings.Contains(release, "token-2") {
-		t.Fatalf("Mint narrowed to %d repositories = %q, %v; want ada's token", len(names), release, err)
+	if err != nil || !strings.Contains(release.Value, "token-2") {
+		t.Fatalf("Mint narrowed to %d repositories = %q, %v; want ada's token", len(names), release.Value, err)
 	}
 	if revoked := github.takeRevoked(); len(revoked) != 0 {
 		t.Fatalf("revokes at GitHub = %q, want none", revoked)

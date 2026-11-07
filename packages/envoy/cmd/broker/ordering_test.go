@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"slices"
@@ -37,13 +38,15 @@ import (
 
 // The steps the rows below record, written as an operator reads them in a failure message.
 const (
-	theFirstLoad        = "the first policy load"
-	theCatchUpReturned  = "the catch-up policy load returned"
-	theBind             = "the bind"
-	theShutdownBegan    = "the shutdown began"
-	theShutdownReturned = "the shutdown returned"
-	theServingEnded     = "the serving context ended"
-	theStoreClosed      = "the store closed"
+	theFirstLoad               = "the first policy load"
+	theCatchUpReturned         = "the catch-up policy load returned"
+	theBind                    = "the bind"
+	theAirlockBind             = "the airlock proxy port's bind"
+	theShutdownBegan           = "the shutdown began"
+	theShutdownReturned        = "the shutdown returned"
+	theAirlockShutdownReturned = "the airlock proxy's shutdown returned"
+	theServingEnded            = "the serving context ended"
+	theStoreClosed             = "the store closed"
 )
 
 // steps is the order one row's collaborators ran in. It is a record rather than a set of
@@ -400,5 +403,130 @@ func TestStopClosesTheStoreOnlyAfterServingEnds(t *testing.T) {
 	})
 	if !ran.is(theServingEnded, theStoreClosed) {
 		t.Fatalf("the stop ran %s; want %s", &ran, strings.Join([]string{theServingEnded, theStoreClosed}, " -> "))
+	}
+}
+
+// TestBootBindsTheAirlockPortAfterTheAPIAndInsideTheBoot pins where the second socket is taken.
+// A deployment with an airlock releases placeholders and a proxy URL in place of values, so a
+// pod that served its API while its proxy port was unbound would hand out credentials nothing
+// can be done with: the command's HTTPS_PROXY would refuse every connection, and the session
+// would read it as the service being down. Binding it inside the boot, after the API's bind and
+// before anything serves either, makes a proxy port that cannot be taken a boot that fails.
+//
+// The named revert: bind the airlock in main, after boot has returned.
+func TestBootBindsTheAirlockPortAfterTheAPIAndInsideTheBoot(t *testing.T) {
+	var ran steps
+	started, err := boot(t.Context(), brokerBoot{
+		LoadPolicy: func(context.Context) (*policy.Current, error) {
+			ran.record(theFirstLoad)
+			return nil, nil
+		},
+		StartListener: func(_ context.Context, _ *policy.Current, onConnected func()) { onConnected() },
+		Listen: func() (net.Listener, error) {
+			ran.record(theBind)
+			return net.Listen("tcp", "127.0.0.1:0")
+		},
+		ListenAirlock: func() (net.Listener, error) {
+			ran.record(theAirlockBind)
+			return net.Listen("tcp", "127.0.0.1:0")
+		},
+		ListenWait: bootListenWait,
+		Catchup: func(context.Context, *policy.Current) error {
+			ran.record(theCatchUpReturned)
+			return nil
+		},
+		Log: orderingLog(),
+	})
+	if err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	if started.Serving == nil {
+		t.Fatal("boot answered no serving context: it returned early, and nothing below is about the order of a finished boot")
+	}
+	t.Cleanup(started.EndServing)
+	defer started.Listener.Close()
+	if started.AirlockListener == nil {
+		t.Fatal("the boot answered no airlock listener, so there is no proxy port for main to serve")
+	}
+	defer started.AirlockListener.Close()
+
+	want := []string{theFirstLoad, theCatchUpReturned, theBind, theAirlockBind}
+	if !ran.is(want...) {
+		t.Fatalf("the boot ran %s; want %s", &ran, strings.Join(want, " -> "))
+	}
+}
+
+// TestBootRefusesWhenTheAirlockPortCannotBeBound is the other half of that: a proxy port the pod
+// cannot take is a boot that fails, not an API that serves without it. The API's own socket goes
+// with it, since a refused boot must leave no address held - another process is about to be
+// started in this one's place and would find the address taken.
+//
+// The named revert: log the airlock bind's error and return the booted API listener anyway.
+func TestBootRefusesWhenTheAirlockPortCannotBeBound(t *testing.T) {
+	var apiListener net.Listener
+	refusal := errors.New("the proxy port is already held")
+	started, err := boot(t.Context(), brokerBoot{
+		LoadPolicy:    func(context.Context) (*policy.Current, error) { return nil, nil },
+		StartListener: func(_ context.Context, _ *policy.Current, onConnected func()) { onConnected() },
+		Listen: func() (net.Listener, error) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			apiListener = listener
+			return listener, err
+		},
+		ListenAirlock: func() (net.Listener, error) { return nil, refusal },
+		ListenWait:    bootListenWait,
+		Catchup:       func(context.Context, *policy.Current) error { return nil },
+		Log:           orderingLog(),
+	})
+	if !errors.Is(err, refusal) {
+		t.Fatalf("boot with an unbindable proxy port = %v; want the bind's own refusal", err)
+	}
+	if started.Serving != nil || started.Listener != nil || started.AirlockListener != nil {
+		t.Fatalf("the refused boot answered %+v; want nothing to serve and nothing to stop", started)
+	}
+	if apiListener == nil {
+		t.Fatal("the boot never reached the API's bind, so this row says nothing about what it left behind")
+	}
+	if err := apiListener.Close(); err == nil {
+		t.Error("the refused boot left the API's socket open: the pod that replaces this one finds the address held")
+	}
+}
+
+// TestStopDrainsTheAirlockBesideTheAPI pins the two ports' drain. Both are this one process's,
+// both have callers in flight at the signal - a command streaming an answer through the proxy is
+// one - and both have to be finished before the work that outlived the drain stops, since the
+// proxy reads the same policy and the same pools the API does. They drain beside each other out
+// of the one shutdown budget rather than one after the other, so neither is handed only what the
+// other left.
+//
+// The named revert: drop ShutdownAirlock from stop, or call it after EndServing.
+func TestStopDrainsTheAirlockBesideTheAPI(t *testing.T) {
+	var ran steps
+	stop(t.Context(), brokerStop{
+		Drain:    stopDrain,
+		DrainNow: make(chan struct{}),
+		Draining: func(bool) {},
+		Shutdown: func(context.Context) error {
+			ran.record(theShutdownBegan)
+			ran.record(theShutdownReturned)
+			return nil
+		},
+		ShutdownAirlock: func(context.Context) error {
+			if ran.has(theServingEnded) {
+				t.Error("the stop ended the serving context before the airlock had drained: a command still being answered through the proxy is answered out of the pools that close next")
+			}
+			ran.record(theAirlockShutdownReturned)
+			return nil
+		},
+		EndServing: func() { ran.record(theServingEnded) },
+		CloseStore: func() {},
+		Log:        orderingLog(),
+	})
+	if !ran.has(theAirlockShutdownReturned) {
+		t.Fatalf("the stop ran %s; it never drained the airlock's proxy port, so every tunnel it held is cut by the kubelet rather than closed", &ran)
+	}
+	order := ran.order()
+	if len(order) == 0 || order[len(order)-1] != theServingEnded {
+		t.Fatalf("the stop ran %s; want both shutdowns before %s", &ran, theServingEnded)
 	}
 }

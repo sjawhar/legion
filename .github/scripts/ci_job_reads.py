@@ -401,6 +401,19 @@ SOAK_STEP = "Server-change soak of the listener"
 SOAK_SCRIPT = f"""\
 pattern=$(../../{TAGGED_TESTS} serverchange ./cmd/listener)
 go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener"""
+# The airlock-lean job's two runs of the model comparison. `-run`, `-fuzz` and `-fuzztime` are no
+# flags the simple form reduces, so each step is pinned whole; they move no closure, since both
+# runs compile the airlock package's tests, whichever cases they then drive.
+AIRLOCK_JOB = "airlock-lean"
+AIRLOCK_LEAN = f"{ENVOY}/internal/broker/airlock/lean"
+AIRLOCK_PKGS = ["./internal/broker/airlock/"]
+AIRLOCK_SEED_STEP = "Compare the Go airlock with the model over the seed corpus"
+AIRLOCK_SEED_SCRIPT = "go test -run FuzzAirlock ./internal/broker/airlock/"
+AIRLOCK_FUZZ_STEP = "Fuzz the Go airlock against the model"
+AIRLOCK_FUZZ_SCRIPT = "go test -fuzz FuzzAirlock -fuzztime=120s -run FuzzAirlock ./internal/broker/airlock/"
+AIRLOCK_BUILD_STEP = "Build the Lean model"
+AIRLOCK_AXIOMS_STEP = "Print the theorems' axioms"
+AIRLOCK_AXIOMS_SCRIPT = f"{ENVOY}/scripts/airlock-lean-axioms.sh"
 # The document service's race step runs under .github/scripts/race_memory.py, which fails it with
 # a log when the race binary's memory passes RACE_MEM_LIMIT_KB (ci.yaml's comment on the step says
 # why), so its line is a shell assignment and a script, not a go command the simple form reduces.
@@ -1064,6 +1077,22 @@ GATES = [
     ], reads=reads(
         (TAGGED_TESTS, f"{at('broker-multiprocess', BROKER_MP_STEP)} takes its -run from it"),
     ) + setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("airlock_lean", AIRLOCK_JOB, exact=[
+        pinned_step(AIRLOCK_JOB, AIRLOCK_SEED_STEP, ENVOY, AIRLOCK_SEED_SCRIPT, [
+            (ENVOY, AIRLOCK_PKGS, "the airlock package's tests over the committed seed corpus", {}),
+        ]),
+        pinned_step(AIRLOCK_JOB, AIRLOCK_FUZZ_STEP, ENVOY, AIRLOCK_FUZZ_SCRIPT, [
+            (ENVOY, AIRLOCK_PKGS, "the same tests, fuzzed against the model for 120 seconds", {}),
+        ]),
+    ], reads=reads(
+        (".github/actions/install-elan/**", at(AIRLOCK_JOB, "./.github/actions/install-elan")),
+        (f"{AIRLOCK_LEAN}/**", f"{at(AIRLOCK_JOB, AIRLOCK_BUILD_STEP)}: lake build reads the model's whole project, and "
+                               f"{at(AIRLOCK_JOB, AIRLOCK_AXIOMS_STEP)} runs Axioms.lean over the library it builds"),
+        (f"{AIRLOCK_LEAN}/lean-toolchain", f"{at(AIRLOCK_JOB, 'elan-cache')}: the elan cache's key is hashFiles of it"),
+        (AIRLOCK_AXIOMS_SCRIPT, f"{at(AIRLOCK_JOB, AIRLOCK_AXIOMS_STEP)} is one line running it, and check k15 of "
+                                f"{ENVOY}/scripts/airlock-check.sh runs the same script, so the two cannot drift"),
+    ) + setup_go(AIRLOCK_JOB, f"{ENVOY}/go.mod") + CI_SELF),
 
 
     # The listener image this job builds and smokes is left to check-image-trigger-paths.sh,

@@ -6,10 +6,19 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"maps"
+	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -21,6 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlockproxy"
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -101,6 +112,87 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 	}
 }
 
+// airlockTestSettings is the seven settings of the airlock's local stack, each as a Config the
+// refusal below reads and as the environment a real broker is started with. One row per
+// setting: the refusal has to name whichever one it found, since an operator reads from it
+// which setting to take out.
+func airlockTestSettings() []struct {
+	name string
+	cfg  func(*config.Config)
+	env  string
+} {
+	return []struct {
+		name string
+		cfg  func(*config.Config)
+		env  string
+	}{
+		{"BROKER_AIRLOCK_TEST_GITHUB_API_BASE", func(c *config.Config) { c.AirlockTestGitHubAPIBase = "http://127.0.0.1:18080" }, "http://127.0.0.1:18080"},
+		{"BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL", func(c *config.Config) { c.AirlockTestGoogleTokenURL = "http://127.0.0.1:18081/token" }, "http://127.0.0.1:18081/token"},
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", func(c *config.Config) { c.AirlockTestDialAllow = []string{"s.airlock.test:443"} }, "s.airlock.test:443"},
+		{"BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE", func(c *config.Config) { c.AirlockTestUpstreamCAFile = "/run/airlock/ca.crt" }, "/run/airlock/ca.crt"},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", func(c *config.Config) {
+			c.AirlockTestResolve = map[string]netip.Addr{"s.airlock.test": netip.MustParseAddr("127.0.0.1")}
+		}, "s.airlock.test=127.0.0.1"},
+		{"BROKER_AIRLOCK_TEST_KEEP_VALUES", func(c *config.Config) { c.AirlockTestKeepValues = true }, "true"},
+		{"BROKER_AIRLOCK_TEST_NO_KIND", func(c *config.Config) { c.AirlockTestNoKind = true }, "true"},
+	}
+}
+
+// TestEachAirlockTestSettingIsRefusedInProduction: every one of the seven points the broker at
+// a stand-in, lets it dial what no production proxy may, or turns a part of the airlock off, so
+// each on its own refuses a start that is not a local run, naming itself.
+func TestEachAirlockTestSettingIsRefusedInProduction(t *testing.T) {
+	for _, setting := range airlockTestSettings() {
+		var cfg config.Config
+		setting.cfg(&cfg)
+		err := refuseAirlockTestSettingsInProduction(cfg, "")
+		if err == nil {
+			t.Errorf("%s set with no BROKER_FAKE_SECRETS_FILE: want an error, got nil", setting.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), setting.name) || !strings.Contains(err.Error(), "BROKER_FAKE_SECRETS_FILE is unset") {
+			t.Errorf("%s set: error = %q; want it to name the setting and the local-run file", setting.name, err)
+		}
+	}
+}
+
+// TestEveryAirlockTestSettingIsFineForALocalRun: all seven at once, with the fake secrets file
+// that makes a start a local run, are accepted - and a production start naming none of them is
+// accepted too, since this refusal must not stand in the way of an ordinary boot.
+func TestEveryAirlockTestSettingIsFineForALocalRun(t *testing.T) {
+	var cfg config.Config
+	for _, setting := range airlockTestSettings() {
+		setting.cfg(&cfg)
+	}
+	if err := refuseAirlockTestSettingsInProduction(cfg, "/dev/fake-secrets.json"); err != nil {
+		t.Fatalf("all seven with BROKER_FAKE_SECRETS_FILE set: want nil, got %v", err)
+	}
+	if err := refuseAirlockTestSettingsInProduction(config.Config{}, ""); err != nil {
+		t.Fatalf("a production start naming none of them: want nil, got %v", err)
+	}
+}
+
+// TestMainRefusesAnAirlockTestSettingInProduction drives the REAL compiled binary with each of
+// the seven, as the port-0 row above drives it: the helper's rows prove it is correct, and this
+// proves the broker runs it at boot, before it migrates the database or binds a socket. The
+// database it is given is unreachable, so a broker that read these settings later would fail on
+// the host instead of on the setting.
+func TestMainRefusesAnAirlockTestSettingInProduction(t *testing.T) {
+	binary := buildBroker(t)
+	for _, setting := range airlockTestSettings() {
+		t.Run(setting.name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary,
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				setting.name+"="+setting.env,
+			)
+			if !strings.Contains(out, setting.name) || !strings.Contains(out, "local stack") {
+				t.Fatalf("broker refused, but its output does not name %s as a local-stack setting: %s", setting.name, out)
+			}
+		})
+	}
+}
+
 // TestTheRequestMachineCarriesTheServicesByAccount pins the one place the broker hands
 // BROKER_SERVICES' accounts to the request decisions: the Machine newRequestMachine builds from a
 // config holds the config's ServicesByAccount, keyed by account so one service may have several,
@@ -124,7 +216,7 @@ func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := newRequestMachine(cfg, nil, nil, nil, nil)
+	m := newRequestMachine(cfg, nil, nil, nil, nil, airlock.Rules{}, "")
 	want := map[string]string{
 		"system:serviceaccount:example:example-sa": "example-service",
 		"system:serviceaccount:example:another-sa": "example-service",
@@ -648,5 +740,269 @@ func TestFakeSecretsFileServesUnderTheGCPStore(t *testing.T) {
 	}
 	if err := json.NewDecoder(reread.Body).Decode(&answer); err != nil || reread.StatusCode != http.StatusOK || !answer.Served {
 		t.Fatalf("reread DEMO_KEY = status %d, %+v, %v; want served under the GCP store's key", reread.StatusCode, answer, err)
+	}
+}
+
+// airlockRulesFile writes rules into a file of t's own and answers its path, the file
+// BROKER_AIRLOCK_RULES_FILE names.
+func airlockRulesFile(t *testing.T, rules string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "airlock.json")
+	if err := os.WriteFile(path, []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// airlockCAFiles writes a self-signed certificate authority and its key into files of t's own
+// and answers the two paths, the files BROKER_AIRLOCK_CA_CERT_FILE and
+// BROKER_AIRLOCK_CA_KEY_FILE name. Self-signed, since the boot reads the certificate as a
+// certificate and trusts nothing about who signed it; the key is beside it because the proxy
+// port signs each bound host's certificate with it and refuses to start without it.
+func airlockCAFiles(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "broker airlock test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "airlock-ca.crt")
+	keyFile = filepath.Join(dir, "airlock-ca.key")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+// writeTempFile writes content into a file named name under a directory of t's own.
+func writeTempFile(t *testing.T, name string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// airlockEnv is what a broker with an airlock is started with besides its rules file: the proxy
+// the release names, the certificate authority it hands over and the key behind it, without
+// which config.Load refuses a broker that reads rules it could not proxy, and an address of its
+// own for the proxy port, since a fixed one would be a port two rows of this package could not
+// both hold.
+func airlockEnv(t *testing.T) []string {
+	t.Helper()
+	certFile, keyFile := airlockCAFiles(t)
+	return []string{
+		"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
+		"BROKER_AIRLOCK_CA_CERT_FILE=" + certFile,
+		"BROKER_AIRLOCK_CA_KEY_FILE=" + keyFile,
+		"BROKER_AIRLOCK_LISTEN_ADDR=127.0.0.1:0",
+	}
+}
+
+// TestMainRefusesAnAirlockRulesFileItCannotServe drives the real binary with each kind of rules
+// file it must refuse — one whose entry the airlock will not validate, one whose entry names a
+// secret by a name no session can ask for, one that is not JSON, and a path that is not there —
+// and asserts it exits non-zero naming the file and what is wrong with it, without ever
+// binding. The database it is given is unreachable, so a broker that read the file after
+// opening the store would fail on the host instead of on the file.
+func TestMainRefusesAnAirlockRulesFileItCannotServe(t *testing.T) {
+	binary := buildBroker(t)
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	for name, c := range map[string]struct {
+		path string
+		want []string
+	}{
+		// The broker logs a refusal as slog's quoted error=…, so a quotation mark inside it
+		// comes out escaped; these rows look for the parts around it.
+		"an entry the airlock refuses": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": []}]}`),
+			want: []string{"secrets[0]", "DEEL_API_KEY", "no host"},
+		},
+		// An entry whose name is not of the policy's form matches no release, so the file
+		// would hold back nothing of the secret a reviewer read it as covering.
+		"an entry name in lower case": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "deel_api_key", "hosts": ["api.deel.com"]}]}`),
+			want: []string{"secrets[0]", "deel_api_key", "not an agent secret name", "holds nothing back"},
+		},
+		"an entry name written with hyphens": {
+			path: airlockRulesFile(t, `{"secrets": [{"name": "DEEL-API-KEY", "hosts": ["api.deel.com"]}]}`),
+			want: []string{"secrets[0]", "DEEL-API-KEY", "not an agent secret name", "holds nothing back"},
+		},
+		"a file that is not JSON": {
+			path: airlockRulesFile(t, "these are not the rules you are looking for\n"),
+			want: []string{"not JSON", "byte offset 2, line 1, column 2"},
+		},
+		"a path that cannot be read": {
+			path: missing,
+			want: []string{missing, "no such file"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary, append(airlockEnv(t),
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				"BROKER_AIRLOCK_RULES_FILE="+c.path,
+			)...)
+			if !strings.Contains(out, "BROKER_AIRLOCK_RULES_FILE") {
+				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_RULES_FILE: %s", out)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("broker refused, but its output does not say %q: %s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestMainStartsWithAnAirlockRulesFile: a file the airlock parses and validates is no obstacle to
+// the boot, and the broker goes on to serve.
+func TestMainStartsWithAnAirlockRulesFile(t *testing.T) {
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
+	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broker := startBroker(t, brokerOptions{Env: append(airlockEnv(t),
+		"BROKER_DATABASE_URL="+storetest.URL(t),
+		"BROKER_LISTEN_ADDR=127.0.0.1:0",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+		"BROKER_AIRLOCK_RULES_FILE="+airlockRulesFile(t, `{"secrets": [
+			{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"], "allow": [{"method": "GET", "pathPrefix": "/rest/"}]}
+		]}`),
+	)})
+	requireHealthy(t, broker.Addr)
+}
+
+// TestMainRefusesAnAirlockCertificateItCannotRead drives the real binary with each kind of
+// certificate file it must refuse — a path that is not there, a file that is not PEM, and a PEM
+// block that is a key rather than a certificate — and asserts it exits non-zero naming the
+// variables, without ever binding. The proxy signs every bound host's certificate with this
+// pair and every release hands the command the certificate of it, so the pod that mounted the
+// wrong file has to find out, not the commands it releases to.
+func TestMainRefusesAnAirlockCertificateItCannotRead(t *testing.T) {
+	binary := buildBroker(t)
+	missing := filepath.Join(t.TempDir(), "absent.crt")
+	// A key that matches nothing here: what each row is about is the certificate file beside
+	// it, and the authority reads both.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, keyFile := airlockCAFiles(t)
+	for name, c := range map[string]struct {
+		path string
+		want string
+	}{
+		"a path that cannot be read": {path: missing, want: "no such file"},
+		"a file that is not PEM":     {path: writeTempFile(t, "plain.crt", []byte("not a certificate\n")), want: "PEM data in certificate input"},
+		"a PEM block that is a key":  {path: writeTempFile(t, "key.crt", pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})), want: "did find a private key"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := runRefusedBroker(t, binary,
+				"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+				"BROKER_PUBLIC_URL=https://secrets.internal.example",
+				"BROKER_AIRLOCK_RULES_FILE="+airlockRulesFile(t, `{"secrets": [{"name": "DEEL_API_KEY", "hosts": ["api.deel.com"]}]}`),
+				"BROKER_AIRLOCK_PROXY_URL=http://127.0.0.1:13381",
+				"BROKER_AIRLOCK_CA_CERT_FILE="+c.path,
+				"BROKER_AIRLOCK_CA_KEY_FILE="+keyFile,
+			)
+			if !strings.Contains(out, "BROKER_AIRLOCK_CA_CERT_FILE") || !strings.Contains(out, c.want) {
+				t.Fatalf("broker refused, but its output does not name BROKER_AIRLOCK_CA_CERT_FILE and %q: %s", c.want, out)
+			}
+		})
+	}
+}
+
+// TestTheReleasesCertificateIsTheAuthoritysOwnAndCarriesNoKey: a release hands the command the
+// one certificate it trusts the proxy by, and that has to be the certificate this process signs
+// each bound host with - not the bytes of the file it was read from. A certificate and its key
+// in one PEM file is a shape an operator really mounts, and one the authority accepts, so a
+// reader that answered the file would put the authority's private key in every release, with
+// which a command could sign a certificate for any host that every other airlock command trusts.
+func TestTheReleasesCertificateIsTheAuthoritysOwnAndCarriesNoKey(t *testing.T) {
+	certFile, keyFile := airlockCAFiles(t)
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := writeTempFile(t, "combined.pem", append(append([]byte{}, certPEM...), keyPEM...))
+
+	ca, err := airlockproxy.NewAuthority(combined, keyFile)
+	if err != nil {
+		t.Fatalf("the authority on a file holding the certificate and the key: %v; the row is about a file the boot accepts", err)
+	}
+	released := airlockCACertificatePEM(ca)
+	if strings.Contains(released, "PRIVATE KEY") {
+		t.Fatalf("the release carries a private key:\n%s", released)
+	}
+	block, rest := pem.Decode([]byte(released))
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		t.Fatalf("the release carries %q and %d bytes after it; want one PEM certificate and nothing else", released, len(rest))
+	}
+	if !bytes.Equal(block.Bytes, ca.Certificate().Raw) {
+		t.Fatal("the release's certificate is not the one the proxy signs with")
+	}
+	// And a deployment with no airlock releases no certificate at all.
+	if released := airlockCACertificatePEM(nil); released != "" {
+		t.Fatalf("a broker with no airlock released %q; want nothing", released)
+	}
+}
+
+// TestTheAirlockProxyIsReadAndWrittenThroughOnePointer: the reread listener's goroutine is
+// started by the boot and reads the proxy on every notification a peer sends, and the proxy is
+// built after that boot returns, so the write and those reads are on different goroutines. Run
+// under -race this row is the report; the holder is what makes it pass.
+func TestTheAirlockProxyIsReadAndWrittenThroughOnePointer(t *testing.T) {
+	var holder airlockProxyHolder
+	proxy := airlockproxy.New(airlockproxy.Options{})
+	readers := make(chan struct{})
+	for range 4 {
+		go func() {
+			defer func() { readers <- struct{}{} }()
+			for range 200 {
+				// What a peer's reread does with the name it was told about, before and
+				// after the boot has built the proxy.
+				holder.dropName("DEMO_KEY")
+			}
+		}()
+	}
+	for range 200 {
+		holder.set(proxy)
+	}
+	for range 4 {
+		<-readers
+	}
+	if holder.server() != proxy {
+		t.Fatalf("the holder answers %p; want the proxy the boot built, %p", holder.server(), proxy)
 	}
 }

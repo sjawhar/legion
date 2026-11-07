@@ -37,17 +37,17 @@ func newNarrowingServer(t *testing.T) *narrowingServer {
 	s := &narrowingServer{}
 	s.testServer = newTestServerWith(t, func(d *api.Deps) {
 		d.Machine.Minters = map[string]requests.Minter{
-			policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+			policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
 				s.minted = append(s.minted, req.GitHubNarrowing)
 				if req.GitHubNarrowing != nil && slices.Contains(req.GitHubNarrowing.Repositories, "missing") {
-					return "", fmt.Errorf("%w: GitHub answered HTTP 422 to the narrowed token for ada: likely a repository it names (missing) that the installation does not reach", secrets.ErrMintNarrowingRefused)
+					return secrets.Minted{}, fmt.Errorf("%w: GitHub answered HTTP 422 to the narrowed token for ada: likely a repository it names (missing) that the installation does not reach", secrets.ErrMintNarrowingRefused)
 				}
 				if req.GitHubNarrowing != nil {
-					return "narrowed", nil
+					return secrets.Minted{Value: "narrowed"}, nil
 				}
-				return "owner-wide", nil
+				return secrets.Minted{Value: "owner-wide"}, nil
 			},
 		}
 	})

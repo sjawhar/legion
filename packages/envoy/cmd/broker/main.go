@@ -9,13 +9,17 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -32,6 +36,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/airlock"
+	"github.com/sjawhar/envoy/internal/broker/airlockproxy"
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/config"
@@ -197,6 +203,58 @@ func main() {
 	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// And, in the same breath, the airlock's test-only settings: every one of them is a local
+	// run's, so a production start that names any of them is refused here rather than running
+	// a broker that mints against a stand-in or dials an address no production proxy may.
+	fatal(refuseAirlockTestSettingsInProduction(cfg, fakeSecrets))
+	// The airlock's rules, read here beside the port-0 refusal: before the database is migrated,
+	// before the socket is bound and before anything reaches for AWS, so a pod given a file it
+	// cannot read or cannot serve refuses to start instead of running without the rules its
+	// operator believes are in force. The file is read once; a change to it rolls the pods.
+	rules, err := readAirlockRules(cfg.AirlockRulesFile)
+	fatal(err)
+	// And the proxy's certificate authority, built in the same breath and refused the same way:
+	// the key beside the certificate, which the proxy port signs each bound host's certificate
+	// with, and the certificate itself, which every release of a name the rules hold back hands
+	// the command as the one thing it trusts the proxy by. It is the last thing about the
+	// airlock that can refuse a boot - a file that is not a certificate, a key that is not that
+	// certificate's, or a certificate that is no authority would leave every bound host's
+	// handshake failing for every command, found out one command at a time - so it is read
+	// before the database is migrated, before the socket is bound and before anything reaches
+	// for AWS. nil for a deployment with no airlock, which binds no proxy port.
+	var airlockCA *airlockproxy.Authority
+	if cfg.AirlockRulesFile != "" {
+		if airlockCA, err = airlockproxy.NewAuthority(cfg.AirlockCACertFile, cfg.AirlockCAKeyFile); err != nil {
+			// Named by the two variables an operator sets, since what the refusal under this
+			// is about is the files they name.
+			fatal(fmt.Errorf("BROKER_AIRLOCK_CA_CERT_FILE and BROKER_AIRLOCK_CA_KEY_FILE: %w", err))
+		}
+	}
+	// What a release hands the command: the authority's own certificate, encoded from the
+	// certificate this process signs with rather than read out of the file again. A file is
+	// bytes an operator put there - a combined PEM holding the certificate and its key is one
+	// the authority above accepts - and a second reader of it would hand every command whatever
+	// else the file holds, the key with which any host's certificate could be signed among it.
+	airlockCACertificate := airlockCACertificatePEM(airlockCA)
+	// And the extra roots the proxy verifies a service's certificate against on its own calls
+	// upstream, which a local stack points at the certificate of its stand-in services. It is
+	// read here with the files above and refused the same way: a file that is not a
+	// certificate would leave every bound host's call failing.
+	airlockTestUpstreamRoots, err := readAirlockTestUpstreamRoots(cfg.AirlockTestUpstreamCAFile)
+	fatal(err)
+	// The proxy port's own server, built far below once the boot has bound its socket, and none
+	// for a deployment with no airlock. It is declared here, and held in a pointer read and
+	// written atomically, because the two reread paths below — this pod's own, and a peer's
+	// notification — are wired before it is built: the listener's goroutine is already running
+	// when it is stored, so the store and those reads are on different goroutines.
+	var airlockProxy airlockProxyHolder
+	// dropAirlockName is what one reread of a secret's name does to the proxy: it drops that
+	// name's value from every grant the proxy holds values for, so the next request of such a
+	// grant reads the value again and mints again from it. The reread of the name is the
+	// signal, not the policy version: a new version of a secret's value moves neither the
+	// policy's version nor the set of names it serves, so nothing else this process sees says
+	// that the value the proxy is holding is the old one.
+	dropAirlockName := airlockProxy.dropName
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -253,7 +311,9 @@ func main() {
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg)}
+	// rules.Digest is "" for every secret when no rules file was named, so such a deployment's
+	// policy version is the one it has today.
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: serviceNames(cfg), AirlockDigest: rules.Digest}
 	// One key source per issuer, read by everything that needs that issuer's keys: the verifiers
 	// discoverVerifiers builds and, for the cluster's issuer and Google's, the RFC 8693 exchange
 	// below, which resolves a subject token's own key through the same *oidc.Keys. So the boot
@@ -312,14 +372,22 @@ func main() {
 				OnConnected: onConnected,
 				Refresh: func(ctx context.Context, name string) error {
 					_, err := current.RefreshOne(ctx, name)
+					// A peer served the reread, so this pod's airlock proxy may be holding
+					// the old value of that name: dropped whatever the reread answered,
+					// since the reread of the name is the signal (dropAirlockName).
+					dropAirlockName(name)
 					return err
 				},
 			}).Run(serving)
 		},
-		Listen:     listenTCP(cfg.ListenAddr),
-		ListenWait: rereadListenWait,
-		Catchup:    func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
-		Log:        slog.Default(),
+		Listen: listenTCP(cfg.ListenAddr),
+		// The proxy port, bound by the same boot and only for a deployment that has an
+		// airlock: without a rules file no name is ever held back, so there is nothing for a
+		// proxy to carry and no port to bind.
+		ListenAirlock: airlockListen(cfg),
+		ListenWait:    rereadListenWait,
+		Catchup:       func(serving context.Context, current *policy.Current) error { return current.Refresh(serving) },
+		Log:           slog.Default(),
 	})
 	fatal(err)
 	// A boot signalled before it had bound anything answers no serving context, having logged the
@@ -342,6 +410,9 @@ func main() {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
+	if started.AirlockListener != nil {
+		slog.Info("airlock proxy listening", "addr", started.AirlockListener.Addr().String())
+	}
 
 	lease, sweep := time.Duration(cfg.LeaseSeconds)*time.Second, time.Duration(cfg.SweepSeconds)*time.Second
 	enr := &enroll.Service{
@@ -349,7 +420,7 @@ func main() {
 		VMServicesByAccount: cfg.VMServicesByAccount,
 	}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
+	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay, rules, airlockCACertificate)
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
@@ -511,6 +582,11 @@ func main() {
 		Approval:           page,
 		Draining:           draining.Load,
 		NotifyReread: func(ctx context.Context, name string) {
+			// This pod served the reread itself, on the 200 path alone, so the value behind
+			// the name may be a new version: dropped from the airlock proxy's own cache
+			// before the peers are told, since the reread of the name is the signal
+			// (dropAirlockName).
+			dropAirlockName(name)
 			if err := notify(ctx, name); err != nil {
 				slog.Warn("broker: the other pods were not told to reread a secret", "secret", name, "error", err)
 			}
@@ -521,6 +597,27 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
+	}
+	// The airlock's proxy port, for a deployment that has one: the same rules file every
+	// release reads, the same request machine the API decides with - the proxy's two reads are
+	// its AirlockConnection and AirlockValues - and the authority built at the top of main.
+	if started.AirlockListener != nil {
+		airlockProxy.set(airlockproxy.New(airlockproxy.Options{
+			Rules:  rules,
+			Grants: reqMachine,
+			CA:     airlockCA,
+			Idle:   time.Duration(cfg.AirlockIdleSeconds) * time.Second,
+			Log:    slog.Default(),
+			// The local stack's four settings for the proxy, every one of them refused on a
+			// production start (refuseAirlockTestSettingsInProduction): where a name is, the
+			// addresses it may dial anyway, the roots it trusts upstream, and the two
+			// negative controls.
+			Resolve:       airlockTestResolver(cfg.AirlockTestResolve),
+			UpstreamRoots: airlockTestUpstreamRoots,
+			DialAllow:     cfg.AirlockTestDialAllow,
+			KeepValues:    cfg.AirlockTestKeepValues,
+			NoKind:        cfg.AirlockTestNoKind,
+		}))
 	}
 	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
 	// the socket is bound and srv.Serve is about to take it, so there are requests to finish and
@@ -543,11 +640,26 @@ func main() {
 			stopNotify()
 		}
 	}()
+	if proxy := airlockProxy.server(); proxy != nil {
+		go func() {
+			if err := proxy.Serve(started.AirlockListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("broker: airlock proxy serve", "error", err)
+				stopNotify()
+			}
+		}()
+	}
 
 	<-ctx.Done()
+	// nil when this deployment has no airlock, which is what brokerStop reads as "there is no
+	// proxy port to drain".
+	var airlockShutdown func(ctx context.Context) error
+	if proxy := airlockProxy.server(); proxy != nil {
+		airlockShutdown = proxy.Shutdown
+	}
 	stop(context.Background(), brokerStop{
 		Drain: drain, DrainNow: drainNow, Draining: draining.Store,
-		Shutdown: srv.Shutdown, EndServing: started.EndServing, CloseStore: st.Close,
+		Shutdown: srv.Shutdown, ShutdownAirlock: airlockShutdown,
+		EndServing: started.EndServing, CloseStore: st.Close,
 		Log: slog.Default(),
 	})
 }
@@ -686,24 +798,224 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_FAKE_SECRETS_FILE is unset); only a local run may use it as dev-broker.sh's derive-from-bind convention", redact.URL(publicURL))
 }
 
+// refuseAirlockTestSettingsInProduction refuses every one of the airlock's test-only settings
+// unless BROKER_FAKE_SECRETS_FILE makes this a local run, as the port-0 refusal above does and
+// for the same reason: each of them points the broker at a stand-in, lets it dial an address no
+// production proxy may dial, or turns off a part of the airlock, so one reaching a real
+// deployment must fail loudly at boot rather than quietly serve a broker that is not the one
+// the operator configured. The refusal names the variable it found, since an operator reads
+// which of its settings it has to take out. Extracted from main so a test can drive it
+// directly instead of through fatal, which calls os.Exit.
+func refuseAirlockTestSettingsInProduction(cfg config.Config, fakeSecretsFile string) error {
+	if fakeSecretsFile != "" {
+		return nil
+	}
+	for _, setting := range []struct {
+		name string
+		set  bool
+	}{
+		{"BROKER_AIRLOCK_TEST_GITHUB_API_BASE", cfg.AirlockTestGitHubAPIBase != ""},
+		{"BROKER_AIRLOCK_TEST_GOOGLE_TOKEN_URL", cfg.AirlockTestGoogleTokenURL != ""},
+		{"BROKER_AIRLOCK_TEST_DIAL_ALLOW", len(cfg.AirlockTestDialAllow) > 0},
+		{"BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE", cfg.AirlockTestUpstreamCAFile != ""},
+		{"BROKER_AIRLOCK_TEST_RESOLVE", len(cfg.AirlockTestResolve) > 0},
+		{"BROKER_AIRLOCK_TEST_KEEP_VALUES", cfg.AirlockTestKeepValues},
+		{"BROKER_AIRLOCK_TEST_NO_KIND", cfg.AirlockTestNoKind},
+	} {
+		if setting.set {
+			return fmt.Errorf("%s is for the broker's local stack alone and is set on a production start (BROKER_FAKE_SECRETS_FILE is unset); take it out", setting.name)
+		}
+	}
+	return nil
+}
+
+// readAirlockTestUpstreamRoots is the trust store the proxy verifies a service's certificate
+// against on its own calls upstream: the host's own roots with the certificates of
+// BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE added, so a local stack's stand-in services verify while
+// every real host still verifies as it did. An empty path answers nil, which is the host's
+// roots alone. A file that cannot be read or holds no certificate refuses the boot: a run that
+// quietly trusted nothing extra would fail one call at a time instead.
+func readAirlockTestUpstreamRoots(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// os.ReadFile's own error names the path, so this adds the variable alone.
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE: the host's own roots: %w", err)
+	}
+	if !pool.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("BROKER_AIRLOCK_TEST_UPSTREAM_CA_FILE %s: holds no PEM certificate", path)
+	}
+	return pool, nil
+}
+
+// airlockTestResolver is BROKER_AIRLOCK_TEST_RESOLVE as the proxy's Resolve: the address the
+// setting gives a host, and the proxy's own lookup (airlockproxy.ResolveHost) for every host it
+// does not name, so a host this setting says nothing about resolves exactly as it would with
+// the setting unset. It answers nil for a setting that names none, which leaves the proxy its
+// own resolver.
+func airlockTestResolver(hosts map[string]netip.Addr) func(context.Context, string) ([]netip.Addr, error) {
+	if len(hosts) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if addr, named := hosts[host]; named {
+			return []netip.Addr{addr}, nil
+		}
+		return airlockproxy.ResolveHost(ctx, host)
+	}
+}
+
+// parseRulesFile reads and parses one airlock rules file: os.ReadFile's own error for a path
+// that cannot be read, which names the path, and airlock.Parse's refusal under the file's name
+// for a file that is not an airlock rules file, since that refusal carries the parse position
+// and not the path. It validates nothing, because its two callers validate different files:
+// the boot validates the file it is about to serve (readAirlockRules), and airlock-check
+// validates the new file alone and reads the old one as it is.
+func parseRulesFile(path string) (airlock.Rules, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return airlock.Rules{}, err
+	}
+	rules, err := airlock.Parse(data)
+	if err != nil {
+		return airlock.Rules{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return rules, nil
+}
+
+// validateRulesFile is everything the broker refuses an airlock rules file for, in one place so
+// that the boot and airlock-check refuse the same file in the same words: airlock.Validate's
+// answer, which is the Lean model's, and then the one refusal that is this program's own and not
+// that model's — an entry whose name is not a name a session can ask for.
+//
+// Rules.Lookup compares an entry's name with a released name exactly, and a released name is
+// always of policy.NameToSlug's form, so an entry written "legion_slack_bot_token" or
+// "LEGION-SLACK-BOT-TOKEN" matches no release at all: the broker would hand the command the real
+// value of the very secret the file was reviewed as holding back. The check is here rather than
+// in airlock.Validate because the airlock knows nothing of how a secret is named under the
+// policy's prefix, and config.go refuses BROKER_AZURE_LOGIN_SECRET by the same NameToSlug.
+func validateRulesFile(rules airlock.Rules) error {
+	if err := airlock.Validate(rules); err != nil {
+		return err
+	}
+	for i, s := range rules.Secrets {
+		if _, err := policy.NameToSlug(s.Name); err != nil {
+			return fmt.Errorf("secrets[%d] %q: %w, so the entry matches no name a session can ask for and holds nothing back", i, s.Name, err)
+		}
+	}
+	return nil
+}
+
+// readAirlockRules reads the airlock's rules file, the path BROKER_AIRLOCK_RULES_FILE names. An
+// empty path is a deployment with no airlock, and answers empty rules, whose Digest is "" for
+// every secret. Anything else refuses the boot: a path that cannot be read, a file airlock.Parse
+// will not read as JSON (whose refusal names the parse position), and a file validateRulesFile
+// refuses (whose refusal names the entry). Each refusal names the variable beside what that
+// reader said about the file, since the airlock package names a rules file no way but by its
+// contents. Extracted from main so a test can drive it without exiting the test process.
+func readAirlockRules(path string) (airlock.Rules, error) {
+	if path == "" {
+		return airlock.Rules{}, nil
+	}
+	rules, err := parseRulesFile(path)
+	if err != nil {
+		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE: %w", err)
+	}
+	if err := validateRulesFile(rules); err != nil {
+		return airlock.Rules{}, fmt.Errorf("BROKER_AIRLOCK_RULES_FILE %s: %w", path, err)
+	}
+	return rules, nil
+}
+
+// airlockListen is brokerBoot.ListenAirlock in production: the bind on
+// BROKER_AIRLOCK_LISTEN_ADDR, and nil for a deployment that names no rules file. Nil rather
+// than a bind of the default address, because a broker with no airlock holds back no name, so a
+// proxy port there would be a port that authenticates nobody and carries nothing.
+func airlockListen(cfg config.Config) func() (net.Listener, error) {
+	if cfg.AirlockRulesFile == "" {
+		return nil
+	}
+	return listenTCP(cfg.AirlockListenAddr)
+}
+
+// airlockCACertificatePEM is the certificate every airlock release hands a command: the
+// authority's own certificate, encoded here from the certificate this process signs with. A
+// deployment with no airlock has no authority and answers "".
+//
+// It is encoded rather than read from BROKER_AIRLOCK_CA_CERT_FILE because that file is whatever
+// an operator mounted: a PEM holding the certificate and its private key together is a file the
+// authority accepts - tls.LoadX509KeyPair takes the certificate block and leaves the rest - and
+// a reader that answered the file's bytes would put that key in every release, with which any
+// host's certificate could be signed and would be trusted by every command the broker released
+// to. What a command needs is the one certificate it verifies the proxy by, and that is this.
+func airlockCACertificatePEM(ca *airlockproxy.Authority) string {
+	if ca == nil {
+		return ""
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Certificate().Raw}))
+}
+
+// airlockProxyHolder is the proxy port this process serves, held so that the paths wired before
+// it is built can reach it: the reread listener's goroutine is started by the boot, and the
+// proxy is built after that boot returns, so the write and the listener's reads are on
+// different goroutines and the pointer is read and written atomically. A deployment with no
+// airlock stores nothing and every read answers nil.
+type airlockProxyHolder struct {
+	proxy atomic.Pointer[airlockproxy.Server]
+}
+
+// set is the boot's one write: the proxy port, once it is built.
+func (h *airlockProxyHolder) set(proxy *airlockproxy.Server) { h.proxy.Store(proxy) }
+
+// server is the proxy this process serves, and nil for a deployment with no airlock or a boot
+// that has not built it yet.
+func (h *airlockProxyHolder) server() *airlockproxy.Server { return h.proxy.Load() }
+
+// dropName is what one reread of a secret's name does to the proxy: it drops that name's value
+// from every grant the proxy holds values for, so the next request of such a grant reads the
+// value again and mints again from it. Nothing to do when there is no proxy, which is both a
+// deployment with no airlock and the window between the listener starting and the proxy being
+// built.
+func (h *airlockProxyHolder) dropName(name string) {
+	if proxy := h.proxy.Load(); proxy != nil {
+		proxy.DropName(name)
+	}
+}
+
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
 // its configuration: the audience and skew every request object is checked against, and, for each
 // service account, the registered service a pod running as it proves, and for each Google
 // service account, the one a machine of that fleet proves. A grant lasts the lifetime its
-// request signed, or until its session ends.
-func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
+// request signed, or until its session ends. rules and caCertificate are the airlock's, read at
+// boot: a name the rules name is released as placeholders, and every such release carries the
+// proxy's URL and this certificate.
+func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error), rules airlock.Rules, caCertificate string) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServicesByAccount:   cfg.ServicesByAccount,
 		VMServicesByAccount: cfg.VMServicesByAccount,
-		Minters: kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{},
+		// The two kinds whose minter calls an endpoint of its own carry the local stack's
+		// stand-in endpoints when it named them, and the real ones otherwise: a minter left
+		// zero mints against GitHub and Google themselves.
+		Minters: kindMinters(
+			secrets.GitHubApp{Base: cfg.AirlockTestGitHubAPIBase},
+			secrets.GoogleLogin{TokenURL: cfg.AirlockTestGoogleTokenURL},
 			secrets.AzureLogin{TokenFile: cfg.AzureTokenFile, SecretName: cfg.AzureLoginSecret},
 			// The google-service-account minter takes no configuration: it impersonates with the
 			// broker pod's own Workload Identity credentials, which it finds on its first mint
 			// and keeps, and asks Google's own IAM endpoint. It is passed by pointer because
 			// that is where it keeps them.
 			&secrets.GoogleServiceAccount{}),
+		Airlock:              rules,
+		AirlockProxyURL:      cfg.AirlockProxyURL,
+		AirlockCACertificate: caCertificate,
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
@@ -898,22 +1210,28 @@ func checkSignInClient(ctx context.Context, signIn approval.SignIn, st *store.St
 	}
 }
 
-// endSessionsCommand is the one argument the broker takes in place of serving.
+// endSessionsCommand is one of the two arguments the broker takes in place of serving; the other
+// is airlockCheckCommand (airlockcheck.go).
 const endSessionsCommand = "end-sessions"
 
 // runSubcommand runs the subcommand args name and answers its exit code. It is every argument
-// this binary takes: an unknown one, a missing login or a second argument is refused with 2 and
-// a usage line, never a fall-through to serving.
+// this binary takes: an unknown name, a missing or malformed argument to a name it knows, is
+// refused with 2 and a usage line, never a fall-through to serving. There are two names, so a
+// switch still reads as one thing (cmd/dispatch/subcommands.go keeps a table for its nine).
 func runSubcommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if args[0] != endSessionsCommand {
-		fmt.Fprintf(stderr, "broker: unknown subcommand %q; the only subcommand is %s <login>, and broker with no argument serves\n", args[0], endSessionsCommand)
-		return 2
+	switch args[0] {
+	case endSessionsCommand:
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			fmt.Fprintf(stderr, "broker: usage: broker %s <login>, one login and nothing else\n", endSessionsCommand)
+			return 2
+		}
+		return endSessions(ctx, strings.TrimSpace(args[1]), stdout, stderr)
+	case airlockCheckCommand:
+		return airlockCheck(args[1:], stdout, stderr)
 	}
-	if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
-		fmt.Fprintf(stderr, "broker: usage: broker %s <login>, one login and nothing else\n", endSessionsCommand)
-		return 2
-	}
-	return endSessions(ctx, strings.TrimSpace(args[1]), stdout, stderr)
+	fmt.Fprintf(stderr, "broker: unknown subcommand %q; the subcommands are %s <login> and %s <file> [--against <old file>], and broker with no argument serves\n",
+		args[0], endSessionsCommand, airlockCheckCommand)
+	return 2
 }
 
 // endSessions deletes every session login is signed in to the approval page with, wherever and

@@ -32,10 +32,19 @@ The docs site's "Operating the broker" page
 everything the broker depends on, and its generated configuration reference lists every variable
 with its default.
 
-`envoy-broker` with no argument serves. Its one subcommand,
-`envoy-broker end-sessions <login>`, ends every browser session that login holds on the approval
-page and prints how many it ended; it reads the same configuration, binds no listener and applies
-no migration.
+`envoy-broker` with no argument serves.
+It takes two subcommands in place of serving.
+`envoy-broker end-sessions <login>` ends every browser session that login holds on the approval
+page and prints how many it ended;
+it reads the same configuration, binds no listener and applies no migration.
+`envoy-broker airlock-check <file> [--against <old file>]` reads an airlock rules file with the
+broker's own code and exits non-zero, naming the entry or the parse position, when the broker
+would not serve that file;
+on a file it would serve it prints the secrets, hosts and headers the file adds and removes
+against the file `--against` names, with a changed `allow`, `kind` or `judge` beside them, so
+that a pull request changing the deployment's `airlock.json` leaves a reviewer only the question
+of whether each host is the right one for its secret.
+`airlock-check` reads no configuration, opens no database and binds nothing.
 
 For a local stack (Postgres in Docker, or one you run named by `DEV_BROKER_POSTGRES_URL`, a fake
 secrets file standing in for Secrets Manager, and the clients), run

@@ -1,0 +1,16 @@
+# go-judge-over-900: Validate accepts a judge above 900 seconds. Caught by the comparison
+# fuzz test: the model's validate still answers false for such a file. Applied with
+# patch -p1 from a copy of the repository.
+
+--- a/packages/envoy/internal/broker/airlock/airlock.go
++++ b/packages/envoy/internal/broker/airlock/airlock.go
+@@ -71,8 +71,7 @@
+ 			return fmt.Errorf("%s: the name is repeated", entry(i, s))
+ 		case len(s.Hosts) == 0:
+ 			return fmt.Errorf("%s: no host, so the airlock binds the secret nowhere", entry(i, s))
+-		case s.Judge != nil && *s.Judge > maxJudgeSeconds:
+-			return fmt.Errorf("%s: judge %d is above %d seconds", entry(i, s), *s.Judge, maxJudgeSeconds)
++		// MUTANT: a judge above 900 seconds is accepted.
+ 		case s.Kind != "" && s.Kind != "aws" && s.Kind != "azure":
+ 			return fmt.Errorf("%s: kind %q is not %q, %q or %q", entry(i, s), s.Kind, "", "aws", "azure")
+ 		}

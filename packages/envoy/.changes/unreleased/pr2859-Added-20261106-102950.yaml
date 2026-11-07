@@ -1,0 +1,8 @@
+kind: Added
+body: |-
+  The airlock: a secret the broker's rules file names is released to a command as a placeholder, never as its value, and the broker's new proxy port puts the real value into each request the rules allow as it leaves.
+
+  `agent-secrets NAME -- command` gives the command the placeholder and points its proxy settings at that port. The broker swaps the value into the headers the entry names, for the hosts it binds, signs an `aws` entry again with the real key, exchanges an `azure` entry at the token endpoint, and refuses every other request to a bound host with an error that names the rule; a host no entry binds is tunnelled unread. `BROKER_AIRLOCK_RULES_FILE` names the rules, `envoy-broker airlock-check` validates one and prints what it adds and removes, and a Lean model of the validation, the decision and the header swap is proved and fuzz-tested against the Go code. A release of a grant any of whose names is behind the airlock takes no GitHub App narrowing: the proxy spends that grant's values itself, so the broker refuses the release rather than answering a narrowing it does not apply.
+time: 2026-11-06T10:29:50.000000000Z
+custom:
+  Issue: pr2859

@@ -1,0 +1,9 @@
+name = "airlock"
+defaultTargets = ["Airlock", "airlock-model"]
+
+[[lean_lib]]
+name = "Airlock"
+
+[[lean_exe]]
+name = "airlock-model"
+root = "Main"

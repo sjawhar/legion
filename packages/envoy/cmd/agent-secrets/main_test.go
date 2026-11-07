@@ -200,10 +200,10 @@ var cannedStatus = map[string]string{"req-approved": approvedStatusJSON, "req-de
 // detail/unreleased/no-trailing-newline response, GET /v1/requests/{id} answers each fakePending
 // request's own id with the same never-resolving pending state and each cannedStatus id with its
 // own bytes (and 404s any other id, since a granted-or-denied-immediately response a test does
-// not read back must never be polled), POST
-// /v1/grants/{id}/values releases one canned value (or, for the unreleased case, none at all),
-// and GET /v1/enrollments/self echoes testEnrollmentID. It does not verify the outer Proof header
-// at all — proof.Verifier's own behavior is covered by internal/broker/proof and
+// not read back must never be polled), POST /v1/grants/{id}/values releases one canned value
+// (or, for the unreleased case, none at all, and for AIRLOCK_ME none and an airlock object
+// instead), and GET /v1/enrollments/self echoes testEnrollmentID. It does not verify the outer
+// Proof header at all — proof.Verifier's own behavior is covered by internal/broker/proof and
 // internal/broker/api's test suites, not this package's.
 func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	t.Helper()
@@ -263,6 +263,12 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
 				"grant_id": "grant-unreleased", "record_id": nil, "approver": nil,
 			})
+		case "AIRLOCK_ME":
+			writeJSON(w, map[string]any{
+				"request_id": "req-airlock", "state": "granted",
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
+				"grant_id": "grant-airlock", "record_id": nil, "approver": nil,
+			})
 		case "NONEWLINE_ME":
 			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
 			// every other case (which goes through writeJSON's json.Encoder, always "\n"
@@ -321,6 +327,27 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"NONEWLINE_ME": "irrelevant"},
 			"expires_at": time.Now().Add(time.Hour),
+		})
+	})
+	mux.HandleFunc("POST /v1/grants/grant-airlock/values", func(w http.ResponseWriter, r *http.Request) {
+		// The airlock's release: nothing in "values" for the name at all, and the proxy, the
+		// certificate to trust it by and the name's placeholder in "airlock", exactly as the
+		// broker answers one (internal/broker/api's grantValuesResponse).
+		writeJSON(w, map[string]any{
+			"values":     map[string]string{},
+			"expires_at": time.Now().Add(time.Hour),
+			"airlock": map[string]any{
+				"proxy_url":      "http://airlock.broker.example:3128",
+				"ca_certificate": testAirlockCertificate,
+				"proxy_password": testAirlockPlaceholder,
+				"names": map[string]any{
+					"AIRLOCK_ME": map[string]any{
+						"value": testAirlockPlaceholder,
+						"slots": map[string]string{"value": testAirlockPlaceholder},
+						"hosts": []string{"api.example.com"},
+					},
+				},
+			},
 		})
 	})
 	mux.HandleFunc("GET /v1/enrollments/self", func(w http.ResponseWriter, r *http.Request) {
@@ -909,12 +936,23 @@ func TestExecFormNestedCallKeepsTheSessionIdentity(t *testing.T) {
 	}
 }
 
+// testAirlockFiles are the two paths prepareAirlock would have written, as the tests that build
+// a child environment pass them: buildChildEnv names them and writes neither.
+var testAirlockFiles = airlockFiles{bundle: "/run/user/1000/agent-secrets/airlock/g1/ca-bundle.pem", wgetrc: "/run/user/1000/agent-secrets/airlock/g1/wgetrc"}
+
 // TestBuildChildEnvKeepsOnlyTheSessionIdentity pins which of this CLI's variables the exec'd
 // child inherits: exactly the three that say which session it is (the broker's URL, the helper
 // socket, the box's key dir), never any other AGENT_SECRETS_* setting, and never an inherited
 // copy of a released name beside the released value.
+//
+// The second row is the same grant with one name behind the airlock, and pins the whole of that
+// child's environment too: the name holds its placeholder, the proxy, its NO_PROXY and Node's
+// switch are set, every bundle variable and WGETRC name the files, and the three session
+// identity variables are kept exactly as in the first row. An inherited copy of anything this
+// CLI sets — the stale proxy, the inherited trust file — is gone, as an inherited copy of a
+// released name is.
 func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
-	environ := []string{
+	identity := []string{
 		"PATH=/usr/bin",
 		"AGENT_SECRETS_URL=https://broker.internal.example",
 		"AGENT_SECRETS_HELPER_SOCK=/run/user/1000/agent-secrets/helper.sock",
@@ -925,16 +963,64 @@ func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
 		"GRANT_ME=inherited-stale-value",
 		"NOT_AN_ASSIGNMENT",
 	}
-	got := buildChildEnv(environ, map[string]string{"GRANT_ME": "released"})
-	want := []string{
+	kept := []string{
 		"PATH=/usr/bin",
 		"AGENT_SECRETS_URL=https://broker.internal.example",
 		"AGENT_SECRETS_HELPER_SOCK=/run/user/1000/agent-secrets/helper.sock",
 		"AGENT_SECRETS_KEY_DIR=/run/user/1000/agent-secrets",
-		"GRANT_ME=released",
 	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("child env:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	placeholder := "agent-secrets-placeholder-" + strings.Repeat("a", 32)
+	for _, row := range []struct {
+		name    string
+		environ []string
+		release *AirlockRelease
+		want    []string
+	}{
+		{
+			name:    "no airlock",
+			environ: identity,
+			want:    append(append([]string{}, kept...), "GRANT_ME=released"),
+		},
+		{
+			name: "one airlock name",
+			environ: append(append([]string{}, identity...),
+				"SSL_CERT_FILE=/inherited/roots.pem",
+				"HTTPS_PROXY=http://stale.example:3128",
+				"NO_PROXY=keep.example.com"),
+			release: &AirlockRelease{
+				ProxyURL:      "http://proxy.broker.example:3128",
+				CACertificate: "-----BEGIN CERTIFICATE-----\nproxy\n-----END CERTIFICATE-----\n",
+				ProxyPassword: placeholder,
+				Names:         map[string]AirlockName{"AIRLOCK_ME": {Value: placeholder, Slots: map[string]string{"value": placeholder}, Hosts: []string{"api.example.com"}}},
+			},
+			want: append(append([]string{}, kept...),
+				"AIRLOCK_ME="+placeholder,
+				"AWS_CA_BUNDLE="+testAirlockFiles.bundle,
+				"CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE="+testAirlockFiles.bundle,
+				"CURL_CA_BUNDLE="+testAirlockFiles.bundle,
+				"GIT_SSL_CAINFO="+testAirlockFiles.bundle,
+				"GRANT_ME=released",
+				"HTTPS_PROXY=http://agent-secrets:"+placeholder+"@proxy.broker.example:3128",
+				"NODE_EXTRA_CA_CERTS="+testAirlockFiles.bundle,
+				"NODE_USE_ENV_PROXY=1",
+				"NO_PROXY=keep.example.com,localhost,127.0.0.1,::1,.svc,.cluster.local,.internal,.ts.net,metadata.google.internal,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,broker.internal.example",
+				"REQUESTS_CA_BUNDLE="+testAirlockFiles.bundle,
+				"SSL_CERT_FILE="+testAirlockFiles.bundle,
+				"WGETRC="+testAirlockFiles.wgetrc,
+				"https_proxy=http://agent-secrets:"+placeholder+"@proxy.broker.example:3128",
+				"no_proxy=keep.example.com,localhost,127.0.0.1,::1,.svc,.cluster.local,.internal,.ts.net,metadata.google.internal,169.254.169.254,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,broker.internal.example",
+			),
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, err := buildChildEnv(row.environ, map[string]string{"GRANT_ME": "released"}, row.release, testAirlockFiles)
+			if err != nil {
+				t.Fatalf("buildChildEnv: %v", err)
+			}
+			if strings.Join(got, "\n") != strings.Join(row.want, "\n") {
+				t.Fatalf("child env:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(row.want, "\n"))
+			}
+		})
 	}
 }
 
@@ -952,7 +1038,10 @@ func TestReleasedValuesReachTheChildExactlyAsStored(t *testing.T) {
 		"a lone carriage return": "sk-live-abc\r",
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := buildChildEnv(nil, map[string]string{"GRANT_ME": value})
+			got, err := buildChildEnv(nil, map[string]string{"GRANT_ME": value}, nil, airlockFiles{})
+			if err != nil {
+				t.Fatalf("buildChildEnv: %v", err)
+			}
 			// Compared as digests, and reported as digests: a failure here is a value that came
 			// out other than it went in, which is the one thing not to print.
 			want := []string{"GRANT_ME=" + value}

@@ -29,22 +29,22 @@ func TestAKindChangedAwayAndBackWithNoReleaseBetweenLeavesTheGrantAsItWas(t *tes
 			var githubCalls, googleCalls int
 			var minted []string
 			machine.Minters = map[string]Minter{
-				policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+				policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 					githubCalls++
 					minted = append(minted, req.Value)
-					return "github-installation-token", nil
+					return secrets.Minted{Value: "github-installation-token"}, nil
 				},
-				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (secrets.Minted, error) {
 					googleCalls++
-					return "google-access-token", nil
+					return secrets.Minted{Value: "google-access-token"}, nil
 				},
 			}
 			grant, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "QUIET_KIND_KEY"), "")
 			if err != nil || grant.GrantID == nil {
 				t.Fatalf("Create = %+v, %v", grant, err)
 			}
-			if values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil); err != nil || values["QUIET_KIND_KEY"] != "github-installation-token" {
-				t.Fatalf("Values before the retag = %v, %v; want the GitHub App minter's token", values, err)
+			if release, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil); err != nil || release.Values["QUIET_KIND_KEY"] != "github-installation-token" {
+				t.Fatalf("Values before the retag = %v, %v; want the GitHub App minter's token", release.Values, err)
 			}
 			moved := secret
 			moved.Tags = maps.Clone(secret.Tags)
@@ -55,11 +55,11 @@ func TestAKindChangedAwayAndBackWithNoReleaseBetweenLeavesTheGrantAsItWas(t *tes
 			}
 			retag(t, machine, moved)
 			retag(t, machine, secret)
-			values, _, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil)
-			if err != nil || values["QUIET_KIND_KEY"] != "github-installation-token" {
-				t.Fatalf("Values once the kind is back, with no release while it was away = %v, %v; want the GitHub App minter's token: the grant is as it was", values, err)
+			release, err := machine.Values(t.Context(), *grant.GrantID, enrollmentID, nil)
+			if err != nil || release.Values["QUIET_KIND_KEY"] != "github-installation-token" {
+				t.Fatalf("Values once the kind is back, with no release while it was away = %v, %v; want the GitHub App minter's token: the grant is as it was", release.Values, err)
 			}
-			if values["QUIET_KIND_KEY"] == "stored-value" {
+			if release.Values["QUIET_KIND_KEY"] == "stored-value" {
 				t.Fatal("the release returned the stored value")
 			}
 			if githubCalls != 2 || googleCalls != 0 {
@@ -84,12 +84,12 @@ func TestAMaxGrantLoweredAndRaisedWithNoReleaseBetweenLeavesTheGrantAsItWas(t *t
 	machine, enrollmentID, key, _ := newFixture(t)
 	var calls int
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(_ context.Context, req secrets.MintRequest) (string, error) {
+		policy.KindGoogleLogin: func(_ context.Context, req secrets.MintRequest) (secrets.Minted, error) {
 			calls++
 			if req.Value != "stored-value" {
 				t.Errorf("the Google login minter was handed %q; want the secret's stored value", req.Value)
 			}
-			return "google-access-token", nil
+			return secrets.Minted{Value: "google-access-token"}, nil
 		},
 	}
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
@@ -99,9 +99,9 @@ func TestAMaxGrantLoweredAndRaisedWithNoReleaseBetweenLeavesTheGrantAsItWas(t *t
 	}
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "30m"))
 	retag(t, machine, requestKindSecret("QUIET_BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
-	values, _, err := machine.Values(t.Context(), *long.GrantID, enrollmentID, nil)
-	if err != nil || values["QUIET_BOUNDED_LOGIN"] != "google-access-token" {
-		t.Fatalf("Values(1h) once max-grant is 1h again, with no release while it was 30m = %v, %v; want the Google login minter's token: the grant is as it was", values, err)
+	release, err := machine.Values(t.Context(), *long.GrantID, enrollmentID, nil)
+	if err != nil || release.Values["QUIET_BOUNDED_LOGIN"] != "google-access-token" {
+		t.Fatalf("Values(1h) once max-grant is 1h again, with no release while it was 30m = %v, %v; want the Google login minter's token: the grant is as it was", release.Values, err)
 	}
 	if calls != 1 {
 		t.Fatalf("minter calls = %d; want 1", calls)

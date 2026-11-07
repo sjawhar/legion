@@ -103,6 +103,10 @@ type Loader struct {
 	// Services are the registered services a secret's owner tag may name: the broker's
 	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
+	// AirlockDigest is the fingerprint of the secret's airlock entry, "" for a secret the rules
+	// do not name. In production: the loaded rules' Rules.Digest. A nil field is "" for every
+	// secret, which is a deployment with no rules file.
+	AirlockDigest func(name string) string
 }
 
 // Load reads the namespace into a Set, logging one RefusedMessage line for each secret it refuses.
@@ -261,6 +265,10 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil
+	}
+	// The airlock names a secret by its policy name, the uppercased one Secret.Name holds.
+	if l.AirlockDigest != nil {
+		s.AirlockDigest = l.AirlockDigest(s.Name)
 	}
 	return s, "", nil
 }

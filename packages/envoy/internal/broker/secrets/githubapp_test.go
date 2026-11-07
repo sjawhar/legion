@@ -144,7 +144,7 @@ func TestGitHubAppMintSignsJWTAndFollowsPagination(t *testing.T) {
 		t.Fatalf("Mint: %v", err)
 	}
 	var got mintedGitHubApp
-	if err := json.Unmarshal([]byte(value), &got); err != nil {
+	if err := json.Unmarshal([]byte(value.Value), &got); err != nil {
 		t.Fatalf("Mint output: %v", err)
 	}
 	if len(got.Installations) != 102 || posts != 102 {
@@ -220,7 +220,7 @@ func TestGitHubAppMintSkipsSuspendedInstallations(t *testing.T) {
 			value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "active-owner", "suspended-owner"))
 			if len(tc.want) == 0 {
 				if err == nil || !strings.Contains(err.Error(), "github app 123456 has no installation") {
-					t.Fatalf("Mint = %q, %v; want no-installation error", value, err)
+					t.Fatalf("Mint = %q, %v; want no-installation error", value.Value, err)
 				}
 				return
 			}
@@ -228,7 +228,7 @@ func TestGitHubAppMintSkipsSuspendedInstallations(t *testing.T) {
 				t.Fatalf("Mint: %v", err)
 			}
 			var got mintedGitHubApp
-			if err := json.Unmarshal([]byte(value), &got); err != nil {
+			if err := json.Unmarshal([]byte(value.Value), &got); err != nil {
 				t.Fatalf("Mint output: %v", err)
 			}
 			if len(got.Installations) != len(tc.want) {
@@ -413,7 +413,7 @@ func TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList(t *testing.T) {
 		t.Fatalf("Mint: %v", err)
 	}
 	var got mintedGitHubApp
-	if err := json.Unmarshal([]byte(value), &got); err != nil {
+	if err := json.Unmarshal([]byte(value.Value), &got); err != nil {
 		t.Fatalf("Mint output: %v", err)
 	}
 	if _, ok := got.Installations["outsider"]; ok || len(got.Installations) != 2 {
@@ -468,7 +468,7 @@ func TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount(t *testing.T) {
 		t.Fatalf("Mint beside an installation that names no account: %v", err)
 	}
 	var got mintedGitHubApp
-	if err := json.Unmarshal([]byte(value), &got); err != nil {
+	if err := json.Unmarshal([]byte(value.Value), &got); err != nil {
 		t.Fatalf("Mint output: %v", err)
 	}
 	if _, ok := got.Installations["ada"]; !ok || len(got.Installations) != 1 {
@@ -507,7 +507,7 @@ func TestGitHubAppMintSkipsAnInstallationWithNoID(t *testing.T) {
 		t.Fatalf("Mint beside installations with no id: %v", err)
 	}
 	var got mintedGitHubApp
-	if err := json.Unmarshal([]byte(value), &got); err != nil {
+	if err := json.Unmarshal([]byte(value.Value), &got); err != nil {
 		t.Fatalf("Mint output: %v", err)
 	}
 	if installation, ok := got.Installations["ada"]; !ok || installation.InstallationID != 2 || len(got.Installations) != 1 {
@@ -515,5 +515,53 @@ func TestGitHubAppMintSkipsAnInstallationWithNoID(t *testing.T) {
 	}
 	if !slices.Equal(asked, []string{"/app/installations/2/access_tokens"}) {
 		t.Fatalf("token requests = %v, want installation 2's alone", asked)
+	}
+}
+
+// TestGitHubAppMintReportsTheEarliestInstallationExpiry: a release of several installations is
+// usable while all of its tokens are, so the expiry the minter reports is the earliest of them.
+// The airlock's proxy mints again five minutes before it, which is what keeps the token of the
+// installation that ends first from being handed to a call about to use it.
+func TestGitHubAppMintReportsTheEarliestInstallationExpiry(t *testing.T) {
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ada's token ends first, and ada is neither the first installation GitHub lists nor the
+	// first in any order a map gives, so the earliest wins rather than the last one read.
+	expiries := map[string]string{"acme": "2026-10-23T14:00:00Z", "ada": "2026-10-23T13:00:00Z", "zed": "2026-10-23T15:00:00Z"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "account": map[string]string{"login": "acme"}},
+				{"id": 2, "account": map[string]string{"login": "ada"}},
+				{"id": 3, "account": map[string]string{"login": "zed"}},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			owner := map[string]string{"1": "acme", "2": "ada", "3": "zed"}[strings.Split(r.URL.Path, "/")[3]]
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "token-" + owner, "expires_at": expiries[owner]})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	minted, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).
+		Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "acme", "ada", "zed"))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	var got mintedGitHubApp
+	if err := json.Unmarshal([]byte(minted.Value), &got); err != nil {
+		t.Fatalf("Mint output: %v", err)
+	}
+	if len(got.Installations) != 3 {
+		t.Fatalf("Mint installations = %v, want all three", got.Installations)
+	}
+	want := time.Date(2026, 10, 23, 13, 0, 0, 0, time.UTC)
+	if !minted.Expires.Equal(want) {
+		t.Fatalf("Mint's expiry = %v, want ada's %v, the earliest of the three", minted.Expires, want)
 	}
 }

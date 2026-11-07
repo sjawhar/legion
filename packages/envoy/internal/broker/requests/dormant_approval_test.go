@@ -72,8 +72,8 @@ func TestAnApprovalWhileTheEnrollmentIsDormantGrantsOntoTheDormantRow(t *testing
 	if holder := grantHolder(t, m, dec.GrantID); holder != second {
 		t.Fatalf("after the adoption the grant hangs off %s, want the box the session runs on now, %s", holder, second)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || values["DEEL_API_KEY"] != "deel-v1" {
-		t.Fatalf("the session reading the grant from the box it enrolled on next = %v, %v; want DEEL_API_KEY=deel-v1", values, err)
+	if released, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || released.Values["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("the session reading the grant from the box it enrolled on next = %v, %v; want DEEL_API_KEY=deel-v1", released.Values, err)
 	}
 }
 
@@ -160,10 +160,10 @@ func TestAnApprovalRacingTheAdoptionGrantsToTheEnrollmentTheRequestNamesNow(t *t
 		t.Fatalf("the broker holds %d requests, %d grants and %d records; want one of each: the abandoned attempt wrote nothing",
 			requests, grants, records)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || values["DEEL_API_KEY"] != "deel-v1" {
-		t.Fatalf("the moved session reading the grant = %v, %v; want DEEL_API_KEY=deel-v1", values, err)
+	if released, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || released.Values["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("the moved session reading the grant = %v, %v; want DEEL_API_KEY=deel-v1", released.Values, err)
 	}
-	if _, _, err := m.Values(ctx, dec.GrantID, first, nil); !errors.Is(err, ErrNotYours) {
+	if _, err := m.Values(ctx, dec.GrantID, first, nil); !errors.Is(err, ErrNotYours) {
 		t.Fatalf("the box the session left reading the grant = %v, want ErrNotYours", err)
 	}
 }
@@ -284,8 +284,8 @@ func TestAnApprovalOnALapsedRowTheSweepHasNotEndedGrantsAndTheSweepThenCarriesIt
 	if holder := grantHolder(t, m, dec.GrantID); holder != second {
 		t.Fatalf("after the adoption the grant hangs off %s, want the box the session runs on now, %s", holder, second)
 	}
-	if values, _, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || values["DEEL_API_KEY"] != "deel-v1" {
-		t.Fatalf("the session reading the grant from the box it enrolled on next = %v, %v; want DEEL_API_KEY=deel-v1", values, err)
+	if released, err := m.Values(ctx, dec.GrantID, second, nil); err != nil || released.Values["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("the session reading the grant from the box it enrolled on next = %v, %v; want DEEL_API_KEY=deel-v1", released.Values, err)
 	}
 }
 

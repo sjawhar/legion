@@ -323,6 +323,107 @@ $ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" 
 Ending an access token ends that token alone: only a caller presenting a machine login's own
 refresh token ends that login and every token of its family.
 
+## Reach a secret behind the airlock
+
+`packages/envoy/scripts/dev-airlock.sh` starts the whole airlock, in a stack of its own. It runs
+`dev-broker.sh` first, for Postgres, `dev-oidc-issuer` and the binaries, and then adds what the
+airlock needs: `cmd/dev-airlock-stands`, which serves the stand-in services and records every
+request each one is sent; a rules file (`BROKER_AIRLOCK_RULES_FILE`) and a fake secrets file that
+name the same secrets; two broker processes on one database, each with an API port and a proxy
+port of its own, behind one TCP front over both API ports and one over both proxy ports; and one
+enrolled pod session, whose key directory the exports name. Run it in place of `dev-broker.sh`,
+from `packages/envoy`, and set the same `DEV_BROKER_POSTGRES_URL` where you have no Docker. Each
+bound host listens on port 443 of a loopback address of its own (127.0.0.2 and up), so the
+machine must let this user bind 443, and one such stack runs at a time.
+
+This run read that URL from a variable the pod sets, which names the same Postgres server as the
+first section. The lines `dev-broker.sh` prints are the ones that section shows, and are cut here:
+
+```console
+$ DEV_BROKER_POSTGRES_URL="$LEGION_TEST_PG_DSN" bash scripts/dev-airlock.sh
+dev-airlock: workdir /legion/scratch/tmp/agent-secrets-airlock.eGQ8I8
+dev-airlock: starting dev-broker.sh (Postgres, dev-oidc-issuer, its broker)...
+...
+dev-broker: ready.
+...
+dev-airlock: created isolated database dev_airlock_egq8i8
+dev-airlock: building dev-airlock-stands...
+dev-airlock: starting dev-airlock-stands...
+dev-airlock-stands: stands listening records=http://127.0.0.1:16053
+dev-airlock: starting the API and proxy fronts...
+dev-airlock-stands: front listening addr=127.0.0.1:49793
+dev-airlock-stands: front listening addr=127.0.0.1:32100
+dev-airlock: starting broker 1 of 2...
+dev-airlock: starting broker 2 of 2...
+...
+dev-airlock: enrolling a pod session...
+dev-airlock: enrolled pod session 43353ee9-a37a-4531-b082-0b247a9d1662 (pod e9d053df-9faf-4b33-82fc-0b069708961d, service legion-daemon)
+
+dev-airlock: ready.
+
+  export AGENT_SECRETS_URL=http://127.0.0.1:49793
+  export AGENT_SECRETS_KEY_DIR=/legion/scratch/tmp/agent-secrets-airlock.eGQ8I8/session-key
+  export AIRLOCK_PROXY_URL=http://127.0.0.1:32100
+  export AIRLOCK_RULES_FILE=/legion/scratch/tmp/agent-secrets-airlock.eGQ8I8/airlock.json
+  export AIRLOCK_FAKE_SECRETS_FILE=/legion/scratch/tmp/agent-secrets-airlock.eGQ8I8/fake-secrets.json
+  export AIRLOCK_S_URL=https://s.airlock.test
+  export AIRLOCK_S_RECORDS=http://127.0.0.1:16053/records/s
+...
+  broker 1:            api 127.0.0.1:34621, proxy 127.0.0.1:62559, pid 46403, log /legion/scratch/tmp/agent-secrets-airlock.eGQ8I8/broker1.log
+  broker 2:            api 127.0.0.1:27522, proxy 127.0.0.1:20097, pid 46404, log /legion/scratch/tmp/agent-secrets-airlock.eGQ8I8/broker2.log
+  secrets:             AIRLOCK_DEMO_TOKEN and AIRLOCK_SCOPED_TOKEN (stored, bound to s.airlock.test; AIRLOCK_SCOPED_TOKEN in
+                       authorization and x-key, GET /read alone), AIRLOCK_GITHUB_APP (github-app,
+                       installation 7 on acme-org), AIRLOCK_GOOGLE_LOGIN (google-login),
+                       AIRLOCK_AZURE_LOGIN (kind azure, human tier) and AIRLOCK_AWS_KEY (kind aws)
+...
+```
+
+Paste these exports into a second shell, as above, and check that `type agent-secrets` names the
+stack's `bin/`. The rules file binds `AIRLOCK_DEMO_TOKEN` to the stand-in service S,
+`s.airlock.test`, and names no headers for it, so its value travels in `authorization`, the one
+header an entry with none takes. The command gets a placeholder of 58 characters in place of the
+value, and its `HTTPS_PROXY` names the proxy front with that grant's proxy password, so the
+command's call to S goes through the broker:
+
+```console
+$ agent-secrets AIRLOCK_DEMO_TOKEN --reason 'read the example service behind the airlock' -- sh -c 'printf "AIRLOCK_DEMO_TOKEN: %s characters, starting %s\n" "${#AIRLOCK_DEMO_TOKEN}" "${AIRLOCK_DEMO_TOKEN%%-*}"; curl -sS https://s.airlock.test/read -H "Authorization: Bearer $AIRLOCK_DEMO_TOKEN"'
+agent-secrets: AIRLOCK_DEMO_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+AIRLOCK_DEMO_TOKEN: 58 characters, starting agent
+the s stand-in answered
+```
+
+What S was sent is at its recording route, `$AIRLOCK_S_RECORDS`. The header it read is not the
+placeholder the command held: it is the value the fake secrets file holds for that secret, which
+the proxy swapped in. The two SHA-256 digests below are of the whole `Authorization` header S
+recorded and of `Bearer ` and that stored value, and they are the same. Neither command prints
+either string:
+
+```console
+$ curl -sS "$AIRLOCK_S_RECORDS" | jq -r '.[-1] | .method + " " + .path + " host=" + .host'
+GET /read host=s.airlock.test
+$ curl -sS "$AIRLOCK_S_RECORDS" | jq -j '.[-1].header.Authorization[0]' | sha256sum
+a2ecdfa9af6567f28055293e907aaec873a545fa2b0ee30c14e8e2a7b27aa149  -
+$ jq -j '.secrets[] | select(.name | endswith("airlock-demo-token")) | "Bearer " + .value' "$AIRLOCK_FAKE_SECRETS_FILE" | sha256sum
+a2ecdfa9af6567f28055293e907aaec873a545fa2b0ee30c14e8e2a7b27aa149  -
+```
+
+The rules file's second entry, `AIRLOCK_SCOPED_TOKEN`, is bound to the same host for `GET /read`
+alone, so the proxy refuses a `POST /write` with it and names the rule that refused:
+
+```console
+$ agent-secrets AIRLOCK_SCOPED_TOKEN --reason 'a path its rule does not allow' -- sh -c 'curl -sS -o /dev/stdout -w " (%{http_code})\n" -X POST https://s.airlock.test/write -H "Authorization: Bearer $AIRLOCK_SCOPED_TOKEN"'
+agent-secrets: AIRLOCK_SCOPED_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
+airlock: not allowed by rule
+ (403)
+```
+
+Each of those two calls wrote one line in the log of whichever broker the proxy front sent it to
+(`$AIRLOCK_DIR/broker1.log` and `broker2.log`): `airlock proxy: a call to a bound host` with the
+enrollment, the grant, the secret, the host, the method, the path, the answer's status, and
+`allowed=true` or `allowed=false` with `reason="not allowed by rule"`. No line of it holds a
+value. Ctrl-C in the first shell stops every process this script started, drops its database and
+prints the workdir it kept.
+
 ## Stop
 
 1. In the first shell, press Ctrl-C: the script stops the broker and `dev-oidc-issuer`, drops its
@@ -347,3 +448,18 @@ deployment's own daemon, which makes that call as it starts a pod; and the fake 
 (`BROKER_FAKE_SECRETS_FILE`: each secret's name, key, tags and value, as JSON) plays Secrets
 Manager and KMS. The broker reads that file again on every call it makes to it, so editing it is
 how you write a secret here.
+
+The airlock's proxy, its rules, its decision and its swap are the real ones too, and so is each
+broker process the airlock stack runs. Five more things stand in there. `cmd/dev-airlock-stands`
+plays every host the rules bind: S and T, which answer one line and record what they were sent,
+the GitHub and Google endpoints a `github-app` and a `google-login` secret mint at, the Microsoft
+token endpoint the `azure` kind exchanges at, which also plays the resource host that token is
+spent at, and an AWS service that verifies Signature Version 4. Each is a `.test` name no
+resolver answers, which `BROKER_AIRLOCK_TEST_RESOLVE` and `BROKER_AIRLOCK_TEST_DIAL_ALLOW` point
+at one loopback address each, so the proxy reaches those five and refuses every other private
+address, as it does in production. The rules file the script writes stands in for the
+deployment's own, which lives in the deployment's repository. The proxy's certificate authority
+is made at each start, where a deployment keeps it in a Kubernetes Secret both broker pods mount.
+The two brokers behind one TCP front stand in for two pods behind a Service, so a call reaches
+either process. And the pod session the script enrols stands in for the Legion daemon's
+enrollment of a worker pod, which is why `agent-secrets self` answers `kind: pod` there.

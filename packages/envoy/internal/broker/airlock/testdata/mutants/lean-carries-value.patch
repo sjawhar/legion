@@ -1,0 +1,16 @@
+# lean-carries-value: the model's check drops the refusal of a request that already
+# carries the real value. Caught by lake build: check_ok and T1 state that no header of
+# the incoming request carries it. Applied with patch -p1 from a copy.
+
+--- a/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
++++ b/packages/envoy/internal/broker/airlock/lean/Airlock/Model.lean
+@@ -291,8 +291,7 @@
+     else if !allowOK sr.allow r then .error "not allowed by rule"
+     else if sr.allow.isSome && hasMethodOverride r then
+       .error "request carries a method override header"
+-    else if r.headers.any (fun h => carries value h.2) then
+-      .error "request already carries the value"
++    -- MUTANT: a request that already carries the real value is forwarded all the same.
+     else .ok sr
+ 
+ def decideReq (rules : Rules) (g : Grant) (value : String) (r : Request) : Decision :=

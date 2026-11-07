@@ -30,8 +30,8 @@ func TestAzureLoginReleaseIsDisabledWithoutConfiguredSecret(t *testing.T) {
 	}
 	secret := set.Secrets["AZURE_LOGIN"]
 	value, err := machine.release(t.Context(), requestedSecret{name: secret.Name, source: secret.Source, decision: policy.Approval}, secret, nil)
-	if value != "" || !errors.Is(err, ErrMintFailed) || secrets.MintErrorClass(err) != "refused" {
-		t.Fatalf("release returned class %s, value present %t; want refused mint and no token", secrets.MintErrorClass(err), value != "")
+	if value.Value != "" || !errors.Is(err, ErrMintFailed) || secrets.MintErrorClass(err) != "refused" {
+		t.Fatalf("release returned class %s, value present %t; want refused mint and no token", secrets.MintErrorClass(err), value.Value != "")
 	}
 }
 
@@ -92,11 +92,11 @@ func TestAzureLoginReleaseUsesThePolicySecretNameAndTier(t *testing.T) {
 			value, err := machine.release(t.Context(), granted, secret, nil)
 			if row.allowed {
 				var got map[string]string
-				if err != nil || json.Unmarshal([]byte(value), &got) != nil || got["federated_token"] != token {
+				if err != nil || json.Unmarshal([]byte(value.Value), &got) != nil || got["federated_token"] != token {
 					t.Fatal("release of the configured human-tier secret did not return its token")
 				}
-			} else if value != "" || !errors.Is(err, ErrMintFailed) || secrets.MintErrorClass(err) != "refused" {
-				t.Fatalf("release returned class %s, value present %t; want refused mint and no token", secrets.MintErrorClass(err), value != "")
+			} else if value.Value != "" || !errors.Is(err, ErrMintFailed) || secrets.MintErrorClass(err) != "refused" {
+				t.Fatalf("release returned class %s, value present %t; want refused mint and no token", secrets.MintErrorClass(err), value.Value != "")
 			}
 		})
 	}

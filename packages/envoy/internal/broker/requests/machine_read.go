@@ -35,62 +35,79 @@ const MintFailedMessage = "broker: mint failed"
 // mint failure the operator acts on.
 const NarrowingRefusedMessage = "broker: narrowing refused"
 
-// Values releases the values of a live grant to its own enrollment, and when the grant expires:
-// nil for a grant that lasts until its session ends. Every call re-checks the
-// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
-// the policy has changed since the grant's request was decided, any granted name is a service's
-// (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
-// prove), or any granted name carries a requesters tag (anyListed: an entry naming a service
-// matches by those same accounts) — that the current policy still allows the session, with the
-// names its operator withheld from it, every granted name under the login that decided it
-// (stillAllowed), and that no granted name's max-grant is now shorter than the lifetime the
-// grant's request signed (overMaxGrant). A stored secret releases its frozen source. A kind
-// secret reads that same stored source and passes its value to the kind's minter. Once every
-// value is read, each stored one is checked against the policy as it stands then
-// (recheckStoredSources), so a retag that lands during the reads never releases what the secret
-// stores once it is a kind. It holds no pooled connection across a Secrets Manager read: the
-// grant's names are read into memory before the first value is fetched. A non-nil narrowing is
-// this release's alone: it reaches the github-app minter of every github-app name the grant
-// holds, and the grant records nothing of it, so its next release without one is owner-wide
-// again. A grant that holds no github-app name refuses a narrowing (ErrNarrowingNotApplicable),
-// and so does one whose github-app name does not list the narrowing's owner in the snapshot the
-// release mints from (ErrNarrowingOwnerNotListed); each releases nothing and runs no minter.
-func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (map[string]string, *time.Time, error) {
-	var owner, requestID, policyVersion, decidedBy string
+// Release is one release of a grant: the values the session may hold, when the grant expires,
+// and, when the grant holds a name behind the airlock, how to reach the proxy that holds the
+// rest.
+type Release struct {
+	Values  map[string]string
+	Expires *time.Time
+	Airlock *AirlockRelease // nil when no granted name is behind the airlock
+}
+
+// grantRelease is a live grant as checkRelease found it: the enrollment that holds it, the
+// request it came of, when it expires, the names it was granted, and the policy snapshot its
+// re-checks were made against, which the reads that follow mint from.
+type grantRelease struct {
+	enrollmentID, requestID string
+	expires                 *time.Time
+	granted                 []requestedSecret
+	set                     *policy.Set
+}
+
+// checkRelease is every check a release of a grant makes before it reads a value, shared by
+// Values and AirlockValues so that what the broker proxies and what it hands over are held to
+// one rule. It re-checks the enrollment and the grant, re-verifies the grant's whole approval
+// chain (VerifyChain), and — when the policy has changed since the grant's request was decided,
+// any granted name is a service's (anyServiceOwned: the policy's version does not cover which
+// service BROKER_SERVICES' accounts prove), or any granted name carries a requesters tag
+// (anyListed: an entry naming a service matches by those same accounts) — that the current
+// policy still allows the session, with the names its operator withheld from it, every granted
+// name under the login that decided it (stillAllowed), that no granted name's max-grant is now
+// shorter than the lifetime the grant's request signed (overMaxGrant), and that no granted
+// name's airlock entry has changed since the request recorded its fingerprint, which ends the
+// grant for good.
+//
+// owner, when it is not empty, is the enrollment the caller proved, which must be the grant's own
+// (ErrNotYours). AirlockValues passes none: a proxy connection proves its grant by holding one of
+// that grant's placeholders, which AirlockConnection checked, and the session it belongs to is
+// what the row answers rather than what the caller claims.
+func (m *Machine) checkRelease(ctx context.Context, grantID, owner string) (grantRelease, error) {
+	var enrollmentID, requestID, policyVersion, decidedBy string
 	var expires *time.Time
 	var lifetime *int
 	var live bool
-	enr := enrollmentRow{ID: enrollmentID}
+	var enr enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and enrollment_lease_live(e.lease_expires_at),
 		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service, c.host
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host)
+		Scan(&enrollmentID, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service, &enr.Host)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil, ErrGrantNotLive
+		return grantRelease{}, ErrGrantNotLive
 	}
 	if err != nil {
-		return nil, nil, err
+		return grantRelease{}, err
 	}
-	if owner != enrollmentID {
-		return nil, nil, ErrNotYours
+	enr.ID = enrollmentID
+	if owner != "" && owner != enrollmentID {
+		return grantRelease{}, ErrNotYours
 	}
 	if !live {
-		return nil, nil, ErrGrantNotLive
+		return grantRelease{}, ErrGrantNotLive
 	}
 	if err := m.VerifyChain(ctx, grantID); err != nil {
-		return nil, nil, err
+		return grantRelease{}, err
 	}
 	granted, err := requestedSecrets(ctx, m.Store.Pool, requestID)
 	if err != nil {
-		return nil, nil, err
+		return grantRelease{}, err
 	}
 	// One policy snapshot serves both the grant re-check and the minters' name, tier and owners.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) || anyListed(set, granted) {
 		requester, err := m.requester(ctx, m.Store.Pool, enr)
 		if err != nil {
-			return nil, nil, err
+			return grantRelease{}, err
 		}
 		for _, g := range granted {
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
@@ -100,54 +117,112 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 				// requesters tag no longer lists this session: listing the person again must not
 				// revive a grant made while they were off the list.
 				if errors.Is(err, errSourceMoved) || errors.Is(err, errRequesterNotListed) {
-					return nil, nil, m.endGrant(ctx, grantID, err)
+					return grantRelease{}, m.endGrant(ctx, grantID, err)
 				}
-				return nil, nil, err
+				return grantRelease{}, err
 			}
 			// A max-grant added or lowered since the request was decided ends this grant for
 			// good, as a raise later must not bring it back: the version covers the tag, so this
 			// runs whenever it moved.
 			if limit, over := overMaxGrant(set, g.name, lifetime); over {
-				return nil, nil, m.endGrant(ctx, grantID, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit))
+				return grantRelease{}, m.endGrant(ctx, grantID, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit))
+			}
+			// A name whose airlock entry is not the one its request recorded ends this grant
+			// for good: what was granted was decided under the old entry, so putting the entry
+			// back does not bring the grant back. The comparison is per name, so only the
+			// grants an entry's change affects end. It sits inside this block because an
+			// entry's change moves the policy version (policy.NewSet folds the fingerprint
+			// in), so the block runs whenever any entry changed and the common path pays
+			// nothing for this. During a roll the two pods may read different files for a
+			// moment; a grant the one with the newer file ends is simply asked for again.
+			if held := set.Secrets[g.name].AirlockDigest; held != g.airlockDigest {
+				return grantRelease{}, m.endGrant(ctx, grantID, fmt.Errorf("%w: %s's airlock entry changed since this grant was decided", ErrGrantNotLive, g.name))
 			}
 		}
 	}
+	return grantRelease{enrollmentID: enrollmentID, requestID: requestID, expires: expires, granted: granted, set: set}, nil
+}
+
+// Values releases the values of a live grant to its own enrollment, and when the grant expires:
+// nil for a grant that lasts until its session ends. Every call runs checkRelease's whole set of
+// re-checks and then the release loop both releases of a grant run (readRelease, release.go). A
+// stored secret releases its frozen source. A kind secret reads that same stored source and
+// passes its value to the kind's minter. It holds no pooled connection across a Secrets Manager
+// read: the grant's names are read into memory before the first value is fetched. A non-nil
+// narrowing is this release's alone: it reaches the github-app minter of every github-app name
+// the grant holds, and the grant records nothing of it, so its next release without one is
+// owner-wide again. A grant that holds no github-app name refuses a narrowing
+// (ErrNarrowingNotApplicable), one whose github-app name does not list the narrowing's owner in
+// the snapshot the release mints from refuses it (ErrNarrowingOwnerNotListed), and so does one
+// any of whose granted names is behind the airlock (ErrNarrowingBehindAirlock, readRelease);
+// each releases nothing and runs no minter.
+//
+// A granted name the airlock's rules name is released as placeholders instead of as its value:
+// its value is read or minted exactly as every other name's is, which is what says the value
+// exists and which slots it fills, and is then discarded. Such a name is left out of Values
+// altogether — a CLI from before the airlock finds it missing and runs nothing, rather than
+// running the command with a placeholder it does not understand — and what the session needs to
+// reach it is Release.Airlock.
+func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narrowing *secrets.GitHubNarrowing) (Release, error) {
+	checked, err := m.checkRelease(ctx, grantID, enrollmentID)
+	if err != nil {
+		return Release{}, err
+	}
 	if narrowing != nil {
-		if name, err := narrowingRefusal(set, granted, narrowing); err != nil {
+		if name, err := narrowingRefusal(checked.set, checked.granted, narrowing); err != nil {
 			if errors.Is(err, ErrNarrowingOwnerNotListed) {
 				slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", name, "error", err)
 			}
-			return nil, nil, err
+			return Release{}, err
 		}
+	}
+	read, err := m.readRelease(ctx, grantID, checked, releaseRead{narrowing: narrowing})
+	if err != nil {
+		return Release{}, err
 	}
 	values := map[string]string{}
-	released := []string{}
-	for _, g := range granted {
-		value, err := m.release(ctx, g, set.Secrets[g.name], narrowing)
-		if errors.Is(err, secrets.ErrNotFound) {
-			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+	splits := map[string]airlockSplit{}
+	for _, released := range read {
+		if released.behindAirlock() {
+			// The real value goes no further than the loop that read it: the session is given
+			// the placeholders airlockRelease mints for the slots the split found.
+			splits[released.name] = released.split
+			continue
 		}
-		if errors.Is(err, secrets.ErrMintNarrowingRefused) {
-			slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", g.name, "error", err)
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("read %s: %w", g.name, err)
-		}
-		values[g.name] = value
-		released = append(released, g.name)
+		values[released.name] = released.value
 	}
-	if err := m.recheckStoredSources(ctx, grantID, granted); err != nil {
-		return nil, nil, err
+	release := Release{Values: values, Expires: checked.expires}
+	if len(splits) > 0 {
+		if release.Airlock, err = m.airlockRelease(ctx, grantID, checked.expires, splits); err != nil {
+			return Release{}, err
+		}
 	}
-	detail := auditDetail{"names": released}
+	detail := auditDetail{"names": releasedNames(read)}
 	if narrowing != nil {
 		detail["github_app"] = auditDetail{"owner": narrowing.Owner, "repositories": narrowing.Repositories, "read_only": narrowing.ReadOnly}
 	}
-	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
-		enrollmentID, requestID, grantID, "session:"+enrollmentID, detail); err != nil {
-		return nil, nil, err
+	if err := m.auditGrantUsed(ctx, grantID, checked, detail); err != nil {
+		return Release{}, err
 	}
-	return values, expires, nil
+	return release, nil
+}
+
+// readValue is one granted name's value and, for a minted kind, when that value stops working,
+// with the refusals every release answers: a name the
+// store no longer holds (ErrSecretNotInStore), a narrowing the minter refused, which is logged as
+// a refused narrowing and handed back as it is, and any other failure named with the secret.
+func (m *Machine) readValue(ctx context.Context, grantID, enrollmentID string, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (secrets.Minted, error) {
+	minted, err := m.release(ctx, g, served, narrowing)
+	if errors.Is(err, secrets.ErrNotFound) {
+		return secrets.Minted{}, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+	}
+	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
+		slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", g.name, "error", err)
+	}
+	if err != nil {
+		return secrets.Minted{}, fmt.Errorf("read %s: %w", g.name, err)
+	}
+	return minted, nil
 }
 
 // narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for: the grant
@@ -221,10 +296,11 @@ const GrantEndedActor = "broker:release-recheck"
 // endGrant ends grantID for good in one transaction, revoking it and writing a grant.revoked audit
 // row naming GrantEndedActor and why (reason's text), then answers reason, an ErrGrantNotLive. A
 // release ends a grant this way when what it was granted cannot come back: its frozen source is
-// not the one served now (a kind change), or its lifetime is longer than the secret's max-grant
-// now. A secret the policy merely stops serving (no value, a malformed tag) pauses its grants
-// instead, which release again once it is served. A grant another writer revoked first is left as
-// it is, with no second audit row.
+// not the one served now (a kind change), its lifetime is longer than the secret's max-grant
+// now, or the name's airlock entry is not the one the request recorded. A secret the policy
+// merely stops serving (no value, a malformed tag) pauses its grants instead, which release
+// again once it is served. A grant another writer revoked first is left as it is, with no second
+// audit row.
 func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -254,8 +330,10 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 	return reason
 }
 
-// release is one granted name's value. A stored secret reads its frozen source and ignores the
-// policy metadata and narrowing. A kind source reads its frozen store source (on Secret
+// release is one granted name's value, and when that value stops working for a kind whose
+// minter says. A stored secret reads its frozen source and ignores the
+// policy metadata and narrowing; it carries no expiry, since nothing but a new stored version
+// ends it. A kind source reads its frozen store source (on Secret
 // Manager its deletion verdict is cached for 30 s, as for every secret), then passes that value
 // and the name, tier and GitHub owners from the policy snapshot Values checked to the minter.
 // An Azure login also requires this name's grant decision to be approval, never automatic.
@@ -263,50 +341,52 @@ func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) er
 // (secrets.ErrMintNarrowingRefused) is returned as it is,
 // for Values to log as a refused narrowing, and is no mint failure. A deleted secret stops
 // releasing once the policy drops it: `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (string, error) {
+func (m *Machine) release(ctx context.Context, g requestedSecret, served policy.Secret, narrowing *secrets.GitHubNarrowing) (secrets.Minted, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
-		return "", fmt.Errorf("secret %s: %w", g.name, err)
+		return secrets.Minted{}, fmt.Errorf("secret %s: %w", g.name, err)
 	}
 	if !minted {
-		return m.Secrets.Read(ctx, source)
+		stored, err := m.Secrets.Read(ctx, source)
+		return secrets.Minted{Value: stored}, err
 	}
 	if kind == policy.KindAzureLogin && g.decision != policy.Approval {
-		return "", fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
+		return secrets.Minted{}, fmt.Errorf("%w: %w: Azure login requires a person's approval", ErrMintFailed, secrets.ErrMintRefused)
 	}
 	mint := m.Minters[kind]
 	if mint == nil {
-		return "", fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
+		return secrets.Minted{}, fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
 	}
 	value, err := m.Secrets.Read(ctx, source)
 	if err != nil {
-		return "", err
+		return secrets.Minted{}, err
 	}
 	token, err := mint(ctx, secrets.MintRequest{
 		Name: g.name, HumanTier: served.Tier == policy.TierHuman, Value: value,
 		GitHubOwners: served.GitHubOwnerLogins(), GitHubNarrowing: narrowing,
 	})
 	if errors.Is(err, secrets.ErrMintNarrowingRefused) {
-		return "", err
+		return secrets.Minted{}, err
 	}
 	if err != nil {
 		// The minter's error names its class and why, never the stored value or a token, so the
 		// line is safe to log; the session sees the same words as MINT_FAILED.
 		slog.Error(MintFailedMessage, "name", g.name, "kind", kind, "class", secrets.MintErrorClass(err), "error", err)
-		return "", fmt.Errorf("%w: %w", ErrMintFailed, err)
+		return secrets.Minted{}, fmt.Errorf("%w: %w", ErrMintFailed, err)
 	}
 	return token, nil
 }
 
 // requestedSecret is one name a request asked for that the policy did not deny when the request
-// was made: the secret it froze (source) and the decision the policy gave it then.
-type requestedSecret struct{ name, source, decision string }
+// was made: the secret it froze (source), the decision the policy gave it then, and the
+// fingerprint of its airlock entry then (airlockDigest, "" for a name the rules do not name).
+type requestedSecret struct{ name, source, decision, airlockDigest string }
 
 // requestedSecrets reads request requestID's names that the policy did not deny, in name order:
 // what a granted request's grant releases (Values, reuseLiveGrant), and what a pending request
 // waits to have approved (currentPolicyAdmits), since one denied name denies the whole request.
 func requestedSecrets(ctx context.Context, q querier, requestID string) ([]requestedSecret, error) {
-	rows, err := q.Query(ctx, `select name, source, decision from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
+	rows, err := q.Query(ctx, `select name, source, decision, airlock_digest from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +394,7 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 	var requested []requestedSecret
 	for rows.Next() {
 		var g requestedSecret
-		if err := rows.Scan(&g.name, &g.source, &g.decision); err != nil {
+		if err := rows.Scan(&g.name, &g.source, &g.decision, &g.airlockDigest); err != nil {
 			return nil, err
 		}
 		requested = append(requested, g)

@@ -239,7 +239,9 @@ func (m GitHubApp) revokeInstallationToken(ctx context.Context, token string) er
 }
 
 // Mint returns a token and expiry for every installation of the App in req.Value that is not
-// suspended and whose account req.GitHubOwners lists, compared without regard to case. It leaves
+// suspended and whose account req.GitHubOwners lists, compared without regard to case, and, as
+// the whole release's expiry, the earliest of those installations' own: the first of its tokens
+// to stop working is when the release stops being wholly usable. It leaves
 // out an installation on any other account without asking GitHub for its token: a public App can
 // be installed by anyone, and a release must not carry a token for an outsider's account. It also
 // leaves out a record with no positive installation id, which names no installation a token can be
@@ -249,15 +251,15 @@ func (m GitHubApp) revokeInstallationToken(ctx context.Context, token string) er
 // than the narrowing asked (heldBy); a token it refuses so it revokes at GitHub first. The value is
 // the JSON object stored in the secret, never part of an error. Every error wraps one of
 // ErrMintStoredValue, ErrMintRefused, ErrMintNarrowingRefused or ErrMintUpstream.
-func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
+func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
 	// not wrap their errors: the stored key and GitHub's token are both secrets.
 	if json.Unmarshal([]byte(req.Value), &secret) != nil {
-		return "", fmt.Errorf("%w: decode GitHub App secret: not a JSON object of its fields", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: decode GitHub App secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if !validGitHubAppID(secret.AppID) || secret.PrivateKey == "" {
-		return "", fmt.Errorf("%w: GitHub App secret needs an app_id and private_key", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: GitHub App secret needs an app_id and private_key", ErrMintStoredValue)
 	}
 	owners := req.GitHubOwners
 	narrowing := req.GitHubNarrowing
@@ -266,14 +268,14 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		// second barrier.
 		owner := strings.ToLower(narrowing.Owner)
 		if !slices.Contains(owners, owner) {
-			return "", fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintNarrowingRefused, secret.AppID, narrowing.Owner)
+			return Minted{}, fmt.Errorf("%w: github app %s: %s is not an account its github-owners tag lists", ErrMintNarrowingRefused, secret.AppID, narrowing.Owner)
 		}
 		owners = []string{owner}
 	}
 	body := narrowing.accessTokensBody(readOnlyPermissions)
 	key, err := githubappjwt.ParseKey(secret.PrivateKey)
 	if err != nil {
-		return "", fmt.Errorf("%w: parse GitHub App private key: %w", ErrMintStoredValue, err)
+		return Minted{}, fmt.Errorf("%w: parse GitHub App private key: %w", ErrMintStoredValue, err)
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -281,13 +283,15 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	}
 	jwt, err := githubappjwt.Sign(secret.AppID, key, now())
 	if err != nil {
-		return "", fmt.Errorf("%w: sign GitHub App JWT: %w", ErrMintStoredValue, err)
+		return Minted{}, fmt.Errorf("%w: sign GitHub App JWT: %w", ErrMintStoredValue, err)
 	}
 	installations, err := m.installations(ctx, jwt)
 	if err != nil {
-		return "", err
+		return Minted{}, err
 	}
 	minted := githubMintedInstallations{Installations: make(map[string]githubMintedInstallation, len(owners))}
+	// expires is the earliest expiry of the installations minted so far, zero until the first.
+	var expires time.Time
 	for _, installation := range installations {
 		// JSON decoding leaves a missing or null id 0: no installation GitHub mints for, so the
 		// record is left out rather than failing the release before a valid one is reached.
@@ -312,31 +316,36 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 			}
 		}
 		if err != nil {
-			return "", narrowing.refusal(err, secret.AppID, owner)
+			return Minted{}, narrowing.refusal(err, secret.AppID, owner)
 		}
 		if err := narrowing.heldBy(token); err != nil {
 			if revokeErr := m.revokeInstallationToken(ctx, token.Token); revokeErr != nil {
 				slog.Warn(revokedWiderMessage, "app", secret.AppID, "installation", installation.ID, "expires_at", token.ExpiresAt, "error", revokeErr)
 			}
-			return "", fmt.Errorf("%w: github app %s: installation %d: %w", ErrMintUpstream, secret.AppID, installation.ID, err)
+			return Minted{}, fmt.Errorf("%w: github app %s: installation %d: %w", ErrMintUpstream, secret.AppID, installation.ID, err)
 		}
 		minted.Installations[owner] = githubMintedInstallation{
 			InstallationID: installation.ID,
 			Token:          token.Token,
 			ExpiresAt:      token.ExpiresAt,
 		}
+		// An answer that carried no expires_at leaves the token's zero, which says nothing about
+		// when it ends and so never becomes the release's expiry.
+		if !token.ExpiresAt.IsZero() && (expires.IsZero() || token.ExpiresAt.Before(expires)) {
+			expires = token.ExpiresAt
+		}
 	}
 	if len(minted.Installations) == 0 {
 		if narrowing != nil {
-			return "", fmt.Errorf("%w: github app %s has no installation on %s", ErrMintRefused, secret.AppID, narrowing.Owner)
+			return Minted{}, fmt.Errorf("%w: github app %s has no installation on %s", ErrMintRefused, secret.AppID, narrowing.Owner)
 		}
-		return "", fmt.Errorf("%w: github app %s has no installation on an account its github-owners tag lists", ErrMintRefused, secret.AppID)
+		return Minted{}, fmt.Errorf("%w: github app %s has no installation on an account its github-owners tag lists", ErrMintRefused, secret.AppID)
 	}
 	encoded, err := json.Marshal(minted)
 	if err != nil {
-		return "", fmt.Errorf("%w: encode GitHub App installations: %w", ErrMintUpstream, err)
+		return Minted{}, fmt.Errorf("%w: encode GitHub App installations: %w", ErrMintUpstream, err)
 	}
-	return string(encoded), nil
+	return Minted{Value: string(encoded), Expires: expires}, nil
 }
 
 // validGitHubAppID reports whether id is a non-empty run of ASCII digits.

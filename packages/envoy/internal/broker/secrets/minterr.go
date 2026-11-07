@@ -1,6 +1,9 @@
 package secrets
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // MintRequest is one release's input to a minter: the secret's stored value, its name and
 // whether the policy snapshot checked for this release holds it as human tier. The Azure
@@ -14,6 +17,14 @@ type MintRequest struct {
 	Value           string
 	GitHubOwners    []string
 	GitHubNarrowing *GitHubNarrowing
+}
+
+// Minted is one minted token: the value a release hands over, and when it stops working, zero
+// when the kind's upstream does not say. The airlock's proxy mints again five minutes before
+// Expires, so no call starts on a token about to end.
+type Minted struct {
+	Value   string
+	Expires time.Time
 }
 
 // GitHubNarrowing narrows one github-app release to the installation of one account and, within

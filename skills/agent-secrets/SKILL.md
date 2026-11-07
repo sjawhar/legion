@@ -15,12 +15,17 @@ Your session never holds the value, and nothing of it reaches your transcript.
 agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
 ```
 
-- Each granted secret reaches `<command>`'s environment under its own name. Nothing runs unless
+- Each granted secret reaches `<command>`'s environment under its own name, as the value or, for
+  a secret behind the airlock, as a placeholder standing for it (below). Nothing runs unless
   every name is granted: a denial of one name denies the whole request, so the command never starts
   with some of its secrets missing (`cmdExec`, `packages/envoy/cmd/agent-secrets/main.go`).
 - `--reason` is what a person reads if the request waits for a decision. Write one.
 - `agent-secrets --help` holds the rest: the flags that narrow a GitHub App token
   (`--github-owner`, `--github-repo`, `--github-read-only`), and how long a grant lasts.
+- A narrowing and the airlock do not go together. Ask for a narrowing in a run whose grant holds
+  a secret behind the airlock (below) and the broker refuses the release, naming that secret;
+  nothing runs. Ask for the GitHub App secret in a run of its own, with no airlocked name beside
+  it.
 
 ## The command reads the value, your shell does not
 
@@ -34,8 +39,9 @@ agent-secrets LEGION_SLACK_BOT_TOKEN -- \
 
 Your own shell expands `$LEGION_SLACK_BOT_TOKEN` before `agent-secrets` runs, and in your shell that
 name is empty. Measured on 2026-11-04 from a Legion issue pod: Slack answered
-`{"ok":false,"error":"not_authed"}`. The value exists only in the environment of the command the
-client starts, so that command must read it itself. Put the command in single quotes, inside
+`{"ok":false,"error":"not_authed"}`. What the client hands over — the value, or the placeholder of
+a secret behind the airlock — exists only in the environment of the command the client starts, so
+that command must read it itself. Put the command in single quotes, inside
 `sh -c`, where the quotes keep the expansion for the child:
 
 ```sh
@@ -50,13 +56,58 @@ The repository uses the same form for a GitHub App token in `docs/deployment.md`
 agent-secrets LEGION_IMPLEMENT_APP --reason=… -- sh -c 'printf %s "$LEGION_IMPLEMENT_APP"'
 ```
 
+## A secret behind the airlock
+
+Your deployment can hold a secret's value back and give your command a stand-in. You see it in the
+command's environment: the name holds `agent-secrets-placeholder-` and 32 letters and digits, not
+the value. A length or a prefix probe there reads the placeholder, and proves nothing about the
+real value.
+
+A call to that secret's service goes through the broker's own proxy, which `agent-secrets` names
+in the run's environment (`HTTPS_PROXY`, a `NO_PROXY` that keeps the secret's hosts on that proxy,
+and a trust bundle). The proxy swaps the placeholder for the real value in the headers the
+secret's rule names. Three things follow for the command you write:
+
+- Make every call inside the `agent-secrets NAME -- command` run, with the environment that run
+  gives it. A tool that keeps a token in a cache file across runs, or that makes its calls outside
+  the run, stops working. Ask for the grant in the run that spends it.
+
+- Pass no value you obtained some other way. The proxy refuses a request whose headers already
+  carry the real value.
+
+- The placeholder is that one grant's, and works only while the grant lives.
+
+A refusal comes from the proxy, not from the service:
+
+- An HTTP error naming the rule that refused it: a TLS name or `Host` that is not the host the
+  command asked for, a method or a path outside the entry's `allow`, a path with a `.` or `..`
+  segment, an `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` header where the
+  entry lists methods, plain `http://` to a host an entry binds, or a private address.
+
+- `407` once the grant ends, on every call to any host. A WebSocket open at that moment is
+  closed with the grant. A tunnel to a host no entry binds carries no value, so it runs to its
+  idle limit instead.
+
+- `503` when the broker could not read the grant at all. The grant has not ended and the call
+  can be made again.
+
+A retry fixes neither of the first two, and neither does another name. A `407` needs a new
+grant. A rule's refusal needs a change to the rules file in the deployment's own repository,
+which a person reviews. Report the refusal as you report a service out of reach: the command you
+ran and the output you saw.
+
+Two calls are not refused by the proxy. A call to a host no entry binds goes out unread, and a
+placeholder in a header the entry does not name goes out as it is, so the service refuses the
+placeholder and its own error is what you see.
+
 ## The value never reaches your transcript
 
 Your transcript keeps everything a command prints.
 
 - Never echo or print the value, and never run `curl -v`, `curl --trace` or a shell with `set -x`
   around it: each of those writes the header, and so the value, to your output.
-- Check a value's shape by its length and its prefix alone:
+- Check a value's shape by its length and its prefix alone. For a secret behind the airlock, that
+  reads the placeholder's shape and not the value's:
 
   ```sh
   agent-secrets NAME -- sh -c 'echo "${#NAME}"; case "$NAME" in ghp_*) echo prefix-ok;; *) echo prefix-no;; esac'

@@ -1,0 +1,22 @@
+# go-carries-value: check drops the refusal of a request that already carries the real
+# value, so the airlock forwards it and swaps on top of it. Caught by the comparison fuzz
+# test: the model refuses. Applied with patch -p1 from a copy of the repository.
+
+--- a/packages/envoy/internal/broker/airlock/airlock.go
++++ b/packages/envoy/internal/broker/airlock/airlock.go
+@@ -284,14 +284,7 @@
+ 	case sr.Allow != nil && hasMethodOverride(r):
+ 		return nil, "request carries a method override header"
+ 	}
+-	// A request that already carries the real value learnt it somewhere other than this
+-	// swap, so the airlock refuses it rather than forwarding it. The scan reads every
+-	// header, not only the ones the entry names, and an entry with a kind is not exempt.
+-	for _, h := range r.Headers {
+-		if Carries(value, h[1]) {
+-			return nil, "request already carries the value"
+-		}
+-	}
++	// MUTANT: a request that already carries the real value is forwarded all the same.
+ 	return sr, ""
+ }
+ 

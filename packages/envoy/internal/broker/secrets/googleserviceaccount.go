@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -97,6 +98,8 @@ type googleServiceAccountSecret struct {
 
 type googleServiceAccountToken struct {
 	AccessToken string `json:"accessToken"`
+	// ExpireTime is RFC 3339, as Google's generateAccessToken answers it.
+	ExpireTime string `json:"expireTime"`
 }
 
 // Mint returns the bare Google access token for the stored service account, as GoogleLogin.Mint
@@ -104,29 +107,32 @@ type googleServiceAccountToken struct {
 // stored value that is not one service account email is refused before any credential is resolved
 // and before any call is made. It never puts the stored value, the broker's own token, the minted
 // token or Google's answer in an error, and every error wraps one of ErrMintStoredValue,
-// ErrMintRefused or ErrMintUpstream.
+// ErrMintRefused or ErrMintUpstream. The Minted it answers carries the expiry Google's own answer
+// names, so the airlock's proxy mints again five minutes before the token stops working rather
+// than holding one that has; an answer naming no expiry, or one this cannot read, carries none,
+// which the proxy reads as a value no clock ends.
 //
 // The receiver is a pointer because a mint that resolves the broker's own credentials keeps
 // them on it (ownSource), which a copy would throw away.
-func (m *GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (string, error) {
+func (m *GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 	const what = "mint Google service account token"
 	var secret googleServiceAccountSecret
 	// encoding/json's syntax errors quote the offending byte, so the decode's own error is
 	// dropped: the stored value is a credential.
 	if json.Unmarshal([]byte(req.Value), &secret) != nil {
-		return "", fmt.Errorf("%w: decode Google service account secret: not a JSON object of its fields", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: decode Google service account secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if !googleServiceAccountEmail.MatchString(secret.ServiceAccount) {
-		return "", fmt.Errorf("%w: Google service account secret must name one <id>@<project>.iam.gserviceaccount.com account in service_account", ErrMintStoredValue)
+		return Minted{}, fmt.Errorf("%w: Google service account secret must name one <id>@<project>.iam.gserviceaccount.com account in service_account", ErrMintStoredValue)
 	}
 	source, err := m.ownSource(ctx)
 	if err != nil {
-		return "", err
+		return Minted{}, err
 	}
 	// A token source's error can quote the credential it read, so only its class is reported.
 	own, err := source.Token()
 	if err != nil {
-		return "", fmt.Errorf("%w: the broker's own Google credentials gave no token", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: the broker's own Google credentials gave no token", ErrMintUpstream)
 	}
 	// Only the email is escaped, and the verb is appended after: url.PathEscape would be free to
 	// escape the colon of ":generateAccessToken", and Google reads a path whose verb arrived as
@@ -137,20 +143,26 @@ func (m *GoogleServiceAccount) Mint(ctx context.Context, req MintRequest) (strin
 		"/v1/projects/-/serviceAccounts/" + url.PathEscape(secret.ServiceAccount) + ":generateAccessToken"
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(googleServiceAccountBody))
 	if err != nil {
-		return "", fmt.Errorf("%w: create Google service account token request: %w", ErrMintUpstream, err)
+		return Minted{}, fmt.Errorf("%w: create Google service account token request: %w", ErrMintUpstream, err)
 	}
 	own.SetAuthHeader(request)
 	request.Header.Set("Content-Type", "application/json")
 	payload, err := mintCall(m.HTTP, request, what, "Google", http.StatusOK, mintResponseLimit)
 	if err != nil {
-		return "", err
+		return Minted{}, err
 	}
 	var token googleServiceAccountToken
 	if json.Unmarshal(payload, &token) != nil {
-		return "", fmt.Errorf("%w: decode Google service account token response: not a JSON object of its fields", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: decode Google service account token response: not a JSON object of its fields", ErrMintUpstream)
 	}
 	if token.AccessToken == "" {
-		return "", fmt.Errorf("%w: Google returned no access token", ErrMintUpstream)
+		return Minted{}, fmt.Errorf("%w: Google returned no access token", ErrMintUpstream)
 	}
-	return token.AccessToken, nil
+	minted := Minted{Value: token.AccessToken}
+	// An expireTime this cannot read is no reason to refuse a token Google answered: the value
+	// works, and a Minted with no expiry is one the proxy holds until a reread ends it.
+	if expires, err := time.Parse(time.RFC3339, token.ExpireTime); err == nil {
+		minted.Expires = expires
+	}
+	return minted, nil
 }

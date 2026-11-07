@@ -1,0 +1,12 @@
+-- packages/envoy/internal/broker/store/migrations/0030_request_secrets_airlock_digest.up.sql
+-- The airlock's rules file says where each secret's value may go, and a change to one secret's
+-- entry must end the grants that entry affects and no others. So each name a request names
+-- records the fingerprint of that name's airlock entry as the request was decided, and a release
+-- compares it with the fingerprint the policy holds then: a name whose entry changed ends its
+-- grant for good, because what was granted was decided under the old entry.
+--
+-- Empty is a name the rules do not name and a deployment with no rules file, which is what every
+-- row written before this migration holds, so the default is '' and the column is not null: a
+-- comparison against a null would be neither equal nor unequal, and such a grant would go on
+-- releasing whatever the file said.
+alter table request_secrets add column airlock_digest text not null default '';

@@ -79,7 +79,7 @@ fi
 POSTGRES_SERVER="${BASH_REMATCH[1]:-}"
 POSTGRES_QUERY="${BASH_REMATCH[3]:-}"
 
-WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agent-secrets-dev.XXXXXX")"
 BIN_DIR="$WORK_DIR/bin"
 BROKER_BIN="$BIN_DIR/broker"
 FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.json"
