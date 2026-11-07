@@ -38,14 +38,18 @@ import { openCommentThreadReplies } from "./view-threads";
  * can store no such block - fetched to open this row's document with the block written as a
  * plain paragraph.
  *
- * Measured at `e86eaa09`, `main` at the merge this branch carries (`jj log -r
- * 'parents(2a876e8f)'`), on 2026-11-07: 1,879,269 bytes in 21 scripts, from three runs that
+ * Measured at `e9a6367b`, `main` at the merge this branch carries (`jj log -r
+ * 'parents(0ab76f93)'`), on 2026-11-07: 1,879,257 bytes in 21 scripts, from three runs that
  * agreed to the byte. The base moves with every forward merge, so re-measure it after one: a
  * pin left behind charges `main`'s own growth to this change, which it did three times here -
- * by 1,839 bytes, then by 51, and then by 98,838, the gap between this pin and the one before
- * it, which was measured at `b284275e` and read 1,780,431. That last gap is `main`'s growth
- * between those two commits: the measure below was rewritten in the same change, and at this
- * head the quiet window it replaced and the fixed set it reads now both answer 1,893,668.
+ * by 1,839 bytes, then by 51, and then by 98,838, the gap between the pin measured at
+ * `b284275e`, which read 1,780,431, and the one measured at `e86eaa09` after it, which read
+ * 1,879,269. That gap of 98,838 is `main`'s growth between those two commits: the measure
+ * below was rewritten in the same change, and at that head the quiet window it replaced and
+ * the fixed set it reads now both answered 1,893,668. The fourth re-measure, this one, moved
+ * the pin 12 bytes the other way, since `main` between `e86eaa09` and `e9a6367b` is that much
+ * smaller; a pin left behind can give the change bytes it did not earn as well as charge it
+ * bytes it did not spend.
  * To measure it again, in a throwaway clone of that commit with this file copied in and cut to
  * the byte row alone, `e2e/api.ts`'s `uploadIssueFile`, `uploadProjectFile` and
  * `createArtifactGrant` added there (the base answers the grants route `404`, which that copy
@@ -67,7 +71,7 @@ import { openCommentThreadReplies } from "./view-threads";
  * cut their chunks differently; what is compared is the bytes a reader fetches, not how many
  * addresses they arrive from.
  */
-const BASE_JS_BYTES: number | undefined = 1_879_269;
+const BASE_JS_BYTES: number | undefined = 1_879_257;
 
 /**
  * What R6 allows the change to add to that number. It read 10,000 until a person raised it to
