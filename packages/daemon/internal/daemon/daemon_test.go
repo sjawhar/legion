@@ -49,7 +49,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -57,18 +57,18 @@ import (
 
 const testOperatorToken = "operator-bearer-for-daemon-tests"
 
-// testDSN is the devbox and CI Postgres these tests run against. The daemon has no in-memory
-// mode: what it does on a boot is what its store recorded.
+// testDSN is the one database this run's tests write in, made by TestMain on the devbox and CI
+// Postgres LEGION_TEST_PG_DSN names (testdb.RunDatabaseMain). The daemon has no in-memory mode:
+// what it does on a boot is what its store recorded, and a boot migrates Legion's schema into
+// whatever database it is given, so the run owns one rather than sharing the server's. A test
+// that sets LEGION_TEST_PG_DSN itself, to a server its own test needs, gets the value it set.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
-			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
-			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/daemon/")
+		t.Skip(testdb.SkipMessage)
 	}
-	return dsn
+	return testdb.RunDatabaseFor(dsn)
 }
 
 // shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
@@ -346,7 +346,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := run(ctx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	count, firstBootAt := boots(t, cfg)
@@ -358,7 +358,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	}
 
 	rebindHeldPorts(t, &cfg)
-	if err := run(ctx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	countAgain, firstBootAgain := boots(t, cfg)
@@ -378,7 +378,7 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 
 	refused := make(chan error, 1)
 	go func() {
-		refused <- run(context.Background(), cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+		refused <- run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
 	}()
 
 	select {
@@ -408,7 +408,7 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.listen = nil
 
-	err := run(context.Background(), cfg, Build{}, quietLogger(), o)
+	err := run(context.Background(), cfg, quietLogger(), o)
 	if err == nil {
 		t.Fatal("run returned no error although another listener held its port")
 	}
@@ -575,7 +575,7 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: project}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: project, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	result, err := intake.ApplyFact(ctx, st.Pool(), "api", "retry:"+issue, intake.RetryOrEscalate{Issue: issue, Decision: intake.RetryDecision}, engine)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
@@ -623,6 +623,149 @@ func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T)
 	}
 	if got := d.state().HeldOutboxRows; got == nil || len(got) != 0 {
 		t.Fatalf("heldOutboxRows once the suspend's lease ended = %+v, want an empty list", got)
+	}
+}
+
+// The wave the wake pacing is letting out, as the state shows it (api.State.WakesWaiting, contract
+// 53): this restart finds two launches the previous daemon did not finish and raises both, the
+// burst lets one out at once and the pacing holds the other, and the state names the wake it holds
+// — the claim it will wake, that claim's issue and role, what kind of wake it is and the moment it
+// is due — until that moment comes, when the launch runs and the state names it no longer. The
+// daemon keeps the wall clock here, where these tests usually hold it still, because the wake and
+// its turn are the whole of what is under test; nothing else of the boot's is armed anywhere near
+// as soon, the boot timeout being two minutes out and the probe interval thirty seconds.
+func TestTheStateNamesTheWakeThePacingHoldsUntilItRuns(t *testing.T) {
+	cfg := testConfig(t)
+	// Thirty wakes a minute, one at a time: the wake behind the burst's waits one two-second
+	// interval and the part of one the daemon's jitter draws (openSupervision's rand.N), which is
+	// long enough to read the state while it waits and short enough that the test waits it out.
+	cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst = 30, 1
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := cfg.Project + "-4"
+	unfinished := map[claim.Token]claim.Role{}
+	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer} {
+		token, err := claim.NewToken(project, issue, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		putClaim(t, cfg, supervise.Claim{
+			Token: token, Project: project, Tree: issue, Issue: issue, Role: role,
+			Generation: 1, State: supervise.StateLaunching, PluginContract: api.DaemonAPIVersion,
+		})
+		writePrompt(t, cfg, token)
+		unfinished[token] = role
+	}
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	// The wall clock, in place of these tests' still one (daemon.go's RealClock for a nil
+	// override): a wake parked on a clock whose timers never fire would never take its turn.
+	o.clock = nil
+	d := startDaemon(t, cfg, o)
+
+	// The two relaunches are raised on goroutines of their own (launchUnfinished), so the second
+	// has not always reserved its wake when the first has launched: the wait is for the state to
+	// name it, which it does within a poll of the reservation and holds for the interval the
+	// pacing gives it.
+	testwait.Eventually(t, "the restart's first launch, which the burst lets out at once", func() bool {
+		return len(rt.CallsOf("Spawn")) == 1
+	})
+	launched := rt.CallsOf("Spawn")[0].Spec.Claim
+	var held api.WakeWaiting
+	var startedAt time.Time
+	testwait.Eventually(t, "the state to name the wake the pacing holds", func() bool {
+		state := d.state()
+		if len(state.WakesWaiting) != 1 {
+			return false
+		}
+		held, startedAt = state.WakesWaiting[0], state.Daemon.StartedAt
+		return true
+	})
+	role, mine := unfinished[held.Claim]
+	if !mine || held.Claim == launched || held.Issue != issue || held.Role != role || held.Kind != "launch" {
+		t.Fatalf("the wake waiting = %+v, want the launch of the restart's other claim on %s, which %s launched",
+			held, issue, launched)
+	}
+	if due := held.DueAt; !due.After(startedAt) || due.After(startedAt.Add(time.Minute)) {
+		t.Fatalf("the wake waiting is due at %s, want a moment after the daemon's start, %s, and inside the minute its pace spreads",
+			due, startedAt)
+	}
+
+	testwait.Eventually(t, "the wake's turn, which runs the launch it held", func() bool {
+		return len(rt.CallsOf("Spawn")) == 2
+	})
+	if second := rt.CallsOf("Spawn")[1].Spec.Claim; second != held.Claim {
+		t.Fatalf("the launch at the wake's turn is of %s, want %s, the claim whose wake the pacing held", second, held.Claim)
+	}
+	if waiting := d.state().WakesWaiting; len(waiting) != 0 {
+		t.Fatalf("wakesWaiting once the wake has run = %+v, want none: the wave has gone out", waiting)
+	}
+}
+
+// The other lane of the same wave (api.State.WakesWaiting): a re-admission whose architect is
+// already running writes it a catch-up in place of a launch, and that wake waits on its outbox row
+// rather than in a machine (workflow.QueueCatchUp, record.Notice.PacedAt). The state names it like
+// any other — the root architect's claim, its issue, architect, kind `catch-up` and the row's own
+// moment — and names it no longer once that moment has passed, since the wake the pacing was
+// holding is then out. Without this lane a state read during a re-admission wave would show an
+// empty queue while every architect of it still waited.
+func TestTheStateNamesThePacedCatchUpWaitingOnItsOutboxRow(t *testing.T) {
+	cfg := testConfig(t)
+	issue := cfg.Project + "-6"
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	records := record.NewStore()
+	// Truncated to the microsecond the column keeps, so the moment the state serves is the moment
+	// written rather than that moment less a few hundred nanoseconds.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	due := now.Add(30 * time.Second)
+	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+		root := runningRoot(issue, phase.Implementing)
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), root, 1, now, due)
+	}); err != nil {
+		t.Fatalf("record the running root and the catch-up its re-admission's start wrote: %v", err)
+	}
+	var row int64
+	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2", issue, string(record.OutboxKindNotice)).Scan(&row); err != nil {
+		t.Fatalf("read the catch-up's row: %v", err)
+	}
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	architect, err := claim.NewToken(project, issue, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This daemon runs no outbox lane, so the row waits exactly where the start wrote it.
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+	waiting := d.state().WakesWaiting
+	if len(waiting) != 1 {
+		t.Fatalf("wakesWaiting while the catch-up waits its turn = %+v, want the one row the pacing holds", waiting)
+	}
+	got := waiting[0]
+	if got.Claim != architect || got.Issue != issue || got.Role != claim.RoleArchitect || got.Kind != "catch-up" || !got.DueAt.Equal(due) {
+		t.Fatalf("the wake waiting = %+v, want the catch-up of %s due at %s", got, architect, due)
+	}
+
+	if _, err := st.Pool().Exec(ctx, "update outbox set next_at = $2 where id = $1", row, now.Add(-time.Second)); err != nil {
+		t.Fatalf("bring the catch-up's moment forward: %v", err)
+	}
+	if waiting := d.state().WakesWaiting; len(waiting) != 0 {
+		t.Fatalf("wakesWaiting once the catch-up's moment has passed = %+v, want none: its wake is out", waiting)
 	}
 }
 
@@ -722,7 +865,7 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, Build{}, log, o) }()
+	go func() { d.done <- run(ctx, cfg, log, o) }()
 	t.Cleanup(d.stop)
 	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
 	// daemon serves, the held listener queues the connection unanswered.
@@ -964,7 +1107,7 @@ func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
+		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
 			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
 		})
@@ -1021,7 +1164,7 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
+		done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(&logged, nil)), overrides{
 			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
 			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
 		})
@@ -1061,11 +1204,21 @@ func TestWorkflowBootWhoseEveryInstallationReadFailsAnswersItsState(t *testing.T
 	if len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want) {
 		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its failed read", state.Repositories)
 	}
+	// The boot's own ERROR lines. pollClient bounds each readiness poll at a second (:275), and a
+	// poll the daemon answers more slowly than that - on a busy machine, or under the race
+	// detector - is abandoned by this test; the API then logs the request whose context went with
+	// it, as "api: begin state transaction failed" or "api: state source failed", both of them
+	// "context canceled". Every line the boot itself writes is the workflow's, so an api line
+	// whose error is that cancellation is the test's own doing and is left out.
 	var errorLines []string
 	for line := range strings.SplitSeq(logged.String(), "\n") {
-		if strings.Contains(line, `"level":"ERROR"`) {
-			errorLines = append(errorLines, line)
+		if !strings.Contains(line, `"level":"ERROR"`) {
+			continue
 		}
+		if strings.Contains(line, `"msg":"api: `) && strings.Contains(line, "context canceled") {
+			continue
+		}
+		errorLines = append(errorLines, line)
 	}
 	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") || !strings.Contains(errorLines[0], failure.Error()) {
 		t.Fatalf("ERROR lines = %q, want one naming the failed read", errorLines)
@@ -1082,7 +1235,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, logger, overrides{
+		done <- run(ctx, cfg, logger, overrides{
 			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
@@ -1162,7 +1315,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	key := cfg.Project + "-3"
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues/"+key {
@@ -1201,7 +1354,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
+		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: github.url,
@@ -1271,7 +1424,7 @@ func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
+		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),
@@ -1296,7 +1449,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
+		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),
@@ -1339,7 +1492,7 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	cfg := workflowConfig(t, natsURL)
 	var requests atomic.Int64
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1384,7 +1537,7 @@ func TestRunWaitsForTheRepositoryMappingThroughADispatchOutage(t *testing.T) {
 			http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
 			return
 		}
-		if servedMapping(t, w, r, cfg.Project) {
+		if servedBootCall(t, w, r, cfg.Project) {
 			return
 		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
@@ -1413,7 +1566,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	cfg := testConfig(t)
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case servedMapping(t, w, r, cfg.Project):
+		case servedBootCall(t, w, r, cfg.Project):
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
@@ -1464,7 +1617,7 @@ type workflowTokenRecorder struct {
 	failing map[string]error
 }
 
-func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ ghrepo.Repository) (appauth.Lease, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.roles = append(r.roles, role)
@@ -1490,11 +1643,22 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 	return !r.missing[key], nil
 }
 
-// servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
-// r asked for either.
-func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
+// servedBootCall answers the calls every boot makes of Dispatch, whatever the test is about:
+// the repository mapping, acme/widgets the default of project; the webhook App check, Dispatch's
+// GitHub App installed on every repository; the publish of the project's gated design steps,
+// which the boot queues for its own project (daemon.queueGatedStepsPublish) and the outbox's
+// first sweep sends; and the read of a gate's own document, which the boot's catch-up makes for
+// every root it reads (bindGateRequest through dispatch.Client.Approval). It reports whether it
+// answered r. A board that leaves one of these to its own default arm fails the test with an
+// unexpected request, which is what this helper exists to stop: none of them belongs to a test
+// here.
+func servedBootCall(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") &&
+		strings.HasSuffix(r.URL.Path, "/gated-steps") {
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
 	if r.Method != http.MethodGet {
 		return false
 	}
@@ -1504,6 +1668,16 @@ func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project
 		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
 	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
 		body = map[string]bool{"installed": true}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/artifacts/") &&
+		!strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/artifacts/"), "/"):
+		// The document itself, one segment: a path under it is a route no board here models and
+		// belongs to the caller's own default arm. A board seeds a gate's row and holds no review
+		// of its document, so the document reads as one nobody has asked to approve, and the
+		// catch-up applies nothing (bindGateRequest returns at an empty AskID). Only the approval
+		// is answered, because only the approval is read here: a reader that needs the issue, the
+		// slug or the role — register_gate's document check — meets the zero value and fails,
+		// which is the board telling it to model the document rather than guess at one.
+		body = map[string]any{"approval": map[string]any{"state": "draft", "latest_version": 1}}
 	default:
 		return false
 	}
@@ -1514,8 +1688,8 @@ func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project
 	return true
 }
 
-func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := r.Token(ctx, role, owner)
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, _ string, _ []string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, ghrepo.Repository{})
 	lease.Token += "-read"
 	return lease, err
 }

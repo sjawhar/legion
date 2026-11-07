@@ -35,11 +35,32 @@ changing *what is observed* or *which statistic of it is held*:
 
 - the timing test records **what the loop armed** and holds the gap to at least that, which a
   loaded machine only lengthens;
-- the memory test holds the **least of three runs** to the bound, since uncollected garbage only
+- the memory test held the **least of three runs** to the bound, since uncollected garbage only
   adds to a peak (the same edit peaked from 190 to 263 MiB over five runs with a live heap under
-  about 130 MiB);
+  about 130 MiB) - a statistic that hid two causes, both of them named and repaired below
+  (INFRA-985);
 - the readiness test **waits for the state production waits for**, the server's own report that
   the durable is bound.
+
+## What the memory test's statistic was hiding
+
+The least of three runs went red again, and the two causes were in the harness, not in the edit:
+
+- a measured server could start while a document was owed a block index or a settlement, so the
+  block-index pass - which reads another, far heavier document - ran inside the measured window
+  and the peak was that pass's memory and not the edit's;
+- the server ran at Go's default `GOGC=100`, where the collector lets the heap grow to twice the
+  live set before it collects, so the peak carried an unbounded amount of garbage and varied from
+  run to run, which is the variance the least of three was chosen to absorb.
+
+The repair is to make the window hold only the edit - the harness settles and indexes what is owed
+before it starts a measured server, and fails where a block-index pass logs inside a window - and
+to bound the collector's margin at `GOGC=25`. With both, one run per document says what the edit
+holds, the least-of-three statistic is gone, and a peak that rises is the edit holding more.
+
+This is the rule above read once more: a statistic that makes a flaky bound green is the right
+first move only while it keeps naming the thing measured. Where the spread it absorbs comes from
+work the window should not hold, the repair is to take that work out of the window.
 
 ## Rules
 

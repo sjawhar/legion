@@ -15,7 +15,7 @@ see the same issues, in the same state, as they change. Every change Dispatch re
 event that agents can subscribe to; [how the pieces fit together](/legion/how-it-fits/) shows where
 Dispatch sits beside Legion and the Secrets Broker.
 
-![The Dispatch Inbox in two columns: the open questions as short rows on the left, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
+![The Dispatch Inbox in two columns: the list of open questions and unread threads on the left, grouped by priority, and the selected question, a decision block, open in its own document on the right.](/legion/media/dispatch/inbox.png)
 
 ## Who uses it
 
@@ -30,7 +30,7 @@ Dispatch sits beside Legion and the Secrets Broker.
 
 | Surface | What it is for |
 | --- | --- |
-| **Inbox** | The open questions (an *ask* each) on your issues, split by whose turn it is; a filter widens it to anyone's. Start here. |
+| **Inbox** | The open questions (an *ask* each) on your issues, and the threads waiting for you to read, in one list; a bar over it filters, sorts and groups. Start here. |
 | **Projects** | A project's issues as a List or a Board, its documents, and, when the project has one, its architecture. |
 | **Issue page** | One issue: its header, the Spec, the Conversation, its child issues, and its files. |
 | **Agents** | The agents connected right now. You can message one, or broadcast to many. |
@@ -39,17 +39,17 @@ Dispatch sits beside Legion and the Secrets Broker.
 | **Settings** | Projects, repository mappings, architecture sources, and the tokens your agents use. |
 
 The sidebar links the Inbox, Agents, your pinned issues, every project, and Settings. The Inbox
-entry shows **Needs you** with a count of the asks waiting on you — those on issues assigned to
-you — and the credential requests waiting on you; widening the Inbox's filter lists more asks
-without changing that count. The Agents entry shows a count when an agent has replied to you and
-you have not read it.
+entry shows one count: the asks waiting on you — those on issues assigned to you — plus the
+credential requests waiting on you and the threads you have not read. Widening the Inbox's
+filter lists more asks without changing that count. The Agents entry shows a count when an agent
+has replied to you and you have not read it.
 
 ## Your first ten minutes
 
 1. **Sign in.** Open Dispatch in your browser, choose **Sign in with Google**, and sign in with your
    Google Workspace account; you must be in the group the server admits. You land on the Inbox.
-2. **Answer one ask.** Under **Waiting on you**, read the top question. Pick an option, or type an
-   answer, and choose **Answer**. If the question is unclear, type what you need to know and choose
+2. **Answer one ask.** Read the top question. Pick an option, or type an answer, and choose
+   **Answer**. If the question is unclear, type what you need to know and choose
    **Ask back** instead. [The Inbox and asks](/legion/dispatch/inbox-and-asks/) explains both.
 3. **Open its issue.** Choose the issue name at the top of the ask, or press `o` on a focused row.
    Read the Spec tab, then press `?` to see every keyboard shortcut on that page.

@@ -36,7 +36,9 @@ export interface RevocableColumn<Row> {
  * `confirm` when a revoke asks first; the list owns the one revoke in flight: every Revoke button
  * is disabled while it is pending, and the submit guard drops a second press that lands before
  * that re-render (a same-tick double click). `onRevoked` runs once a revoke succeeds, for the
- * section to refresh what it changed.
+ * section to refresh what it changed. A section may also list rows the broker lets nobody revoke:
+ * `unrevocable` names why for such a row, which is then read-only, with that line where its
+ * button would be, so the page offers no button that can only fail.
  */
 export function RevocableList<Row>({
   className,
@@ -52,6 +54,7 @@ export function RevocableList<Row>({
   revoke,
   revokeError,
   rowKey,
+  unrevocable,
 }: {
   className: string;
   columns: readonly RevocableColumn<Row>[];
@@ -67,6 +70,10 @@ export function RevocableList<Row>({
   revoke: (row: Row, bounds: WriteBounds) => Promise<void>;
   revokeError: string;
   rowKey: (row: Row) => string;
+  /** Why nobody may revoke `row`, in place of its Revoke button, and null for a row anybody
+   *  listed here may revoke. A section gives it where the broker refuses every person's revoke
+   *  of some rows it lists, so the page never offers a button that can only fail. */
+  unrevocable?: (row: Row) => string | null;
 }): ReactNode {
   const submitGuard = useSubmitGuard();
   // The list shows a refused revoke itself, under the table.
@@ -138,14 +145,20 @@ export function RevocableList<Row>({
                       </td>
                     ))}
                     <td className="px-4 py-3 text-right">
-                      <button
-                        className={`min-h-11 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText} ${hoverToDangerText}`}
-                        disabled={mutation.isPending}
-                        onClick={() => press(row)}
-                        type="button"
-                      >
-                        Revoke
-                      </button>
+                      {unrevocable?.(row) ? (
+                        <span className={`text-xs whitespace-nowrap ${textMutedOnSurface}`}>
+                          {unrevocable(row)}
+                        </span>
+                      ) : (
+                        <button
+                          className={`min-h-11 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText} ${hoverToDangerText}`}
+                          disabled={mutation.isPending}
+                          onClick={() => press(row)}
+                          type="button"
+                        >
+                          Revoke
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))

@@ -153,7 +153,7 @@ ARG YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
 # the suite's next update. The base image's suite is the pin.
 # The PostgreSQL server and pgvector come from apt.postgresql.org, not trixie: trixie's own archive
 # stops at PostgreSQL 17, and the pod's cluster has to be the major the deployment's databases and CI
-# run, 18 (packages/daemon/internal/testpg/testpg.go). That suite is no pin either, and a version pin
+# run, 18 (packages/daemon/internal/testpg/testdb/testdb.go). That suite is no pin either, and a version pin
 # is no answer there: read on 2026-10-30, the trixie-pgdg index carries the last three point releases
 # of a major and no more (postgresql-18 at 18.6, 18.4 and 18.3; postgresql-17 at 17.11, 17.10 and
 # 17.9, with 17.0 through 17.8 gone), so `postgresql-18=18.6-1.pgdg13+2` would stop resolving at the
@@ -572,7 +572,7 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576
 # Without a server in the image, a role that needs Postgres either unpacks debs onto the issue volume
 # for twenty minutes or points its test at the deployment's sessions database, whose login drops
 # databases on the instance the whole fleet's sessions live in. 18 is the major the deployment's
-# databases and CI run (packages/daemon/internal/testpg/testpg.go), so both come from
+# databases and CI run (packages/daemon/internal/testpg/testdb/testdb.go), so both come from
 # apt.postgresql.org: trixie serves 17 alone, and a cluster of another major is a different planner,
 # a different catalog and a different dump format from the one a test meets everywhere else. The ARG
 # note above says what is pinned there and why a version pin is not. The source list and the key go
@@ -1002,8 +1002,9 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # killed instead would leave its shutdown checkpoint running and the `rm -rf` below would race it.
 # An issue pod's launcher runs the same command, so a build whose server package, extension or
 # script no longer works fails here rather than at every role's start in every pod. The DSN is the
-# one the runtime sets for every role: a loopback host, no password, and legion_test, the
-# non-superuser role `ensure` creates, not the cluster's own superuser.
+# one this image's own launcher serves to every role of an issue pod: a loopback host, no password,
+# and legion_test for both the login and the database — the non-superuser role `ensure` creates,
+# not the cluster's own superuser, and the database `ensure` creates with that role as its owner.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -1026,7 +1027,7 @@ RUN set -eu; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; unzip -v; \
     legion-testpg check; \
-    probe_dsn='postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable'; \
+    probe_dsn='postgres://legion_test@127.0.0.1:5433/legion_test?sslmode=disable'; \
     LEGION_TESTPG_DIR="$scratch/testpg" LEGION_TEST_PG_DSN="$probe_dsn" legion-testpg ensure; \
     psql -X -q "$probe_dsn" -c 'create database probe'; \
     psql -X -tAq 'postgres://legion_test@127.0.0.1:5433/probe?sslmode=disable' -c "select extname from pg_extension where extname = 'vector'" | grep -qx vector; \
@@ -1058,8 +1059,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # gh in a pod is `legion gh`, first on the image PATH, which runs the real gh at /usr/local/bin/gh
 # (LEGION_GH_PATH, which every agent container is told) with GH_CONFIG_DIR at the gh directory of
-# the owner the command names: packages/daemon/docker/gh, the same script a tmux pane's launcher
-# directory holds (packages/daemon/internal/runtime/workerbin).
+# the repository the command names, or of its owner where the bundle holds the repository none:
+# packages/daemon/docker/gh, the same script a tmux pane's launcher directory holds
+# (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
 # neither rename nor replace what they hold; everything under /opt/legion/pi-envoy,

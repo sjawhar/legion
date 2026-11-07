@@ -1569,8 +1569,8 @@ runtime:
 	if cfg.Runtime.Name != "kubernetes" || cfg.Runtime.Kubernetes == nil {
 		t.Fatalf("Runtime = %+v, want the kubernetes block", cfg.Runtime)
 	}
-	if cfg.Linger != 18*time.Minute || cfg.Gates.Design != DesignGateOff || cfg.AdmissionCap != 2 {
-		t.Errorf("Linger=%s Gates=%+v AdmissionCap=%d, want 18m, off, 2", cfg.Linger, cfg.Gates, cfg.AdmissionCap)
+	if cfg.Linger != 18*time.Minute || len(cfg.Gates.Design) != 0 || cfg.AdmissionCap != 2 {
+		t.Errorf("Linger=%s Gates=%+v AdmissionCap=%d, want 18m, no gated step, 2", cfg.Linger, cfg.Gates, cfg.AdmissionCap)
 	}
 	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != DefaultResources() || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, both pods' default reservations, and no node selector", *block)

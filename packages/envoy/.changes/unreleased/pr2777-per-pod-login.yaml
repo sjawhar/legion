@@ -1,0 +1,33 @@
+kind: Changed
+body: |-
+  A machine login becomes per pod rather than per account, over two releases. **This release
+  changes no behaviour of it**: migration 0029 adds the two indexes the per-pod login needs and
+  drops none, because the broker runs more than one pod and a roll serves the previous
+  generation beside this one against one database, and that generation's upsert resolves its
+  conflict target against 0015's one-credential-per-subject index and against neither new one —
+  dropping it here would fail every token login and every machine token exchange on the pods
+  still serving, `42P10`, for the length of every roll. So one ServiceAccount still holds one
+  live credential whatever its pod, and a replaced pod still takes that row over. The login's
+  pod is written to the row all the same, which is what lets a pod's own login enrol that pod
+  and no other.
+
+  The follow-up migration of the next release drops that index, and the per-pod login starts
+  there: a login a pod's own projected token made is unique per ServiceAccount and pod, a login
+  from a token bound to no pod stays its account's one credential, and every pod of an account
+  may hold a login at the same time, each with its own key. A process that logs in again from
+  the pod it already runs in keeps its credential. A **replaced** pod gets a credential of its
+  own, and ends the enrollments its predecessor made all the same: a pod enrollment is revoked
+  by the credential that made it or by the same launcher logging in again from another pod —
+  the same ServiceAccount, the same service, and a pod of an account `BROKER_SERVICES` binds to
+  that service, the launcher relation an enrolment already reads. A pod whose credential
+  predates that release carries no pod on its row, so its next login claims that row for the
+  pod it proves, by its subject and the key the login signed with, and keeps its credential: a
+  daemon running across the upgrade renews on the row it already holds rather than being
+  refused its own key. A pod that enrolled itself gets nothing from this: the service such an
+  account logs in as binds no pod account, so no session pod can end another's. Every other
+  caller stays `403 NOT_ENROLLING_CREDENTIAL`.
+
+  The broker reads which of the two schemas it is on at every token login, so either generation
+  is right on either schema and no roll has to be ordered around it.
+custom:
+  Issue: pr2777

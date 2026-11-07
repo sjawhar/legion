@@ -49,11 +49,11 @@ func isCheckout(argv []string) bool {
 // Every command provisioning runs on the repository's shared clone runs under the request's
 // StoreLock — its clone, fetch, bookmark reads and writes, the workspace's registration (`jj
 // workspace add`, which writes no file of it), git worktree bookkeeping and configuration — and the
-// lock is let go only while `jj sparse reset` writes the issue's own working copy, the step whose
-// time follows the repository's size, so the checkouts of several issues can run side by side while
-// nothing else of the clone ever does. Provision returns with the lock released, on the first
-// workspace of a clone, on another issue's, and on a workspace that already exists, which it checks
-// out no more.
+// lock is let go only while `jj sparse reset` writes the issue's own working copy, which of the
+// steps whose time follows the repository's size is the one that writes nothing of the clone's, so
+// the checkouts of several issues can run side by side while nothing else of the clone ever does.
+// Provision returns with the lock released, on the first workspace of a clone, on another issue's,
+// and on a workspace that already exists, which it checks out no more.
 func TestProvisionHoldsTheStoreLockForEverythingButTheCheckout(t *testing.T) {
 	lock := &heldLock{}
 	run := &lockReadingRunner{recordingRunner: newLocalRunner(t), lock: lock}

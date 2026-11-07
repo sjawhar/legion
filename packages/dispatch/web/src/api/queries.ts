@@ -1,4 +1,7 @@
+import { INBOX_THREAD_KINDS } from "@legion/contracts";
+
 import {
+  infiniteQueryOptions,
   keepPreviousData,
   type QueryFunctionContext,
   queryOptions,
@@ -18,6 +21,7 @@ import type {
   DeliveryTimelineResponse,
   InboxRow,
   IssueDetails,
+  MyRepliesResponse,
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
@@ -128,16 +132,59 @@ export const userAgentStateQuery = () =>
     queryFn: () => api.getMyAgentState(),
   });
 
-/** The prefix every Replies query shares: the page, its count, and each owner's unread set. One
- *  invalidation of it refreshes them all. */
+/** The prefix every thread query shares: the Inbox's own rows, the unread count, and each
+ *  owner's unread set. One invalidation of it refreshes them all. */
 export const myRepliesKey = ["me", "replies"] as const;
 
-/** The viewer's count of unread threads, from the one-row page's `total`: the header's and the
- *  sidebar's `Replies N`. */
+/** One Inbox thread's ask, with its replies and its answer: the row's body in the list and in
+ *  the reading pane read the one copy under this key. It never goes stale on its own - an event
+ *  refresh is what moves it (`api/event-refresh.ts`). */
+export const askThreadQuery = (threadId: string) =>
+  queryOptions({
+    queryKey: ["ask-thread", threadId],
+    queryFn: () => api.getAsk(threadId),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+
+/** The viewer's count of unread threads, from the one-row page's `total`: the sidebar's and the
+ *  compact header's one Inbox number counts it beside the work waiting on them. One request per
+ *  page load, never the unpaged read below. */
 export const myRepliesCountQuery = () =>
   queryOptions({
     queryKey: [...myRepliesKey, "count"],
-    queryFn: async () => (await api.listMyReplies({ limit: 1 })).total,
+    queryFn: async () => (await api.listMyReplies({ kind: INBOX_THREAD_KINDS, limit: 1 })).total,
+  });
+
+/** The prefix both of the Inbox's thread reads share - its own list and what the reader has
+ *  dismissed out of it: what a refresh rule tests the listed rows under, whichever view the page
+ *  is on (`api/event-refresh.ts`). */
+export const inboxThreadsKey = [...myRepliesKey, "inbox"] as const;
+
+/** Every thread row in the reader's Inbox, in one unpaged read: the Reply and Agent rows of the
+ *  list, read or not, less what they have dismissed. A thread stays here until it is dismissed,
+ *  so reading one leaves its row where it is. The Inbox page and its drawer read this and
+ *  nothing else does - a surface that wants one owner's unread set reads `myRepliesOwnerQuery`
+ *  below. */
+export const inboxThreadsQuery = () =>
+  queryOptions({
+    queryKey: [...inboxThreadsKey, "inbox"],
+    queryFn: () => api.listMyReplies({ kind: INBOX_THREAD_KINDS, state: "inbox" }),
+  });
+
+/** What the reader has dismissed out of their Inbox, newest dismissal first, which the View
+ *  menu's **Dismissed** draws: `INBOX_DISMISSED_PAGE` rows a page, each next page read from the
+ *  last one's `next_cursor` by the list's own **Show more**. */
+export const dismissedThreadsQuery = () =>
+  infiniteQueryOptions({
+    queryKey: [...inboxThreadsKey, "dismissed"],
+    queryFn: ({ pageParam }) =>
+      api.listMyReplies({
+        kind: INBOX_THREAD_KINDS,
+        state: "dismissed",
+        ...(pageParam === undefined ? {} : { cursor: pageParam }),
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last: MyRepliesResponse) => last.next_cursor,
   });
 
 /** One owner's unread threads, which every thread mounted on that owner's page reads to learn

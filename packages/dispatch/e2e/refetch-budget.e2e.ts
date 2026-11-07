@@ -11,6 +11,7 @@ import {
   patchIssue,
   putIssueState,
 } from "./api";
+import { inboxCountBadge, inboxCountText } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -366,7 +367,7 @@ test("pin: a pin from another tab shows in this tab's sidebar within 2 s with on
 
 // SLOW(>=2s): two seeded threads, two reply writes and three event barriers, each a real write
 // the page has to show.
-test("replies: a reply in a thread alice wrote in moves her Replies count, and one in a thread she never wrote in reads nothing", async ({
+test("replies: a reply in a thread alice wrote in moves her Inbox count, and one in a thread she never wrote in reads nothing", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -386,15 +387,14 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
         repliesReads += 1;
       }
     });
-    // From 1280 px the sidebar's Replies row carries the count.
-    const repliesCount = page
-      .getByRole("navigation", { name: "Navigation" })
-      .getByRole("link", { name: /^Replies/ });
+    // The shell's one Inbox number, wherever this width draws it: the sidebar's entry from
+    // 1280 px, the compact top bar's badge below. Nothing waits on alice yet, so it is bare.
+    const inboxCount = inboxCountBadge(page);
 
     await page.clock.install();
     await page.goto(`/issues/${strangers.key}/conversation`);
     const title = await eventBarrier(page, traffic, strangers.key, strangers.title);
-    await expect(repliesCount).toHaveText("Replies");
+    await expect(inboxCount).toHaveText(inboxCountText(0));
     await settled(traffic);
     repliesReads = 0;
 
@@ -412,7 +412,7 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
     expect(repliesReads, "Replies reads after a reply in a thread alice never wrote in").toBe(0);
 
     await createComment(own.key, { body: "A reply to alice.", reply_to: ownRoot.id }, session);
-    await expect(repliesCount).toHaveText(/^Replies\s*1$/, { timeout: 2_000 });
+    await expect(inboxCount).toHaveText(inboxCountText(1), { timeout: 2_000 });
     expect(repliesReads).toBeGreaterThan(0);
   } finally {
     await alice.close();

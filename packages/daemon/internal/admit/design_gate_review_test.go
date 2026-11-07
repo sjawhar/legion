@@ -35,10 +35,11 @@ func storedGate(t *testing.T, pool *pgxpool.Pool, key string) *record.DesignGate
 	t.Helper()
 	var gate *record.DesignGate
 	inTx(t, pool, func(tx pgx.Tx) {
-		var err error
-		if gate, err = record.NewStore().Gate(context.Background(), tx, key); err != nil {
+		gates, err := record.NewStore().GatesOf(context.Background(), tx, key)
+		if err != nil {
 			t.Fatalf("read gate: %v", err)
 		}
+		gate = record.SpecGate(gates)
 	})
 	if gate == nil {
 		t.Fatalf("issue %s has no design gate", key)
@@ -275,24 +276,30 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 // A registration whose read of Dispatch began before a review the daemon has already applied at
 // that version is the older reader: the person acted after it. The gate keeps that review — a
 // told changes request is not told again, an approval is not rolled back — and no wait starts,
-// since only the person's next act could answer one.
+// since only the person's next act could answer one. Where that review is an approval, the
+// registration itself tells the architect nothing, but every required step is open, so the
+// admission pass this fact runs starts the root (workflow.AdvanceOpenTrees): a root whose steps
+// are all open never stays at admitted waiting for a gate fact that has already happened.
 func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 	reviewed := record.EventMark{Seq: 11, At: reviewedAt.Add(time.Minute)}
 	for _, tc := range []struct {
-		name string
-		gate record.DesignGate
-		open bool
+		name  string
+		gate  record.DesignGate
+		open  bool
+		stops phase.Phase
 	}{
 		{
 			name: "a changes request the architect was told of",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: reviewed},
+			stops: phase.Admitted,
 		},
 		{
 			name: "an approval that opened the gate",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: reviewed},
-			open: true,
+			open:  true,
+			stops: phase.Planning,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,13 +319,9 @@ func TestARegistrationDoesNotHideTheReviewTheGateAlreadyHolds(t *testing.T) {
 
 			// A root whose gate stands open takes its slot for its own first phase, which the
 			// registration neither causes nor stops; one whose gate is closed stays admitted
-			// with its architect's spec still to be approved.
-			stands := phase.Admitted
-			if tc.open {
-				stands = phase.Planning
-			}
-			if got := issue(t, pool, "LEGION-100"); got.Phase != stands || got.Awaiting != nil {
-				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it %s with no wait", got, stands)
+			// with its architect's design still to be approved.
+			if got := issue(t, pool, "LEGION-100"); got.Phase != tc.stops || got.Awaiting != nil {
+				t.Fatalf("root after a registration older than the review the gate holds = %#v, want it at %s with no wait", got, tc.stops)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-100", Index: 0, AdmittedAt: fixedNow}})
 			if told := gateNotices(t, pool, "LEGION-100", "design-changes-requested"); len(told) != 0 {
@@ -346,13 +349,13 @@ func TestAReviewAnotherSupersededChangesNoGateState(t *testing.T) {
 	}{
 		{
 			name: "an approval older than the changes request the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "name the rollback path", ToldChangesMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 4, Mark: superseded},
 		},
 		{
 			name: "a changes request older than the approval the gate records",
-			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
+			gate: record.DesignGate{Issue: "LEGION-100", Step: record.DesignStepSpec, ArtifactID: "artifact-root", LatestVersion: 4,
 				ApprovedVersion: new(4), ApprovedMark: newer},
 			late: intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
 				Version: 4, Reason: "name the rollback path", Mark: superseded},

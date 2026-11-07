@@ -28,7 +28,7 @@ func isolatePG(t *testing.T) {
 func testStack() *stackFile {
 	return &stackFile{
 		Name: "loadtest-abc", DispatchToken: "agent-secret", ListenerToken: "listener-secret",
-		Ports: stackPorts{Postgres: 15432, Proxy: 15433, NATS: 14222, NATSMonitor: 18222, Listener: 19120, Dispatch: 18777, Pprof: 16061},
+		Ports: stackPorts{Postgres: 15432, Proxy: 15433, ProxyStats: 15434, NATS: 14222, NATSMonitor: 18222, Listener: 19120, Dispatch: 18777, Pprof: 16061},
 		PIDs:  stackPIDs{Postgres: 11, Dispatch: 12},
 	}
 }
@@ -69,6 +69,9 @@ func TestGuardTakesEndpointsFromTheStack(t *testing.T) {
 	if got := redactEndpoint("-pg", e.pg); got != "postgres://127.0.0.1:15432/dispatch" {
 		t.Fatalf("the stack's -pg recorded as %q, want its host, port and database", got)
 	}
+	if e.proxyStats != "http://127.0.0.1:15434" {
+		t.Fatalf("proxy stats %q, want the stack's proxy_stats port", e.proxyStats)
+	}
 }
 
 // foreignFlags gives every endpoint flag a foreign value.
@@ -91,6 +94,10 @@ func TestGuardAllowForeignUsesTheFlags(t *testing.T) {
 	}
 	if len(e.pids) != 0 || e.natsServerName != "" {
 		t.Fatalf("a foreign target keeps pids %v and server name %q, want neither", e.pids, e.natsServerName)
+	}
+	// The proxy's wire counts are the local stack's: a foreign run reads none.
+	if e.proxyStats != "" {
+		t.Fatalf("a foreign target keeps the stack's proxy stats %q, want none", e.proxyStats)
 	}
 }
 

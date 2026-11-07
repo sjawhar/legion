@@ -132,6 +132,12 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
+	case errors.Is(err, enroll.ErrPodSelfEnrollOnly):
+		writeError(w, http.StatusForbidden, "POD_SELF_ENROLL_ONLY", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodNotLaunched):
+		writeError(w, http.StatusForbidden, "POD_NOT_LAUNCHED", err.Error())
+		return
 	case err != nil:
 		writeInternal(w, "create enrollment", err)
 		return
