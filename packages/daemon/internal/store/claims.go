@@ -213,9 +213,9 @@ func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) 
 }
 
 // ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane
-// can write: what a tmux pane adopted after a restart is told its write owner by (the daemon's
-// claimRepositoryOwner), since a token spells its issue lowercased. A token no claim holds is
-// refused.
+// can write: what a tmux pane adopted after a restart is told its own repository by (the daemon's
+// claimRepository, the tmux runtime's Options.ClaimRepository), the one its bundle's write token
+// reaches, since a token spells its issue lowercased. A token no claim holds is refused.
 func (s *Store) ClaimIssue(ctx context.Context, token claim.Token) (string, error) {
 	var issue string
 	err := s.pool.QueryRow(ctx, `select issue from claims where token = $1`, string(token)).Scan(&issue)

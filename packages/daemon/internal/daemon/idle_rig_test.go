@@ -566,14 +566,28 @@ func (r *idleWakeRig) newRuntime(ctx context.Context, listener *stream.Listener,
 	tools := r.toolsDir()
 	opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 	opts.Tokens = idleRigTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
-		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
+		owner := strings.ToLower(repo.Owner())
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
-	// The owner set the pods' gh directories are built from, which sandbox.New now requires
+	// The controller's own bundle, which its launch and its refresh both ask for by owner
+	// (sandbox.Options.ControllerCredential, appauth.ControllerCredential): the review App's, over
+	// liveRepo's owner, the rig's one.
+	opts.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+		rendered := ghconfig.Render("ghs_idle_rig", string(appauth.Review), time.Now().Add(time.Hour))
+		owner := strings.Split(liveRepo, "/")[0]
+		if defaultOwner != "" {
+			owner = defaultOwner
+		}
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
+	}
+	// The directories the pods' gh is built from, which sandbox.New now requires
 	// (checkSupervision) and the runtime reads a running pod's gh projection against: the rig's
-	// issues are all on liveRepo, so its owner is the whole set.
-	opts.GitHubOwners = func() []string { return []string{strings.Split(liveRepo, "/")[0]} }
+	// issues are all on liveRepo, so its owner's directory is the whole set.
+	opts.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string {
+		return []string{strings.Split(liveRepo, "/")[0]}
+	}
 	opts.Mapped = func() []ghrepo.Repository { return nil }
 	opts.Tools.Legion = idleRigLegionTool(r.t, tools)
 	opts.Agent = idleRigAgentTool(r.t, tools)
@@ -608,8 +622,8 @@ func (r *idleWakeRig) toolsDir() string {
 // (appauth.GitIdentity).
 type idleRigAppTokens struct{ *workflowTokenRecorder }
 
-func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.workflowTokenRecorder.Token(ctx, role, owner)
+func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	lease, err := t.workflowTokenRecorder.Token(ctx, role, repo)
 	if err != nil {
 		return lease, err
 	}
@@ -621,7 +635,9 @@ func (t idleRigAppTokens) Token(ctx context.Context, role appauth.AppRole, owner
 // repository needs none, and no pod of this rig clones anything.
 type idleRigTokens struct{}
 
-func (idleRigTokens) Token(context.Context, string) (string, error) { return "idle-rig-provision", nil }
+func (idleRigTokens) Token(context.Context, ghrepo.Repository) (string, error) {
+	return "idle-rig-provision", nil
+}
 
 // launch waits until the issue's pod runs its role, registered, ready and having told the daemon
 // it runs no background work: the state the idle rule releases. The daemon starts the implementer
