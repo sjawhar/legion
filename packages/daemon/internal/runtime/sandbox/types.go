@@ -50,10 +50,19 @@ type Pod struct {
 }
 
 // ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
-// repository with, for a repository owner.
+// repository with, for a repository.
 // The daemon's is appauth; a harness's may be a token file read on every call.
+//
+// It takes the repository, and not its owner, because a configured repository rename resolves
+// one repository at a time: whether a recorded name is addressed under the name it moved to
+// turns on that pair alone (ghrepo.Renames.Serving), so two repositories of one owner can need
+// tokens of two installations. The implementation the daemon hands in is the one place that
+// knows of a rename; nothing under internal/runtime/sandbox does, and nothing here resolves an
+// address. Only the token follows a rename: every address a caller builds from the repository it
+// passes — the pod's feed and clone, the repository cache's volume, Service and GH_CONFIG_DIR —
+// stays the repository the record names, which is what keeps a running pod where it is.
 type ProvisionTokens interface {
-	Token(ctx context.Context, owner string) (string, error)
+	Token(ctx context.Context, repo ghrepo.Repository) (string, error)
 }
 
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's

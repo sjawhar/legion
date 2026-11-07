@@ -66,28 +66,31 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // life (a relaunch that replaces the pod provisions it anew instead), and the fetch re-reads the
 // token's file before every transfer, so a pod left on its boot token, aged past the hour GitHub
 // gives an installation token, could not fetch its repository again. The lease is minted once per
-// repository owner a tick, however many of that owner's pods the walk holds, and an owner whose
-// mint fails is logged once and left to the next tick, where its pods are tried again.
+// repository a tick, however many of that repository's pods the walk holds, and a repository
+// whose mint fails is logged once and left to the next tick, where its pods are tried again.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
-	// mints memoizes this tick's provisioning leases by lower-cased owner — nothing here knows of a
-	// configured repository rename, which the daemon's adapter maps, so Acme and acme are one call —
-	// and records a mint that failed as well as one that worked, so an owner is asked at most once a
-	// tick whatever the answer. The walk is one goroutine, so the map needs no lock.
+	// mints memoizes this tick's provisioning leases by lower-cased repository — so sjawhar/Legion
+	// and sjawhar/legion are one call — and records a mint that failed as well as one that worked,
+	// so a repository is asked at most once a tick whatever the answer. The key is the repository
+	// and not its owner because the token source reads a configured rename off the repository it
+	// is handed (ProvisionTokens), which nothing here knows of: two repositories of one owner can
+	// resolve to two installations, and one key for both would hand one of them the other's token.
+	// The walk is one goroutine, so the map needs no lock.
 	type mint struct {
 		token string
 		ok    bool
 	}
 	mints := map[string]mint{}
-	provisioning := func(owner string) (string, bool) {
-		key := strings.ToLower(owner)
+	provisioning := func(repo ghrepo.Repository) (string, bool) {
+		key := strings.ToLower(repo.String())
 		if m, asked := mints[key]; asked {
 			return m.token, m.ok
 		}
 		minting, cancel := call(ctx)
-		token, err := r.tokens.Token(minting, owner)
+		token, err := r.tokens.Token(minting, repo)
 		cancel()
 		if err != nil {
-			r.log.Warn("sandbox runtime: provisioning token mint failed", "owner", owner, "err", err)
+			r.log.Warn("sandbox runtime: provisioning token mint failed", "repo", repo.String(), "err", err)
 		}
 		mints[key] = mint{token: token, ok: err == nil}
 		return token, err == nil
@@ -115,7 +118,7 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		if !named {
 			continue
 		}
-		token, ok := provisioning(repo.Owner())
+		token, ok := provisioning(repo)
 		if !ok {
 			continue
 		}
@@ -123,9 +126,9 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	}
 }
 
-// refreshProvisioningToken writes token — the implement App's current lease for the owner of repo,
-// the repository the fetch of pod names (fetchRepository), which the walk minted once for that
-// owner this tick — into the provisioning Secret of pod, owned by the Sandbox with uid. The fetch
+// refreshProvisioningToken writes token — the implement App's current lease for repo, the
+// repository the fetch of pod names (fetchRepository), which the walk minted once for that
+// repository this tick — into the provisioning Secret of pod, owned by the Sandbox with uid. The fetch
 // reads the token's file anew before every transfer from GitHub (workspace.Fetch), and the kubelet
 // rewrites the projected file within its sync period, so a fetch that starts long after the pod
 // did, one the kubelet runs again after it rebuilds the pod's sandbox included, never presents an

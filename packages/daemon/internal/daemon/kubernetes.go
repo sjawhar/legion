@@ -477,7 +477,8 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
-// token source (the implement App's, minted for the repository's owner) and every tree role's gh
+// token source (the implement App's, minted for the repository GitHub holds each recorded one
+// under, which the mapping decides: servingRepository over mapped) and every tree role's gh
 // bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
 // are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
 // against, with the workflow's mapping as the repositories its repository caches follow (mapped),
@@ -501,7 +502,7 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = newImplementTokens(apps, servingOwner(owners, renames), opts.Log)
+			opts.Tokens = newImplementTokens(apps, servingRepository(mapped, renames), opts.Log)
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
 			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
 		}
@@ -514,38 +515,48 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 	}
 }
 
-// servingOwner is the owner whose installation holds the repositories of owner now: the owner a
-// configured rename moved them to, where the project owns that one and not owner itself
-// (ghrepo.Renames.OwnerAliases, the daemon's one rule for it), and owner unchanged otherwise,
-// which is every owner of a deployment that configures no rename. The owners it reads are the
-// mapping's, which changes as Dispatch's mapping does, so it is read per mint rather than once.
-func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner string) string {
-	return func(owner string) string {
-		aliases, _ := renames.OwnerAliases(func(name string) bool {
-			return slices.ContainsFunc(owners(), func(o string) bool { return strings.EqualFold(o, name) })
+// servingRepository is the repository GitHub holds a recorded one under now
+// (ghrepo.Renames.Serving, the daemon's one rule for it, read here rather than written a second
+// time): the other name of the recorded name's configured pair exactly when the recorded name is
+// that pair's from, the project serves the pair's to, and the project does not serve the pair's
+// from; every recorded name of a deployment that configures no rename is answered unchanged.
+//
+// The predicate it reads is asked of one repository and never of an owner. A project that serves
+// one more repository of the owner a pair moved a repository away from serves no more of the
+// moved repository, yet the owner test this replaces read that as the pair's old owner being the
+// project's own and stopped resolving the pair: that is how adding one repository to a project's
+// mapping turned a live pair off and left every tree opened before the transfer unable to push.
+// The served repositories it reads are the mapping's, which changes as Dispatch's mapping does,
+// so they are read per mint rather than once.
+func servingRepository(served func() []ghrepo.Repository, renames ghrepo.Renames) func(ghrepo.Repository) ghrepo.Repository {
+	return func(recorded ghrepo.Repository) ghrepo.Repository {
+		return renames.Serving(recorded, func(repo ghrepo.Repository) bool {
+			return slices.ContainsFunc(served(), func(s ghrepo.Repository) bool {
+				return strings.EqualFold(s.String(), repo.String())
+			})
 		})
-		if to, alias := aliases[strings.ToLower(owner)]; alias {
-			return to
-		}
-		return owner
 	}
 }
 
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner and
-// narrowed to reading it (contents, pull requests, Actions and metadata at read,
-// appauth.Tokens.ReadToken), which is all a clone, a fetch and a repository cache do. An
-// installation that refuses that narrowing (appauth.ErrPermissionsRefused, GitHub's 422 to a
-// request naming permissions it does not all hold) is served the owner's own installation token
-// instead, the one fallback there is, said once for that owner on the daemon's log. Every other
-// refusal — GitHub's trouble (appauth.TransientError, a 5xx or a rate-limited 422) or an App with
-// no installation on the owner (appauth.ErrNotInstalled) — is returned as it came, with no second
-// mint and nothing logged.
+// pod's workspace-fetch clones with an installation token minted for the owner of the repository
+// GitHub holds the pod's recorded one under, narrowed to reading it (contents, pull requests,
+// Actions and metadata at read, appauth.Tokens.ReadToken), which is all a clone, a fetch and a
+// repository cache do. An installation that refuses that narrowing
+// (appauth.ErrPermissionsRefused, GitHub's 422 to a request naming permissions it does not all
+// hold) is served the owner's own installation token instead, the one fallback there is, said
+// once for that owner on the daemon's log. Every other refusal — GitHub's trouble
+// (appauth.TransientError, a 5xx or a rate-limited 422) or an App with no installation on the
+// owner (appauth.ErrNotInstalled) — is returned as it came, with no second mint and nothing
+// logged.
 //
 // It is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
-// provision, its gh credential refresh and its repository cache Secret), so the owner a
-// configured rename moved a repository away from is mapped here, once, to the owner whose
-// installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
+// provision, its gh credential refresh and its repository cache Secret), and it takes the
+// repository each of them holds, so a repository a configured rename moved is mapped here, once,
+// to the one GitHub holds it under now and its token is minted on that repository's owner's
+// installation (serving, servingRepository): nothing under runtime/sandbox knows of a rename.
+// The mapping is read per repository, never per owner, so one pair of a shared owner resolving
+// says nothing about another repository of that owner.
 //
 // Only the token follows the rename. Every address those three sites build — the pod's feed, its
 // clone, and the repository cache's volume and Service — stays the repository the record names,
@@ -555,8 +566,10 @@ func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner str
 // redirect to the new repository location or URL", so a clone or a fetch addressed at the name
 // the record keeps reaches the repository GitHub holds today.
 type implementTokens struct {
-	apps    appauth.Tokens
-	serving func(owner string) string
+	apps appauth.Tokens
+	// serving is the recorded repository mapped to the one GitHub holds it under now
+	// (servingRepository); nil in a deployment that needs no mapping at all.
+	serving func(ghrepo.Repository) ghrepo.Repository
 	// log receives the fallback's line; slog.Default() when nil, as the runtime's own Log is.
 	log *slog.Logger
 
@@ -565,17 +578,24 @@ type implementTokens struct {
 	warned map[string]bool
 }
 
-// newImplementTokens is the adapter over apps, with serving as the map a mint's owner goes
-// through (servingOwner) and log as what the fallback's line is written to, slog.Default() when
-// nil.
-func newImplementTokens(apps appauth.Tokens, serving func(string) string, log *slog.Logger) *implementTokens {
+// newImplementTokens is the adapter over apps, with serving as the map a mint's repository goes
+// through (servingRepository) and log as what the fallback's line is written to, slog.Default()
+// when nil.
+func newImplementTokens(apps appauth.Tokens, serving func(ghrepo.Repository) ghrepo.Repository, log *slog.Logger) *implementTokens {
 	return &implementTokens{apps: apps, serving: serving, log: log, warned: map[string]bool{}}
 }
 
-func (t *implementTokens) Token(ctx context.Context, owner string) (string, error) {
+// Token mints repo's provisioning token on the installation of the owner GitHub holds repo under
+// now: the mapping is applied first, and every call GitHub is asked — the reading lease and the
+// fallback alike — names that resolved owner, since the owner of the name a record keeps is the
+// one whose installation a transfer took the repository out of. The fallback is said once per
+// owner the mint was made for, which is the resolved one, so a pair's two owners never cost two
+// lines for one installation.
+func (t *implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	if t.serving != nil {
-		owner = t.serving(owner)
+		repo = t.serving(repo)
 	}
+	owner := repo.Owner()
 	lease, err := t.apps.ReadToken(ctx, appauth.Implement, owner)
 	if err == nil {
 		return lease.Token, nil
