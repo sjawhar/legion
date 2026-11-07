@@ -1967,12 +1967,9 @@ func (d *listenerDeps) registerSession(
 		if registered.delivery.answer != nil && *registered.delivery.answer.Gap {
 			gap = true
 		}
+		// A pass that answers carries no error (listenerDeps.registerPass), so the switch
+		// below is left every error there is, the entry write's among them.
 		if answered {
-			if err != nil {
-				// The session entry's write failed, so this registration is that error and
-				// nothing else (sessionEntryWriteError).
-				return registeredSession{}, nil, err
-			}
 			if registered.delivery.answer != nil {
 				registered.delivery.answer.Gap = &gap
 			}
@@ -2024,8 +2021,9 @@ func (d *listenerDeps) registerSession(
 //
 // Whether this pass answers the registration comes back in a bool of its own: every pass leaves
 // a registration behind, and that bool is what tells the loop which of them the registration is
-// answered from, without the loop comparing the stored row to the plan a second time. A pass
-// whose entry write failed leaves no registration at all, only the error
+// answered from, without the loop comparing the stored row to the plan a second time. It is
+// true only beside a nil error, so a caller reading it has a registration to answer from: a
+// pass whose entry write failed answers false and leaves no registration at all, only the error
 // (sessionEntryWriteError). The gap is the loop's own: it reads the answer this pass gives and
 // sets the gap on the answer of the pass that answers (registerSession).
 func (d *listenerDeps) registerPass(
@@ -2066,8 +2064,10 @@ func (d *listenerDeps) registerPass(
 	}
 	if err := d.sessions.PutWithin(ctx, body.SessionID, sessionEntryFromSubscribe(body, machineID, outcome)); err != nil {
 		// The row is stored and nothing tells another reader the session is here, so the
-		// registration travels as this error alone and no caller is handed it.
-		return registeredSession{}, true, nil, &sessionEntryWriteError{cause: err}
+		// registration travels as this error alone and no caller is handed it. The pass
+		// answers nothing: the error is the registration's, and the caller's switch over it
+		// returns it rather than planning again.
+		return registeredSession{}, false, nil, &sessionEntryWriteError{cause: err}
 	}
 	if outcome.relayed() {
 		// The write stands whatever the client does with the answer, so the consumer this

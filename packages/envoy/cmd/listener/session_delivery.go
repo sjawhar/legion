@@ -435,7 +435,7 @@ func (m *sessionDelivery) registeredTarget(ctx context.Context, d *listenerDeps,
 	case entry.Delivery != session.DeliveryConsumer:
 		return registeredConsumer{}, false
 	}
-	topics, err := storedInterestTopics(ctx, d.registry, sessionID, true)
+	topics, err := interestTopics(d.registry.Refresh(ctx, sessionID))
 	if err != nil {
 		m.logger.Warn("listener could not read the topics of a session whose consumer it is repairing",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
@@ -783,7 +783,7 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
 	unlock := m.locks.lock(sessionID)
-	topics, err := storedInterestTopics(ctx, d.registry, sessionID, false)
+	topics, err := interestTopics(d.registry.Get(ctx, sessionID))
 	if err != nil {
 		unlock()
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
@@ -797,21 +797,16 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	}
 }
 
-// storedInterestTopics is the topics of sessionID's stored interest row, read within ctx: none when
-// it has no row, or a row this build cannot decode, whose topics nothing routes. fromBucket reads
-// the row the bucket holds (store.Registry.Refresh), for a caller whose answer must hold a write
-// this listener's watch need not have delivered yet; every other caller is answered from the
-// watched cache, which a bucket read fills on a miss (store.Registry.Get).
-func storedInterestTopics(ctx context.Context, registry *store.Registry, sessionID string, fromBucket bool) ([]string, error) {
-	var (
-		interest store.Interest
-		err      error
-	)
-	if fromBucket {
-		interest, err = registry.Refresh(ctx, sessionID)
-	} else {
-		interest, err = registry.Get(ctx, sessionID)
-	}
+// interestTopics is the topics of the interest row a read of the interest registry answered
+// with: none where the session has no row (nats.ErrKeyNotFound), and none where the row is one
+// this build cannot decode (store.ErrMalformedInterest), whose topics nothing routes. Every
+// other failure is the caller's to answer for.
+//
+// Which read the topics come from is the caller's own line: store.Registry.Refresh is the row
+// the bucket holds, for a caller whose answer must hold a write this listener's watch need not
+// have delivered yet, and store.Registry.Get is the watched cache, which a bucket read fills on
+// a miss.
+func interestTopics(interest store.Interest, err error) ([]string, error) {
 	if errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, store.ErrMalformedInterest) {
 		return nil, nil
 	}

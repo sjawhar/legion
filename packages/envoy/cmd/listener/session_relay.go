@@ -721,7 +721,7 @@ func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.Session
 // storedFilter is the filter of sessionID's consumer for its stored interest topics, read within
 // ctx under the session's lock, which the caller holds; false, logged, when they cannot be read.
 func (m *sessionRelays) storedFilter(ctx context.Context, sessionID string) ([]string, bool) {
-	topics, err := storedInterestTopics(ctx, m.registry, sessionID, false)
+	topics, err := interestTopics(m.registry.Get(ctx, sessionID))
 	if err != nil {
 		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return nil, false
