@@ -668,6 +668,27 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   go. The process is stopped and nothing is started; the claim waits `launching` with no process,
   keeps its task, and the same launch is tried again every `probe_interval_seconds` until the write
   lands. If the line keeps coming, look at the database.
+- **`supervise: a claim write the database did not take`** at Warn, with `store=` (the store
+  method whose call failed) and `owed=`, means the daemon decided something about a claim and its
+  Postgres did not take the write. With `owed=true` the write is kept and made again at that
+  claim's next decision: the daemon's memory is ahead of the row, and nothing is lost. With
+  `owed=false` the server answered and refused the statement, which it would refuse again, so the
+  write is dropped and the row stays as it was — that one is a defect to look at, not an outage.
+  The event the decision was handling is dropped either way, as it always has been.
+- **`supervise: a claim write the database did not take was made`** at Info, with `store=`, is the
+  close of that story: the owed write landed at the claim's next decision, and the row says what
+  the daemon holds again. The reports that write carried — a turn that started, a claim that went
+  ready or failed — are made right behind it. Count these against the Warn lines above to see an
+  outage end; a claim with a Warn and no such line is still behind, and its next decision will try
+  again.
+- **`supervise: a turn started`** and **`supervise: a turn ended`** at Info, each with the claim
+  and its `generation`, and with `delivery=` where the turn is a task's, are how a reader tells a
+  turn that started from one the daemon never saw, and a turn that ended from one still running.
+  A start with no end means the turn is running, or that it ended another way: look for
+  `supervise: process died`, `supervise: the agent's turn has not ended; suspending it mid-turn`,
+  `supervise: claim failed`, `supervise: the agent reported its exit`, `supervise: the process
+  speaks another plugin contract; relaunching it onto the current plugin`, or `supervise: the
+  update round is over for this claim`, each of which says what became of the turn instead.
 - **`supervise: restoring a launch the previous daemon did not finish as launch_uncertain; no
   process is recorded for it`** at boot names a claim the store held live with no process, with the
   state it was stored in (`stored=`): a launch the previous daemon began and never recorded. The
