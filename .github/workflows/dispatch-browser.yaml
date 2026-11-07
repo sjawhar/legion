@@ -554,12 +554,15 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
-        # e2e/agent-view.e2e.ts imports AGENT_STREAM_LIMITS and capAgentStreamText as values
-        # (LEGION-548), which Playwright's own Node resolution reads from contracts' built
-        # dist/: under Node the package's "default" condition is dist/index.js. A type-only
-        # import needs none of it, and neither does the dashboard's own Vite build, which
-        # reaches contracts' src/ through the aliases at packages/dispatch/web/vite.config.ts
-        # (the "bun" export condition is Bun's own and is no part of how Vite resolves it).
+        # This job runs the clock specs alone (`clockSpecs`, e2e/playwright.config.ts: the
+        # `-alone` projects' testMatch), so the reader here is not the shard job's: it is
+        # e2e/heavy-document-writes.e2e.ts:14, which imports DISPATCH_BLOCK_UNITS from
+        # @legion/contracts/dispatch-tools as a value. Playwright's own Node resolution reads it
+        # from contracts' built dist/: under Node the package's "default" condition is
+        # dist/dispatch-tools.js. A type-only import needs none of it, and neither does the
+        # dashboard's own Vite build, which reaches contracts' src/ through the aliases at
+        # packages/dispatch/web/vite.config.ts (the "bun" export condition is Bun's own and is
+        # no part of how Vite resolves it).
         run: bun run build
         working-directory: packages/contracts
       # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
@@ -1014,24 +1017,33 @@ jobs:
             echo "::error::this run's jobs could not be read, so the legs this lane owed are unknown"
             exit 1
           }
+          # Each job's leg name is derived here, once, beside the fields it travels with, so the
+          # two readings below take it rather than each parsing the job name again. It was parsed
+          # twice until a review found it, and the fix for a leg name the parse could not read
+          # then had to land in both copies.
+          #
+          # `shard (3)` becomes `shard-3` and `alone (webkit-alone)` becomes `alone-webkit-alone`,
+          # after either caller's prefix. Every other job of this workflow, `merge` and
+          # `multiprocess` among them, and every job of ci.yaml, gets a null leg and is passed
+          # over by reading one. The project part takes any name that holds no `)`, which the
+          # project names of this suite do not: a project added to the alone job's matrix arrives
+          # in these lists by itself, so neither reading names a project or a shard count and
+          # adding one needs no edit in this job. A name holding `)` is the one it would not
+          # read, and there is no such project; were one added, this is the line to widen. It
+          # read `[a-z-]*` until retro found it, which silently dropped a project named with a
+          # digit or a capital - and a leg absent from reading one's list is a leg whose missing
+          # blob nothing reports, which is the one thing that list is for.
           jq '[.[].jobs[] | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))]
-            | group_by(.name) | map(max_by(.run_attempt) | {id, name, conclusion})' "$pages" > "$jobs"
+            | group_by(.name) | map(max_by(.run_attempt) | {id, name, conclusion,
+                leg: ((.name | capture(" shard \\((?<n>[0-9]+)\\)$") | "shard-\(.n)")
+                  // (.name | capture(" alone \\((?<p>[^)]*)\\)$") | "alone-\(.p)")
+                  // null)})' "$pages" > "$jobs"
           # The legs this lane owed, read from those jobs rather than written out a second time
-          # here: a project added to the alone job's matrix is a job of this run and arrives in
-          # this list by itself, so this step names no project and no shard count, and adding one
-          # needs no edit here. What makes that true is the project pattern below, `[^)]*`, which
-          # takes any name GitHub can put in the brackets of `alone (<project>)`. It read
-          # `[a-z-]*` until retro found it: `sed -n …p` prints nothing for a name it cannot match
-          # and says nothing about it, so a project named with a digit or a capital would have
-          # left this list in silence - and a leg absent from this list is a leg whose missing
-          # blob nothing reports, which is the one thing the list is for. A narrower pattern
-          # would also make adding such a project need an edit here, against the promise above.
-          # A leg the lane does not run is skipped by its job's own `if:` - the alone and
+          # here. A leg the lane does not run is skipped by its job's own `if:` - the alone and
           # multiprocess jobs on the pull-request lane - and owes nothing. A leg that failed
           # before it could upload is in the list and still owes its blob.
-          legs=$(jq -r '.[] | select(.conclusion != "skipped") | .name' "$jobs" |
-            sed -n -e 's/.* shard (\([0-9][0-9]*\))$/shard-\1/p' \
-              -e 's/.* alone (\([^)]*\))$/alone-\1/p' | sort)
+          legs=$(jq -r '.[] | select(.leg != null and .conclusion != "skipped") | .leg' "$jobs" |
+            sort)
           if [ -z "$legs" ]; then
             echo "::error::this run's jobs hold no shard or alone leg, so there is nothing to" \
               "hold the merged report against"
@@ -1148,9 +1160,13 @@ jobs:
           # it matters instead: reading one fails this job when a leg the lane owed a blob report
           # did not upload one, and the verdict step fails on an upstream result that is neither
           # success nor skipped.
+          # `.leg` is the name derived once above, not parsed again here. It is written as `-`
+          # when the job is no leg, never as an empty field: a tab is IFS whitespace, so an empty
+          # field would be swallowed and `read` would take the next one in its place. `name` stays
+          # last, where `read -r` lets it hold the spaces a job name carries.
           jq -r '.[]
             | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
-            | [.id, .conclusion, .name] | @tsv' "$jobs" > "$unhappy"
+            | [.id, .conclusion, (.leg // "-"), .name] | @tsv' "$jobs" > "$unhappy"
           {
             echo "### The legs that did not succeed"
             echo
@@ -1160,11 +1176,8 @@ jobs:
             echo "::notice title=dispatch-browser leg exits::every leg of this workflow concluded success"
             exit 0
           fi
-          while IFS="$(printf '\t')" read -r id conclusion name; do
-            # The leg the job's name holds, if it is one: `shard (3)` or `alone (webkit-alone)`.
-            leg=$(printf '%s' "$name" | sed -n -e 's/.* shard (\([0-9][0-9]*\))$/shard-\1/p' \
-              -e 's/.* alone (\([^)]*\))$/alone-\1/p')
-            if [ -z "$leg" ]; then
+          while IFS="$(printf '\t')" read -r id conclusion leg name; do
+            if [ "$leg" = "-" ]; then
               text="job $id ($name) ended $conclusion; it is no shard, so the merged report holds no row of it"
             elif [ ! -f "$blobs/report-$leg.zip" ]; then
               text="job $id ($name) ended $conclusion and uploaded no blob report, so the merged report holds none of its rows"
