@@ -232,7 +232,7 @@ func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
 }
 
 // The live-document path is the same cycle with the worst loser. A browser edit reaches
-// AppendRoomFlush through websocket.go - and AppendUpdateWithCredit, the append this exercises,
+// AppendRoomFlush through websocket.go - and AppendUpdatesWithCredit, the append this exercises,
 // when its room recorded no class for it - which takes the room lock on its own connection
 // and then the artifact row through doc_updates' foreign key; when the owner lock was
 // `for update` and an event append held it, Postgres killed one of them, and on this path the
@@ -247,8 +247,8 @@ func TestLiveUpdateIsNotBlockedByTheOwnerLock(t *testing.T) {
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)
 	awaitUnblocked(t, "a live document update", func() error {
-		_, err := service.persistence.(*PgVersioned).AppendUpdateWithCredit(
-			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true, nil, nil,
+		_, err := service.persistence.(*PgVersioned).AppendUpdatesWithCredit(
+			ctx, id, []BrowserUpdate{{Update: crdt.EncodeStateAsUpdateV1(doc, nil), ContentChanged: true}},
 		)
 		return err
 	})

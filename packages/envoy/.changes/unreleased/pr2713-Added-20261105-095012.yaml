@@ -1,0 +1,5 @@
+kind: Added
+body: 'A thread stays in the Inbox, read or not, until it is dismissed: `POST /api/v1/me/inbox/dismiss` takes the row ids `reply:<thread id>` and `agent:<message id>` with `seen_replies`, what the page drew in each of those rows (a `reply:` entry carries the row''s `version`, an `agent:` entry the `newest_reply` it showed and the `unread_replies` it drew; a dismissal naming rows without them is refused), or the list''s filters with a `dismiss_through`, and `restore` to put them back, answering how many threads it changed; the mark is written only while the row still holds what the page drew. `GET /api/v1/me/replies` takes `state=inbox` (the undismissed rows, read or not) and `state=dismissed` (newest dismissal first, 200 at a time from a cursor) in place of `state=all`. A later message by somebody else brings a dismissed thread back unread, and the person''s own reply does not.'
+time: 2026-11-05T09:50:12.000000000Z
+custom:
+    Issue: pr2713

@@ -73,34 +73,55 @@ step below works from. Both lines are written only after the stream carries the 
 starts from the deployed configuration too: the replicas become the deployed count or
 `ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes the deployed one or
 `ENVOY_STREAM_MAX_BYTES`, whichever is more, the setting on a stream with none, and stays as
-deployed when the setting is unset; discard is `DiscardNew`, so a full stream refuses a new
-publish (`bus.ErrStreamFull`, which its sender retries) and keeps every stored message until it is
-72 hours old; and the metadata, `envoy_stream_id` included, and every field Envoy does not own
-(`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) stay as they are. A
-start's own write therefore never lowers the copies or the limit it read, so an operator's raise
-of either stands, and programs with different `ENVOY_NATS_REPLICAS` or `ENVOY_STREAM_MAX_BYTES` do
-not fight: the most copies and the largest limit stand. A clustered deployment still sets both
-alike in every envoy-listener and in the Dispatch server. JetStream's stream update has no
+deployed when the setting is unset; the consumer cap becomes the deployed cap or
+`streamMaxConsumers` (24000, compiled into the binary rather than read from a setting),
+whichever is more, and the compiled cap on a stream whose cap reads `-1` or `0` only when the
+connected server is nats-server 2.15.0 or later (`serverDefaultsAnUnsetCap`), which is where such
+a stream is capped by the server at its own default of 1000; an older server leaves it
+unlimited, so there the deployed `-1` or `0` stays as it is; discard is `DiscardNew`, so a full
+stream refuses a new publish (`bus.ErrStreamFull`, which its sender retries) and keeps every
+stored message until it is 72 hours old; and the metadata, `envoy_stream_id` included, and every
+field Envoy does not own (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest)
+stay as they are. A start's own write therefore never lowers the copies, the limit or the cap it
+read, so an operator's raise of any of them stands, and programs with different
+`ENVOY_NATS_REPLICAS` or `ENVOY_STREAM_MAX_BYTES` do not fight: the most copies and the largest
+limit stand. A clustered deployment still sets both alike in every envoy-listener and in the
+Dispatch server. JetStream's stream update has no
 compare-and-swap: a start with other or no settings, or another subject list, that reads the
 stream before another start's write and writes after it puts the old subjects, copies, limit and
 metadata back.
 
+The cap is the one of these a deployed stream can refuse. A create carries it on every
+nats-server, but every server before v2.12.5 refuses an update that changes `MaxConsumers` on a
+stream that already exists (`nats: stream configuration update can not change MaxConsumers`,
+measured on v2.10.29, v2.11.0 and v2.12.0), and that refusal, which names `max_consumers`, the
+value the binary asks for and that floor (`refusedSettings`), stops the listener's start, while
+Dispatch's server, which reconciles in the background, keeps serving and retries it. A deployment
+whose server is older than v2.12.5 and whose stream holds a positive cap below 24000 therefore
+upgrades the nats-server first, keeping its store, and the next start sets the cap. A stream with
+no cap is sent no cap change before 2.15, so such a deployment is refused nothing and takes the
+cap at the first start or keeper pass once its server is 2.15 or later.
+
 So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
 it reads the stream again and writes it back (`keepStream`, `keptStream`) with copies below its
 `ENVOY_NATS_REPLICAS` raised, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none, raised to
-it (when set), a missing `envoy_stream_id` added, the 72-hour age and duplicate window and
-`DiscardNew` put back (constants every release compiles alike), and each subject its binary
-compiles that the stream lacks added, unless it overlaps a subject the stream carries or captures
-a role lane (`keptSubjects`). It logs `envoy nats keeper restored the stream` at WARN with, for
-example,
-`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
-Like a start, the keeper never lowers the copies or the limit (`ownedStream`): an operator who
-raises a full stream's limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`) is not
-undone 30 seconds later. The keeper only adds subjects: it removes and replaces none, since a
-keeper that reconciled subjects as a start does would have two releases with different subject
-lists switch the stream back and forth every period. Its write still carries the rest of the list
-as it read it, so a start's write that lands between the keeper's read and its write loses its new
-subject again, and that release's own keeper adds it back a period later. One case does not
+it (when set), a consumer cap below its compiled 24000 raised to it, a deployed `-1` or `0`
+included where the server caps such a stream itself (`serverDefaultsAnUnsetCap`, read from the
+live connection each pass), a missing `envoy_stream_id` added, the 72-hour age and duplicate
+window and `DiscardNew` put back (constants every release compiles alike), and each subject its
+binary compiles that the stream lacks added, unless it overlaps a subject the stream carries or
+captures a role lane (`keptSubjects`). It logs `envoy nats keeper restored the stream` at WARN
+with, for example,
+`restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+Like a start, the keeper never lowers the copies, the limit or the cap (`ownedStream`): an
+operator who raises a full stream's limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`)
+is not undone 30 seconds later, and an operator who lowers the cap by hand has it raised back
+within one period, under `max_consumers` in that line. The keeper only adds subjects: it removes
+and replaces none, since a keeper that reconciled subjects as a start does would have two releases
+with different subject lists switch the stream back and forth every period. Its write still
+carries the rest of the list as it read it, so a start's write that lands between the keeper's
+read and its write loses its new subject again, and that release's own keeper adds it back a
+period later. One case does not
 recover that way: when the write that lands puts back an overlapping subject the start had
 replaced, that release's keeper skips its own subject while the overlapping one is there
 (`keptSubjects`), so only that release's next start replaces it again. A stream that still
@@ -111,8 +132,12 @@ With mixed settings during a rollout the stream can sit below the setting for up
 after the last start. Lowering the replicas and lowering or removing the limit are operator steps
 that need every program's setting changed first, or the keeper puts them back:
 `nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>` and
-`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none). A retired subject (below)
-is added back within 30 seconds by the keeper of any running binary that still compiles it.
+`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>` (`-1` for none). Lowering the cap
+(`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is one too, and needs every
+program's binary lowered first, since the cap is compiled in; that edit needs nats-server v2.12.5
+or later, as any change of `MaxConsumers` on a stream that already exists does. A retired subject
+(below) is added back within 30 seconds by the keeper of any running binary that still compiles
+it.
 
 An earlier version of this page described the opposite behaviour, which was true until
 cybermonklabs/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with

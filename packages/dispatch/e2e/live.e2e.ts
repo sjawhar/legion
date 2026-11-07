@@ -608,6 +608,7 @@ test("live: a fresh page load opens the socket at the current head and stays wit
   // The socket is outside the HTTP request budget, and the sign-in check carries its event head.
   expect(apiRequestPaths.filter((path) => path.split("?")[0] === "/api/v1/events")).toEqual([]);
 
+
   // Exactly these on a fresh load, and nothing else. A set rather than a count, and waited for
   // rather than read at an instant: the page issues the last requests of its first load within
   // a few milliseconds of painting the message this row waits for, so a count taken the moment
@@ -661,17 +662,18 @@ test("live: a fresh page load opens the socket at the current head and stays wit
     // me/agents/state, whose unread replies the Agents badge counts on every page (the
     // sidebar's on desktop, the compact header's on phone).
     "/api/v1/me/agents/state",
-    // The credential requests waiting on the viewer, which the Needs-you badge counts beside
-    // the inbox on every page.
+    // The credential requests waiting on the viewer, which the Inbox count adds up on every
+    // page.
     "/api/v1/credential-requests?approver=me",
-    // `me/replies?limit=1`, whose total the Replies badge counts on every page (the sidebar's
-    // on desktop, the compact header's on phone).
-    "/api/v1/me/replies?limit=1",
+    // `me/replies?kind=reply,agent&limit=1`, whose total is the other half of that one Inbox
+    // number (the sidebar's on desktop, the compact header's on phone).
+    "/api/v1/me/replies?kind=reply%2Cagent&limit=1",
     // The Conversation's list of the issue's phase handoffs, which it shows beside the
     // messages.
     `/api/v1/issues/${issue.key}/handoffs`,
   ].sort();
   await expect.poll(() => [...apiRequestPaths].sort()).toEqual(firstLoad);
+
 
   await alice.close();
 });

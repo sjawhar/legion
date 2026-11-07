@@ -40,14 +40,15 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		LingerClose{Generation: 7},
 		WorkspaceRemove{Linger: 3},
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
+		GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}},
 		IssueBranch{Generation: 2},
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
 		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
 		AutoMergeDisable{Number: 42},
 		ReadyMerge{Number: 42, Head: "c0de"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
-		CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: now},
-		CheckCompare{Look: 3, Cause: "deploy run", Deploy: &DeployRun{Run: 40203304600, Attempt: 2, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}, OpenedAt: now},
+		CheckWakeDue{Look: 2, OpenedAt: now, Reason: "the tester's own wake"},
+		CheckWakeDue{Look: 3, Reason: "a look nobody reported"},
 		CheckLook{Look: 2, OpenedAt: now},
 		CheckLook{Look: 1},
 		CheckBound{},
@@ -163,7 +164,8 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease}
+		OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease,
+		OutboxKindGatedStepsPublish}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
@@ -230,24 +232,17 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
 		{name: "a merge queue publish without a role", payload: MergeQueuePublish{Packet: "READY #42"}, reason: "merge queue publish requires role"},
 		{name: "a merge queue publish without a packet", payload: MergeQueuePublish{Role: "merge-queue"}, reason: "merge queue publish requires packet"},
+		{name: "a gated-steps publish without a project", payload: GatedStepsPublish{Steps: []DesignStep{DesignStepSpec}}, reason: "requires the project whose row it writes"},
+		{name: "a gated-steps publish naming no step of the gate", payload: GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{"verification"}}, reason: `names "verification", which is no design-gate step`},
 		{name: "a READY merge without a pull request", payload: ReadyMerge{Head: "c0de"}, reason: "READY merge requires its pull request number and head"},
 		{name: "a READY merge without a head", payload: ReadyMerge{Number: 42}, reason: "READY merge requires its pull request number and head"},
-		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check look on a phase start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Phase: phase.Implementing, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check look on another role's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a negative check look", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: -1}, reason: "a supervise check look names a start of the implementer with no phase"},
-		{name: "a check compare without a look", payload: CheckCompare{Cause: "daemon boot", Build: "b00f"}, reason: "check compare requires the look it starts"},
-		{name: "a check compare without a build", payload: CheckCompare{Look: 1, Cause: "daemon boot"}, reason: "check compare requires the build commit and what asked for it"},
-		{name: "a check compare without a cause", payload: CheckCompare{Look: 1, Build: "b00f"}, reason: "check compare requires the build commit and what asked for it"},
-		{name: "a check compare with both a build and a deploy run", payload: CheckCompare{Look: 1, Cause: "deploy run", Build: "b00f", Deploy: &validDeployRun}, reason: "check compare carries both a build commit and a deploy run; it compares exactly one"},
-		{name: "a check compare with neither a build nor a deploy run", payload: CheckCompare{Look: 1, Cause: "deploy run"}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run check compare without a cause", payload: CheckCompare{Look: 1, Deploy: &validDeployRun}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run without a run", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Run = 0 })}, reason: deployRunRefusal},
-		{name: "a deploy run with a negative run", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Run = -1 })}, reason: deployRunRefusal},
-		{name: "a deploy run without an attempt", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Attempt = 0 })}, reason: deployRunRefusal},
-		{name: "a deploy run without a workflow", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Workflow = "" })}, reason: deployRunRefusal},
-		{name: "a deploy run without a step", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Step = "" })}, reason: deployRunRefusal},
-		{name: "a deploy run without a branch", payload: CheckCompare{Look: 1, Cause: "deploy run", Deploy: deployRunWith(func(d *DeployRun) { d.Branch = "" })}, reason: deployRunRefusal},
+		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on a phase start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Phase: phase.Implementing, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on an architect's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a check look on a reviewer's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleReviewer, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
+		{name: "a negative check look", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: -1}, reason: checkLookRefusal},
+		{name: "a check wake without a look", payload: CheckWakeDue{Reason: "the tester's own wake"}, reason: "check wake requires the look it was named at"},
+		{name: "a check wake without a reason", payload: CheckWakeDue{Look: 1}, reason: "check wake requires the reason it wakes the check"},
 		{name: "a phase-ended message to an architect", payload: PhaseEnded{Role: claim.RoleArchitect, From: phase.Accepting, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
 		{name: "a phase-ended message to no role", payload: PhaseEnded{From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "never to an architect"},
 		{name: "a phase-ended message without the phase that ended", payload: PhaseEnded{Role: claim.RoleTester, To: phase.Implementing, Reason: "CI is red at head: pytest"}, reason: "names the phase that ended and the different phase"},
@@ -281,11 +276,9 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "unknown supervise operation", row: OutboxRow{ID: 37, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"unknown","tree":"LEGION-208","role":"architect"}`)}, reason: "unknown supervise operation"},
 		{name: "start without tree", row: OutboxRow{ID: 38, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"start","role":"architect"}`)}, reason: "start requires tree"},
 		{name: "start without role", row: OutboxRow{ID: 39, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"start","tree":"LEGION-208"}`)}, reason: "start requires role"},
-		{name: "a check compare without a look", row: OutboxRow{ID: 40, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"cause":"daemon boot","build":"b00f"}`)}, reason: "check compare requires the look it starts"},
-		{name: "a check compare with both a build and a deploy run", row: OutboxRow{ID: 42, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","build":"b00f","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main"}}`)}, reason: "it compares exactly one"},
-		{name: "a check compare with neither a build nor a deploy run", row: OutboxRow{ID: 43, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run"}`)}, reason: "or a deploy run in place of the build commit"},
-		{name: "a deploy run without a step", row: OutboxRow{ID: 44, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","branch":"main"}}`)}, reason: deployRunRefusal},
-		{name: "a deploy run with an unknown field", row: OutboxRow{ID: 45, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main","job":3}}`)}, reason: "unknown field"},
+		{name: "a check wake without a look", row: OutboxRow{ID: 40, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"reason":"the tester's own wake"}`)}, reason: "check wake requires the look it was named at"},
+		{name: "a check wake without a reason", row: OutboxRow{ID: 42, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"look":1}`)}, reason: "check wake requires the reason it wakes the check"},
+		{name: "a check wake with an unknown field", row: OutboxRow{ID: 43, Kind: OutboxKindCheckWake, Payload: json.RawMessage(`{"look":1,"reason":"the tester's own wake","build":"b00f"}`)}, reason: "unknown field"},
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
 		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 46, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"CI is red at head: pytest"}`)}, reason: "never to an architect"},
 		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 47, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red at head: pytest","quiesce":"tester"}`)}, reason: "unknown field"},
@@ -299,41 +292,9 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 	}
 }
 
-// validDeployRun is a deploy run CheckCompare accepts, which deployRunWith changes one field of.
-var validDeployRun = DeployRun{Run: 40203304600, Attempt: 1, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}
-
-// deployRunRefusal is the validation's words for a deploy run missing one of its fields.
-const deployRunRefusal = "check compare's deploy run requires a positive run and attempt and its workflow, step and branch"
-
-// deployRunWith is a copy of validDeployRun that change has altered.
-func deployRunWith(change func(*DeployRun)) *DeployRun {
-	deploy := validDeployRun
-	change(&deploy)
-	return &deploy
-}
-
-// A check_compare row a daemon queued before deploy runs existed carries a build and no deploy:
-// it decodes to the build compare it was, and a build compare encodes no deploy field, so a daemon
-// rolled back past this change still reads the build rows this one writes.
-func TestABuildCheckCompareRowReadsAsItDidBeforeDeployRuns(t *testing.T) {
-	opened := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
-	row := OutboxRow{ID: 46, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":2,"cause":"daemon boot","build":"b00f","openedAt":"2026-09-23T01:00:00Z"}`)}
-	got, err := DecodeOutboxPayload(row)
-	if err != nil {
-		t.Fatalf("DecodeOutboxPayload: %v", err)
-	}
-	want := CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: opened}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("payload = %#v, want %#v", got, want)
-	}
-	encoded, err := NewOutboxRow("LEGION-208", want, opened)
-	if err != nil {
-		t.Fatalf("NewOutboxRow: %v", err)
-	}
-	if string(encoded.Payload) != string(row.Payload) {
-		t.Fatalf("a build compare encodes %s, want %s with no deploy field", encoded.Payload, row.Payload)
-	}
-}
+// checkLookRefusal is the validation's words for a supervise row whose check look is not a start
+// of the implementer or the tester with no phase.
+const checkLookRefusal = "a supervise check look names a start of the implementer or the tester with no phase"
 
 // The release field is gone: an issue's close deletes its Sandbox in every case, so a suspension
 // carries nothing to say which. A row the previous release queued with the field is stripped of
@@ -436,6 +397,104 @@ func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) 
 		if got := PersonActor(actor); got != want {
 			t.Errorf("PersonActor(%q) = %t, want %t", actor, got, want)
 		}
+	}
+}
+
+// The boot's publish of the deployment's design-gate steps is one outbox row addressed to the
+// bare project key rather than to an issue. The record's part is three things: the row is due to
+// the daemon of that project and to no other, which the same split_part scope answers for a key
+// with no hyphen; a boot writes the project's one row of the kind, replacing what a pending row
+// carries, so the list waiting for Dispatch is always the list the booting daemon holds; and a
+// finished row leaves nothing behind, so the boot after it queues its own.
+func TestGatedStepsPublishAtBoot(t *testing.T) {
+	now := time.Date(2026, 11, 6, 4, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	// boot is what openWorkflow does with the list it was configured with: write the project's
+	// one publish.
+	boot := func(project string, steps []DesignStep) {
+		t.Helper()
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.EnqueueGatedSteps(ctx, tx, GatedStepsPublish{Project: project, Steps: steps}, now))
+		})
+	}
+	// queued is the one publish the outbox holds for project, by row id and by what it carries.
+	queued := func(project string) (int64, GatedStepsPublish) {
+		t.Helper()
+		var held []OutboxRow
+		inTx(t, st, func(tx pgx.Tx) {
+			var err error
+			held, err = records.DueRows(ctx, tx, project, "", nil, now)
+			must(t, err)
+		})
+		if len(held) != 1 || held[0].Issue != project {
+			t.Fatalf("DueRows of %s = %#v, want the one publish addressed to the project key", project, held)
+		}
+		payload, err := DecodeOutboxPayload(held[0])
+		must(t, err)
+		publish, ok := payload.(GatedStepsPublish)
+		if !ok {
+			t.Fatalf("the row of %s decodes as %#v, want a gated-steps publish", project, payload)
+		}
+		return held[0].ID, publish
+	}
+
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	first, publish := queued("LEGION")
+	want := GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}}
+	if !reflect.DeepEqual(publish, want) {
+		t.Fatalf("the publish carries %#v, want %#v, the configured list in the configured order", publish, want)
+	}
+
+	// A second boot on the same list leaves the row it finds where it is, so a restart loop
+	// writes no second publish and takes nothing off the backoff the lane has set on this one.
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	if id, again := queued("LEGION"); id != first || !reflect.DeepEqual(again, publish) {
+		t.Fatalf("a boot on the unchanged list left row %d carrying %#v, want row %d carrying %#v untouched", id, again, first, publish)
+	}
+
+	// A boot on a changed list while that row is still pending replaces what it carries: an
+	// operator who changes gates.design and restarts while Dispatch has yet to take the publish
+	// gets the list this daemon booted on, not the one the boot before it held.
+	boot("LEGION", []DesignStep{DesignStepSpec})
+	changedRow, changed := queued("LEGION")
+	if changedRow != first {
+		t.Fatalf("the boot on the changed list wrote row %d beside %d, want the pending row carrying the new list", changedRow, first)
+	}
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepSpec}}); !reflect.DeepEqual(changed, want) {
+		t.Fatalf("the pending publish carries %#v after the boot on a changed list, want %#v", changed, want)
+	}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.DueRows(ctx, tx, "INFRA", "", nil, now)
+		must(t, err)
+		if len(rows) != 0 {
+			t.Fatalf("DueRows of INFRA = %#v, want nothing: LEGION's publish is LEGION's daemon's", rows)
+		}
+	})
+
+	var claimed OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		var ok bool
+		var err error
+		claimed, ok, err = records.ClaimRow(ctx, tx, changedRow, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatal("ClaimRow of the publish claimed nothing")
+		}
+		must(t, records.FinishOutbox(ctx, tx, claimed.ID, claimed.LeaseToken))
+	})
+
+	// The run deleted the row, so the next boot publishes whatever it is configured with now: a
+	// deployment that gates nothing publishes the empty list rather than nothing at all.
+	boot("LEGION", []DesignStep{})
+	ran, published := queued("LEGION")
+	if ran == changedRow {
+		t.Fatalf("the boot after the publish ran reused row %d, want a row of its own", ran)
+	}
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{}}); !reflect.DeepEqual(published, want) {
+		t.Fatalf("the next boot published %#v, want the empty list of a deployment that gates nothing", published)
 	}
 }
 

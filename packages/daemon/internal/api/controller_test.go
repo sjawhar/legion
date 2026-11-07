@@ -2,19 +2,24 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -33,6 +38,7 @@ func newControllerHarness(t *testing.T, launched bool) *harness {
 func (h *harness) serve(controllerLaunched bool) {
 	h.t.Helper()
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: controllerLaunched,
 	}).Handler
@@ -120,9 +126,12 @@ func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launche
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
-		Tokens: tokens, GitHubOwners: func() []string { return []string{"sjawhar", "acme"} },
+		Tokens: tokens, GitHubRepositories: func() []ghrepo.Repository {
+			return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
+		},
 	}).Handler
 	return h
 }
@@ -135,12 +144,44 @@ func (h *harness) controllerGitHubCredential(secret string) *httptest.ResponseRe
 // failingTokens is a Tokens whose every mint fails, for the credential routes' 502.
 type failingTokens struct{}
 
-func (failingTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (failingTokens) Token(context.Context, appauth.AppRole, ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("github is down")
 }
 
-func (failingTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (failingTokens) ReadToken(context.Context, appauth.AppRole, string, []string) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("github is down")
+}
+
+// refusingTokens is handoffTokens for every owner but one, whose every read lease GitHub refuses
+// the narrowing of (appauth.ErrNarrowingRefused, its 422): the App's installation reaches none
+// of that owner's repositories.
+type refusingTokens struct {
+	handoffTokens
+	owner string
+}
+
+func (t refusingTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	if strings.EqualFold(owner, t.owner) {
+		return appauth.Lease{}, fmt.Errorf("%w (repositories %s)", appauth.ErrNarrowingRefused, strings.Join(repos, ", "))
+	}
+	return t.handoffTokens.ReadToken(ctx, role, owner, repos)
+}
+
+// rateLimitedTokens refuses owner's read leases as GitHub's rate limit does: the narrowing
+// sentinel a 422 carries, wrapped in the trouble that 422 also is.
+type rateLimitedTokens struct {
+	handoffTokens
+	owner string
+}
+
+func (t rateLimitedTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string, repos []string) (appauth.Lease, error) {
+	if strings.EqualFold(owner, t.owner) {
+		return appauth.Lease{}, &appauth.TransientError{
+			Err: fmt.Errorf("%w: GitHub App token exchange failed (422): you have exceeded a secondary rate limit (repositories %s)",
+				appauth.ErrNarrowingRefused, strings.Join(repos, ", ")),
+		}
+	}
+	return t.handoffTokens.ReadToken(ctx, role, owner, repos)
 }
 
 // The route that mints a controller capability answers only the operator's bearer, and a refusal
@@ -473,8 +514,9 @@ func TestControllerGitHubCredential(t *testing.T) {
 func TestControllerGitHubCredentialWithoutAnOwner(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubOwners: func() []string { return nil },
+		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubRepositories: func() []ghrepo.Repository { return nil },
 	}).Handler
 	secret := h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED")
@@ -503,4 +545,113 @@ func TestControllerGitHubCredentialWhenTheMintFails(t *testing.T) {
 	h := newControllerCredentialHarness(t, failingTokens{}, false)
 	secret := h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
+}
+
+// serveSteps replaces the harness's server with one over the same store whose deployment gates
+// steps, which is what the controller secret route answers.
+func (h *harness) serveSteps(steps []record.DesignStep) {
+	h.t.Helper()
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Steps: steps,
+	}).Handler
+}
+
+// The controller secret route answers the design-gate steps the deployment gates, in the order
+// it gates them, so `legion controller start` can tell its controller which approvals its trees
+// wait on. A deployment that gates no step answers the empty list on the wire, never a missing
+// field: the CLI reads a missing field as a daemon that does not know the list and refuses to
+// start, so the two must be told apart (cmd/legion's fetchControllerSecret). The one word the
+// route answered before is gone from the body with the field that carried it.
+func TestControllerSecretAnswersTheConfiguredSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []record.DesignStep
+		want  []any
+	}{
+		{"two steps, in the order the deployment gates them",
+			[]record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec}, []any{"criteria", "spec"}},
+		{"root-issues", config.DesignGateRootIssues.Steps(), []any{"spec"}},
+		{"off", config.DesignGateOff.Steps(), []any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.serveSteps(tc.steps)
+			recorder := h.controllerSecret(testOperatorToken)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("controller secret = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			raw := slices.Clone(recorder.Body.Bytes())
+			var answer ControllerSecretResponse
+			if err := json.Unmarshal(raw, &answer); err != nil {
+				t.Fatalf("decode the body: %v", err)
+			}
+			if answer.Secret == "" {
+				t.Error("the route answered an empty capability")
+			}
+			if !slices.Equal(answer.DesignGateSteps, tc.steps) {
+				t.Errorf("designGateSteps = %v, want %v", answer.DesignGateSteps, tc.steps)
+			}
+			// The wire itself, since a nil slice and an empty one decode alike into the Go
+			// field and are different bodies to the CLI that reads them.
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode the body as an object: %v", err)
+			}
+			steps, named := body["designGateSteps"].([]any)
+			if !named || !slices.Equal(steps, tc.want) {
+				t.Errorf("the body's designGateSteps = %v (named %t), want %v", body["designGateSteps"], named, tc.want)
+			}
+			if _, old := body["designGate"]; old {
+				t.Errorf("the body still carries the design gate policy word: %v", body["designGate"])
+			}
+		})
+	}
+}
+
+// A controller whose recorded default owner its App's installation no longer reaches — GitHub
+// refusing a lease over every repository that owner serves — is answered a refusal naming the
+// owner and those repositories, never 200 with a bundle holding no App: the controller's
+// GH_CONFIG_DIR names that owner's directory, so a bundle without it is gh files the caller
+// cannot write, and `legion controller start` would meet it as a bundle its own Validate
+// refuses, after a 200. The owners that answer are untouched: a caller naming no default is
+// served from them.
+func TestControllerGitHubCredentialWhenTheDefaultOwnerIsRefused(t *testing.T) {
+	h := newControllerCredentialHarness(t, refusingTokens{owner: "acme"}, false)
+	secret := h.mintedSecret()
+
+	refused := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "acme"}, nil)
+	body := refused.Body.String()
+	wantFailure(t, refused, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE")
+	if !strings.Contains(body, "acme") || !strings.Contains(body, "widgets") || strings.Contains(body, "token-for") {
+		t.Errorf("the refusal is %s, want it to name the owner and its repositories and carry no token", body)
+	}
+
+	served := h.controllerGitHubCredential(secret)
+	if served.Code != http.StatusOK {
+		t.Fatalf("the controller naming no default = %d, want 200 from the owners that answered; body %s", served.Code, served.Body)
+	}
+	var answer ControllerCredentialResponse
+	decodeInto(t, served, &answer)
+	want := map[string]ControllerOwnerCredential{"sjawhar": {Hosts: ghconfig.Hosts("review-token-for-sjawhar-read"), Config: ghconfig.Config}}
+	if !maps.Equal(answer.Owners, want) || answer.Default != "sjawhar" || answer.App != "review" {
+		t.Errorf("the controller naming no default = %+v, want sjawhar's files alone and sjawhar the default", answer)
+	}
+}
+
+// A refusal that is GitHub's rate limit rather than its answer about the installation is
+// answered as the trouble it is, never as the default owner being unreachable: the first is a
+// minute's wait the caller's next tick cures, the second tells an operator to change an
+// installation that is as it should be. GitHub answers a narrowed token request it rate-limits
+// with the same 422 it refuses a narrowing with, so the two arrive carrying one sentinel and are
+// told apart by appauth.NarrowingRefused alone.
+func TestControllerGitHubCredentialWhenGitHubIsRateLimited(t *testing.T) {
+	h := newControllerCredentialHarness(t, rateLimitedTokens{owner: "acme"}, false)
+	secret := h.mintedSecret()
+
+	refused := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "acme"}, nil)
+	wantFailure(t, refused, http.StatusBadGateway, "GITHUB_TOKEN_FAILED")
+	if body := refused.Body.String(); strings.Contains(body, "token-for") {
+		t.Errorf("the refusal is %s, want it to carry no token", body)
+	}
 }

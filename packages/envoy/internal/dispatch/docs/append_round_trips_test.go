@@ -149,23 +149,35 @@ func (r *roundTripRecorder) recorded() []roundTrip {
 
 // roomLockRuns are the runs of round trips the holders of room's session-level advisory lock made
 // on their own connections: each from the pg_advisory_lock that took it to the pg_advisory_unlock
-// that released it (withRoomLock). Nothing else runs on that connection meanwhile - the holder
-// marks its context as holding the connection (store.HoldsConnection) and does all its work
-// through it - so a run is the whole cost of one such store.
+// that released it (holdRoom, lockRoom). Nothing else runs on that connection meanwhile - the
+// holder marks its context as holding the connection (store.HoldsConnection) and does all its
+// work through it - so a run is the whole cost of one such store. A room's own batch takes the
+// lock in the first statement of a pipeline (appendRoomTx) and releases it in the last of
+// another, so a run begins at the trip whose first statement takes the lock, pipeline or
+// statement, and ends at the trip that holds the unlock. The prepare pgx sends just before a
+// pipeline it has uncached statements for belongs to the store that owes it, so a prepare
+// recorded on this connection right before the run's first trip is part of the run.
 func (r *roundTripRecorder) roomLockRuns(room string) [][]roundTrip {
 	var runs [][]roundTrip
 	trips := r.recorded()
 	for index, trip := range trips {
-		if trip.batch || !trip.names(room) || !strings.Contains(trip.sql[0], "pg_advisory_lock(hashtext") {
+		if trip.prepare || !trip.names(room) || !strings.Contains(trip.sql[0], "pg_advisory_lock(hashtext") {
 			continue
 		}
 		run := []roundTrip{trip}
+		if index > 0 {
+			if before := trips[index-1]; before.prepare && before.conn == trip.conn {
+				run = []roundTrip{before, trip}
+			}
+		}
 		for _, later := range trips[index+1:] {
 			if later.conn != trip.conn {
 				continue
 			}
 			run = append(run, later)
-			if !later.batch && strings.Contains(later.sql[0], "pg_advisory_unlock(hashtext") {
+			if slices.ContainsFunc(later.sql, func(sql string) bool {
+				return strings.Contains(sql, "pg_advisory_unlock(hashtext")
+			}) {
 				break
 			}
 		}
@@ -217,31 +229,59 @@ func roundTripLabels(trips []roundTrip) []string {
 	return labels
 }
 
+// roundTripLabel names one trip: a pipeline by its first statement, since a room's append sends
+// the same statements in the same order in each of its pipelines (appendRoomTx), and a statement
+// run on its own by itself. A trip whose first statement the list does not know is reported as
+// that SQL, so a new one shows in an assertion's message rather than passing for a known one.
 func roundTripLabel(trip roundTrip) string {
+	label := statementLabel(oneLineSQL(trip.sql[0]))
 	if trip.batch {
-		if trip.prepare {
-			return "a prepare of the append's writes (one batch)"
-		}
-		return "the append's writes (one batch)"
-	}
-	sql := oneLineSQL(trip.sql[0])
-	label := sql
-	switch {
-	case sql == oneLineSQL(appendGateStatement):
-		label = "the append gate read"
-	case strings.Contains(sql, "pg_advisory_lock(hashtext"):
-		label = "pg_advisory_lock"
-	case strings.Contains(sql, "pg_advisory_unlock(hashtext"):
-		label = "pg_advisory_unlock"
-	case strings.Contains(sql, "pg_advisory_xact_lock(hashtext"):
-		label = "pg_advisory_xact_lock"
-	case strings.Contains(sql, "pg_try_advisory_lock(hashtext"):
-		label = "pg_try_advisory_lock"
+		label = pipelineLabel(label)
 	}
 	if trip.prepare {
 		return "a prepare of " + label
 	}
 	return label
+}
+
+// statementLabel names one statement of a document's store by its SQL.
+func statementLabel(sql string) string {
+	switch {
+	case sql == oneLineSQL(appendGateStatement):
+		return "the append gate read"
+	case sql == oneLineSQL(appendUpdatesStatement), sql == oneLineSQL(appendUpdatesJoinedStatement):
+		return "the append's insert"
+	case sql == oneLineSQL(takePruneCheckpointStatement):
+		return "the prune checkpoint read"
+	case strings.Contains(sql, "pg_advisory_lock(hashtext"):
+		return "pg_advisory_lock"
+	case strings.Contains(sql, "pg_advisory_unlock(hashtext"):
+		return "pg_advisory_unlock"
+	case strings.Contains(sql, "pg_advisory_xact_lock(hashtext"):
+		return "pg_advisory_xact_lock"
+	case strings.Contains(sql, "pg_try_advisory_lock(hashtext"):
+		return "pg_try_advisory_lock"
+	}
+	return sql
+}
+
+// pipelineLabel names a pipeline by the label of its first statement: the two a room's batch
+// sends under the document's lock, the one a standing prune checkpoint costs it and the rollback
+// a path that returns before its commit sends before its unlock (appendRoomTx). The unlock is no
+// pipeline of its own: it is one statement, sent through duty.FreeSessionLock, and statementLabel
+// names it.
+func pipelineLabel(first string) string {
+	switch first {
+	case "pg_advisory_lock":
+		return "the append's opening (one batch)"
+	case "the append's insert":
+		return "the append's writes (one batch)"
+	case "rollback":
+		return "the append's rollback (one batch)"
+	case "the prune checkpoint read":
+		return "the append's prune recovery (one batch)"
+	}
+	return first + " (one batch)"
 }
 
 func oneLineSQL(sql string) string {
@@ -272,17 +312,20 @@ func tracedRoomService(t *testing.T) (*Service, string, *roundTripRecorder) {
 	return service, artifactID, recorder
 }
 
-// A warm browser keystroke's store is six round trips, all of them under the document's advisory
-// lock the room's persistence worker holds on its own connection: the lock, the transaction, the
-// gate read, the one batch of writes the append owes, the commit and the unlock (AppendRoomFlush,
-// appendUpdateTxClass). The transaction-level lock is not among them: the session already holds
-// the document's lock on this very connection, so taking it again would grant what the session
-// has and cost a seventh trip - the one every other writer of the document waits out. A prepare
-// is one of the trips the list below names, a statement's own and a batch's alike, and the
-// measured keystroke runs on a connection the warm-up keystroke has already prepared every
-// statement of, so it makes none: a statement new to that connection, in the batch or beside it,
-// adds a trip the list does not hold and fails this test.
-func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
+// A warm browser keystroke's store is three round trips, all of them under the document's
+// advisory lock the room's batch holds on a connection of the room-appends pool: the opening
+// pipeline, which takes the lock, begins the transaction and reads the gate; the writes
+// pipeline, the insert of the batch's rows with the writes they owe and the commit; and the end,
+// the unlock alone, a statement of its own rather than a pipeline, since nothing is left open to
+// roll back before it (appendRoomTx, duty.FreeSessionLock). The transaction-level lock is not
+// among them: the session already holds the document's lock on this very connection, so taking
+// it again would grant what the session has - and a prune's recovery is not, since no checkpoint
+// stands, which is the one case that costs a fourth trip. A prepare is one of the trips the list
+// below names, a statement's own and a pipeline's alike, and the measured keystroke runs on a
+// connection the warm-up keystroke has already prepared every statement of, so it makes none: a
+// statement new to that connection, in a pipeline or beside it, adds a trip the list does not
+// hold and fails this test, as a fourth pipeline does.
+func TestAWarmBrowserKeystrokeFlushesInThreeRoundTrips(t *testing.T) {
 	service, artifactID, recorder := tracedRoomService(t)
 	// The first keystroke warms the room, the pool and the store's prepared statements; the
 	// second is the one measured.
@@ -298,11 +341,8 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 	}
 	got := roundTripLabels(runs[0])
 	want := []string{
-		"pg_advisory_lock",
-		"begin",
-		"the append gate read",
+		"the append's opening (one batch)",
 		"the append's writes (one batch)",
-		"commit",
 		"pg_advisory_unlock",
 	}
 	if !slices.Equal(got, want) {
@@ -314,10 +354,12 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 // What the saving above must not cost: the room's two durable writers of one document, a live
 // write and the room's own persistence worker, are serialised by the room's advisory lock. The
 // write takes it in its own transaction at its one read of the document (readFork, lockedHead)
-// and holds it until the transaction ends; the worker holds the session-level form on its own
-// connection for the whole of its store (withRoomLock). That lock is also what lets every append
-// of a flush skip a lock of its own (Service.flushThrough's rule): a flush runs inside the
-// transaction its caller already locked the room in.
+// and holds it until the transaction ends; the worker's batch holds the session-level form on
+// its own connection for the whole of its store (appendRoomTx). That lock is also what lets
+// every append of a flush skip a lock of its own (Service.flushThrough's rule): a flush runs
+// inside the transaction its caller already locked the room in. The write's own appends are
+// statements of that transaction, not a pipeline of its own (writeStatement.exec), so the trips
+// named below are statements.
 //
 // Here a transaction of the test's own holds the room's lock, Bob's keystroke queues on it and
 // the live write queues behind the keystroke, watched on its own backend: the write's one read
@@ -343,6 +385,9 @@ func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T
 		t.Fatalf("hold the room's lock: %v", err)
 	}
 
+	// The keystroke's batch lingers for the room's next keystrokes before it goes
+	// (roomAppendLinger), so it reaches the lock a linger after the room applied it; roomWait
+	// covers that, as it covers the rest of the room's own work.
 	editAsConnectedPeer(t, service, artifactID, 1, storedOrderBob, replaceRun("Second.", "Second, bob."))
 	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
 		t.Fatal("the keystroke's append never came to wait on the room's lock")
@@ -366,7 +411,7 @@ func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T
 	if err, early := storetest.WaitForQueuedBehind(t, holder, writeConn.PgConn().PID(), written, roomWait(t)); early {
 		t.Fatalf("the live write answered %v before it queued behind the room's lock: it waited on no lock of the room", err)
 	}
-	for _, appended := range []string{"the append gate read", "the append's writes (one batch)"} {
+	for _, appended := range []string{"the append gate read", "the append's insert"} {
 		if labels := recorder.labelsOn(writeConn); slices.Contains(labels, appended) {
 			t.Fatalf("the live write queued behind the room's lock only after %q, so it did not wait at its one read of the document (readFork, lockedHead); it ran:\n\t%s",
 				appended, strings.Join(labels, "\n\t"))

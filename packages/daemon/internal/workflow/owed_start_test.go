@@ -186,7 +186,7 @@ func assertNotStranded(t *testing.T, pool *pgxpool.Pool, role claim.Role, token 
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		store := record.NewStore()
 		for _, c := range []supervise.Claim{live, suspended} {
-			stranded, err := Stranded(t.Context(), tx, store, "LEGION", []supervise.Claim{c}, nil, time.Now().UTC())
+			stranded, err := Stranded(t.Context(), tx, store, "LEGION", nil, []supervise.Claim{c}, nil, time.Now().UTC())
 			if err != nil {
 				return err
 			}

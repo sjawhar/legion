@@ -15,13 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // idleRigListener is the real Envoy listener of packages/envoy/cmd/listener, built once per test
-// binary and run as its own process for the rig: the one component that sees a message published
-// to a role topic nobody holds and a message sent to the agent subject of a session that is gone,
-// and reports both to the daemon on notifications.legion.wake.
+// process (testbuild.EnvoyBinary) and run as its own process for the rig: the one component that
+// sees a message published to a role topic nobody holds and a message sent to the agent subject
+// of a session that is gone, and reports both to the daemon on notifications.legion.wake.
 //
 // It is started the way scripts/e2e/envoy-session-delivery.sh starts one — a build of this
 // checkout's cmd/listener, then PORT, ENVOY_LISTEN_HOST, ENVOY_MACHINE_ID, NATS_URLS and a HOME of
@@ -37,56 +38,6 @@ type idleRigListener struct {
 	stop   func()
 }
 
-// idleRigListenerBuild builds cmd/listener once per test binary, in a directory of its own that
-// the package's TestMain removes. The directory holds a binary of some 17 MB and binds no
-// socket, and no *testing.T outlives it, so it keeps os.MkdirTemp rather than testtmp.Dir,
-// whose budget is for paths a unix socket has to fit and whose removal is a test's.
-var idleRigListenerBuild struct {
-	once sync.Once
-	dir  string
-	path string
-	err  error
-}
-
-// removeIdleRigListenerBuild removes the build's directory, if a build made one. TestMain calls
-// it once every test has run: the directory outlives every test that uses it, so no t.Cleanup
-// can remove it.
-func removeIdleRigListenerBuild() {
-	if idleRigListenerBuild.dir != "" {
-		_ = os.RemoveAll(idleRigListenerBuild.dir)
-	}
-}
-
-// idleRigListenerBinary is the built listener, built on first use.
-func idleRigListenerBinary(t *testing.T) string {
-	t.Helper()
-	idleRigListenerBuild.once.Do(func() {
-		dir, err := os.MkdirTemp("", "lgb")
-		if err != nil {
-			idleRigListenerBuild.err = err
-			return
-		}
-		idleRigListenerBuild.dir = dir
-		source, err := filepath.Abs(filepath.Join("..", "..", "..", "envoy"))
-		if err != nil {
-			idleRigListenerBuild.err = err
-			return
-		}
-		path := filepath.Join(dir, "envoy-listener")
-		build := exec.Command("go", "build", "-o", path, "./cmd/listener")
-		build.Dir = source
-		if output, err := build.CombinedOutput(); err != nil {
-			idleRigListenerBuild.err = fmt.Errorf("build the Envoy listener in %s: %v\n%s", source, err, output)
-			return
-		}
-		idleRigListenerBuild.path = path
-	})
-	if idleRigListenerBuild.err != nil {
-		t.Fatal(idleRigListenerBuild.err)
-	}
-	return idleRigListenerBuild.path
-}
-
 // startIdleRigListener runs a listener of machine id against natsURL until t ends, and returns it
 // once /healthz answers healthy.
 func startIdleRigListener(t *testing.T, natsURL, machine string) *idleRigListener {
@@ -98,7 +49,7 @@ func startIdleRigListener(t *testing.T, natsURL, machine string) *idleRigListene
 // listener restarted mid-test comes back where every URL already handed out reaches it.
 func startIdleRigListenerOn(t *testing.T, natsURL, machine string, port int) *idleRigListener {
 	t.Helper()
-	binary := idleRigListenerBinary(t)
+	binary := testbuild.EnvoyBinary(t, "./cmd/listener")
 	// The listener's HOME is also where it runs, and the only path the test writes under it is
 	// the log below.
 	home := testtmp.Dir(t, "listener.log")

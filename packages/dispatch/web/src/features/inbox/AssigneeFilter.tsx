@@ -14,18 +14,23 @@ function triggerText(selected: readonly string[], viewer: string): string {
 }
 
 /**
- * Who the Inbox is listed for: the `?assignee=` filter, above the list. The trigger says the
- * selection in the reader's own words (`Assignee · you`, `· everyone`, `· Unassigned`,
- * one other person's email, or how many), and the popover picks any number of people, with
- * Unassigned - every document ask and every issue nobody holds - first.
+ * Who the Inbox is listed for: the `?assignee=` filter, one of the five fields the **Filter**
+ * control opens. The trigger says the selection in the reader's own words (`Assignee · you`,
+ * `· everyone`, `· Unassigned`, one other person's email, or how many), and the popover picks
+ * any number of people, with Unassigned - every document ask and every issue nobody holds -
+ * first. Each row carries how many rows that value holds, counted under the other four fields'
+ * filters, so a person the narrowed list has nothing for says 0 rather than nothing.
  */
 export function AssigneeFilter({
+  counts,
   onChange,
   onOpenChange,
   open,
   selected,
   viewer,
 }: {
+  /** How many rows each value holds, by login and by `unassigned`. */
+  counts: ReadonlyMap<string, number>;
   onChange: (selected: readonly string[]) => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
@@ -64,7 +69,10 @@ export function AssigneeFilter({
         onOpenChange(next);
       }}
       open={open}
-      optionDetail={(value) => (value === viewer ? "you" : undefined)}
+      optionDetail={(value) => `${value === viewer ? "you · " : ""}${counts.get(value) ?? 0}`}
+      optionDetailLabel={(value) =>
+        `${value === viewer ? "you, " : ""}${counts.get(value) ?? 0} rows`
+      }
       optionLabel={(value) => (value === UNASSIGNED_FILTER_VALUE ? "Unassigned" : value)}
       options={options}
       searchLabel="Search people"

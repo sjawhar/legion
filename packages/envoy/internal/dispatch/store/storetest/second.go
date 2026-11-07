@@ -3,6 +3,7 @@ package storetest
 import (
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -19,4 +20,13 @@ import (
 func SecondProcess(t testing.TB, database *store.Store) *store.Store {
 	t.Helper()
 	return Reopened(t, database, func(*pgxpool.Config) {})
+}
+
+// TracedStore opens a store of its own on the database database is already on, closed after t
+// ends, whose every connection, and every connection of every pool it opens later, reports to
+// tracer: the store opens each later pool from a copy of the configuration tracer is installed on
+// (Traced). pgx hands tracer each pipeline too when it is also a pgx.BatchTracer.
+func TracedStore(t testing.TB, database *store.Store, tracer pgx.QueryTracer) *store.Store {
+	t.Helper()
+	return &store.Store{Pool: Traced(t, database.Pool, tracer, nil)}
 }

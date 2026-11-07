@@ -1,0 +1,5 @@
+kind: Changed
+body: The worker MCP server speaks Legion daemon API contract 53, whose state names every wake the daemon's pacing holds.
+time: 2026-11-05T12:40:25.511715883Z
+custom:
+    Issue: pr2805

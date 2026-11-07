@@ -197,12 +197,12 @@ func TestAHandoverApprovalTheGateWouldNotTakeLeavesItAsItWas(t *testing.T) {
 		gate   record.DesignGate
 	}{
 		{name: "an approval of a version older than the gate's latest", policy: config.DesignGateRootIssues,
-			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}},
+			gate: record.DesignGate{Issue: "LEGION-208", Step: record.DesignStepSpec, ArtifactID: "artifact-208", LatestVersion: 3}},
 		{name: "an approval a later changes request of its version superseded", policy: config.DesignGateRootIssues,
-			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2,
+			gate: record.DesignGate{Issue: "LEGION-208", Step: record.DesignStepSpec, ArtifactID: "artifact-208", LatestVersion: 2,
 				ToldChangesVersion: &two, ToldChangesReason: "split the migration", ToldChangesMark: askSeq(12)}},
 		{name: "an approval under gates.design off", policy: config.DesignGateOff,
-			gate: record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2}},
+			gate: record.DesignGate{Issue: "LEGION-208", Step: record.DesignStepSpec, ArtifactID: "artifact-208", LatestVersion: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)

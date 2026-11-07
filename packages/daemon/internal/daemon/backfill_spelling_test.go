@@ -289,11 +289,11 @@ type servedOwnerTokens struct {
 	owner string
 }
 
-func (t servedOwnerTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	if !strings.EqualFold(owner, t.owner) {
-		return appauth.Lease{}, fmt.Errorf("no installation of the %s App on %s covers the repository", role, owner)
+func (t servedOwnerTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	if !strings.EqualFold(repo.Owner(), t.owner) {
+		return appauth.Lease{}, fmt.Errorf("no installation of the %s App on %s covers the repository", role, repo.Owner())
 	}
-	return t.roleTokens.Token(ctx, role, owner)
+	return t.roleTokens.Token(ctx, role, repo)
 }
 
 // A transfer the deployment configures as a pair (`repository_renames`) refuses no boot: GitHub

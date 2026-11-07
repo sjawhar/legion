@@ -21,12 +21,6 @@ import (
 // worth retrying once age or an operator has made room, so it keeps the 503 and the Retry-After
 // that ask for that retry, and its body names the full stream.
 //
-// A republish the full stream refused is answered the same way (writeBusUnavailable, api.go). The
-// stream acknowledged the publish a duplicate of a message it does not hold (bus.ErrNotStored),
-// the same envelope went once more without its id, and the full stream refused that send too, so
-// the error wraps both. An answer that read only the outermost error would call that one a bus
-// that did not answer.
-//
 // What it does not prove: that the server's refusal arrives as bus.ErrStreamFull. That is
 // internal/bus's own ground (streamFull), and here the error is built as streamFull builds it.
 func TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer(t *testing.T) {
@@ -48,7 +42,6 @@ func TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer(t *testing.T) {
 			err  error
 		}{
 			{"the publish refused", full},
-			{"the republish refused", fmt.Errorf("%w: %w", bus.ErrNotStored, full)},
 		} {
 			t.Run(route.name+"/"+failure.name, func(t *testing.T) {
 				recorder, record := serveRecorded(t, func(logger *logging.Logger) http.HandlerFunc {
