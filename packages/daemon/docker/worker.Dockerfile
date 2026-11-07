@@ -819,6 +819,7 @@ RUN set -eu; \
       "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
     gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
     fetch() { curl -fsSL --retry 7 --retry-all-errors --max-time 60 "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
+    head_check() { curl -fsSI --retry 7 --retry-all-errors --max-time 60 -o /dev/null "$(gh_raw_url "$1" "$2" "$3")"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
     fetch "$omp_repo" "$omp_tag" LICENSE omp-LICENSE; \
     fetch "$omp_repo" "$omp_tag" packages/coding-agent/THIRD-PARTY-NOTICES.txt omp-coding-agent-THIRD-PARTY-NOTICES.txt; \
@@ -835,16 +836,16 @@ RUN set -eu; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
     fetch golang/tools "gopls/v${GOPLS_VERSION}" LICENSE gopls-LICENSE; \
     crates() { \
-      curl -fsSI --retry 7 --retry-all-errors --max-time 60 -o /dev/null "$(gh_raw_url "$1" "$2" Cargo.lock)"; \
+      head_check "$1" "$2" Cargo.lock; \
       printf '%s links Rust crates whose license texts its release does not ship. They are the packages listed in\nhttps://github.com/%s/blob/%s/Cargo.lock, the lockfile of the release this image installs; the\nlicense of each is published with it on crates.io.\n' "$3" "$1" "$2" > "/in/$4"; \
     }; \
     crates "$jj_repo" "$jj_tag" jj jj-crates; \
     crates astral-sh/uv "$UV_VERSION" uv uv-crates; \
-    curl -fsSI --retry 7 --retry-all-errors --max-time 60 -o /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
+    head_check golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod; \
     printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
-    curl -fsSI --retry 7 --retry-all-errors --max-time 60 -o /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
+    head_check kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod; \
     printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules; \
-    curl -fsSI --retry 7 --retry-all-errors --max-time 60 -o /dev/null "$(gh_raw_url mikefarah/yq "v${YQ_VERSION}" go.mod)"; \
+    head_check mikefarah/yq "v${YQ_VERSION}" go.mod; \
     printf 'yq links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/mikefarah/yq/blob/v%s/go.mod, the module file of the release this image installs; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$YQ_VERSION" > /in/yq-modules
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=debian-packages /debian-packages /in/debian-packages

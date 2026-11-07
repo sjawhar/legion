@@ -64,6 +64,8 @@ name: CI
 # a retry. Each bound is derived from its own step's measured maximum and names it beside the
 # call. A bound is per attempt, so neither a step's nor a job's `timeout-minutes` is a bound:
 # each is a sum of them, and the Budgets note below says how every one of them was computed.
+# Each `bun install --frozen-lockfile` step is named for the command it runs, which is the
+# handle .github/scripts/ci_job_reads.py's bun_job cites a frozen install by.
 # Two jobs below prove all of it against the fault it answers, rather than by reading:
 # download-retry runs each of those sites — a curl of a release asset, `mise install`,
 # `bun add`, `bun install --frozen-lockfile`, `go mod download`, `bunx playwright install` and a
@@ -1750,9 +1752,7 @@ jobs:
 
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
       # against this install's measured maximum of 11 s over 180 observations in the 20 most
-      # recent successful ci.yaml push runs on main, over five times it. The step is named for
-      # the command it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job cites
-      # a frozen install by.
+      # recent successful ci.yaml push runs on main, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2068,8 +2068,7 @@ jobs:
         uses: ./.github/actions/setup-bun
 
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2390,8 +2389,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2430,8 +2428,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2465,8 +2462,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2518,8 +2514,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2574,8 +2569,7 @@ jobs:
       # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2686,8 +2680,7 @@ jobs:
           . .github/scripts/ci-retry.sh
           retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -2824,9 +2817,7 @@ jobs:
           retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. The step is named
-      # for the command it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job
-      # cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -3340,8 +3331,7 @@ jobs:
           retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -3444,8 +3434,7 @@ jobs:
       # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
       - uses: ./.github/actions/install-claude-code
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -3526,8 +3515,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -4643,8 +4631,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -4735,8 +4722,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
-      # against this install's measured maximum of 11 s, over five times it. Named for the
-      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      # against this install's measured maximum of 11 s, over five times it.
       - name: bun install --frozen-lockfile
         run: |
           . .github/scripts/ci-retry.sh
@@ -5249,14 +5235,7 @@ jobs:
       # than assumed, and where a proxy a report could not stop is stopped.
       - name: Leave no proxy behind the ci-ok report
         if: always()
-        run: |
-          pkill -f ci-fault-proxy.py || true
-          left=$(env | grep -Ei '^(http_proxy|https_proxy|all_proxy|no_proxy)=' || true)
-          if [ -n "$left" ]; then
-            echo "::error::the job's environment carries a proxy the ci-ok report would use: $left"
-            exit 1
-          fi
-          echo "no proxy variable is in this job's environment"
+        run: .github/scripts/download-retry-proof.sh clear
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -5401,14 +5380,7 @@ jobs:
       # that is checked rather than assumed.
       - name: Leave no proxy behind the ci-ok report
         if: always()
-        run: |
-          pkill -f ci-fault-proxy.py || true
-          left=$(env | grep -Ei '^(http_proxy|https_proxy|all_proxy|no_proxy)=' || true)
-          if [ -n "$left" ]; then
-            echo "::error::the job's environment carries a proxy the ci-ok report would use: $left"
-            exit 1
-          fi
-          echo "no proxy variable is in this job's environment"
+        run: .github/scripts/download-retry-proof.sh clear
 
       - name: Report ci-ok when this is the run's last job
         if: always()

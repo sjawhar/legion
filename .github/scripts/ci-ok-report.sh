@@ -149,8 +149,9 @@ if [ -n "$pending" ]; then
   exit 0
 fi
 
-summary=$(mktemp)
-trap 'rm -f "$summary"' EXIT
+# Under $work, so the one EXIT trap above removes it: a second `trap … EXIT` would replace that
+# one and leave the directory behind.
+summary="$work/summary"
 status=0
 verdict=$(NEEDS=$(jq -c .needs <<<"$decision") EVENT=$EVENT SELECTED_BY=$selected_by \
   PULL_REQUEST_ONLY=$pull_request_only "$script_dir/ci-ok.sh" 2>&1) || status=$?

@@ -53,12 +53,6 @@ near() {
   if [ "$1" -ge "$(($2 - $3))" ] && [ "$1" -le "$(($2 + $3))" ]; then echo true; else echo false; fi
 }
 
-# indent <text>: the text under the case that produced it, two spaces in.
-indent() {
-  local line
-  while IFS= read -r line; do printf '  %s\n' "$line"; done <<< "$1"
-}
-
 # The status the local `timeout` returns when it kills: 124 from GNU coreutils, 143 from BusyBox.
 # The helper may only call 124 the bound's own kill, so which one this machine gives decides which
 # wording the hanging case expects.

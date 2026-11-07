@@ -203,6 +203,8 @@ WORKFLOWS = Path(".github/workflows")
 ACTIONS = Path(".github/actions")
 SCRIPTS = Path(".github/scripts")
 HELPER = ".github/scripts/ci-retry.sh"
+# This file, named by the problems it raises about its own lists.
+SELF = ".github/scripts/check-download-retry.sh"
 # The `.test.sh` harnesses beside the checks are not read. A harness is not a job's download: the
 # two network calls in the tree today are ci-fault-proxy.test.sh's `run_curl`, which drives one
 # curl at the fault proxy precisely to watch a single unretried attempt, and
@@ -226,7 +228,7 @@ PYTHON_READER_FILE = ".github/scripts/check-ci-images.sh"
 PYTHON_READ = re.compile(r"urllib\.request\.urlopen\s*\(|(?<![\w.])urlopen\s*\(")
 PYTHON_DEF = re.compile(r"^(\s*)def\s+(\w+)\s*\(")
 
-LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
 # What a word sheds to become the name of the program it runs.
 PROGRAM = re.compile(r"^(\$\{?GITHUB_WORKSPACE\}?/)?(\.\.?/)*")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
@@ -323,14 +325,13 @@ def probe_spans(text: str) -> list[tuple[int, int]]:
 
 class Command:
     """One simple command of a shell body: its words, the line it starts on, the character offset
-    it starts at, and the innermost loop and function it sits in."""
+    it starts at, and the innermost loop it sits in."""
 
     def __init__(self, words: list[str], line: int, offset: int) -> None:
         self.words = words
         self.line = line
         self.offset = offset
         self.loop: int | None = None
-        self.function: str | None = None
 
 
 class Scanner:
@@ -475,8 +476,8 @@ class Scanner:
 
 
 def structure(commands: list[Command]) -> dict[str, int]:
-    """Marks each command with the loop and the function it sits in, and returns the line of the
-    loop in each function that holds one — the loops a call of that function reaches."""
+    """Marks each command with the loop it sits in, and returns the line of the loop in each
+    function that holds one — the loops a call of that function reaches."""
     loops: list[int] = []
     function: str | None = None
     function_depth = 0
@@ -486,7 +487,6 @@ def structure(commands: list[Command]) -> dict[str, int]:
         if first == "done" and loops:
             loops.pop()
         command.loop = loops[-1] if loops else None
-        command.function = function
         if function is not None:
             if command.loop is not None and function not in function_loop:
                 function_loop[function] = command.loop
@@ -640,7 +640,8 @@ def curl_options(words: list[str]) -> tuple[int | None, bool, bool, bool]:
         if "=" in word and word.startswith("--"):
             word, _, value = word.partition("=")
         if word == "--retry":
-            value = value if value is not None else words[index + 1:index + 2] and words[index + 1]
+            if value is None and index + 1 < len(words):
+                value = words[index + 1]
             if value and value.isdigit():
                 retries = int(value)
         elif word == "--retry-all-errors":
@@ -670,17 +671,18 @@ class Site:
         self.loop = loop
 
 
-def commands_of(body: str, first_line: int) -> tuple[list[Command], dict[str, int], list[tuple[int, int]], list[tuple[int, str]]]:
-    """The simple commands of a shell body, the loop each local function holds, the probe spans,
-    and the heredoc bodies."""
-    text, heredocs = without_heredocs(EXPRESSION.sub("EXPR", body))
+def commands_of(body: str,
+                first_line: int) -> tuple[list[Command], dict[str, int], list[tuple[int, int]]]:
+    """The simple commands of a shell body, the loop each local function holds, and the probe
+    spans."""
+    text, _ = without_heredocs(EXPRESSION.sub("EXPR", body))
     commands = Scanner(first_line).scan(text)
-    return commands, structure(commands), probe_spans(text), heredocs
+    return commands, structure(commands), probe_spans(text)
 
 
 def sites_of(path: str, body: str, first_line: int, step: str) -> list[Site]:
     """Every fetch of one shell body."""
-    commands, function_loop, probes, _ = commands_of(body, first_line)
+    commands, function_loop, probes = commands_of(body, first_line)
     found: list[Site] = []
     for command in commands:
         if any(start <= command.offset < end for start, end in probes):
@@ -842,14 +844,13 @@ scripts = [
 ]
 for dockerfile in DOCKERFILES:
     if dockerfile not in files:
-        problems.append(
-            f"::error file=.github/scripts/check-download-retry.sh,line=1::{dockerfile} is one of "
-            "the three Dockerfiles a CI job builds and this check reads, and the tree does not "
-            "hold it. Point DOCKERFILES at where it moved, or drop it if CI no longer builds it."
-        )
+        problem(SELF, 1,
+                f"{dockerfile} is one of the three Dockerfiles a CI job builds and this check "
+                "reads, and the tree does not hold it. Point DOCKERFILES at where it moved, or "
+                "drop it if CI no longer builds it.")
 
 sites: list[Site] = []
-exempted: list[tuple[Site, Exemption]] = []
+exempted: list[Site] = []
 # The steps of a workflow or a composite action, as (job, step name, run, line).
 
 
@@ -885,12 +886,12 @@ for path in workflows + actions:
     for job, name, run, line in steps_of(path, document):
         for site in sites_of(path, run, line, name):
             if job in credentialed:
-                exempted.append((site, None))
+                exempted.append(site)
                 continue
             covering = next((entry for entry in EXEMPTIONS if entry.covers(site, job)), None)
             if covering:
                 covering.used += 1
-                exempted.append((site, covering))
+                exempted.append(site)
                 continue
             sites.append(site)
 
@@ -900,11 +901,11 @@ for path in scripts:
         covering = next((entry for entry in EXEMPTIONS if entry.covers(site, None)), None)
         if covering:
             covering.used += 1
-            exempted.append((site, covering))
+            exempted.append(site)
             continue
         sites.append(site)
     # Rule 5: a `urllib.request` read inside this script's Python goes through the one reader.
-    _, _, _, heredocs = commands_of(text, 1)
+    _, heredocs = without_heredocs(EXPRESSION.sub("EXPR", text))
     indents: list[tuple[int, str]] = []
     for line, body in heredocs:
         if match := PYTHON_DEF.match(body):
@@ -927,7 +928,7 @@ for path in scripts:
 # ---------------------------------------------------------------- the Dockerfiles
 
 
-def instructions(text: str, path: str) -> list[tuple[int, str, str]]:
+def instructions(text: str) -> list[tuple[int, str, str]]:
     """Each instruction of a Dockerfile as (line, keyword, the text after the keyword) with its
     backslash continuations and the comment lines between them kept, so a scan of that text reads
     the same lines the build runs."""
@@ -961,7 +962,7 @@ def joined(text: str) -> str:
 for path in DOCKERFILES:
     if path not in files:
         continue
-    for line, keyword, rest in instructions(Path(path).read_text(), path):
+    for line, keyword, rest in instructions(Path(path).read_text()):
         if keyword != "RUN":
             continue
         while match := re.match(r"\s*--(mount|network|security)=\S+", rest):
@@ -999,11 +1000,11 @@ for site in sites:
         elif retries is None or retries < RETRY_FLOOR or not all_errors or not bounded or not fails:
             missing = []
             if retries is None:
-                missing.append("`--retry 7` (it passes none)")
+                missing.append(f"`--retry {RETRY_FLOOR}` (it passes none)")
             elif retries < RETRY_FLOOR:
-                missing.append(f"`--retry 7` (it passes `--retry {retries}`, whose last attempt "
-                               "starts well inside 120 s: curl's waits double from one second, so "
-                               "only 7 reaches 127 s)")
+                missing.append(f"`--retry {RETRY_FLOOR}` (it passes `--retry {retries}`, whose "
+                               "last attempt starts well inside 120 s: curl's waits double from "
+                               f"one second, so only {RETRY_FLOOR} reaches 127 s)")
             if not all_errors:
                 missing.append("`--retry-all-errors` (without it a connection reset is not a retry)")
             if not bounded:
@@ -1051,13 +1052,13 @@ for site in sites:
 for entry in EXEMPTIONS:
     if entry.used:
         continue
-    problems.append(
-        f"::error file=.github/scripts/check-download-retry.sh,line=1::the exception for "
-        f"{entry.path}" + (f" job '{entry.job}'" if entry.job else "")
-        + (f" step '{entry.step}'" if entry.step else "")
-        + " matches no fetch in the tree. An exception outliving its site is an exception nobody "
-        f"reads again: drop it, or point it at where that site moved. It was written for {entry.why}."
-    )
+    problem(SELF, 1,
+            f"the exception for {entry.path}"
+            + (f" job '{entry.job}'" if entry.job else "")
+            + (f" step '{entry.step}'" if entry.step else "")
+            + " matches no fetch in the tree. An exception outliving its site is an exception "
+            "nobody reads again: drop it, or point it at where that site moved. It was written "
+            f"for {entry.why}.")
 
 if LIST_MODE and not problems:
     # A reader of this list pipes it (`| head`, `| cut`), so a closed pipe ends this the way any

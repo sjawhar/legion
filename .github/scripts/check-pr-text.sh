@@ -63,15 +63,11 @@ live="$work/live.json"
 # Every read of the API below retries: .github/scripts/ci-retry.sh makes five bounded attempts,
 # the last starting 150 s after the first, so a refusal costs this lane a wait rather than the
 # required pr-title check (dispatch://INFRA-1545, R1). Each read writes its file from inside
-# `sh -c`, so that every attempt starts that file over: gh copies an error answer's body to
-# standard output as it copies a good one's, and a refused attempt's leftovers ahead of the
-# retry's answer would leave the file holding no JSON at all. `sh -c` given one command execs it,
-# so the attempt's bound still reaches gh itself.
+# `sh -c`, so that every attempt starts that file over and the attempt's bound still reaches gh
+# itself, for the reason .github/scripts/ci-ok-report.sh gives where it does the same.
 #
-# 60 s per attempt, for each of the three: this repository measures no REST read of its own, and
-# the smallest download it does measure is install-changie's tarball, at most 1 s across the 20
-# most recent successful ci.yaml push runs on main. One page of any of these routes is smaller
-# than that tarball, so the bound is 60 times a maximum these reads stay under.
+# 60 s per attempt, for each of the three: the bound that file derives there for one page of a
+# REST route, which none of these three reads is larger than.
 # shellcheck source=.github/scripts/ci-retry.sh
 . "$script_dir/ci-retry.sh"
 # shellcheck disable=SC2016 # $1 and $2 are sh -c's own arguments, expanded by that shell

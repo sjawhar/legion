@@ -48,14 +48,11 @@ jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg conclusion "$CONCLUSI
 # The post retries: .github/scripts/ci-retry.sh makes five bounded attempts, the last starting
 # 150 s after the first, and an exhausted post fails the step. The loop that stood here was a
 # second copy of that helper, which is what dispatch://INFRA-1545's R2 refuses. gh writes the
-# posted check's URL into a file through `sh -c`, for the reason ci-ok-report.sh gives: each
-# attempt has to start that file over, since gh copies a refused answer's body to standard output
-# as it copies a good one's.
+# posted check's URL into a file through `sh -c`, so that each attempt starts that file over,
+# for the reason ci-ok-report.sh gives where it does the same.
 #
-# 60 s per attempt: this repository measures no REST call of its own, and the smallest download
-# it does measure is install-changie's tarball, at most 1 s across the 20 most recent successful
-# ci.yaml push runs on main. This post is smaller than that tarball, so the bound is 60 times a
-# maximum it stays under.
+# 60 s per attempt: the bound that file derives there for one page of a REST route, which this
+# post is no larger than.
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=.github/scripts/ci-retry.sh
 . "$script_dir/ci-retry.sh"

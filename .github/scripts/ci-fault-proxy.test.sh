@@ -101,12 +101,6 @@ run_curl() {
   seconds=$(($(date +%s) - start))
 }
 
-# indent <text>: the text under the case that produced it, two spaces in.
-indent() {
-  local line
-  while IFS= read -r line; do printf '  %s\n' "$line"; done <<< "$1"
-}
-
 echo "case: --mode fail answers 504 to a faulted host, over plain HTTP and over CONNECT"
 start_proxy fail --mode fail --hosts fetch.invalid
 run_curl -x "$proxy" -o /dev/null -w '%{http_code}' http://fetch.invalid/tool.tar.gz

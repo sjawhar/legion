@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The fault rig of ci.yaml's download-retry and download-retry-images jobs: it starts
 # .github/scripts/ci-fault-proxy.py in front of one step, reads the proxy's log after that step,
-# and prints and checks what the retry did (dispatch://INFRA-1545, T7). Three verbs:
+# and prints and checks what the retry did (dispatch://INFRA-1545, T7). Four verbs:
 #
 #   start <name> --mode <recover|stall> [--hosts <csv>] [--recover-after <s>] [--bind <address>]
 #       Starts a proxy of its own for the step that follows, waits for its port, and writes
@@ -29,6 +29,12 @@
 #       and the runner is discarded. worker-image.yaml and ci.yaml's envoy-smoke job are where
 #       these images are built for real, through that action, and their triggers are what
 #       check-image-trigger-paths.sh proves.
+#
+#   clear
+#       Kills any proxy still running and refuses the job if a proxy variable is in its
+#       environment: the rig writes none to $GITHUB_ENV, so the steps after it — the ci-ok
+#       report and the upload inside it — must see none. The one verb that names no proxy,
+#       because it is about all of them.
 #
 # What `report` checks, which is what each of the two modes claims:
 #   recover  the step succeeded, the proxy refused at least one attempt (so the fault was in the
@@ -166,6 +172,7 @@ report() {
   now=$(date +%s)
   elapsed=$((now - started))
 
+  local faults passes fault_count first last
   # One line per request the proxy refused or stalled, as offsets from the step's start, and the
   # same for the ones it passed on. An attempt may open more than one connection — a package
   # manager fetches in parallel — so these are requests, not attempts; the count below is held
@@ -173,7 +180,6 @@ report() {
   faults=$(awk -v t="$started" '$3 == "504" || $3 == "stall" { n++; if (n <= 40) printf "+%ds ", $1 - t }
                                 END { if (n > 40) printf "and %d more", n - 40 }' "$log")
   passes=$(awk '$3 == "pass"' "$log" | wc -l)
-  local fault_count
   fault_count=$(awk '$3 == "504" || $3 == "stall"' "$log" | wc -l)
   first=$(awk -v t="$started" '$3 == "504" || $3 == "stall" { print $1 - t; exit }' "$log")
   last=$(awk -v t="$started" '$3 == "504" || $3 == "stall" { v = $1 - t } END { if (v != "") print v }' "$log")
@@ -245,12 +251,30 @@ build() {
   docker image inspect "$tag" --format 'download-retry: {{.RepoTags}} reached its last stage, {{.Id}}'
 }
 
+# The rig writes no proxy variable to $GITHUB_ENV, so none of them reaches the steps after it —
+# the ci-ok report and the upload inside it. This is where that is checked rather than assumed,
+# and where a proxy a `report` could not stop is stopped.
+clear() {
+  [ "$#" -eq 0 ] || die "clear: takes no argument"
+  pkill -f ci-fault-proxy.py || true
+  local left
+  left=$(env | grep -Ei '^(http_proxy|https_proxy|all_proxy|no_proxy)=' || true)
+  if [ -n "$left" ]; then
+    echo "::error::the job's environment carries a proxy the ci-ok report would use: $left"
+    exit 1
+  fi
+  echo "no proxy variable is in this job's environment"
+}
+
 verb=${1:-}
-[ "$#" -ge 2 ] || die "usage: $(basename "$0") <start|report|build> <name> [options]"
+# Every verb but `clear` names the proxy it is about; `clear` is about all of them.
+[ "$verb" = clear ] || [ "$#" -ge 2 ] ||
+  die "usage: $(basename "$0") <start|report|build> <name> [options], or <clear>"
 shift
 case $verb in
   start) start "$@" ;;
   report) report "$@" ;;
   build) build "$@" ;;
-  *) die "unknown verb '$verb'; it takes start, report or build" ;;
+  clear) clear "$@" ;;
+  *) die "unknown verb '$verb'; it takes start, report, build or clear" ;;
 esac

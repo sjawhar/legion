@@ -55,7 +55,7 @@
 # On exhaustion it prints one `::error::` line, which GitHub turns into the step's annotation, and
 # returns the last attempt's exit status.
 retry_fetch() {
-  local what bound attempts attempt status left noun pause
+  local what bound attempts attempt status left noun refusal
 
   if [ "$#" -lt 3 ]; then
     echo "::error::retry_fetch takes <what> <per-attempt bound in seconds> -- <command...>, and got $# argument(s)" >&2
@@ -69,14 +69,15 @@ retry_fetch() {
     return 2
   fi
   shift
+  refusal="::error::retry_fetch: the per-attempt bound is a positive whole number of seconds, not '$bound'"
   case $bound in
     '' | *[!0-9]*)
-      echo "::error::retry_fetch: the per-attempt bound is a positive whole number of seconds, not '$bound'" >&2
+      echo "$refusal" >&2
       return 2
       ;;
   esac
   if [ "$bound" -eq 0 ]; then
-    echo "::error::retry_fetch: the per-attempt bound is a positive whole number of seconds, not '$bound'" >&2
+    echo "$refusal" >&2
     return 2
   fi
   if [ "$#" -eq 0 ]; then
@@ -110,8 +111,7 @@ retry_fetch() {
       echo "::error::$what failed to download after $attempts attempts (last exit $status)" >&2
       return "$status"
     fi
-    pause=$((10 << (attempt - 1)))
-    sleep "$pause"
+    sleep "$((10 << (attempt - 1)))"
     attempt=$((attempt + 1))
   done
 }

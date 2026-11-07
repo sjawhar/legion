@@ -101,15 +101,11 @@ jobs:
           # starting 150 s after the first, so a refusal from the API costs this lane a wait
           # rather than the required pr-title check (dispatch://INFRA-1545, R1). The redirection
           # sits inside the command the helper runs rather than around the call, so each attempt
-          # starts the file over: gh copies an error answer's body to standard output as it copies
-          # a good one's, and a refused attempt's leftovers ahead of the retry's answer would
-          # leave the file holding no JSON at all. `sh -c` given one command execs it, so the
-          # attempt's bound still reaches gh itself.
+          # starts the file over and the bound still reaches gh itself, for the reason
+          # .github/scripts/ci-ok-report.sh gives where it does the same.
           #
-          # 60 s per attempt: this repository measures no REST read of its own, and the smallest
-          # download it does measure is install-changie's tarball, at most 1 s across the 20 most
-          # recent successful ci.yaml push runs on main. One page of this route is smaller than
-          # that tarball, so the bound is 60 times a maximum this read stays under.
+          # 60 s per attempt: the bound that file derives there for one page of a REST route,
+          # which this read is no larger than.
           . .github/scripts/ci-retry.sh
           # shellcheck disable=SC2016 # $1 and $2 are sh -c's own arguments, expanded by that shell
           retry_fetch "the queued pull request" 60 -- \

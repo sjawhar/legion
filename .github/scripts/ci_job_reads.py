@@ -77,6 +77,7 @@ IMAGES_JOB = "download-retry-images"
 RETRY_FIRST_PROXY = "Start the recovering fault for install-changie"
 RETRY_FIRST_REPORT = "What install-changie's curl did under the recovering fault"
 RETRY_GO_STEP = "Download packages/envoy's Go modules under the recovering fault"
+IMAGES_WORKER_STEP = "Build the worker image under the recovering fault"
 
 
 def targets(path: str, key: str) -> list:
@@ -1200,12 +1201,12 @@ GATES = [
       + setup_go(RETRY_JOB, f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("download_retry_images", "download-retry-images", reads=reads(
-        (f"{DAEMON}/docker/worker.Dockerfile", f"{at(IMAGES_JOB, 'Build the worker image under the recovering fault')} builds it"),
+        (f"{DAEMON}/docker/worker.Dockerfile", f"{at(IMAGES_JOB, IMAGES_WORKER_STEP)} builds it"),
         (f"{ENVOY}/docker/Dockerfile", f"{at(IMAGES_JOB, 'Build the Envoy image under the recovering fault')} builds it, and "
                                        f"{at(IMAGES_JOB, 'Build the smoke image the held-port wrapper takes as its base, with no proxy')} builds it unfaulted first"),
         (f"{ENVOY}/infra/host/heldportwrapper/Dockerfile", f"{at(IMAGES_JOB, 'Build the held-port image under the recovering fault')} builds it"),
         (FAULT_PROXY, f"{at(IMAGES_JOB, 'Start the recovering fault for the worker image build')} runs it, bound to the docker bridge"),
-        (RETRY_RIG, f"{at(IMAGES_JOB, 'Build the worker image under the recovering fault')} builds through it"),
+        (RETRY_RIG, f"{at(IMAGES_JOB, IMAGES_WORKER_STEP)} builds through it"),
     ) + CI_SELF),
 ]
 

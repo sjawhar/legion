@@ -31,7 +31,7 @@ let first: string;
 let second: string;
 
 beforeAll(() => {
-  workDir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "proof-sdk-pack-test-"));
+  workDir = mkdtempSync(join(tmpdir(), "proof-sdk-pack-test-"));
   sourceDir = join(workDir, "source");
   mkdirSync(join(sourceDir, "src", "editor", "plugins"), { recursive: true });
   writeFileSync(join(sourceDir, "src", "lib.ts"), "export const lib = 1;\n");

@@ -20,6 +20,10 @@
  * every entry carries the commit's author date as its mtime and `0:0` as its numeric ownership,
  * and `gzip -n` writes no timestamp. So two runs over one source tree give one file, and a
  * rebuild of a pin already committed changes nothing.
+ *
+ * Its scratch trees go under `node:os`'s `tmpdir()`, which reads `$TMPDIR`: the issue volume's,
+ * where the environment sets one, since an upstream tarball is 31 MB and a container's own disk
+ * is small.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -59,14 +63,6 @@ interface Upstream {
   mtime: string;
 }
 
-/**
- * Where the scratch trees go: the issue volume's `TMPDIR` when the environment sets one, since an
- * upstream tarball is 31 MB and a container's own disk is small.
- */
-function scratchRoot(): string {
-  return process.env.TMPDIR ?? tmpdir();
-}
-
 function run(command: string, args: string[], input = ""): void {
   const result = spawnSync(command, args, { input, stdio: ["pipe", "inherit", "inherit"] });
   if (result.error) throw result.error;
@@ -96,7 +92,7 @@ function members(sourceDir: string): string[] {
     }
     names.push(name);
   }
-  return names.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  return names.sort();
 }
 
 /**
@@ -110,7 +106,7 @@ function members(sourceDir: string): string[] {
  */
 export function packUpstream({ sourceDir, mtime, outputPath }: PackOptions): void {
   const names = members(sourceDir);
-  const workDir = mkdtempSync(join(scratchRoot(), "proof-sdk-pack-"));
+  const workDir = mkdtempSync(join(tmpdir(), "proof-sdk-pack-"));
   try {
     const tarPath = join(workDir, "upstream.tar");
     run(
@@ -170,7 +166,7 @@ if (import.meta.main) {
     process.exit(1);
   }
   const outputPath = resolve(output ?? join(import.meta.dir, "..", `proof-sdk-${commit}.tgz`));
-  const workDir = mkdtempSync(join(scratchRoot(), "proof-sdk-fetch-"));
+  const workDir = mkdtempSync(join(tmpdir(), "proof-sdk-fetch-"));
   try {
     packUpstream({ ...(await fetchUpstream(commit, workDir)), outputPath });
   } finally {

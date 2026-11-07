@@ -150,22 +150,36 @@ class Handler(socketserver.StreamRequestHandler):
         host, _, port = authority.partition(":")
         return host, int(port) if port else default_port
 
-    def do_connect(self, authority: str) -> None:
-        host, port = self.split_authority(authority, 443)
-        if self.fault.faults(host):
-            if self.fault.mode == "stall":
-                self.stall(host, "CONNECT")
-                return
-            log(f"504 CONNECT {host}:{port}")
-            self.answer(504, b"ci-fault-proxy: injected fault\n")
-            return
+    def injected(self, host: str, label: str, what: str) -> bool:
+        """Whether the fault answered this request itself: a stall that held it, or a 504."""
+        if not self.fault.faults(host):
+            return False
+        if self.fault.mode == "stall":
+            self.stall(host, label)
+            return True
+        log(f"504 {what}")
+        self.answer(504, b"ci-fault-proxy: injected fault\n")
+        return True
+
+    def connect_upstream(self, host: str, port: int, what: str) -> socket.socket | None:
+        """The connection to the origin, or None once a 502 has answered for its refusal."""
         try:
             upstream = socket.create_connection((host, port), timeout=30)
         except OSError as error:
-            log(f"502 CONNECT {host}:{port}: {error}")
+            log(f"502 {what}: {error}")
             self.answer(502, f"ci-fault-proxy: {error}\n".encode())
+            return None
+        log(f"pass {what}")
+        return upstream
+
+    def do_connect(self, authority: str) -> None:
+        host, port = self.split_authority(authority, 443)
+        what = f"CONNECT {host}:{port}"
+        if self.injected(host, "CONNECT", what):
             return
-        log(f"pass CONNECT {host}:{port}")
+        upstream = self.connect_upstream(host, port, what)
+        if upstream is None:
+            return
         try:
             self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
             self.wfile.flush()
@@ -181,24 +195,16 @@ class Handler(socketserver.StreamRequestHandler):
         authority, slash, path = rest.partition("/")
         path = "/" + path if slash else "/"
         host, port = self.split_authority(authority, 80)
-        if self.fault.faults(host):
-            if self.fault.mode == "stall":
-                self.stall(host, method)
-                return
-            log(f"504 {method} http://{authority}{path}")
-            self.answer(504, b"ci-fault-proxy: injected fault\n")
+        what = f"{method} http://{authority}{path}"
+        if self.injected(host, method, what):
             return
         # The hop-by-hop headers go, and the connection is a single exchange: this proxy keeps no
         # pool, so an origin left holding the connection open would only make pipe() wait for its
         # own timeout after the client already has the whole answer.
         kept = [h for h in headers if not h.lower().startswith((b"proxy-", b"connection:", b"keep-alive:"))]
-        try:
-            upstream = socket.create_connection((host, port), timeout=30)
-        except OSError as error:
-            log(f"502 {method} http://{authority}{path}: {error}")
-            self.answer(502, f"ci-fault-proxy: {error}\n".encode())
+        upstream = self.connect_upstream(host, port, what)
+        if upstream is None:
             return
-        log(f"pass {method} http://{authority}{path}")
         try:
             head = f"{method} {path} HTTP/1.1\r\n".encode("latin-1") + b"".join(kept) + b"Connection: close\r\n\r\n"
             upstream.sendall(head)
