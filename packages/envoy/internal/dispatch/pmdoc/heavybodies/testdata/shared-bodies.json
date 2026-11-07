@@ -67,12 +67,12 @@
     {
       "id": "lazy-list-item",
       "side": "go",
-      "why": "Go's Shape \"a list item then lines carrying no marker\" was spelled here too, as heavy-bodies.ts's lazyListItem, for the document writes the deleted heavy-document-writes.e2e.ts made through the API (INFRA-1404). No browser row draws the body - heavy-bodies.e2e.ts's lazy row is lazyQuote - so the browser suite no longer spells it. What gates it is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
+      "why": "Go's Shape \"a list item then lines carrying no marker\" was spelled in packages/dispatch/e2e/heavy-bodies.ts too, as that module's lazyListItem, for the document writes the deleted heavy-document-writes.e2e.ts made through the API (INFRA-1404). No browser row draws the body - heavy-bodies.e2e.ts's lazy row is lazyQuote - so the browser suite no longer spells it. What gates it is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
     },
     {
       "id": "markers-49-then-blank-lines",
       "side": "go",
-      "why": "Go's Shape \"49 list markers on one line then blank lines\" was heavy-bodies.ts's nested49ThenBlankLines, which only the deleted heavy-document-writes.e2e.ts drew (INFRA-1404). heavy-bodies.e2e.ts's own 49-marker row builds its body inline, 49 markers padded to one character under the parse worker's threshold (1,999 characters) rather than to the 32,000-character body cap, so that is a different body and not this one respelled. What gates this one is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
+      "why": "Go's Shape \"49 list markers on one line then blank lines\" was heavy-bodies.ts's nested49ThenBlankLines, which only the deleted heavy-document-writes.e2e.ts drew (INFRA-1404). heavy-bodies.e2e.ts's own 49-marker row builds its body inline, 49 markers padded to one character under the parse worker's threshold rather than to the 32,000-character body cap, so that is a different body and not this one respelled. What gates this one is pmdoc's TestHeavyBodiesAtTheBlockCapAreStoredOrRefusedInTime and the API's TestHeavyDocumentWriteVerdicts."
     },
     {
       "id": "nested-100-items-then-text-lines",

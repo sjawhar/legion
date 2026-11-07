@@ -120,11 +120,31 @@ describe(`what ${TABLE_PATH} says this side spells`, () => {
 
   // The walk that makes this side total. The record above is hand-kept, so a body exported and
   // left out of it would stand in no list of the table and nothing would say so: this reads the
-  // module itself and holds its string exports and the record to each other, one for one. An
-  // export missing from the record is a body the table gates nowhere; a record entry no export
-  // spells is a body written out twice.
+  // module itself and holds its string exports and the record to each other by their bytes,
+  // which is all either side can be matched on - a string carries no identity here, so bodies
+  // spelled alike are one body to this walk. Four things fail it: an export whose bytes no
+  // entry of the record holds, a record entry whose bytes no export holds, one body exported
+  // under two names, and one body recorded under two ids. The last two are what make the match
+  // one for one - two names, or two ids, standing on one body would otherwise collapse into a
+  // single entry and leave the walk nothing to notice.
   test("every body this module exports stands in its heavyBodies record, and the other way", () => {
-    const idsByBody = new Map(Object.entries(heavyBodies).map(([id, body]) => [body, id]));
+    const idsByBody = new Map<string, string>();
+    const collidingIds: string[] = [];
+    for (const [id, body] of Object.entries(heavyBodies)) {
+      const twin = idsByBody.get(body);
+      if (twin === undefined) {
+        idsByBody.set(body, id);
+      } else {
+        collidingIds.push(`${twin} and ${id}`);
+      }
+    }
+    if (idsByBody.size !== Object.keys(heavyBodies).length) {
+      throw new Error(
+        `heavy-bodies.ts's heavyBodies record holds one body under two ids, ` +
+          `${collidingIds.join(", ")}: each body stands under one id here, so that one row of ` +
+          `${TABLE_PATH} pins it - drop the second id, or spell the body it is meant to hold`
+      );
+    }
     const namesByBody = new Map<string, string>();
     for (const [name, body] of exportedBodies) {
       const twin = namesByBody.get(body);
@@ -143,8 +163,8 @@ describe(`what ${TABLE_PATH} says this side spells`, () => {
       .filter(([, body]) => !namesByBody.has(body))
       .map(([id]) => id);
     // An export left out: put it in the record under the id the table pins it to, shared with Go
-    // or oneSideOnly as this side's own. A record entry no export spells: spell it as an export
-    // and hold the record to that, so a spec and the table read the same body.
+    // or oneSideOnly as this side's own. A record entry whose bytes no export holds: spell that
+    // body as an export and hold the record to it, so a spec and the table read the same body.
     expect({ exportedAndUnrecorded, recordedAndUnexported }).toEqual({
       exportedAndUnrecorded: [],
       recordedAndUnexported: [],

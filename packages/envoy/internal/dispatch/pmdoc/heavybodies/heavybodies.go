@@ -4,11 +4,13 @@
 // import, until the browser rows that wrote them through the API were moved into Go (INFRA-1404).
 //
 // Eight of these bodies are spelled a second time in TypeScript, in packages/dispatch/e2e/heavy-bodies.ts,
-// which the browser suite draws them from; the other three are Go's alone, written through the API by
-// the tests here and in internal/dispatch/api and drawn by no browser row. A checked-in digest table
-// holds the two spellings to each other: testdata/shared-bodies.json names every body both sides
-// spell - by the ID each Shape and NestedDirective below carries - with that body's length in bytes
-// and the SHA-256 of those bytes, and every body only one side has, with why it is alone. Both sides
+// which the browser suite draws them from; the other three are Go's alone, drawn by no browser row.
+// What reads those three is Go: internal/dispatch/api's TestHeavyDocumentWriteVerdicts writes each
+// of them through the API, pmdoc's own tests parse them, and digests_test.go beside this file only
+// hashes them. A checked-in digest table holds the two spellings to each other:
+// testdata/shared-bodies.json names every body both sides spell - by the ID each Shape and
+// NestedDirective below carries - with that body's length in bytes and the SHA-256 of those bytes,
+// and every body only one side has, with why it is alone. Both sides
 // read the table and neither may drift from it: digests_test.go here, and
 // packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there, each fail where a body of
 // their own no longer digests to its row, and where their side has gained, lost or renamed one. So
