@@ -348,9 +348,9 @@ func TestOnTextOnPartialAndOnStepSeeTheRunAsItHappens(t *testing.T) {
 	}
 }
 
-// A callback that returns an error ends the run there: Run returns that error, the result still
-// carries the model calls that finished and what they spent, and no model call is made past the
-// one the callback stopped.
+// A callback that returns an error ends the run there: Run returns that error with the Result so
+// far, which carries every model call that finished and what it spent, and the run makes no more
+// calls than Bounds.Calls allows.
 func TestACallbacksErrorEndsTheRunAndIsReturnedWithTheResultSoFar(t *testing.T) {
 	t.Parallel()
 	stopped := errors.New("the caller stopped the run")
@@ -376,16 +376,21 @@ func TestACallbacksErrorEndsTheRunAndIsReturnedWithTheResultSoFar(t *testing.T) 
 	}
 	for _, c := range []struct {
 		name string
-		// set puts the failing callback on the request, and calls is the model calls the
-		// run has made when the callback is first given something: the call the callback
-		// ends the run on. OnText and OnPartial are first called on the prose of the
-		// second call; OnStep when the first call finishes.
+		// set puts the failing callback on the request, and bound is the most model calls
+		// the run may make. OnText and OnPartial are first called on the prose of the
+		// second call, OnStep when the first call finishes, but only OnStep's error is
+		// raised in the goroutine that makes the calls: there the run is cancelled before
+		// the next one, so exact marks that case, which makes its one call and no more.
+		// The run's consumer calls OnText and OnPartial while that goroutine streams
+		// ahead of it into a buffered channel, so by the time the error lands the run may
+		// have made every call the request allows, and their bound is Bounds.Calls.
 		set   func(*Request)
-		calls int
+		bound int
+		exact bool
 	}{
-		{name: "OnText", set: func(r *Request) { r.OnText = func(string) error { return stopped } }, calls: 2},
-		{name: "OnPartial", set: func(r *Request) { r.OnPartial = func(json.RawMessage) error { return stopped } }, calls: 2},
-		{name: "OnStep", set: func(r *Request) { r.OnStep = func(Step) error { return stopped } }, calls: 1},
+		{name: "OnText", set: func(r *Request) { r.OnText = func(string) error { return stopped } }, bound: 3},
+		{name: "OnPartial", set: func(r *Request) { r.OnPartial = func(json.RawMessage) error { return stopped } }, bound: 3},
+		{name: "OnStep", set: func(r *Request) { r.OnStep = func(Step) error { return stopped } }, bound: 1, exact: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -397,12 +402,17 @@ func TestACallbacksErrorEndsTheRunAndIsReturnedWithTheResultSoFar(t *testing.T) 
 			if !errors.Is(err, stopped) {
 				t.Fatalf("Run returned %v, want the callback's own error", err)
 			}
-			// The steps the result carries are the ones that finished: the calls
-			// before the one in flight, and that call too where it finished before
-			// the error landed, which it may, since OnPartial is given its
-			// snapshots from the run's own second reader.
-			if len(result.Steps) < 1 || len(result.Steps) > c.calls {
-				t.Fatalf("the result carries %d steps, want between 1 and the %d calls made: %+v", len(result.Steps), c.calls, result.Steps)
+			// The steps the result carries are the calls that finished: at least the
+			// one the callback was given something from, never more than the requests
+			// the stand-in served, since a call cancelled in flight leaves a request
+			// with no step, and never more requests than the run is allowed calls.
+			n := len(s.requests())
+			if c.exact {
+				if len(result.Steps) != 1 || n != 1 {
+					t.Fatalf("the result carries %d steps and %d model calls were made, want one of each: the callback's error cancels the run before the next call: %+v", len(result.Steps), n, result.Steps)
+				}
+			} else if len(result.Steps) < 1 || len(result.Steps) > n || n > c.bound {
+				t.Fatalf("the result carries %d steps of %d model calls made, want 1 <= steps <= calls <= %d: %+v", len(result.Steps), n, c.bound, result.Steps)
 			}
 			if first := (Usage{Input: 10, Output: 5, CostUSD: (10*anthropicPrice.Input + 5*anthropicPrice.Output) / 1e6, Metered: true}); result.Steps[0].Usage != first {
 				t.Errorf("the first step's usage is %+v, want the first call's own %+v", result.Steps[0].Usage, first)
@@ -416,9 +426,6 @@ func TestACallbacksErrorEndsTheRunAndIsReturnedWithTheResultSoFar(t *testing.T) 
 			}
 			if !result.Usage.Metered || result.Usage.Input == 0 {
 				t.Errorf("the result's usage is %+v, want what the calls that finished spent", result.Usage)
-			}
-			if n := len(s.requests()); n != c.calls {
-				t.Errorf("%d model calls were made, want %d: the run stops at the one in flight", n, c.calls)
 			}
 		})
 	}

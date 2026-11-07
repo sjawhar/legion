@@ -293,7 +293,13 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
+//
+// reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
+// and before supervision, which reserves its launches from the same one): the moment the one
+// wake the engine causes may run, the catch-up a start writes in place of a launch (workflow's
+// claimReady), and nil while the operator paces nothing, which is the engine's reading of the
+// pacing off — the catch-up is then due at once, as it always was.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build, reserve func(time.Time) time.Time) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -359,6 +365,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		return nil, err
 	}
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	// The one wake the engine causes is the catch-up a start writes in place of a launch
+	// (workflow's claimReady), and it is paced with the launches it stands among, from the one
+	// limiter run built for both lanes. A deployment that paces nothing passes no reserve at all,
+	// which is the pacing off: the engine then writes that catch-up due at once, as it always did.
+	engineCfg.Reserve = reserve
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	// The project's `memory` block decides what each tree admission opens is drawn: a project the
@@ -816,10 +827,16 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 	return nil
 }
 
+// attach gives the workflow what only supervision has: the outbox, built on its supervisor and
+// its runtime. The pace a paced catch-up's wake line names is the supervisor's own
+// (supervise.WakePace, the rate and the burst the machines are held to), which the outbox reads
+// through that supervisor where it writes the line (wakeRan); the limiter both lanes reserve
+// from was built before either of them (run).
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design,
+		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnDurableState(w.claimDurableState)

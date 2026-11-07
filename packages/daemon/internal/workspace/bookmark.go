@@ -147,9 +147,12 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		return err
 	}
 
-	// The one jj command on the shared clone not built by onClone: `jj workspace add` refuses
-	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
-	// directory), so the add snapshots the clone's own working copy. Every other command
+	// `jj workspace add` is the one jj command on an existing shared clone not built by onClone: it
+	// refuses --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating
+	// its directory), so the add snapshots the clone's own working copy. The jj commands that make a
+	// clone are not onClone's either (cloneSteps): `jj git clone` and `jj git init --colocate`,
+	// which open no repository yet, and the clear and the abandon that leave a clone made from a
+	// feed with no working tree, which must act on the working copy (feedClone). Every other command
 	// provisioning and removal run on the clone is onClone's, and so is every command a refusal
 	// prints (wayOut). The add registers the workspace with no files (--sparse-patterns empty), so
 	// it is quick under the store lock; Provision writes the working copy after letting the lock go

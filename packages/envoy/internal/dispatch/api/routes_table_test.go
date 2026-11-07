@@ -2,10 +2,12 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +21,43 @@ import (
 type routeIndex struct {
 	Routes []routeIndexEntry `json:"routes"`
 	Docs   string            `json:"docs"`
+}
+
+// routeIndexGolden is the committed index of the table: one route per line, sorted by path then
+// method, as `METHOD path auth`. It is what catches a route added or removed by accident, and
+// what a hand-kept count could not do — two branches that each add a route are each wrong about
+// a count, where this file merges into the union of the lines they add. Write it again with
+// `go test ./internal/dispatch/api -run TestRouteIndexLists -update`.
+const routeIndexGolden = "testdata/routes.txt"
+
+// routeIndexLines renders the table as routeIndexGolden holds it: the rows sorted by path, then
+// method, and rendered after that, so two methods of one path with different auth classes are
+// still ordered by their methods. Descriptions are left out: they are prose that changes with
+// every wording pass, and the test below already holds every row to having one.
+func routeIndexLines(routes []apiRoute) string {
+	sorted := slices.Clone(routes)
+	slices.SortFunc(sorted, func(left, right apiRoute) int {
+		return cmp.Or(strings.Compare(left.Pattern, right.Pattern), strings.Compare(left.Method, right.Method))
+	})
+	lines := make([]string, 0, len(sorted))
+	for _, route := range sorted {
+		lines = append(lines, route.Method+" "+route.Pattern+" "+string(route.Auth))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// The rendered index's own order, which the committed file can prove only for the pairs the
+// table happens to hold: two methods of one path whose auth classes sort the other way round are
+// ordered by their methods, not by their auth.
+func TestRouteIndexLinesOrderTwoMethodsOfOnePathByMethod(t *testing.T) {
+	got := routeIndexLines([]apiRoute{
+		{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/things/{id}", Auth: authAny}},
+		{routeRow: routeRow{Method: http.MethodDelete, Pattern: "/api/v1/things/{id}", Auth: authPublic}},
+	})
+	want := "DELETE /api/v1/things/{id} public\nGET /api/v1/things/{id} any\n"
+	if got != want {
+		t.Fatalf("routeIndexLines = %q, want %q", got, want)
+	}
 }
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
@@ -59,6 +98,37 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	}
 	if len(index.Routes) != len((&server{}).routes()) {
 		t.Fatalf("index lists %d routes, table has %d", len(index.Routes), len((&server{}).routes()))
+	}
+
+	// The table against the committed index. A route added, removed, or given another auth class
+	// reds this test until testdata/routes.txt is written again, deliberately, with -update.
+	got := routeIndexLines((&server{}).routes())
+	if *updateFixtures {
+		if err := os.WriteFile(routeIndexGolden, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", routeIndexGolden)
+	}
+	want, err := os.ReadFile(routeIndexGolden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		committed := strings.Split(strings.TrimSuffix(string(want), "\n"), "\n")
+		table := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
+		var added, removed []string
+		for _, line := range table {
+			if !slices.Contains(committed, line) {
+				added = append(added, line)
+			}
+		}
+		for _, line := range committed {
+			if !slices.Contains(table, line) {
+				removed = append(removed, line)
+			}
+		}
+		t.Errorf("the table and %s differ.\nthe table has, and the file does not: %v\nthe file has, and the table does not: %v\nRun the test again with -update when the change is deliberate.",
+			routeIndexGolden, added, removed)
 	}
 }
 
@@ -106,14 +176,20 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 	}
 }
 
-// The table is the registration: every row is mounted, every row is described, and the
-// count only moves when a route is deliberately added or removed.
+// The table is the registration: every row is mounted, every row is described, and no row is
+// listed twice.
+//
+// No count is pinned. A count is one number two branches cannot both be right about: a branch
+// that adds a route updates it, and the base that added one first then makes that branch's
+// merge red for a reason that is not the branch's change
+// (docs/solutions/github/a-base-gate-arrives-in-the-merge-and-the-job-your-branch-alone-adds-is-the-line-it-refuses-pr2517.md:63-67
+// records that failure: "routes() has 147 rows, want 146: the base had added a route").
+// What catches a route added or removed by accident is the committed index
+// TestRouteIndexListsEveryRouteSortedByPathThenMethod compares the table against
+// (testdata/routes.txt), which two branches that each add a route merge into the union of their
+// two lines.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 167
 	routes := (&server{}).routes()
-	if len(routes) != registeredRoutes {
-		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
-	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
 		key := route.Method + " " + route.Pattern
@@ -133,8 +209,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+12 {
-		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, registeredRoutes+12)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != len(routes)+12 {
+		t.Fatalf("test hooks add twelve routes: got %d, want %d", got, len(routes)+12)
 	}
 }
 

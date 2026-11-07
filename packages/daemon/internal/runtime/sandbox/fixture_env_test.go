@@ -12,9 +12,10 @@ import (
 )
 
 // This package's TestMain takes every variable that names another repository, remote or credential
-// out of the test process (fixtureenv.Guard), and TestTheTestProcessIsGuarded holds that. Neither
-// covers the one way a fixture command can still be moved onto another repository: a test that
-// plants a variable back with t.Setenv, which runs long after the guard.
+// out of the test process (fixtureenv.MustGuard), and internal/fixtureenv's own
+// TestEveryGuardingPackagesTestMainGuardsItsProcess holds that it still does. Neither covers the
+// one way a fixture command can still be moved onto another repository: a test that plants a
+// variable back with t.Setenv, which runs long after the guard.
 // TestLiveSetupIgnoresTheRoleEnvironmentGitVariables does exactly that, planting the maps
 // setupRig.poisons returns, GIT_DIR and GIT_COMMON_DIR among them, to prove the setup script
 // under test ignores the role's environment, and GIT_DIR outranks the directory a command runs

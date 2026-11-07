@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { forgetBrokerClients } from "@legion/envoy-client/broker-credential";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
+import { fakeLatestHandoff } from "@legion/envoy-client/test/fake-dispatch";
 import { restoreEnvironment } from "@legion/test-fixtures/environment";
 import { hostTool, skipWithout } from "@legion/test-fixtures/host-tools";
 import {
@@ -15,7 +16,6 @@ import {
   findHandoffReport,
   findPushedBranchHead,
   type JjRunner,
-  type LatestHandoff,
   paneLatestHandoff,
   pathJj,
 } from "./handoff-record";
@@ -43,19 +43,12 @@ function fakeJj(pushed = true): { jj: JjRunner; calls: string[][] } {
   return { jj, calls };
 }
 
-/** A Dispatch answering `answer` for every phase's newest record, recording each read. */
-function fakeDispatch(answer: () => Promise<{ id: string; version: number }> = async () => RECORD) {
-  const reads: string[] = [];
-  const latestHandoff: LatestHandoff = async (issue, word) => {
-    reads.push(`${issue} ${word}`);
-    return answer();
-  };
-  return { latestHandoff, reads };
-}
+/** A Dispatch whose every phase answers RECORD, recording each read. */
+const recordingDispatch = () => fakeLatestHandoff(async () => RECORD);
 
 test("the implementer's round reports the newest implement record and the pushed tip", async () => {
   const { jj, calls } = fakeJj();
-  const { latestHandoff, reads } = fakeDispatch();
+  const { latestHandoff, reads } = recordingDispatch();
   await expect(
     findHandoffReport({ phase: "implementing", role: "implementer", env, jj, latestHandoff })
   ).resolves.toEqual({ commit: TIP, handoffId: RECORD.id, handoffVersion: RECORD.version });
@@ -74,7 +67,7 @@ test("the planner, the tester and the reviewer report their phase's newest recor
     ["reviewing", "reviewer", "review"],
   ] as const) {
     const { jj, calls } = fakeJj();
-    const { latestHandoff, reads } = fakeDispatch();
+    const { latestHandoff, reads } = recordingDispatch();
     await expect(findHandoffReport({ phase, role, env, jj, latestHandoff })).resolves.toEqual({
       handoffId: RECORD.id,
       handoffVersion: RECORD.version,
@@ -94,7 +87,7 @@ test("every other completion reports the commit the workspace stands on, and rea
     ["admitted", "architect"],
   ] as const) {
     const { jj, calls } = fakeJj();
-    const { latestHandoff, reads } = fakeDispatch();
+    const { latestHandoff, reads } = recordingDispatch();
     await expect(findHandoffReport({ phase, role, env, jj, latestHandoff })).resolves.toEqual({
       commit: STANDING,
     });
@@ -126,7 +119,7 @@ test("no record, or a Dispatch that does not answer, is refused naming what to d
   ];
   for (const [answer, message] of refusals) {
     const { jj } = fakeJj();
-    const { latestHandoff } = fakeDispatch(answer);
+    const { latestHandoff } = fakeLatestHandoff(answer);
     await expect(
       findHandoffReport({ phase: "testing", role: "tester", env, jj, latestHandoff })
     ).rejects.toThrow(new Error(message));
@@ -135,7 +128,7 @@ test("no record, or a Dispatch that does not answer, is refused naming what to d
 
 test("an implementer whose @- is not on its branch at origin is refused naming the push", async () => {
   const { jj } = fakeJj(false);
-  const { latestHandoff } = fakeDispatch();
+  const { latestHandoff } = recordingDispatch();
   await expect(
     findHandoffReport({ phase: "implementing", role: "implementer", env, jj, latestHandoff })
   ).rejects.toThrow(
@@ -147,7 +140,7 @@ test("an implementer whose @- is not on its branch at origin is refused naming t
 
 test("the workspace and a well-formed issue key are required before jj or Dispatch is asked", async () => {
   const { jj, calls } = fakeJj();
-  const { latestHandoff, reads } = fakeDispatch();
+  const { latestHandoff, reads } = recordingDispatch();
   await expect(
     findHandoffReport({
       phase: "retro",
@@ -174,7 +167,7 @@ test("a failing jj surfaces its command and stderr", async () => {
   const jj: JjRunner = async (args) => {
     throw new Error(`jj ${args.join(" ")} failed: Error: There is no jj repo in "."`);
   };
-  const { latestHandoff } = fakeDispatch();
+  const { latestHandoff } = recordingDispatch();
   await expect(
     findHandoffReport({ phase: "retro", role: "implementer", env, jj, latestHandoff })
   ).rejects.toThrow(
@@ -400,7 +393,7 @@ test.skipIf(withoutJj)(
       "commit_id"
     );
     expect(change).toMatch(/^[0-9a-f]{40}$/);
-    const { latestHandoff } = fakeDispatch();
+    const { latestHandoff } = recordingDispatch();
     const report = () =>
       findHandoffReport({
         phase: "implementing",

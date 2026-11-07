@@ -49,12 +49,62 @@ type Disk struct {
 	Provisioned time.Time
 }
 
-// New is a disk whose remote holds one commit on main and on the issue's branch, and whose
+// New is a disk whose clone is jj's own colocated clone (`jj git clone --colocate`, which checks
+// out a working tree), whose remote holds one commit on main and on the issue's branch, and whose
 // workspace stands on that commit with nothing in it the remote lacks. Each of before runs once the
 // remote holds that commit and before the pod's clone is made, so what it pushes to the remote the
 // clone holds from the start; the clone records what it held then, as provisioning records it
 // (workspace.RecordHeld).
 func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
+	t.Helper()
+	return newDisk(t, issue, before,
+		func(d *Disk, root string) {
+			d.Run(root, "jj", "git", "clone", "--colocate", d.Remote, d.Clone)
+		},
+		func(d *Disk) {
+			d.Run(d.Clone, "jj", "workspace", "add", "--name", strings.ToLower(d.Issue), d.Workspace)
+		})
+}
+
+// NewWithoutCloneTree is a disk whose clone holds no working tree, as an issue pod's clone does
+// (workspace.feedClone): a `git clone --no-checkout` of the feed, made jj's with `jj git init
+// --colocate`, its sparse patterns cleared and the snapshot that init took abandoned. What that
+// leaves is a clone directory holding nothing but .git and .jj, while its git HEAD still names the
+// default branch's commit and its index still names every file of it. The clone here is made from
+// the remote itself, so the `git remote set-url origin` with which feedClone points the clone at
+// GitHub rather than the feed has nothing to change and is not run; every other step is the pod's,
+// in the pod's order, which is load-bearing (feedClone says why).
+//
+// The issue's workspace is added as provisioning adds it (workspace.createWorkspace and Provision):
+// registered with no file (`jj workspace add --sparse-patterns empty`), which leaves the clone's
+// own working copy untouched, and checked out after (`jj sparse reset`). Everything else — the
+// remote, the before hooks, the records provisioning writes — is New's.
+func NewWithoutCloneTree(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
+	t.Helper()
+	d := newDisk(t, issue, before,
+		func(d *Disk, root string) {
+			d.Run(root, "git", "clone", "--quiet", "--no-checkout", d.Remote, d.Clone)
+			d.Run(root, "jj", "git", "init", "--colocate", d.Clone)
+			d.Run(d.Clone, "jj", "sparse", "set", "--clear", "--color=never", "-R", d.Clone)
+			d.Run(d.Clone, "jj", "abandon", "@", "--color=never", "-R", d.Clone)
+		},
+		func(d *Disk) {
+			d.Run(d.Clone, "jj", "workspace", "add", d.Workspace, "--name", strings.ToLower(d.Issue),
+				"--revision", d.Base, "--sparse-patterns", "empty", "-R", d.Clone)
+			d.Run(d.Workspace, "jj", "sparse", "reset")
+		})
+	d.requireNoCloneTree()
+	return d
+}
+
+// newDisk is what the two constructors share: the bare remote holding one commit on main and on the
+// issue's branch, the before hooks run on it, and the records provisioning writes — what the clone
+// held when it was made (workspace.RecordHeld), when the workspace was created
+// (workspace.RecordCreated) — with the issue's bookmark tracked. clone makes the shared clone and
+// add the issue's workspace of it, each the way its constructor builds one; root, which clone is
+// given, is the directory the disk is laid out under, where a jj that opens no repository runs, as
+// provisioning runs those in the clone's parent (workspace.cloneSteps).
+func newDisk(t testing.TB, issue string, before []func(d *Disk), clone func(d *Disk, root string), add func(d *Disk)) *Disk {
 	t.Helper()
 	for _, tool := range []string{"git", "jj"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -94,16 +144,33 @@ func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
 	if err := os.MkdirAll(filepath.Dir(d.Workspace), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	d.Run(root, "jj", "git", "clone", "--colocate", d.Remote, d.Clone)
+	clone(d, root)
 	if err := workspace.RecordHeld(context.Background(), workspace.NewRunner(time.Minute, d.tools()), d.Clone); err != nil {
 		t.Fatal(err)
 	}
-	d.Run(d.Clone, "jj", "workspace", "add", "--name", strings.ToLower(issue), d.Workspace)
+	add(d)
 	if err := workspace.RecordCreated(d.Workspace, d.Provisioned); err != nil {
 		t.Fatal(err)
 	}
 	d.JJ("bookmark", "track", d.Branch, "--remote", "origin")
 	return d
+}
+
+// requireNoCloneTree fails the test when the clone holds anything but .git and .jj. The state
+// NewWithoutCloneTree stands for is a clone with no working tree, so a jj whose sparse clear or
+// abandon stops leaving one is reported here, where it happens and by what it left, rather than as
+// a confusing assertion in the case that follows.
+func (d *Disk) requireNoCloneTree() {
+	d.t.Helper()
+	entries, err := os.ReadDir(d.Clone)
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); name != ".git" && name != ".jj" {
+			d.t.Fatalf("the clone %s holds %s, want nothing but .git and .jj: this disk's clone must hold no working tree", d.Clone, name)
+		}
+	}
 }
 
 // Run runs argv in dir under the disk's environment and returns its trimmed output, failing the

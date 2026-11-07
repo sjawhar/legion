@@ -104,7 +104,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 	roles := promptrefs.New()
 	for file, prompt := range map[string]string{
 		"roles/core/planner.md": "Consult `task(agent=\"oracle\")` on a hard tradeoff.\n",
-		"roles/reviewer.md":     "Run `task(agent=\"thermonuclear-deep-review\")` after `skill://ce-simplify-code`.\n",
+		"roles/reviewer.md":     "Run `task(agent=\"thermonuclear-deep-review\")` after `skill://simplify-settled-diff`.\n",
 		"roles/tester.md":       "Follow skill://legion-worker.\n",
 	} {
 		roles.Text(file, []byte(prompt))
@@ -118,7 +118,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 			"thermonuclear-deep-review": {worker, "roles/reviewer.md"},
 		},
 		promptrefs.Skills: {
-			"ce-simplify-code":          {"roles/reviewer.md"},
+			"simplify-settled-diff":     {"roles/reviewer.md"},
 			"legion-worker":             {worker, "roles/tester.md"},
 			"thermonuclear-deep-review": {filepath.Join("agents", "thermonuclear-deep-review.md")},
 		},

@@ -388,11 +388,9 @@ The Legion plugin ships these in `agents/`:
 
 - the planner's `plan-gap-analyst` and `plan-reviewer`
 
-It ships these with Legion's other skills in its `dist/skills`:
+It ships this with Legion's other skills in its `dist/skills`:
 
-- the pair's rubrics
-
-- `ce-simplify-code`
+- `simplify-settled-diff`
 
 The Envoy plugin ships these skills in its `dist/skills`:
 
@@ -411,6 +409,9 @@ The Envoy plugin ships these skills in its `dist/skills`:
 - `outside-message`
 
 - `plain-words`
+
+- the reviewer's pair, `thermonuclear-code-quality` and `thermonuclear-deep-review`, which both
+  harnesses install
 
 The build has none of the operator's model configuration, so it leaves those agents' models unresolved (`--skip-agent-models`).
 It then checks every image-site row of the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi would find each
@@ -2744,10 +2745,14 @@ architect, planner, implementer, tester, reviewer, merger):
    A deployment that names no such repository runs no such container.
 
 3. `workspace-init` provisions the issue's clone and its jj workspace on the pod's own disk from the read-only feed, taking no lock and waiting on no other pod: no other pod mounts that disk.
-   The clone is a local `git clone` of the feed.
+   The clone is a local `git clone --no-checkout` of the feed, so it holds no working tree at all: nothing in it but `.git` and `.jj`.
    Git hard-links the feed's object files when the filesystem allows, but the clone owns those links, so replacing the feed cannot remove history its refs need;
    it has no `.git/objects/info/alternates`.
    Its `origin` names GitHub, and `jj git init --colocate` makes it jj's, tracking the default branch as a `jj git clone` would.
+   Two jj commands follow, under the same `workspace.CloneTimeout` and each with its working directory and its `-R` at the clone, and they keep jj's first snapshot from recording that absent tree as deleted:
+   `jj sparse set --clear --color=never` leaves the clone's working copy with no file in it, and `jj abandon @ --color=never` drops the snapshot `jj git init` already took.
+   The order is load-bearing, and was measured both ways: clearing the patterns afterwards does not undo that first snapshot, and abandoning before the clear makes jj materialize the whole tree again, which only moves the write.
+   The pod therefore writes the repository's working copy once, in the issue's own workspace, rather than twice.
    Its environment is the image's `PATH` and the XDG base directories (`initEnvironment`, `manifest.go`);
    nothing names a role, a generation, a lock wait, another issue's workspace, or anything the disk is expected to hold already
    — the disk is created with the pod, so every provision is the issue's first.
@@ -4011,10 +4016,12 @@ What it may wait on instead is the predecessor's claim being *reaped*
 
 Under gVisor the container cgroup changes nothing inside the sandbox:
 `runsc` sizes the sandbox from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉)
-— except on GKE Autopilot, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md):
-there `nproc` reflects gVisor's own host-vCPU presentation instead, a known gap ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu limits there
+— except on GKE Autopilot's container-optimized compute platform, where a sandboxed pod reads `nproc` 2 whatever it reserves and whatever its host holds (measured 2026-11-05 at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, dispatch://INFRA-928/artifact/measurements-2026-11-05-md):
+there the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) read Σ cpu limits exactly at each of those sizes, which is why that quota, not `nproc`, is what [the live proof](../scripts/e2e/README.md) asserts there,
+while a pod of the same cluster placed on a node of a named machine series (`cloud.google.com/machine-family`) read 3 at a 3-CPU limit, its whole reservation, where the rule above holds
 — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's whole reservation while its siblings idle.
 The reservation is the pod's working set, and its request is what the scheduler counts.
+Measured on INFRA's pool on 2026-11-05, a pod's own processes on that platform reached about 1.3 to 1.9 cores whether the pod reserved 2, 2.5 or 3 CPU (1.321, 1.367 and 1.392 cores over 300-second runs on one node, and 1.8227 cores in a running issue pod at a 3-CPU limit), so reserving more cpu there bought that workload little more work ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665), "Actual CPU capacity is lower than assigned CPU capacity when gVisor sandbox is enabled").
 
 **The bound.**
 Concurrently running issue pods are bounded by what the pool's `limits.cpu` and `limits.memory` leave for pods of the per-pod sum of requests:
@@ -4156,7 +4163,9 @@ The check runs inside the pod, in the shim of one of the round's own processes, 
 It asks a process of the implementer or the merger first, the roles that act as the implement App, and asks the next process of the pod when one cannot be asked at all.
 For every workspace on the disk (`/legion/workspaces/<owner>/<repo>/<issue>`, whose repository is the one its own git names, so a directory there that is no git worktree is an error rather than a pass) it reads what the workspace's remote holds now (`git ls-remote origin`, so a commit GitHub keeps only under a pull request's ref after a squash merge counts as held, and a commit only a stale remote-tracking ref names, its branch deleted or force-pushed on GitHub since the pod's last fetch, does not) and finds, against that:
 the work that is the workspace's own, and never a commit the clone held when it was made, from two sources.
-The first is the workspace's own line: the issue's branch `legion/<KEY>` and every local tag of the clone, every entry of its stash, the git HEAD of the workspace and of every other worktree of the clone (`git worktree list`, the clone's own working tree included), and in jj the ancestors of the workspace's working-copy commit and of its issue's bookmark (`heads(::(@ | bookmarks(exact:"legion/<KEY>")) ~ (empty() & description(exact:"")))`).
+The first is the workspace's own line: the issue's branch `legion/<KEY>` and every local tag of the clone, every entry of its stash, the git HEAD of the workspace and of every other worktree of the clone (`git worktree list`, the clone's own working tree left out), and in jj the ancestors of the workspace's working-copy commit and of its issue's bookmark (`heads(::(@ | bookmarks(exact:"legion/<KEY>")) ~ (empty() & description(exact:"")))`).
+The clone's own working tree is left out because it is no agent's workspace — every role of the issue works in a workspace of its own — and in a pod it is no tree at all, while the clone's git HEAD and index still name every file of it, so a walk that took it would commit the deletion of the whole tree and push it as a rescue branch.
+Leaving it out costs the clone's own git HEAD as a candidate, which takes nothing an agent wrote: every local branch of the clone is a candidate already (`git for-each-ref refs/heads`, the second source below), and everything jj can see is one through the visible-heads revset.
 The second is what was made in the pod: every visible jj head (`heads(::visible_heads() ~ (empty() & description(exact:"")))`) and every local git branch that no commit the clone held when it was made contains.
 Provisioning records those commits once, in the one place it creates the shared clone, before it moves the clone into place: every visible head jj sees in the new clone, which is every branch, remote-tracking ref and tag the pod's feed gave it, written to the clone's `.jj/legion-held` (`workspace.RecordHeld`).
 No date decides it: a commit's committer time is what git or jj was told (`git rebase` and `git am` with `--committer-date-is-author-date` keep the author's, `GIT_COMMITTER_DATE` and `JJ_TIMESTAMP` set any), a reflog expires, and the operation log can be abandoned, so a commit a role made in the workspace's own detached git HEAD, or under an old timestamp, is the pod's work wherever jj's working copy has moved since.
@@ -4169,7 +4178,7 @@ A pod's shared clone keeps every commit it ever fetched visible to jj (`git.aban
 What a role made in the pod is, wherever its working copy is now: a side line it experimented on and left, and a merge whose bookmark was never moved onto it, whose push said `Nothing changed`, even once the working copy has moved back onto the bookmark; jj's empty, undescribed working-copy commit is not work.
 A commit someone else made, which the pod fetched while it ran and GitHub deleted or rewrote since, is pushed too, however old it is: the check cannot tell it from the pod's own, and that is noise, never a loss.
 `refs/jj/keep` is not read; it holds the obsolete predecessor of every rewritten commit.
-Files in the workspace, or in another worktree of the clone, that no commit holds become one commit on top of that worktree's git HEAD, built in an index of its own, so the files, the index, the refs and jj's operation log are left as they were; a file `.gitignore` ignores is left out, as a role's own push leaves it.
+Files in the workspace, or in another worktree of the clone the walk takes, that no commit holds become one commit on top of that worktree's git HEAD, built in an index of its own, so the files, the index, the refs and jj's operation log are left as they were; a file `.gitignore` ignores is left out, as a role's own push leaves it.
 What it finds is reduced to its heads and pushed, in one atomic push to the workspace's own remote, each head to a branch of its own, `legion/<KEY>-rescue-<first 8 characters of the pod's uid>-<n>`, with `n` the least number from 1 that names no branch the remote has.
 A rescue branch of the same pod that the remote holds already, pushed by an earlier check whose replacement did not happen then, is reported again, so the issue is told of it whichever check's replacement goes through.
 The check carries git commits alone: a submodule's own commits and files are not carried (jj checks no submodule out), and no Git LFS upload runs (the worker image has no `git-lfs`, so a file under an LFS filter is committed as its own content, as a role's own commit of it is).
@@ -4402,16 +4411,18 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   for a `Failed` pod the last 20 log lines of the failing container (the init container when it exited non-zero, else the main one) are quoted in the daemon log;
 
 - `Pending` with the `workspace-fetch`, `skills-fetch` or `workspace-init` init container **running** → **alive**, whatever the pod's age:
-  the pod is provisioning its working copy (`workspace-fetch`'s wait for the repository cache, then its stream and verification under one `workspace.FetchTimeout` and its delta under another, rather than `workspace.CommandTimeout`, all within `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then `workspace-init`'s shared clone of the feed, whose steps that follow the repository's size share one `workspace.CloneTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
+  the pod is provisioning its working copy (`workspace-fetch`'s wait for the repository cache, then its stream and verification under one `workspace.FetchTimeout` and its delta under another, rather than `workspace.CommandTimeout`, all within `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then `skills-fetch`'s one shallow clone under `workspace.CommandTimeout`, then `workspace-init`'s shared clone of the feed, whose steps that follow the repository's size share one `workspace.CloneTimeout`, the issue's own checkout under `workspace.CheckoutTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
   it waits on no other pod and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume), and a live initialiser is a live process
   — as the tmux runtime's own in-process provisioning is.
-  The launch that created the pod waits for the role's launcher, which starts only once both init containers have finished.
+  The launch that created the pod waits for the role's launcher, which starts only once every init container has finished.
   Until it first sees an init container running it waits `worker_boot_timeout_seconds`, the image pull's bound;
-  from then on, `worker_boot_timeout_seconds` counted from the last moment it saw one running, and never longer than that plus `workspace.FetchBudget` and `workspace.CloneTimeout` together (220 min;
+  from then on, `worker_boot_timeout_seconds` counted from the last moment it saw one running, and never longer than that plus `workspace.FetchBudget`, `workspace.CloneTimeout` and `workspace.CheckoutTimeout` together (280 min;
   `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`, `internal/runtime/sandbox/relaunch.go`):
-  each term is the real bound of a distinct phase, run one after the other, `workspace-fetch`'s whole fetch and then `workspace-init`'s shared clone of the feed.
-  The fetch started no later than that first sighting and the shared clone after the fetch ended, so both end inside the bound, each failing on its own, naming why, when it runs out of its own
-  — the fetch's failure naming the repository cache's state — and `workspace-init`'s other commands then have at least the boot timeout.
+  each term is the real bound of one step whose duration follows the repository's size, and the three run one after the other, `workspace-fetch`'s whole fetch, then `workspace-init`'s shared clone of the feed, then the issue's own checkout.
+  The fetch started no later than that first sighting, the shared clone after the fetch ended and the checkout after the clone, so the three end inside the bound, each failing on its own, naming why, when it runs out of its own
+  — the fetch's failure naming the repository cache's state — while the commands between them take the moments they do.
+  The sum counts no term for the commands that keep `workspace.CommandTimeout`, `skills-fetch`'s clone and `workspace-init`'s other commands among them:
+  the boot timeout past the sum is what covers them, so the sum is no worst case, and when the fetch and the clone each run their whole bound, whatever those commands take comes out of the checkout's hour and that boot timeout.
   A launch that gives up while `workspace-fetch` still runs says so, with the cache's state.
   A pod that provisions for twenty minutes is one launch, not a launch failure per boot timeout, and a launcher that has not connected the boot timeout after provisioning ended still fails the launch.
 
@@ -4420,15 +4431,15 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   — wait behind it, while other issues' rows and the issue's own board writes and notices run meanwhile.
   During a GitHub outage that is the fetch's five attempts and four waits, about 2 minutes when GitHub refuses at once and about 12½ minutes when every connect times out (127 s each), after which the fetch fails and the launch ends;
   each relaunch of the claim then holds the issue's lifecycle lane as long again, and the issue's later lifecycle rows wait on it.
-  A repository cache that is slow to become ready and a transfer that keeps making progress can hold the launch for the fetch's whole 190 minutes, and `workspace-init`'s shared clone of the feed, for a large repository, up to 30 more.
+  A repository cache that is slow to become ready and a transfer that keeps making progress can hold the launch for the fetch's whole 190 minutes, `workspace-init`'s shared clone of the feed, for a large repository, up to 30 more, and the issue's own checkout of that repository up to 60 after that.
   Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`, `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls
   — three boot timeouts; the repository cache's waits, five more boot timeouts and the calls of one other ensure of the cache that may hold its turn ahead of the try;
   the launcher wait's backstop of twice the boot timeout plus `sandbox.Runtime.ProvisionBound`;
   the termination grace; and the try's client calls at their 30 s timeout
-  — about 4 h 50 min at the defaults; a try that reaches it is charged a launch failure and the next try runs, while a try the daemon's own stop ends is still charged nothing.
+  — about 5 h 50 min at the defaults; a try that reaches it is charged a launch failure and the next try runs, while a try the daemon's own stop ends is still charged nothing.
   Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration deadline (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s, 6 min):
   under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound` until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same one a tmux pane runs under throughout.
-  A pod that never says hello is retired at the launch's return plus the base deadline plus the bound, armed as one (226 min at the defaults);
+  A pod that never says hello is retired at the launch's return plus the base deadline plus the bound, armed as one (286 min at the defaults);
   one that says hello and never registers is retired at hello plus the base deadline alone (6 min from the hello);
   and one whose agent registers and never says it is ready is retired at its registration plus the base deadline alone (6 min from the registration, again from a daemon restart that finds it registered), then resumed as the same session one generation later and counted as a launch failure.
   A tmux pane carries no bound to begin with, since it starts the agent at once with no init phase.
@@ -4442,7 +4453,7 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 
 - `Pending`, unscheduled (`PodScheduled=False`), for longer than `worker_boot_timeout_seconds` → **dead (gone)**, with the pod's events quoted;
   the boot watchdog's existing path retires it and its stop deletes the pod.
-  A pod already scheduled but stuck before either init container starts
+  A pod already scheduled but stuck before any init container starts
   — an image pull or a volume mount that never finishes
   — is not caught here: it stays **alive** under the `Pending` rule below, bounded only by the registration deadline above, the same as any other pod still provisioning;
 
@@ -4531,7 +4542,7 @@ The Go coordinator's pods (`packages/daemon`) keep to that rule with two init co
   an issue pod's disk is created with the pod and deleted with it (INFRA-80), and every feed a fetch meets is one this pod's own init container wrote, which that same check
   — run before any git, in an init container no agent runs beside — is what keeps the fetch from running anything an agent of this pod planted.
 
-- Every other provisioning command is bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the repository's size and the network's speed, not a fixed step in provisioning:
+- Every other provisioning command is bounded by `workspace.CommandTimeout` (5 minutes, fixed), the commands that hold a bound of their own excepted — `workspace.CommandTimeout` names them where it is declared (`internal/workspace/config.go`), and the `workspace-init` bullet below states each one that runs there — but a transfer's duration follows the repository's size and the network's speed, not a fixed step in provisioning:
   once the fetch may start — at once, or once the repository cache is ready, after a wait of at most 130 minutes, which covers the cache's own first clone
   — the cache's stream and its verification run under one `workspace.FetchTimeout` (30 minutes), and every attempt of the transfer from GitHub and its reads of GitHub's `HEAD` under another, each given what remains of its own, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (190 minutes).
   A transfer that fails transiently is run again:
@@ -4544,7 +4555,8 @@ The Go coordinator's pods (`packages/daemon`) keep to that rule with two init co
   No retry starts past the bound.
   Any other failure — a token refused, a repository not found or not granted, a certificate that does not verify, a curl error the list does not name
   — fails the fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`).
-  The launch waits for the pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (220 minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so the fetch, its wait and retries included, spends no launch failure, and `workspace-init` has its shared clone's 30 minutes and at least the boot timeout after a fetch that ran its whole budget.
+  The launch waits for the pod's launchers while any init container runs, up to `sandbox.Runtime.ProvisionBound` (280 minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so the fetch, its wait and retries included, spends no launch failure.
+  After a fetch that ran its whole budget, the shared clone's 30 minutes and the issue's checkout's hour are what is left of the sum, and `skills-fetch`'s clone and `workspace-init`'s other commands come out of that hour and the boot timeout beyond it.
   The fetch reads the token from its file anew as every transfer attempt from GitHub starts, taking the file as it stands then, and the gh refresher's minute brings every live issue pod's provisioning Secret to the implement App's current lease (`refreshProvisioningToken`, `internal/runtime/sandbox/ghcredential.go`), Pending or Running, whatever its fetch has already done, the cache's token beside it kept, logging `sandbox
   runtime: provisioning token refreshed`; the daemon re-mints a lease once less than 20 minutes of it remain (`internal/appauth/appauth.go`) and the kubelet rewrites the projected file within its sync period, so a delta after a long wait on the repository cache, or a retry late in a long fetch, presents a token that is still good.
   A pod whose fetch has finished is refreshed for the same reason: a pod's init containers can run again at any point in its life — the kubelet runs them afresh whenever it rebuilds the pod's sandbox, after a node event or a kill of another container, while a relaunch that replaces the pod provisions it anew (`relaunch`) — and that fetch reads the token's file as it stands then, so a Secret left at the pod's boot token would hand it one GitHub expired an hour after the pod started.
@@ -4558,8 +4570,9 @@ The Go coordinator's pods (`packages/daemon`) keep to that rule with two init co
 - **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home
   — never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!legion git-credential' --feed
-  /legion/feed`: the clone is a local `git clone` of the feed, its origin set to `https://github.com/<owner>/<repo>`, and its fetch reaches that remote at the feed over git's file transport, bringing the default branch and the issue's branch alone, each by its exact name, then the workspace add, `update-stale`, and the configuration writes, once it has removed the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
-  Local clone object entries survive a feed replacement, while its checkout of the working tree and jj's import of every commit follow the repository's size, so the two share one bound of their own, `workspace.CloneTimeout` (30 minutes), the import given what the checkout left, rather than `workspace.CommandTimeout`;
+  /legion/feed`: the clone is a local `git clone --no-checkout` of the feed, its origin set to `https://github.com/<owner>/<repo>`, and its fetch reaches that remote at the feed over git's file transport, bringing the default branch and the issue's branch alone, each by its exact name, then the workspace add, `update-stale`, and the configuration writes, once it has removed the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  Local clone object entries survive a feed replacement, while the clone's copy of the feed's packs, where the filesystem denies it a hard link, and jj's import of every commit follow the repository's size, so all four steps of that clone — the local `git clone --no-checkout`, `jj git init --colocate`, then the `jj sparse set --clear` and `jj abandon @` that leave it with no working tree — share one bound of their own, `workspace.CloneTimeout` (30 minutes), each given what the ones before it left, rather than `workspace.CommandTimeout`;
+  the issue's own checkout, the one command here that writes a whole working copy, takes `workspace.CheckoutTimeout` (one hour), measured on one write of the largest repository mapped, 282,134 files and 11.56 GiB, which took nine minutes in an issue pod;
   every other command here keeps the 5 minutes.
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own volume, and no other provision shares the repository.
   What an agent of the issue planted can run there, with nothing to take that the agent does not already hold.
@@ -4927,6 +4940,20 @@ each issue's pod (every role of it alike) and the image probe's.
   the probe pod reads the effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its OK line's `model-fallback` mark (`unread` when it could not read it:
   the probe pod's log says why), and the daemon reports the `model-fallback` capability open while a deployment's copy turns it off or the probe could not read it
   — a report, not a refusal; a `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability report](#the-deployments-capability-report)).
+
+- **The pace of the wakes the daemon causes** is the operator's, as two top-level `legion.yaml` keys:
+  `worker_wakes_per_minute` (8 by default) and `worker_wake_burst` (1 by default), a token bucket over the role processes the daemon starts and the tasks and notices it queues to wake a session that already runs (`internal/wakepace`), as [The daemon's Kubernetes request rate](#the-daemons-kubernetes-request-rate) is one over its requests to the API server.
+  Each wake has its session read its whole context again, which the provider charges as uncached input:
+  a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of 1,327,888, measured over the 261 sessions one roll woke in a single moment on 2026-11-04.
+  The rate is a ceiling and not the rate a wave keeps:
+  each wake waits its turn and then a random part of up to one interval more, so a long wave sustains about two thirds of the rate, which is about 5 a minute at the default of 8.
+  The defaults' arithmetic: 8 a minute with a burst of 1 holds any minute to 9 paced wakes, which at the mean is 5.2M tokens, split over the two Anthropic organizations one gateway key reaches, against an acceptance bar of 8M an organization a minute.
+  They also leave room beside the pod-update round rate of INFRA-1116:
+  one round opening a minute costs up to about 3.4M, which with 5.2M of wakes and a median minute of about 0.55M is about 9.2M over two organizations.
+  The rate is per daemon, so an operator whose contexts grow, and one who runs two deployments against one Anthropic organization, divides it.
+  A rate of 0 turns the pacing off:
+  nothing is paced then and no bound of this kind holds, which is what the live proofs under `scripts/e2e` set.
+  What the pacing holds at any moment is on the state's `wakesWaiting`, which `legion state` prints as its `wakes waiting:` line.
 
 - **AskGate's time limit** is the operator's too.
   Every pod loads pi-envoy, whose AskGate reviews each Dispatch write of a role's main agent before it posts.
