@@ -17,13 +17,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
-// selectors is every owner a command names, each with the argument that names it; whether an
-// argument names the command's own repository (targeted), so gh resolves none of its own; and
-// whether gh api's arguments hold a placeholder gh fills from the command's own repository
-// (readsBase).
+// selectors is every owner a command names, each with the argument that names it; every
+// repository its selectors name, by name alone, as the argument names it (the command's owners
+// are held to one, so a repository of another owner is a refusal and never a second key);
+// whether a selector named an owner and no repository of it (ownerOnly), which leaves the command
+// no one repository even where another selector names one; whether an argument names the
+// command's own repository (targeted), so gh resolves none of its own; and whether gh api's
+// arguments hold a placeholder gh fills from the command's own repository (readsBase).
 type selectors struct {
 	api       bool
 	owners    map[string]string
+	repos     map[string]bool
+	ownerOnly bool
 	targeted  bool
 	readsBase bool
 }
@@ -34,20 +39,65 @@ func (s *selectors) add(owner, what string) {
 	}
 }
 
+// repository records the owner and the repository value names: a selector naming one repository
+// of one owner. The owner is lowercased, as a bundle's directory names an owner, and the
+// repository is keyed as the directory holding its token is named for it (ghRepositoryName), so
+// two spellings of one repository — `Legion-Smoke` in a pull request's URL beside
+// `-R sjawhar/legion-smoke`, or a remote's `widgets.git` beside `widgets` — are the one
+// repository the command names rather than two, which would send it to the owner's own
+// directory.
 func (s *selectors) repository(value, what string) error {
-	owner, err := repositoryOwner(value, what, s.api)
+	owner, repo, err := repositoryTarget(value, what, s.api)
 	if err == nil {
 		s.add(owner, what)
+		s.repos[ghRepositoryName(repo)] = true
 	}
 	return err
 }
 
+// ownerAlone records owner as named with no repository of it (ownerOnly), the one recording both
+// owner and pairOwner make: the command reaches whatever of that owner's gh resolves, so its
+// directory is the owner's own.
+func (s *selectors) ownerAlone(owner, what string) {
+	s.add(owner, what)
+	s.ownerOnly = true
+}
+
+// owner records the owner value names and no repository.
 func (s *selectors) owner(value, what string) error {
 	owner, err := checkedOwner(value, what, s.api)
 	if err == nil {
-		s.add(owner, what)
+		s.ownerAlone(owner, what)
 	}
 	return err
+}
+
+// pairOwner records the owner of value, OWNER/TEAM or OWNER/NUMBER, and no repository: a team and
+// a project are none of the owner's repositories. The pair is read as a repository's name only
+// to take the owner out of it.
+func (s *selectors) pairOwner(value, what string) error {
+	owner, _, err := repositoryTarget(value, what, s.api)
+	if err == nil {
+		s.ownerAlone(owner, what)
+	}
+	return err
+}
+
+// onlyRepository is the one repository every selector of the command named, as the bundle's
+// directory holding its token is named for it (ghRepositoryName, the key selectors.repository
+// records): "" where a selector named the command's owner alone, where the selectors named two
+// repositories, and where they named none. A command whose selectors agree on one repository is
+// the one whose narrowest token the bundle may hold; every other reaches whatever else of the
+// owner's gh resolves, and so the owner's own directory. The owner is its caller's, the one
+// owner the command names (ghTargetOf), since a second owner is a refusal before this is asked.
+func (s *selectors) onlyRepository() string {
+	if s.ownerOnly || len(s.repos) != 1 {
+		return ""
+	}
+	for name := range s.repos {
+		return name
+	}
+	return ""
 }
 
 // ghRepositoryNumber is an issue or pull request named OWNER/REPO#N, which gh reads in a number's
@@ -207,8 +257,9 @@ func (s *selectors) fromAPI(parsed ghArgs) error {
 
 // fromOptions collects the owners the leaf's options name, by what each selects (ghOptionKind): a
 // repository or an owner, each of a comma-separated list; a repository of --org's, a name alone
-// that organization's; github.com alone as a host; a web URL; nothing. An option this cannot read
-// is refused.
+// that organization's; a team or a project, whose owner is the first half of its name and whose
+// second half is no repository; github.com alone as a host; a web URL; nothing. An option this
+// cannot read is refused.
 func (s *selectors) fromOptions(cmd *ghCommand, parsed ghArgs) error {
 	orgs := parsed.values["org"]
 	for _, name := range slices.Sorted(maps.Keys(parsed.values)) {
@@ -243,6 +294,8 @@ func (s *selectors) fromOptions(cmd *ghCommand, parsed ghArgs) error {
 					}
 				case "repository":
 					err = s.repository(item, what)
+				case "owner/name":
+					err = s.pairOwner(item, what)
 				case "url":
 					if isWebURL(item) {
 						err = s.repository(item, what)
@@ -303,10 +356,12 @@ func (s *selectors) query(words []string) error {
 	return nil
 }
 
-// endpoint collects the owner a gh api endpoint names: repos/<owner>/, orgs/<owner>/ or
-// users/<owner>/, with or without the API's host before it, and a search endpoint's q, reporting
-// whether it is a search endpoint, whose q field is its query too. A placeholder in the owner's
-// place names none (GH_REPO's, or the working directory's, fills it); a repository named by id
+// endpoint collects the owner a gh api endpoint names, and the repository where it names one:
+// repos/<owner>/<repo>, repos/<owner>/, orgs/<owner>/ or users/<owner>/, with or without the
+// API's host before it, and a search endpoint's q, reporting whether it is a search endpoint,
+// whose q field is its query too. A placeholder in the owner's place names none (GH_REPO's, or
+// the working directory's, fills it), and one in the repository's names the owner alone, since
+// what fills it is read where gh reads it (fromOwnRepository); a repository named by id
 // (repositories/<id>) and another host are errors. gh reads an endpoint holding "://" as a whole
 // URL.
 func (s *selectors) endpoint(endpoint string) (search bool, err error) {
@@ -329,6 +384,9 @@ func (s *selectors) endpoint(endpoint string) (search bool, err error) {
 	case (first == "repos" || first == "orgs" || first == "users") && len(segments) > 1:
 		if ghPlaceholder.MatchString(segments[1]) {
 			return false, nil
+		}
+		if first == "repos" && len(segments) > 2 && segments[2] != "" && !ghPlaceholder.MatchString(segments[2]) {
+			return false, s.repository(segments[1]+"/"+segments[2], "the endpoint "+endpoint)
 		}
 		return false, s.owner(segments[1], "the endpoint "+endpoint)
 	case first == "search":
@@ -373,11 +431,17 @@ func isGitHubHost(host string) bool {
 	return host == "github.com" || strings.HasSuffix(host, ".github.com")
 }
 
-// repositoryOwner is the owner, lowercased, of a repository named as gh names one — OWNER/REPO,
-// HOST/OWNER/REPO, or a github.com URL, its host github.com or a subdomain as gh normalizes it
-// (isGitHubHost) — refused when it names no owner, another host, or an owner that is no GitHub
-// login.
-func repositoryOwner(value, what string, api bool) (string, error) {
+// repositoryTarget is the lowercased owner and the name of a repository named as gh names one —
+// OWNER/REPO, HOST/OWNER/REPO, or a github.com URL, its host github.com or a subdomain as gh
+// normalizes it (isGitHubHost) — refused when it names no owner, another host, or an owner that
+// is no GitHub login. The name is the second segment as gh reads it, whatever follows it (a pull
+// request's number, a tree's path), as the argument spells it. The caller that records it keys
+// it as the directory holding its token is named for it (selectors.repository,
+// gitcredential.go's ghRepositoryName), so two spellings of one repository are one selector;
+// the lookup normalizes it again, which changes nothing for a name GitHub holds, and decides
+// whether a bundle can hold a directory of that name, since a name no directory can hold is one
+// the bundle holds none for.
+func repositoryTarget(value, what string, api bool) (owner, repo string, err error) {
 	host, rest := "", value
 	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
 		host, rest = parsed.Hostname(), strings.Trim(parsed.Path, "/")
@@ -385,13 +449,14 @@ func repositoryOwner(value, what string, api bool) (string, error) {
 		host, rest = parts[0], strings.Join(parts[1:], "/")
 	}
 	if host != "" && !isGitHubHost(host) {
-		return "", cannotPlace(value, "names another host than github.com", api)
+		return "", "", cannotPlace(value, "names another host than github.com", api)
 	}
 	parts := strings.Split(rest, "/")
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", cannotPlace(value, "names no owner", api)
+		return "", "", cannotPlace(value, "names no owner", api)
 	}
-	return checkedOwner(parts[0], what, api)
+	owner, err = checkedOwner(parts[0], what, api)
+	return owner, parts[1], err
 }
 
 // checkedOwner is owner lowercased, refused when it is no GitHub login.
@@ -453,46 +518,52 @@ func ghParseGitURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// owner is the owner, lowercased, of the github.com repository the remote setting names, read as
-// gh reads it (ghParseGitURL), "" for one naming none gh reads: a remote with no host (a local
-// path) or on another host, and a gh-resolved "base", whose remote's own URL is read beside it. why
-// says why a setting is one this cannot read: a URL gh's parser refuses, an ssh remote on another
-// host, which gh may read as an alias of github.com from ssh's configuration, and a github.com one
-// naming no OWNER/REPO whose owner is a GitHub login.
-func (r ghRemote) owner() (owner, why string) {
+// repository is the lowercased owner and the name of the github.com repository the remote
+// setting names, read as gh reads it (ghParseGitURL), "" for one naming none gh reads: a remote
+// with no host (a local path) or on another host, and a gh-resolved "base", whose remote's own
+// URL is read beside it. The name is carried on as the setting spells it, `.git` and all, which
+// the one gh directory lookup normalizes (repositoryGHConfigDir). why says why a setting is one
+// this cannot read: a URL gh's parser refuses, an ssh remote on another host, which gh may read
+// as an alias of github.com from ssh's configuration, and a github.com one naming no OWNER/REPO
+// whose owner is a GitHub login.
+func (r ghRemote) repository() (owner, repo, why string) {
 	if r.resolved != "" {
 		if r.resolved == "base" {
-			return "", ""
+			return "", "", ""
 		}
-		owner, err := repositoryOwner(r.resolved, "", false)
+		owner, repo, err := repositoryTarget(r.resolved, "", false)
 		if err != nil {
-			return "", "names no github.com repository this can read"
+			return "", "", "names no github.com repository this can read"
 		}
-		return owner, ""
+		return owner, repo, ""
 	}
 	u, err := ghParseGitURL(r.url)
 	switch {
 	case err != nil:
-		return "", "is a URL this cannot read as gh does"
+		return "", "", "is a URL this cannot read as gh does"
 	case u.Hostname() == "":
-		return "", ""
+		return "", "", ""
 	case u.Scheme == "ssh" && !isGitHubHost(u.Hostname()):
-		return "", "is an ssh remote whose host gh may read as github.com through ssh's configuration"
+		return "", "", "is an ssh remote whose host gh may read as github.com through ssh's configuration"
 	case !isGitHubHost(u.Hostname()):
-		return "", ""
+		return "", "", ""
 	}
 	parts := strings.SplitN(strings.Trim(u.Path, "/"), "/", 3)
 	if owner = strings.ToLower(parts[0]); len(parts) != 2 || parts[1] == "" || !ghconfig.IsOwner(owner) {
-		return "", "names no OWNER/REPO whose owner is a GitHub login"
+		return "", "", "names no OWNER/REPO whose owner is a GitHub login"
 	}
-	return owner, ""
+	return owner, parts[1], ""
 }
 
-// fromWorkingDirectory collects the owner of every github.com repository the working directory's
-// git remotes name (remotes): gh takes the repository of a command it resolves none for from
-// those remotes, an `upstream` before an `origin` and a gh-resolved one before either, so every
-// one counts, and a workspace whose remotes name two owners names two. A remote this cannot read
-// is refused; a working directory that is no git repository names none.
+// fromWorkingDirectory collects the owner and the repository of every github.com repository the
+// working directory's git remotes name (remotes): gh takes the repository of a command it
+// resolves none for from those remotes, an `upstream` before an `origin` and a gh-resolved one
+// before either, so every one counts, and a workspace whose remotes name two owners names two —
+// as a workspace whose remotes name two repositories of one owner names two repositories, and so
+// no one repository. Two settings spelling the one repository differently, a URL's `repo.git`
+// beside a gh-resolved `owner/repo`, are two names here too, which leaves the command the
+// owner's own directory: the wider of the two tokens, and never another repository's. A remote
+// this cannot read is refused; a working directory that is no git repository names none.
 func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) error {
 	advice := "name the repository with -R <owner>/<repo>"
 	if s.api {
@@ -503,12 +574,13 @@ func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) err
 		return fmt.Errorf("cannot tell which repository the command targets: the working directory's git remotes, from which gh takes the command's own repository, cannot be read (%v), so it sends no token; %s", err, advice)
 	}
 	for _, remote := range listed {
-		owner, why := remote.owner()
+		owner, repo, why := remote.repository()
 		if why != "" {
 			return fmt.Errorf("cannot tell which repository the command targets: the working directory's %s %s, so it sends no token; %s", remote.what(), why, advice)
 		}
 		if owner != "" {
 			s.add(owner, "the working directory's "+remote.what())
+			s.repos[ghRepositoryName(repo)] = true
 		}
 	}
 	return nil

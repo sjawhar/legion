@@ -40,21 +40,29 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // role's GitHub credential, so the pane's gh (the `legion gh` wrapper's real gh) and the clone's
 // `legion git-credential` helper read the tokens the daemon holds now. It walks a snapshot of the
 // watch (trackedProcesses), takes each pane's role from its claim token (claim.Token.Role),
-// skipping a token that names no role, and renders the credential for the pane's write owner: the
-// one its launch minted the write token for, recorded on the tracked entry, which is empty for the
-// controller, whose bundles are read-only for every owner. For a tree pane adopted after a
-// restart, whose launch the runtime never saw, the write owner is the owner of the repository the
-// claim's issue works, read from the daemon's own state (Options.RepositoryOwner); an adopted
-// controller asks nothing. Nothing under the pane's gh directory, which the pane's own user can
-// write, decides an owner, and a bundle's default owner, the directory GH_CONFIG_DIR names, is never
-// minting authority. It rewrites only the owners whose hosts.yml differs (ghconfig.WriteBundle),
-// recreating a root that is gone. An owner that cannot be read, a render that fails, or a render
-// for a write owner whose default is another owner is logged and the pane keeps its last tokens
-// until the next tick. A controller whose project has no GitHub owner to mint for
-// (runtime.ErrNoGitHubOwner) launched with gh acting as nobody, its gh directory empty, and has
-// nothing to refresh: it is passed over without a word, as the sandbox runtime passes over such a
-// controller's pod. A runtime with no credential function (Options.GitHubCredential nil: a
-// daemon with no GitHub Apps) wrote no pane any gh files, so it has nothing to refresh.
+// skipping a token that names no role, and renders a tree pane's credential for the pane's own
+// repository: the one its launch minted the write token for, recorded on the tracked entry. For a
+// tree pane adopted after a restart, whose launch the runtime never saw, the repository is the one
+// the claim's issue works, read from the daemon's own state (Options.ClaimRepository).
+//
+// The controller's bundle is fetched by owner instead (Options.ControllerCredential), the default
+// its launch recorded: it works no repository, so a bundle asked for by repository would take its
+// default from the first owner the project serves, sorted, and a project that gained an owner
+// sorting before the recorded one would move the default away from the directory the pane's
+// GH_CONFIG_DIR was fixed at. An adopted controller, whose launch this runtime never saw, records
+// no owner and asks for none, which is the first owner, as its launch took it.
+//
+// Nothing under the pane's gh directory, which the pane's own user can write, decides a repository
+// or an owner, and a bundle's default owner, the directory GH_CONFIG_DIR names, is never minting
+// authority. It rewrites only the directories whose hosts.yml differs
+// (ghconfig.WriteBundle), recreating a root that is gone. A repository that cannot be read, a
+// render that fails, or a render whose default is not the owner of the pane's own repository is
+// logged and the pane keeps its last tokens until the next tick. A controller whose project has
+// no GitHub owner to mint for (runtime.ErrNoGitHubOwner) launched with gh acting as nobody, its
+// gh directory empty, and has nothing to refresh: it is passed over without a word, as the
+// sandbox runtime passes over such a controller's pod. A runtime with no credential function
+// (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh files, so it
+// has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	if r.gitHubCredential == nil {
 		return
@@ -68,16 +76,22 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		failed := func(err error) {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", err)
 		}
-		owner := entry.ghWriter
+		repo := entry.ghRepo
 		if entry.issue == "" && role != claim.RoleController {
-			recorded, err := r.repositoryOwner(ctx, token)
+			recorded, err := r.claimRepository(ctx, token)
 			if err != nil {
-				failed(fmt.Errorf("the owner of the claim's repository: %w", err))
+				failed(fmt.Errorf("the claim's repository: %w", err))
 				continue
 			}
-			owner = strings.ToLower(recorded)
+			repo = recorded
 		}
-		bundle, err := r.gitHubCredential(ctx, role, owner)
+		var bundle ghconfig.Bundle
+		var err error
+		if role == claim.RoleController {
+			bundle, err = r.controllerCredential(ctx, entry.ghDefault)
+		} else {
+			bundle, err = r.gitHubCredential(ctx, role, repo)
+		}
 		if role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner) {
 			continue
 		}
@@ -85,8 +99,9 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			failed(err)
 			continue
 		}
+		owner := strings.ToLower(repo.Owner())
 		if owner != "" && bundle.Default != owner {
-			failed(fmt.Errorf("the credential's default owner %s is not the pane's write owner %s", bundle.Default, owner))
+			failed(fmt.Errorf("the credential's default owner %s is not the pane's own owner %s", bundle.Default, owner))
 			continue
 		}
 		root := runtime.GHConfigDir(r.stateDir, token)
@@ -96,9 +111,9 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			continue
 		}
 		if len(changed) > 0 {
-			written := bundle.Owners[bundle.Default]
+			written := bundle.Dirs[bundle.Default]
 			r.log.Info("tmux runtime: github credential refreshed", "claim", token, "role", role, "app", written.App,
-				"expiresAt", written.ExpiresAt, "owners", changed)
+				"expiresAt", written.ExpiresAt, "dirs", changed)
 		}
 	}
 }

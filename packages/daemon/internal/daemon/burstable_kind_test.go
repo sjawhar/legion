@@ -136,14 +136,26 @@ func burstableLiveRuntime(ctx context.Context, cfg config.Config, rc *rest.Confi
 	}
 	opts.Conns, opts.StreamURL, opts.Store = listener, listener.Addr(), firstLaunchStore{}
 	opts.Tokens = publicCloneTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 		rendered := ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
-		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
+		owner := strings.ToLower(repo.Owner())
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
+	}
+	// The controller's own bundle, which its launch and its refresh both ask for by owner
+	// (sandbox.Options.ControllerCredential, appauth.ControllerCredential): the review App's, over
+	// the proof's one owner, since the project serves burstableLiveRepository alone.
+	opts.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+		rendered := ghconfig.Render("ghs_placeholder", string(appauth.Review), time.Now().Add(time.Hour))
+		owner := strings.ToLower(burstableLiveRepository.Owner())
+		if defaultOwner != "" {
+			owner = defaultOwner
+		}
+		return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
 	// The stand-in bundle holds the launch's own owner and no other, so the proof's project
 	// serves none of its own: every pod it makes projects what it was launched with, and no pod
-	// has drifted from an owner the daemon serves (sandbox's movedGhOwners).
-	opts.GitHubOwners = func() []string { return nil }
+	// has drifted from a directory the daemon serves (sandbox's movedGhDirs).
+	opts.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string { return nil }
 	opts.Mapped = func() []ghrepo.Repository { return []ghrepo.Repository{burstableLiveRepository} }
 	opts.Agent = burstableLiveStub
 	rt, err := sandbox.New(ctx, rc, opts)
@@ -186,7 +198,7 @@ func (firstLaunchStore) Claims(context.Context) ([]supervise.Claim, error)      
 // git for.
 type publicCloneTokens struct{}
 
-func (publicCloneTokens) Token(context.Context, string) (string, error) {
+func (publicCloneTokens) Token(context.Context, ghrepo.Repository) (string, error) {
 	return "public-repository-needs-no-token", nil
 }
 

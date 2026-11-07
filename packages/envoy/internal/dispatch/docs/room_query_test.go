@@ -158,6 +158,101 @@ func TestAShareReturnsTheOtherProcessesInFlightAppend(t *testing.T) {
 	}
 }
 
+// deliverRoomQuery hands service's query lane one kind query about room from sender, as room
+// sync does when the notification of it arrives (roomQueries.query), so a test of what answering
+// it does waits on no notification.
+func deliverRoomQuery(t *testing.T, service *Service, sender, room, kind string) {
+	t.Helper()
+	payload, err := json.Marshal(roomQuery{ID: uuid.NewString(), Sender: sender, Room: room, Kind: kind})
+	if err != nil {
+		t.Fatalf("encode the %s query: %v", kind, err)
+	}
+	service.roomQueries.query(context.Background(), string(payload))
+}
+
+// A room's browser appends linger for the room's next keystrokes before they go (roomAppendLinger),
+// and a flush has roomQueryWait to answer in, spent by an asker holding whatever it asked the
+// flush for. So a query of another process asks the room's appends to go before it waits for
+// them, as a wait for the room's own appends does (waitForRoomIdle): every linger already
+// waiting is woken, no update the room recorded before the query lingers any more, and none
+// lingers while the answer waits (askRoomAppends).
+func TestARoomQueryOfAnotherProcessEndsAPendingBatchesLinger(t *testing.T) {
+	pair := newQueryProcesses(t)
+	pair.heldEditOnB(t, 1, model.Actor{Kind: "user", ID: "bob"}, replaceRun("Bravo paragraph.", "Bravo paragraph, by bob."))
+	defer pair.gateB.release()
+	state := pair.taskB.lockExistingState(pair.artifactID)
+	if len(state.updateClasses) == 0 {
+		pair.taskB.unlockState(pair.artifactID, state)
+		t.Fatal("task B's room queued no class for bob's edit, so no batch of it can linger")
+	}
+	class := state.updateClasses[len(state.updateClasses)-1]
+	lingering := state.appendLinger.wait()
+	pair.taskB.unlockState(pair.artifactID, state)
+	asked := time.Now()
+
+	deliverRoomQuery(t, pair.taskB, pair.taskA.ProcessID(), pair.artifactID, roomQueryFlush)
+
+	select {
+	case <-lingering:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the query woke none of task B's lingering appends: a batch of its keystrokes holds the answer up for a linger")
+	}
+	state = pair.taskB.lockExistingState(pair.artifactID)
+	flushed, waiters := state.appendsFlushed, state.appendWaiters
+	pair.taskB.unlockState(pair.artifactID, state)
+	if flushed.Before(asked) {
+		t.Fatalf("task B recorded its appends asked for at %v, before the query at %v: an update recorded in between lingers all the same", flushed, asked)
+	}
+	if waiters == 0 {
+		t.Fatal("task B counts no waiter on its appends while it answers the flush, so a keystroke its room takes meanwhile lingers while the answer waits")
+	}
+	if _, wake, wait := pair.taskB.roomBatchThrough(pair.artifactID, class, true); wake != nil {
+		t.Fatalf("the batch of an update task B's room recorded before the query lingers another %v", wait)
+	}
+}
+
+// Every update of a pending batch stays listed as its room instance's unstored work until its own
+// append has returned, so a share answers a query that arrives while the batch is still to go with
+// all of them: here the update whose append waits at the gate and the keystroke queued behind it,
+// whose call has not taken it yet. Once the gate opens, both are stored once and the instance
+// lists neither: a stored update is unlisted exactly once, by its own call.
+func TestAShareHoldsEveryQueuedUpdateOfAPendingBatch(t *testing.T) {
+	pair := newQueryProcesses(t)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	pair.heldEditOnB(t, 1, bob, appendBlocks(t, "Bob's first paragraph.\n"))
+	editAsPeer(t, pair.taskB, pair.artifactID, appendBlocks(t, "Bob's second paragraph.\n"))
+
+	answers, asked, err := pair.taskA.roomQueries.ask(context.Background(), pair.database.Pool, pair.artifactID, roomQueryShare)
+	if err != nil || !asked {
+		t.Fatalf("task A's share = asked %t, %v; want task B asked", asked, err)
+	}
+	if len(answers) != 1 || !answers[0].holds || answers[0].tooLarge {
+		t.Fatalf("task A's share answers = %+v, want task B's one, holding the room", answers)
+	}
+	shared := storedDocumentWith(t, pair.database, pair.artifactID, answers[0].updates)
+	for _, paragraph := range []string{"Bob's first paragraph.", "Bob's second paragraph."} {
+		if !strings.Contains(shared, paragraph) {
+			t.Fatalf("the stored document with task B's shared updates reads %q, without %q: an update of its pending batch is listed nowhere", shared, paragraph)
+		}
+	}
+
+	pair.gateB.release()
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	instance := pair.taskB.instanceOf(pair.taskB.srv.GetDoc(pair.artifactID))
+	if instance == nil {
+		t.Fatal("task B holds no room instance of the document once its batch was stored")
+	}
+	if listed := instance.unstoredUpdates(); len(listed) != 0 {
+		t.Fatalf("task B's room lists %d of its stored updates as unstored, want none: each leaves the list with its own call", len(listed))
+	}
+	stored := storedMarkdown(t, pair.database, pair.artifactID)
+	for _, paragraph := range []string{"Bob's first paragraph.", "Bob's second paragraph."} {
+		if count := strings.Count(stored, paragraph); count != 1 {
+			t.Fatalf("the store reads %q, holding %q %d times, want once", stored, paragraph, count)
+		}
+	}
+}
+
 // What a share holds past roomShareLimit is not sent: the answer says too_large, carries no
 // updates, and the asker logs a WARN and judges without them.
 func TestAShareTooLargeForOneQueryAnswersTooLarge(t *testing.T) {

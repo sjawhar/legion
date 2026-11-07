@@ -19,6 +19,7 @@ import { type IssueStatus, statusLabel } from "../project/board-model";
 import { AgentName } from "./AgentName";
 import { type BlockItemKind, itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
+import { REF_PREVIEW_CARD_ID, refPreviewCardContains } from "./ref-preview-card";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import {
   artifactTextQuery,
@@ -38,7 +39,6 @@ import {
 import { referenceTargetKind } from "./target-id";
 import { type TextSource, textSourceOf } from "./text-references";
 
-const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
  * mark (`data-dispatch-href`, the sanitized mark's real target), or a React link that set
  * `data-dispatch-ref` — see `referenceTriggerProps`. */
@@ -156,16 +156,14 @@ function triggerOf(node: EventTarget | null): HTMLElement | null {
   return node instanceof Element ? node.closest<HTMLElement>(TRIGGER_SELECTOR) : null;
 }
 
-function cardContains(node: EventTarget | null): boolean {
-  return node instanceof Element && node.closest(`#${CARD_ID}`) !== null;
-}
-
 /** The one region the pointer may roam without closing the card: the current target's anchor -
  * the open card's, or the one a pending hover is waiting on - and the card itself. Every pointer
  * transition is judged against this predicate, in the document listeners alone, so no close
  * depends on the order in which two event systems see one `pointerout`. */
 function inHoverZone(node: EventTarget | null): boolean {
-  return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
+  return (
+    state !== undefined && (triggerOf(node) === state.target.anchor || refPreviewCardContains(node))
+  );
 }
 
 /** The route a trigger names, read as a node's reference whatever the length of its target id: a
@@ -306,7 +304,7 @@ function attachTriggers(): () => void {
     // Focus moving from the anchor into its own card is not leaving: a press on the card's link
     // while the anchor holds focus (dnd-kit hands focus back to a board card's link after a
     // drop) must reach the link as a click, not unmount it under the pointer.
-    if (trigger !== null && !cardContains(event.relatedTarget)) {
+    if (trigger !== null && !refPreviewCardContains(event.relatedTarget)) {
       refPreview.blur(trigger);
     }
   };
@@ -601,7 +599,7 @@ function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
   return (
     <div
       className={`fixed top-0 left-0 z-[60] w-80 max-w-[calc(100vw-1rem)] rounded-xl border p-3 text-sm shadow-lg ${card}`}
-      id={CARD_ID}
+      id={REF_PREVIEW_CARD_ID}
       ref={element}
       role="tooltip"
     >
@@ -697,7 +695,7 @@ export function RefPreviewHost(): ReactNode {
       return;
     }
     const previous = openAnchor.getAttribute("aria-describedby");
-    openAnchor.setAttribute("aria-describedby", CARD_ID);
+    openAnchor.setAttribute("aria-describedby", REF_PREVIEW_CARD_ID);
     return () => {
       if (previous === null) {
         openAnchor.removeAttribute("aria-describedby");

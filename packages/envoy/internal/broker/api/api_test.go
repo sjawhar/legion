@@ -125,7 +125,11 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		t.Fatalf("oidc.New: %v", err)
 	}
 	serviceLogins := map[string]string{daemonAccount: "legion-daemon", otherDaemonAccount: "legion-daemon"}
-	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
+	// BROKER_SERVICES: both accounts the pods these tests enrol run as, bound to the service both
+	// daemon accounts log in as, which is what lets their logins enrol those pods. An account
+	// outside it is a pod no login here launches (POD_NOT_LAUNCHED).
+	servicesByAccount := map[string]string{workerAccount: "legion-daemon", otherAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins, ServicesByAccount: servicesByAccount}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	// Wired as cmd/broker/main.go wires it, so a session name belongs to one principal on this
 	// server too: the enrollment route refuses a name another principal holds.

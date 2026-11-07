@@ -1,12 +1,14 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { removeTemporaryDirectories, temporaryDirectory } from "../../test/temp-dir";
 import { runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetKeyedLayerMemory } from "../dispatch-http";
 
-// `dispatch inbox` against a stub Dispatch: the three routes the Inbox page reads, answered as the
+afterAll(removeTemporaryDirectories);
+
+// `dispatch inbox` against a stub Dispatch: the four routes the Inbox page reads, answered as the
 // server answers them, so the test pins the lines the command prints rather than the renderer's
 // own idea of them.
 
@@ -100,6 +102,61 @@ const PENDING = [
   },
 ];
 
+/** A time `ms` before `now`, as the server writes one. */
+function ago(now: number, ms: number): string {
+  return new Date(now - ms).toISOString();
+}
+
+/** The rows of `GET /api/v1/me/replies?kind=reply,agent`, newest reply first: a comment thread
+ *  on an issue someone answered, and an agent session's reply to a message the person sent it.
+ *  Built when the stub answers, so their ages are read off the clock the command reads, and
+ *  each offset sits between two steps so neither age falls to the step below as the test runs. */
+function threadRows(now: number): Record<string, unknown>[] {
+  return [
+    {
+      kind: "comment",
+      thread_id: "66666666-6666-4666-8666-666666666666",
+      ref: "/issues/DSP-6/comments/66666666-6666-4666-8666-666666666666",
+      subject: "The staging box lost its disk again",
+      issue: { key: "DSP-6", title: "Staging keeps falling over" },
+      priority: 2,
+      project: "DSP",
+      read_through: ago(now, 30 * 60_000),
+      unread: true,
+      unread_count: 2,
+      reply: {
+        id: "99999999-9999-4999-8999-999999999999",
+        kind: "reply",
+        author: { kind: "user", id: "bob@theorem.dev" },
+        first_line: "I swapped the disk this morning.",
+        created_at: ago(now, 5 * 60_000 + 30_000),
+      },
+    },
+    {
+      kind: "agent",
+      thread_id: "77777777-7777-4777-8777-777777777777",
+      ref: "/agents/ses-5/live",
+      subject: "Can you take the migration next?",
+      session: { id: "ses-5", name: "legion-implementer" },
+      unread_reply_ids: ["88888888-8888-4888-8888-888888888888"],
+      unread: true,
+      unread_count: 1,
+      reply: {
+        id: "88888888-8888-4888-8888-888888888888",
+        kind: "reply",
+        author: { kind: "session", id: "ses-5" },
+        first_line: "Taking it now.",
+        created_at: ago(now, 95 * 60_000),
+      },
+    },
+  ];
+}
+
+/** `GET /api/v1/me/replies`'s answer around `rows`, unpaged as the command asks for it. */
+function repliesBody(rows: Record<string, unknown>[], now: number): Record<string, unknown> {
+  return { rows, total: rows.length, limit: 0, offset: 0, as_of: new Date(now).toISOString() };
+}
+
 /** How the stub answers one read: the rows it lists by default (`LISTED`), or a body and status
  *  of its own, a literal `null` body among them. */
 type Answer = typeof LISTED | { readonly status: number; readonly body: unknown };
@@ -108,6 +165,7 @@ const LISTED = "listed" as const;
 let whoamiAnswer: Answer = LISTED;
 let inboxAnswer: Answer = LISTED;
 let pendingAnswer: Answer = LISTED;
+let repliesAnswer: Answer = LISTED;
 const requests: string[] = [];
 
 function refusal(code: string, error: string, status: number): Answer {
@@ -142,6 +200,10 @@ const server = Bun.serve({
     if (pathname === "/api/v1/credential-requests") {
       return answered(pendingAnswer, { pending: PENDING });
     }
+    if (pathname === "/api/v1/me/replies") {
+      const now = Date.now();
+      return answered(repliesAnswer, repliesBody(threadRows(now), now));
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -154,7 +216,8 @@ beforeEach(() => {
   whoamiAnswer = LISTED;
   inboxAnswer = LISTED;
   pendingAnswer = LISTED;
-  stateDir = mkdtempSync(join(tmpdir(), "dispatch-inbox-"));
+  repliesAnswer = LISTED;
+  stateDir = temporaryDirectory("dispatch-inbox-");
   resetAdviceMemory();
   forgetKeyedLayerMemory();
 });
@@ -205,14 +268,19 @@ describe("dispatch inbox", () => {
       "Later 1",
       `- DSP-3 · P3 · question · Does the export still need its nightly run? · dispatch://DSP-3/ask/${SNOOZED_ID}`,
       "",
+      "Unread threads 2",
+      "- DSP-6 · comment · The staging box lost its disk again · user bob@theorem.dev · 5m · /issues/DSP-6/comments/66666666-6666-4666-8666-666666666666",
+      "- legion-implementer · agent · Can you take the migration next? · session ses-5 · 1h · /agents/ses-5/live",
+      "",
       "Credential requests 2",
       "- agent_secret · github/token, aws/role · 2026-11-02T09:00:00Z · session request=ses-7, enrollment=ses-8 · https://broker.theorem.dev/approve/rec-1",
       "- launcher_credential · runner-12 · 2026-11-02T10:00:00Z",
     ]);
-    // The caller's own credential, on the three routes the Inbox page reads and no other.
+    // The caller's own credential, on the four routes the Inbox page reads and no other.
     expect(requests.sort()).toEqual([
       "GET /api/v1/credential-requests?approver=me",
       "GET /api/v1/inbox?assignee=me",
+      "GET /api/v1/me/replies?kind=reply%2Cagent",
       "GET /api/v1/whoami",
     ]);
   });
@@ -268,5 +336,107 @@ describe("dispatch inbox", () => {
       expect(stdout).toContain("does not hold the person scope");
       expect(stdout).not.toContain("Needs you");
     }
+  });
+
+  test("lists a Reply row by its owner and an Agent row by its session, with replier and age", async () => {
+    const now = Date.now();
+    repliesAnswer = {
+      status: 200,
+      body: repliesBody(
+        [
+          {
+            kind: "message",
+            thread_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ref: "/projects/CORE/documents/design-notes",
+            subject: "Is the nightly export still ours?",
+            document: { project: "CORE", slug: "design-notes", name: "design.md" },
+            read_through: ago(now, 3 * 24 * 60 * 60_000),
+            unread: true,
+            unread_count: 1,
+            reply: {
+              id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              kind: "reply",
+              author: { kind: "user", id: "bob@theorem.dev" },
+              first_line: "It is, until the new one runs.",
+              created_at: ago(now, 2 * 24 * 60 * 60_000 + 60 * 60_000),
+            },
+          },
+          {
+            kind: "agent",
+            thread_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            ref: "/agents/ses-5/live",
+            subject: "Can you take the migration next?",
+            session: { id: "ses-5", name: "legion-implementer" },
+            unread_reply_ids: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"],
+            unread: true,
+            unread_count: 1,
+            reply: {
+              id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              kind: "reply",
+              author: { kind: "session", id: "ses-5" },
+              first_line: "Taking it now.",
+              created_at: ago(now, 45_000),
+            },
+          },
+        ],
+        now
+      ),
+    };
+
+    const { code, stdout, stderr } = await runInbox();
+
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    // A thread on a document is named by its slug, an agent thread by the session's name, and a
+    // reply written in the last minute reads `<1m`.
+    expect(stdout).toContain(
+      [
+        "Unread threads 2",
+        "- design-notes · message · Is the nightly export still ours? · user bob@theorem.dev · 2d · /projects/CORE/documents/design-notes",
+        "- legion-implementer · agent · Can you take the migration next? · session ses-5 · <1m · /agents/ses-5/live",
+      ].join("\n")
+    );
+  });
+
+  test("counts the unread threads in the call's details", async () => {
+    const { code } = await runInbox();
+
+    expect(code).toBe(0);
+    // The counts are not printed; the command leaves them in the session's ledger line.
+    const ledger = readFileSync(
+      join(stateDir, "sessions", "ses-1", "results.jsonl"),
+      "utf-8"
+    ).trim();
+    const entry = JSON.parse(ledger) as { details?: Record<string, unknown> };
+    expect(entry.details).toMatchObject({ asks: 5, unread_threads: 2, credential_requests: 2 });
+  });
+
+  test("a failed replies read warns on stderr, counts no threads and prints the rest", async () => {
+    repliesAnswer = refusal("INTERNAL", "the thread list could not be read", 502);
+
+    const { code, stdout, stderr } = await runInbox();
+
+    expect(code).toBe(0);
+    expect(stderr).toBe(
+      "dispatch: warning: unread threads could not be read: INTERNAL the thread list could not be read\n"
+    );
+    expect(stdout).toContain("Unread threads 0\n");
+    // The asks and the credential requests are read apart from the threads, and still print.
+    expect(stdout).toContain("Needs you 4\n");
+    expect(stdout).toContain("Later 1\n");
+    expect(
+      stdout.trimEnd().endsWith("- launcher_credential · runner-12 · 2026-11-02T10:00:00Z")
+    ).toBe(true);
+  });
+
+  test("a scope refusal from the replies read exits 1 naming the code and the scope", async () => {
+    repliesAnswer = SCOPE_REFUSED;
+
+    const { code, stdout } = await runInbox();
+
+    expect(code).toBe(1);
+    expect(stdout).toContain("OAUTH_SCOPE_REQUIRED");
+    expect(stdout).toContain("does not hold the person scope");
+    expect(stdout).not.toContain("Needs you");
   });
 });
