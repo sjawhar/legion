@@ -236,9 +236,9 @@ func TestAnAutoMergeDisableOfATreeRecordedBeforeItsTransferAddressesTheRepositor
 // the owner it was minted for.
 type identityTokens struct{ roleTokens }
 
-func (t identityTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.roleTokens.Token(ctx, role, owner)
-	lease.Identity = runtime.GitIdentity{Name: "legion-" + string(role) + "[bot] of " + owner, Email: owner + "@users.noreply.github.com"}
+func (t identityTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	lease, err := t.roleTokens.Token(ctx, role, repo)
+	lease.Identity = runtime.GitIdentity{Name: "legion-" + string(role) + "[bot] of " + repo.Owner(), Email: repo.Owner() + "@users.noreply.github.com"}
 	return lease, err
 }
 

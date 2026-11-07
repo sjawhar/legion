@@ -252,7 +252,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	defer stopGitHubRefresh()
 	if defaultOwner != "" {
-		env["GH_CONFIG_DIR"] = ghconfig.OwnerDir(controllerGHDir(stateDir), defaultOwner)
+		env["GH_CONFIG_DIR"] = ghconfig.Dir(controllerGHDir(stateDir), defaultOwner)
 	}
 	composer, err := prompts.New(stateDir)
 	if err != nil {

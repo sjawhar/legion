@@ -1,17 +1,24 @@
 import { type ReactNode, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 
-import type { Artifact, InboxRow } from "../../api/types";
-import { linkHoverText, linkText, secondaryButtonCompact } from "../../theme/classes";
+import type { Artifact, InboxRow, MyReplyRow } from "../../api/types";
+import {
+  linkHoverText,
+  linkText,
+  secondaryButtonCompact,
+  textMutedOnCanvas,
+} from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
-import { InboxOwnerLink } from "./AskOwnerLink";
+import { InboxOwnerLink, ThreadOwnerLine } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
 import { askIssueKey, controlName } from "./ask-name";
+import { DismissControl } from "./DismissControl";
 import { EarlierApproval } from "./EarlierApproval";
+import { threadReferenceRoute } from "./list-row";
 import { SnoozeControl } from "./SnoozeControl";
 import { isUnassigned } from "./sections";
 import { isSnoozed } from "./snooze";
@@ -55,7 +62,7 @@ export interface ReadingPaneHeadProps {
    *  holding `Snoozing…`, a refusal and its Retry is not unmounted by the fold the optimistic
    *  snooze causes - the column follows that row, so the fold would take this head with it. */
   onSnoozeLive: (askId: string, live: boolean) => void;
-  /** The heading of the section the column scrolled to, once the document has drawn. */
+  /** The heading of the section the column is opened at, once the block has drawn. */
   sectionBlockId: string | undefined;
   viewer: string | undefined;
 }
@@ -110,7 +117,9 @@ export function ReadingPaneHead({
       {ask.issue_key === null ? null : (
         <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
       )}
-      {ask.issue_key !== null && viewer !== undefined && (isUnassigned(ask) || assignLive) ? (
+      {ask.issue_key !== null &&
+      viewer !== undefined &&
+      (isUnassigned({ ask, kind: "ask" }) || assignLive) ? (
         <AssignToMe askId={ask.id} issueKey={ask.issue_key} onLive={onAssignLive} viewer={viewer} />
       ) : null}
       <SnoozeControl
@@ -140,6 +149,50 @@ export function ReadingPaneHead({
           {approveDrawn ? null : <EarlierApproval approval={approval} />}
         </>
       )}
+    </header>
+  );
+}
+
+/**
+ * The reading column's head for a Reply or an Agent row: who the thread belongs to, **Open
+ * page** - the thread's own page, which the server names in the row's `ref`: the document with
+ * the thread open, the issue's conversation, or `/agents/<id>/live` for an Agent row - **Copy
+ * ref**, and the **Dismiss** that takes the row out of the Inbox, which in the Dismissed view
+ * reads **Move to Inbox** (`DismissControl`).
+ *
+ * **Open page** is what `o` follows here (`data-inbox-owner`), as the card's **Open** is below
+ * this column's width: the key opens the thread, never the issue it happens to sit on, and it
+ * opens an Agent row's live view, which has no owner link to fall back to. The owner beside it
+ * is a link a reader can still follow by hand.
+ *
+ * An Agent row has no **Copy ref**: Dispatch's reference grammar has no form for an issue-less
+ * message (`dispatch://KEY/message/<id>` needs an issue key, and `dispatch://agent/` covers only
+ * artifacts), which is why `y` does nothing on such a row either. Priority, **Assign to me** and
+ * **Snooze** are a question's controls and show for no thread row at all.
+ */
+export function ThreadPaneHead({
+  sectionBlockId,
+  thread,
+}: {
+  /** The heading of the section the column is opened at, where the column shows a document:
+   *  the page opens there rather than at the document's top. */
+  sectionBlockId?: string | undefined;
+  thread: MyReplyRow;
+}): ReactNode {
+  const reference = threadReferenceRoute(thread);
+  const page =
+    sectionBlockId === undefined ? thread.ref : `${thread.ref}${blockFragment(sectionBlockId)}`;
+  return (
+    <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <ThreadOwnerLine
+        className={`min-w-0 truncate text-sm font-semibold ${textMutedOnCanvas}`}
+        thread={thread}
+      />
+      <Link className={`text-sm ${linkText} ${linkHoverText}`} data-inbox-owner="" to={page}>
+        Open page
+      </Link>
+      {reference === undefined ? null : <CopyRefButton route={reference} />}
+      <DismissControl shown thread={thread} />
     </header>
   );
 }

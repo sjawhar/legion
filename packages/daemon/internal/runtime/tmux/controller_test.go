@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -116,17 +117,24 @@ func TestTheControllerWorksInADirectoryAndAWindowOfItsOwn(t *testing.T) {
 // controller start` and the sandbox runtime do there: the launch succeeds, the controller's gh
 // directory is an empty 0700 one — whatever an earlier launch left there removed — named by
 // GH_CONFIG_DIR with the tokens emptied, and the refresher leaves it be without logging a failure.
-// Any other role with no owner is still refused.
+// The controller's launch asks its own function (Options.ControllerCredential), as its refresh
+// does, so that is what refuses here; any other role with no owner is still refused through
+// Options.GitHubCredential.
 func TestAControllerWithNoGitHubOwnerRunsWithGhActingAsNobody(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
-	noOwner := func(_ context.Context, role claim.Role, _ string) (ghconfig.Bundle, error) {
+	noOwner := func(_ context.Context, role claim.Role, _ ghrepo.Repository) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for %s: %w", role, runtime.ErrNoGitHubOwner)
 	}
-	f := newFakeServerRuntime(t, noOwner, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	f := newFakeServerRuntimeWith(t, noOwner, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		func(o *Options) {
+			o.ControllerCredential = func(context.Context, string) (ghconfig.Bundle, error) {
+				return noOwner(ctx, claim.RoleController, ghrepo.Repository{})
+			}
+		})
 	spec := controllerSpec(t, "omp")
 	root := runtime.GHConfigDir(f.stateDir, spec.Claim)
-	stale, _ := staticCredential(ctx, claim.RoleController, "acme")
+	stale, _ := staticCredential(ctx, claim.RoleController, ghrepo.MustParse("acme/widgets"))
 	if _, err := ghconfig.WriteBundle(root, stale); err != nil {
 		t.Fatal(err)
 	}

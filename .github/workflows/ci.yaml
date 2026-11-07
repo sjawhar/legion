@@ -1094,6 +1094,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/explaintest/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              # room_recovery_test.go reads the goroutine dump through it.
+              - 'packages/envoy/internal/goroutinetest/*'
               - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
@@ -2039,6 +2041,9 @@ jobs:
       # scripts/sessions is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the session message-wait script
         run: bunx tsc --noEmit -p scripts/sessions
+
+      - name: Test the session message-wait script
+        run: bun test scripts/sessions
 
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
