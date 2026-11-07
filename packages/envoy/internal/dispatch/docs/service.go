@@ -2652,24 +2652,43 @@ func WithoutRecoveryWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, withoutRecoveryWait{}, true)
 }
 
-// queryFrom returns the caller's transaction when it is inside one, else the pool its context
-// names (withQueryPool), else the request pool. A document read made while an API write
-// transaction is open must go through that transaction: a second connection from the request pool
-// is what deadlocks it (store.ErrNestedAcquire). Background work that reaches a read written for
-// requests names its own pool, so it takes no connection admission counts for requests.
+// queryFrom returns where a read this service makes for its caller takes its connection
+// (readQuerier): the caller's transaction, the pool its context names, or the request pool.
 func (s *Service) queryFrom(ctx context.Context) Queryer {
+	return readQuerier(ctx, s.store.Pool)
+}
+
+// readQuerier is where a read a caller waits on takes its connection: the caller's transaction
+// when it is inside one, else the pool its context names (withQueryPool), else the request pool,
+// on which a pinned read runs on the connection it already holds (store.PinConnection) rather than
+// taking a second. A document read made while an API write transaction is open must go through
+// that transaction: a second connection from the request pool is what deadlocks it
+// (store.ErrNestedAcquire). Background work, and a settlement, that reaches a read written for
+// requests names its own pool, so it takes no connection admission counts for requests.
+//
+// It is where every read of a document that is not a load of its stored history goes - the stored
+// head a read compares a resident room against (readStoredHead) and the stamp a cold read names
+// its cache entry by (PgVersioned.DocumentStamp) among them - because such a read is the
+// request's own: it is one statement, it holds nothing while it runs, and on a pinned read it
+// costs no connection at all. The pool that owns loads is for the loads a caller holding one of
+// these connections waits on (loadTxSource).
+func readQuerier(ctx context.Context, pool *store.Pool) Queryer {
 	if tx, ok := txFromContext(ctx); ok {
 		return tx
 	}
-	if pool, ok := ctx.Value(queryPoolKey{}).(*store.Pool); ok {
-		return pool
+	if named, ok := ctx.Value(queryPoolKey{}).(*store.Pool); ok {
+		return named
 	}
-	return s.store.Pool
+	return pool
 }
 
 type queryPoolKey struct{}
 
-// withQueryPool names the pool queryFrom reads through for ctx when ctx carries no transaction.
+// withQueryPool names the pool a document read made under ctx works through: the one readQuerier
+// reads through when ctx carries no transaction, and the one a load of a stored history opens its
+// transaction on in place of the pool that owns loads (loadTxSource). A settlement names the
+// settlements pool for its warm-up and its passes (settleRoomWithin), and a cold read names the
+// request pool for the fold it leaves running (foldDocument).
 func withQueryPool(ctx context.Context, pool *store.Pool) context.Context {
 	return context.WithValue(ctx, queryPoolKey{}, pool)
 }
