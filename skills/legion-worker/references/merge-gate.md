@@ -288,7 +288,7 @@ reviewing until you finish.
   (`CHECK_VERDICT_REQUIRED`).
 - **Each look does three things.** Do what the deployment instructions say to reach the deploy:
   when they name an agent or role for it, `envoy_publish` the merge commit to that role's topic
-  with `expects_reply: none`, and await no reply. Read whether production carries the merge. Then
+  with `expects_reply: false`, and await no reply. Read whether production carries the merge. Then
   report one of three outcomes:
   - `pass`, once you drove the changed path in production through the user's own access path and
     recorded the result: `dispatch result` against the issue's `after_merge` check, at the merge
