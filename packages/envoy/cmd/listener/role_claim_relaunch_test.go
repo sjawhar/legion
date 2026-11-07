@@ -165,7 +165,7 @@ func TestARelaunchedRoleHolderReclaimsItsRoleAndItsOwnStopFreesIt(t *testing.T) 
 
 	// The dead process answers for nothing, so its claim's renewal ages out of the window, and
 	// the next heartbeat's re-claim takes the role and moves the claim to this process.
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 	if granted := rig.claim(secondProcess); granted.Code != http.StatusOK {
 		t.Fatalf("the relaunch's re-claim once nobody answers for the claim: status %d %s, want 200", granted.Code, granted.Body.String())
 	}

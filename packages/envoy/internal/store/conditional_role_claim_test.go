@@ -60,7 +60,13 @@ func raceConditionalClaim(t *testing.T, role, seed, winner, claimant string) (*R
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	required := read.Revision
-	_, err = reg.SetRoleWithPrevious(context.Background(), claimant, "example-host", roleClaimInstance, role, "", false, &required)
+	_, err = reg.SetRoleWithPrevious(context.Background(), RoleClaimRequest{
+		SessionID:        claimant,
+		MachineID:        "example-host",
+		ClientInstanceID: roleClaimInstance,
+		Role:             role,
+		IfClaimRevision:  &required,
+	})
 	if racing.updates == 0 {
 		t.Fatalf("the conditional claim never reached a conditional update, so it never raced")
 	}

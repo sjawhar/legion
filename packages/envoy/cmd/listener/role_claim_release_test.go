@@ -47,7 +47,8 @@ func newRoleClaimReleaseRig(t *testing.T, sessionID, role, instance string) *rol
 	if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine"}, []string{releaseKeptTopic}); err != nil {
 		t.Fatalf("register %s's interests: %v", sessionID, err)
 	}
-	if _, err := registry.SetRoleWithPrevious(ctx, sessionID, "test-machine", instance, role, "", false, nil); err != nil {
+	claim := store.RoleClaimRequest{SessionID: sessionID, MachineID: "test-machine", ClientInstanceID: instance, Role: role}
+	if _, err := registry.SetRoleWithPrevious(ctx, claim); err != nil {
 		t.Fatalf("claim %s for %s as %q: %v", role, sessionID, instance, err)
 	}
 	rig := &roleClaimReleaseRig{

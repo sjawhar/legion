@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleHolderSessions is the session side of a role-holder resolution (roles.SessionLookup): this
@@ -190,14 +191,10 @@ func bucketSessionEntry(ctx context.Context, sessions *session.SessionRegistry, 
 
 // roleSupersession is what a soft claim may do to the role holder it found (POST /v1/roles/set,
 // the issue's R6): take the role from that holder, leave it where it is, or neither, because a
-// session read did not answer. roleSupersessionVerdict answers one of these, so the route states
-// the rule that decides it nowhere and words only the answers.
-//
-// A holder that is the claimant's own session id never reaches this type. That one the route
-// decides on the standing claim itself - the process the claim names and the renewal it carries
-// (store.RoleClaimRenewedWithin) - because a session id names no process and the session record
-// a verdict here would read names whichever process registered that id last, not the one holding
-// the role.
+// read did not answer. One of two functions answers it - roleSupersessionVerdict for a holder
+// that is another session, roleOwnSessionVerdict for the role held under the claimant's own
+// session id - so the route states the rule that decides a holder nowhere and words only the
+// answers.
 type roleSupersession uint8
 
 const (
@@ -208,7 +205,10 @@ const (
 	// roleTakenFromHolder: the holder gives the role up, because it is not live - stalled past
 	// the live window, or with no record at all - or because it is the claimant's named
 	// predecessor and its entry carries the claimant's own client instance id, the same
-	// conversation continuing inside the instance that held the role.
+	// conversation continuing inside the instance that held the role. The role held under the
+	// claimant's own session id is taken on this verdict too, where the standing claim names
+	// the claimant's own process or nobody renewed it inside the live window
+	// (roleOwnSessionVerdict).
 	roleTakenFromHolder
 	// roleTakenFromUnidentifiedPredecessor is roleTakenFromHolder for the one case
 	// session.InstanceMatches accepts without two ids to compare: a live named predecessor
@@ -216,11 +216,65 @@ const (
 	// field. It is a verdict of its own only so the route can log that takeover without
 	// restating the rule that reached it.
 	roleTakenFromUnidentifiedPredecessor
-	// roleHolderUnread: a session read that did not answer, so nothing is taken from anyone.
-	// It comes with the error the route answers (writeBusUnavailable), already worded for the
-	// read that failed.
+	// roleHeldByAnotherProcess: the role is held under the claimant's own session id by a
+	// process that still answers for its claim, so nothing is taken and
+	// store.Registry.SetRoleWithPrevious answers the 409 naming that session id
+	// (roleOwnSessionVerdict). It is roleStaysWithHolder's refusal told apart from it only so
+	// the route can log the second process being held off, which a bare 409 naming the
+	// claimant's own session id does not show an operator.
+	roleHeldByAnotherProcess
+	// roleHolderUnread: a read that did not answer - the holder's session record, or the role
+	// claim view a renewal is only worth reading while it can answer - so nothing is taken
+	// from anyone. It comes with the error the route answers (writeBusUnavailable), already
+	// worded for the read that failed.
 	roleHolderUnread
+	// roleUnclaimed: no claim stands for the role, so there is no holder to supersede and
+	// nothing to log. Only the route's own read of the claim answers it (roleSetHandler),
+	// never the two verdict functions, which are asked about a holder.
+	roleUnclaimed
 )
+
+// roleOwnSessionVerdict decides a soft claim of a role whose standing claim is held under the
+// claimant's own session id, which is no reason to hand the role over: a second process can
+// resume a live session's id, and the session record names whichever process registered that id
+// last, not the one holding the role. So this verdict is made on the standing claim alone -
+// claim, as the route read it - and reads no session record at all, which is what tells it apart
+// from roleSupersessionVerdict. claimantInstanceID is the client instance the claimant's request
+// stated, with no fallback to the registration: an absent instance names no process and matches
+// no claim, so a request that states none reaches the renewal test rather than a case of its own.
+//
+// A claim naming the claimant's very process is the holder re-claiming its own role
+// (store.RoleClaim.HeldByProcess), granted at once however recently it was renewed: it rests on
+// no renewal, and refusing it would strand the holder's own process after a listener restart.
+//
+// Otherwise the claim goes to the claimant only once nobody has answered for it inside liveWindow
+// (store.Registry.ClaimRenewedWithin, over the registry's own clock). A claim an earlier build
+// wrote names no process and is weighed at the moment it was claimed
+// (store.RoleClaim.LastAnsweredAt), so it is kept while it is newer than the window and granted
+// once it is older - the same rule, not a case of its own.
+//
+// That reading is only worth anything while renewals can still move. What moves them is a
+// registration (POST /v1/interests/subscribe), which renews every claim the registering session
+// holds through the role claim view (store.Registry.RenewRoleClaims, over RolesHeldBy); while
+// that view cannot answer - the state a listener restart leaves for as long as its first read of
+// the bucket takes - no registration renews any claim, so every claim's renewal is ageing with
+// nothing able to move it. A refill longer than the live window would then read a live holder's
+// claim as abandoned and hand its role to a second process, the very takeover the refusal exists
+// to make. So the renewal test fails closed on the view's own state (store.Registry.RoleViewErr,
+// the one test of it, which makes no bucket call): roleHolderUnread with the error the route
+// answers, nothing claimed and nothing written, and the claimant retries.
+func roleOwnSessionVerdict(registry *store.Registry, claim store.RoleClaim, claimantInstanceID string, liveWindow time.Duration) (roleSupersession, error) {
+	if claim.HeldByProcess(claimantInstanceID) {
+		return roleTakenFromHolder, nil
+	}
+	if registry.ClaimRenewedWithin(claim, liveWindow) {
+		return roleHeldByAnotherProcess, nil
+	}
+	if viewErr := registry.RoleViewErr(); viewErr != nil {
+		return roleHolderUnread, fmt.Errorf("read role claim view: %w", viewErr)
+	}
+	return roleTakenFromHolder, nil
+}
 
 // roleSupersessionVerdict decides whether a soft claim takes the role from the holder it found,
 // for the one route that asks (roleSetHandler). holder is the session the role's claim names,

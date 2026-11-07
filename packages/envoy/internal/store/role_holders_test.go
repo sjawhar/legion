@@ -509,7 +509,8 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 	interests := reg.watcher.KV()
 	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(&endingGetKeyValue{KeyValue: kv, key: oldSession, end: cancel}, interests.WatchHandle(), interests.Streams()), interestCache{reg})
 
-	if _, err := reg.SetRoleWithPrevious(ctx, newSession, "example-host", roleClaimInstance, role, "", false, nil); err != nil {
+	claim := RoleClaimRequest{SessionID: newSession, MachineID: "example-host", ClientInstanceID: roleClaimInstance, Role: role}
+	if _, err := reg.SetRoleWithPrevious(ctx, claim); err != nil {
 		t.Fatalf("a claim that landed returned %v when its request ended during the cleanup, want success", err)
 	}
 	assertRoleHolder(t, reg, role, newSession)

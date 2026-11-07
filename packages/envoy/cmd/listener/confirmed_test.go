@@ -55,10 +55,10 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 // /v1/roles/set hands a claim's handover this config (runKeptRoleDrain), so a test that claims
 // a role through that route needs it.
 //
-// And the live window of d's own session registry, which that route weighs a standing claim's
-// renewal against when the claim is held under the claimant's own session id
-// (listenerDeps.sessionLiveWindow): read from the registry here exactly as main reads it from
-// its own, so a test's route and its registry can never be held to different windows.
+// The route needs nothing of the live window here: it reads that window from d's own session
+// registry when it weighs a standing claim's renewal (roleSetHandler, through
+// session.SessionRegistry.Windows), so a test's route and its registry are held to one window
+// with nothing to keep in step by hand.
 func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
@@ -82,9 +82,6 @@ func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
 		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
 		roleKeepDrains:    newRoleKeepGuards(),
-	}
-	if d.sessions != nil {
-		d.sessionLiveWindow, _ = d.sessions.Windows()
 	}
 	return d
 }

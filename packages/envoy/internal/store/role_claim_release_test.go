@@ -20,7 +20,8 @@ var releasedByItsProcess = RoleReleaseAuthority{ClientInstanceID: roleClaimInsta
 // which process holds the role and a release can be weighed against it.
 func claimRoleAs(t *testing.T, reg *Registry, sessionID, machineID, role, instance string) {
 	t.Helper()
-	if _, err := reg.SetRoleWithPrevious(context.Background(), sessionID, machineID, instance, role, "", false, nil); err != nil {
+	claim := RoleClaimRequest{SessionID: sessionID, MachineID: machineID, ClientInstanceID: instance, Role: role}
+	if _, err := reg.SetRoleWithPrevious(context.Background(), claim); err != nil {
 		t.Fatalf("claim %s for %s as %q: %v", role, sessionID, instance, err)
 	}
 }

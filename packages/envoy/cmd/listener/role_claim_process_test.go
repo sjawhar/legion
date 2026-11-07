@@ -147,7 +147,7 @@ func TestASecondProcessOfOneSessionIdTakesTheRoleOnceTheClaimsRenewalIsOlderThan
 	)
 	rig := newRoleClaimProcessRig(t, sessionID)
 	rig.seed(t, sessionID, role, holdingProcess)
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 
 	recorder := rig.claim(sessionID, role, secondProcess)
 	if recorder.Code != http.StatusOK {
@@ -172,7 +172,7 @@ func TestASecondProcessOfOneSessionIdIsRefusedTheRoleWhileTheRoleClaimViewCannot
 	)
 	rig := newRoleClaimProcessRig(t, sessionID)
 	rig.seed(t, sessionID, role, holdingProcess)
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 	refuseRoleClaimView(t, rig.deps.registry)
 
 	recorder := rig.claim(sessionID, role, secondProcess)
@@ -196,7 +196,7 @@ func TestASecondProcessOfOneSessionIdTakesTheRoleOnceTheRoleClaimViewAnswersAgai
 	)
 	rig := newRoleClaimProcessRig(t, sessionID)
 	rig.seed(t, sessionID, role, holdingProcess)
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 	answerAgain := refuseRoleClaimView(t, rig.deps.registry)
 	if recorder := rig.claim(sessionID, role, secondProcess); !roleViewUnanswered(recorder) {
 		t.Fatalf("a second process's claim while the role claim view cannot answer: status %d, Retry-After %q, body %s; want the bus-unavailable 503 naming the role claim view's refusal",
@@ -257,7 +257,7 @@ func TestARoleClaimRecordThatNamesNoProcessIsWeighedByTheMomentItWasClaimed(t *t
 		t.Fatalf("a claim over a record claimed inside the window: status %d %s, want 409 naming %s", refused.Code, refused.Body.String(), sessionID)
 	}
 
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 	granted := rig.claim(sessionID, role, secondProcess)
 	if granted.Code != http.StatusOK {
 		t.Fatalf("a claim over a record claimed a window ago: status %d %s, want 200", granted.Code, granted.Body.String())
@@ -287,7 +287,7 @@ func TestARoleClaimThatStatesNoProcessIsWeighedByTheStandingClaimsRenewal(t *tes
 		t.Fatalf("the stored claim names the process %q after the refusal, want %q", got, holdingProcess)
 	}
 
-	ageRoleClaim(t, rig.deps, role, 2*rig.deps.sessionLiveWindow)
+	ageRoleClaim(t, rig.deps, role, 2*roleClaimLiveWindow(rig.deps))
 	granted := rig.claim(sessionID, role, "")
 	if granted.Code != http.StatusOK {
 		t.Fatalf("a claim that states no process against a claim nobody renews: status %d %s, want 200", granted.Code, granted.Body.String())
@@ -299,8 +299,10 @@ func TestARoleClaimThatStatesNoProcessIsWeighedByTheStandingClaimsRenewal(t *tes
 
 // The lookup answers the process the claim names beside the holder's session id, so a client
 // refused the role can see that the holder is another process of its own session id - the 409 of
-// POST /v1/roles/set names the session alone. A claim that names no process answers an empty
-// instance rather than leaving the field out.
+// POST /v1/roles/set names the session alone. A claim that names no process leaves the field out
+// altogether, as the 404 of a lapsed holder does: a client reads an absent field as "no other
+// process holds this role" and an empty one as "another process does", so an empty one would
+// send the holder of such a claim a soft claim it does not need and a 409 naming itself.
 func TestTheRoleLookupAnswersTheProcessTheHoldersClaimNames(t *testing.T) {
 	const sessionID = "ses_shared_id"
 	rig := newRoleClaimProcessRig(t, sessionID)
@@ -314,15 +316,25 @@ func TestTheRoleLookupAnswersTheProcessTheHoldersClaimNames(t *testing.T) {
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("GET /v1/roles/%s: status %d %s, want 200", tc.role, recorder.Code, recorder.Body.String())
 			}
+			// A pointer tells the field left out from the field answered empty, which is
+			// the whole of what this case holds.
 			var answer struct {
-				Holder           string `json:"holder"`
-				ClientInstanceID string `json:"client_instance_id"`
+				Holder           string  `json:"holder"`
+				ClientInstanceID *string `json:"client_instance_id"`
 			}
 			if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 				t.Fatalf("decode %s: %v", recorder.Body.String(), err)
 			}
-			if answer.Holder != sessionID || answer.ClientInstanceID != tc.instance {
-				t.Fatalf("the lookup answers holder %q of process %q, want %q of %q", answer.Holder, answer.ClientInstanceID, sessionID, tc.instance)
+			if answer.Holder != sessionID {
+				t.Fatalf("the lookup answers holder %q, want %q", answer.Holder, sessionID)
+			}
+			switch {
+			case tc.instance == "":
+				if answer.ClientInstanceID != nil {
+					t.Fatalf("the lookup of a claim that names no process answers client_instance_id %q, want the field left out", *answer.ClientInstanceID)
+				}
+			case answer.ClientInstanceID == nil || *answer.ClientInstanceID != tc.instance:
+				t.Fatalf("the lookup answers client_instance_id %v, want %q", answer.ClientInstanceID, tc.instance)
 			}
 		})
 	}

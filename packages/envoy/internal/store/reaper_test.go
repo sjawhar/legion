@@ -68,14 +68,13 @@ func TestARoleClaimPassKeepsAClaimItsHolderStillRenews(t *testing.T) {
 	assertRoleHolder(t, reg, renewing, holder)
 	assertRoleHolder(t, reg, stopped, "")
 
-	// And the release the pass makes, asked directly over the claim the pass read: the renewal
-	// is weighed there too, so no caller of it can free a claim the pass would keep.
-	claim, err := reg.RoleClaim(context.Background(), renewing)
-	if err != nil {
-		t.Fatalf("read the renewed claim: %v", err)
-	}
-	if release, err := reg.releaseReadExpiredRoleClaim(context.Background(), renewing, claim, 0, liveWindow); err != nil || release != ExpiredRoleClaimRenewed {
-		t.Fatalf("the release of a renewed claim = %v, %v; want it kept as renewed", release, err)
+	// And a pass over the claim that was kept, asked again: the renewal is the whole of what
+	// keeps it, so a second pass over the very same record frees nothing either. The release
+	// behind the pass weighs no renewal of its own (releaseReadExpiredRoleClaim), which is why
+	// this is asked of the pass and not of it.
+	sweep, err = reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a second pass over the renewed claim = %+v, %v; want nothing freed: the holder still renews it", sweep, err)
 	}
 	assertRoleHolder(t, reg, renewing, holder)
 }

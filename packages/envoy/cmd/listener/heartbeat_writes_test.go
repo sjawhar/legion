@@ -84,7 +84,8 @@ func TestHeartbeatKVWritesPerHeartbeat(t *testing.T) {
 	// its holder's interest record is written out by that registration, inside the first round
 	// and before anything is counted: the heartbeats counted below are identical to each other.
 	for index := range sessionCount {
-		if _, err := registry.SetRoleWithPrevious(ctx, sessionOf(index), "test-machine", instance, roleOf(index), "", false, nil); err != nil {
+		claim := store.RoleClaimRequest{SessionID: sessionOf(index), MachineID: "test-machine", ClientInstanceID: instance, Role: roleOf(index)}
+		if _, err := registry.SetRoleWithPrevious(ctx, claim); err != nil {
 			t.Fatalf("claim %s for %s: %v", roleOf(index), sessionOf(index), err)
 		}
 	}

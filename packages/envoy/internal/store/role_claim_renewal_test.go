@@ -33,7 +33,8 @@ func TestAClaimThisBuildWritesNamesItsHoldersProcessAndWhenItLastAnswered(t *tes
 		role   = "legion-controller"
 		holder = "ses_claiming_process"
 	)
-	if _, err := reg.SetRoleWithPrevious(context.Background(), holder, "example-host", roleClaimInstance, role, "", false, nil); err != nil {
+	claim := RoleClaimRequest{SessionID: holder, MachineID: "example-host", ClientInstanceID: roleClaimInstance, Role: role}
+	if _, err := reg.SetRoleWithPrevious(context.Background(), claim); err != nil {
 		t.Fatalf("claim %s for %s: %v", role, holder, err)
 	}
 
@@ -154,7 +155,8 @@ func renewedRoleClaim(t *testing.T, role, holder string) (*Registry, func(time.D
 	claimed := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
 	var elapsed atomic.Int64
 	reg.now = func() time.Time { return claimed.Add(time.Duration(elapsed.Load())) }
-	if _, err := reg.SetRoleWithPrevious(context.Background(), holder, "example-host", roleClaimInstance, role, "", false, nil); err != nil {
+	claim := RoleClaimRequest{SessionID: holder, MachineID: "example-host", ClientInstanceID: roleClaimInstance, Role: role}
+	if _, err := reg.SetRoleWithPrevious(context.Background(), claim); err != nil {
 		t.Fatalf("claim %s for %s: %v", role, holder, err)
 	}
 	return reg, func(since time.Duration) { elapsed.Store(int64(since)) }
@@ -162,8 +164,9 @@ func renewedRoleClaim(t *testing.T, role, holder string) (*Registry, func(time.D
 
 // The incident this guards: a second process resumed the holder's session id and deregistered it,
 // so the holder's session record is gone while the holder itself goes on answering for its claim.
-// The claim's own renewal is inside the live window, so neither the release nor a sweep frees it,
-// and the release says which window kept it.
+// The claim's own renewal is inside the live window, so the sweep keeps the claim whatever the
+// session bucket says of its holder - the renewal is the one thing that says the holder is still
+// there, and the sweep reads it before it asks anything else (ReapRoleClaims).
 func TestAClaimRenewedInsideTheLiveWindowIsKeptThoughItsHoldersSessionRecordIsGone(t *testing.T) {
 	const (
 		role       = "legion-controller"
@@ -174,17 +177,14 @@ func TestAClaimRenewedInsideTheLiveWindowIsKeptThoughItsHoldersSessionRecordIsGo
 	advance(liveWindow - time.Second)
 	gone := func(string) bool { return false }
 
-	// The release is handed the claim its caller read, as the reaper's pass hands it the claim
-	// it read to find the holder gone (ReapRoleClaims).
+	// The renewal the sweep weighs, read off the claim as the sweep's own scan carries it.
 	claim, err := reg.RoleClaim(context.Background(), role)
 	if err != nil {
-		t.Fatalf("read %s's claim to release: %v", role, err)
+		t.Fatalf("read %s's claim: %v", role, err)
 	}
-	release, err := reg.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0, liveWindow)
-	if err != nil || release != ExpiredRoleClaimRenewed {
-		t.Fatalf("release a claim renewed inside the live window = %v, %v; want it kept as renewed", release, err)
+	if !reg.ClaimRenewedWithin(claim, liveWindow) {
+		t.Fatalf("a claim renewed %s ago reads unrenewed within %s; want it renewed", liveWindow-time.Second, liveWindow)
 	}
-	assertRoleHolder(t, reg, role, holder)
 
 	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0, liveWindow)
 	if err != nil || sweep.Reaped != 0 {
@@ -209,7 +209,7 @@ func TestAClaimWhoseRenewalIsOlderThanTheLiveWindowIsFreed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s's claim to release: %v", role, err)
 		}
-		release, err := reg.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0, liveWindow)
+		release, err := reg.releaseReadExpiredRoleClaim(context.Background(), role, claim, 0)
 		if err != nil || release != ExpiredRoleClaimReleased {
 			t.Fatalf("release a claim renewed one live window ago = %v, %v; want it released", release, err)
 		}
@@ -227,17 +227,18 @@ func TestAClaimWhoseRenewalIsOlderThanTheLiveWindowIsFreed(t *testing.T) {
 	})
 }
 
-// RoleClaimRenewedWithin is the one test of a claim's renewal, and the release, the sweep and
-// POST /v1/roles/set weighing a claim held under the claimant's own session id all read a claim
-// through it, so it is asked here as a caller outside this package asks it: against a clock the
-// caller names. A claim an earlier build wrote carries no renewal and is weighed at the moment
-// it was claimed, so it is renewed while that moment is inside the window and stale once it is
-// older; a window of zero holds nothing renewed, and neither does a record carrying no time at
-// all.
-func TestRoleClaimRenewedWithinWeighsEveryClaimAgainstTheWindowItIsGiven(t *testing.T) {
+// Registry.ClaimRenewedWithin is the one test of a claim's renewal, and the sweep and POST
+// /v1/roles/set weighing a claim held under the claimant's own session id both read a claim
+// through it, against this registry's own clock: there is one clock for the two of them, and a
+// test that moves it moves both readings. A claim an earlier build wrote carries no renewal and
+// is weighed at the moment it was claimed, so it is renewed while that moment is inside the
+// window and stale once it is older; a window of zero holds nothing renewed, and neither does a
+// record carrying no time at all.
+func TestClaimRenewedWithinWeighsEveryClaimAgainstTheWindowItIsGiven(t *testing.T) {
 	now := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
 	const liveWindow = time.Minute
 	at := func(age time.Duration) int64 { return now.Add(-age).UnixMilli() }
+	reg := &Registry{now: func() time.Time { return now }}
 	for name, tc := range map[string]struct {
 		claim      RoleClaim
 		liveWindow time.Duration
@@ -251,7 +252,7 @@ func TestRoleClaimRenewedWithinWeighsEveryClaimAgainstTheWindowItIsGiven(t *test
 		"a caller that configured no window":              {claim: RoleClaim{ClaimedAt: at(time.Second), RenewedAt: at(time.Second)}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := RoleClaimRenewedWithin(tc.claim, now, tc.liveWindow); got != tc.want {
+			if got := reg.ClaimRenewedWithin(tc.claim, tc.liveWindow); got != tc.want {
 				t.Fatalf("a claim claimed at %d and renewed at %d reads renewed=%t within %s, want %t",
 					tc.claim.ClaimedAt, tc.claim.RenewedAt, got, tc.liveWindow, tc.want)
 			}
@@ -290,7 +291,15 @@ func renewableRoleClaim(t *testing.T, role, holder, instance string) (*Registry,
 	if err := reg.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("WaitForCacheReady: %v", err)
 	}
-	if _, err := reg.SetRoleWithPrevious(ctx, holder, "example-host", instance, role, roleClaimPredecessor, true, nil); err != nil {
+	claim := RoleClaimRequest{
+		SessionID:         holder,
+		MachineID:         "example-host",
+		ClientInstanceID:  instance,
+		Role:              role,
+		PreviousSessionID: roleClaimPredecessor,
+		Soft:              true,
+	}
+	if _, err := reg.SetRoleWithPrevious(ctx, claim); err != nil {
 		t.Fatalf("claim %s for %s: %v", role, holder, err)
 	}
 	return reg, func(since time.Duration) { elapsed.Store(int64(since)) }
@@ -431,7 +440,8 @@ func TestARenewalThatLosesItsCompareAndSwapWritesNothingAndIsNotRetried(t *testi
 	racing.beforeFirstUpdate = func() {
 		// A hard claim writes unconditionally, so it lands under the renewal's read and
 		// the renewal's own update meets the bucket's refusal, not one this hook invented.
-		if _, err := reg.SetRoleWithPrevious(context.Background(), winner, "example-host", roleClaimSecondInstance, role, "", false, nil); err != nil {
+		winning := RoleClaimRequest{SessionID: winner, MachineID: "example-host", ClientInstanceID: roleClaimSecondInstance, Role: role}
+		if _, err := reg.SetRoleWithPrevious(context.Background(), winning); err != nil {
 			t.Errorf("the claim that wins the race: %v", err)
 		}
 	}

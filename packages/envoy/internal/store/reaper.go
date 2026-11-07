@@ -150,14 +150,15 @@ type RoleClaimSweep struct {
 // over, uncounted, and the sweep goes on.
 //
 // A claim passes two tests before it is freed, and its own renewal is read first: a claim whose
-// holder answered for it less than liveWindow ago (RoleClaim.LastAnsweredAt) is kept without
-// isAlive being asked at all, because the holder goes on renewing the claim whatever the session
-// bucket says of the session id it registered under - a second process that resumed that id and
-// then deregistered it leaves the record gone and the holder running. Only a claim past that
-// window is weighed by isAlive, and only one both tests give up is released
-// (releaseReadExpiredRoleClaim, which weighs the renewal once more over the claim this pass
-// read, and sessionTTL, the restart grace, besides). The renewal is read off the record the scan
-// carried, so neither test costs the pass a bucket call of its own.
+// holder answered for it less than liveWindow ago (RoleClaim.LastAnsweredAt, through
+// Registry.ClaimRenewedWithin) is kept without isAlive being asked at all, because the holder
+// goes on renewing the claim whatever the session bucket says of the session id it registered
+// under - a second process that resumed that id and then deregistered it leaves the record gone
+// and the holder running. Only a claim past that window is weighed by isAlive, and only one both
+// tests give up is released (releaseReadExpiredRoleClaim, which weighs sessionTTL, the restart
+// grace, and reads the renewal no second time: this pass has read it already, over the very
+// claim it hands on). The renewal is read off the record the scan carried, so neither test costs
+// the pass a bucket call of its own.
 //
 // Every bucket call the pass makes after its scan - each release, and the delete of a key this
 // build cannot read - waits no longer than ctx (bus.Bounded), which is the reaper loop's own
@@ -250,10 +251,10 @@ func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool
 			continue
 		}
 		claim := scanned.Claim
-		if claim.HolderSessionID == "" || r.renewedWithin(claim, liveWindow) || isAlive(claim.HolderSessionID) {
+		if claim.HolderSessionID == "" || r.ClaimRenewedWithin(claim, liveWindow) || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim, sessionTTL, liveWindow)
+		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim, sessionTTL)
 		if err != nil {
 			if ended := ctx.Err(); ended != nil {
 				return sweep, ended

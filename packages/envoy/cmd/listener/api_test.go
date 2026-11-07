@@ -809,6 +809,15 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 }
 
+// roleClaimLiveWindow is the live window d's session registry runs with, which POST /v1/roles/set
+// weighs a standing claim's renewal against (store.Registry.ClaimRenewedWithin): read from that
+// registry exactly as the route reads it, so a test ages a claim past the very window the route
+// will judge it by.
+func roleClaimLiveWindow(d *listenerDeps) time.Duration {
+	live, _ := d.sessions.Windows()
+	return live
+}
+
 // ageRoleClaim moves role's stored claim back by age, both the moment it was claimed and the
 // renewal that follows it (store.RoleClaim), as a holder that has stopped answering for its claim
 // leaves it. Nothing frees a claim renewed inside the live window, so a test about a holder that
@@ -2181,7 +2190,8 @@ func TestUnsubscribeAllReleasesTheRoleClaimsOfTheProcessThatAsked(t *testing.T) 
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := registry.SetRoleWithPrevious(ctx, sessionID, "test-machine", holdingProcess, role, "", false, nil); err != nil {
+	claimRequest := store.RoleClaimRequest{SessionID: sessionID, MachineID: "test-machine", ClientInstanceID: holdingProcess, Role: role}
+	if _, err := registry.SetRoleWithPrevious(ctx, claimRequest); err != nil {
 		t.Fatalf("claim %s for %s: %v", role, sessionID, err)
 	}
 
