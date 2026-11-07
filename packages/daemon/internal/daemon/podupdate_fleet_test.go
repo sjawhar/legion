@@ -356,7 +356,7 @@ func (d *fleetHandoffs) Handoff(_ context.Context, id string) (dispatch.Handoff,
 	defer d.mu.Unlock()
 	handoff, ok := d.handoffs[id]
 	if !ok {
-		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: dispatch.HandoffNotFound}
+		return dispatch.Handoff{}, &dispatch.Error{Status: http.StatusNotFound, Code: "HANDOFF_NOT_FOUND"}
 	}
 	return handoff, nil
 }

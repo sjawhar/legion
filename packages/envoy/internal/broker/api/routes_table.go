@@ -58,6 +58,13 @@ const (
 	// someone holds. It is an approval credential over every person's secrets, so Dispatch's
 	// server alone holds it.
 	relaysDecisions
+	// readsGrantLog is reading every audit row of a closed period: the whole grant log, each row
+	// naming the session that asked, the person behind it, the service the broker verified, the
+	// secrets and the decision. A quarterly access review needs it to answer "who held what, and
+	// who said yes" from the broker's own record rather than from anyone's recollection. It
+	// grants nothing: it decides no request, releases no secret value and writes no row, so a
+	// caller holding it alone can read the broker's history and change none of it.
+	readsGrantLog
 )
 
 // Account is a caller of the accountAuth routes: the name BROKER_API_ACCOUNTS gives its
@@ -76,11 +83,17 @@ func (a Account) may(p power) bool { return p != noPower && a.powers&p == p }
 // accountPowers is the broker's whole table of caller names: every name BROKER_API_ACCOUNTS may
 // give a ServiceAccount, and what that name may do. dispatch is Dispatch's server, which relays a
 // person's decisions and reads tokens back; listener is the Envoy listener, which reads a token
-// back and relays no decision. A new caller is a deliberate row here, since a name is an
-// authority and not a label: a name this table does not know refuses the broker's boot.
+// back and relays no decision; access-review is the identity a quarterly access review calls as,
+// which reads the grant log and nothing else. The review is a third name rather than another of
+// Dispatch's powers because Dispatch's server already holds approval authority over every
+// person's secrets: giving the whole audit trail to that same name would widen what one stolen
+// token reads, while the review identity decides nothing and so is safe to hand to whoever runs
+// the review. A new caller is a deliberate row here, since a name is an authority and not a
+// label: a name this table does not know refuses the broker's boot.
 var accountPowers = map[string]power{
-	"dispatch": readsTokensBack | relaysDecisions,
-	"listener": readsTokensBack,
+	"access-review": readsGrantLog,
+	"dispatch":      readsTokensBack | relaysDecisions,
+	"listener":      readsTokensBack,
 }
 
 // AccountFor answers the account a caller name carries, and whether the broker knows the name at
@@ -328,6 +341,15 @@ func routes() []apiRoute {
 		// revoking person is the one the request names, which the broker takes on the caller's
 		// word: a revoke only takes power away.
 		{http.MethodPost, "/v1/person-signins/{id}/revoke", accountAuth(relaysDecisions, (*server).revokePersonSignIn)},
+		// Read the broker's grant log for one closed period, for a quarterly access review:
+		// every audit row between ?since and ?until (RFC 3339, half-open), oldest first, each
+		// naming the session that wrote it, that session's person, the service the broker
+		// verified, the secrets asked for and their decisions, the state, the approver and who
+		// decided. ?after resumes after an id and ?limit bounds the page, which is a thousand
+		// rows at most. ?until must be at least an hour before now, so that every row of the
+		// period has committed before the review reads it. It is the one route readsGrantLog
+		// reaches: the review reads the broker's record and changes nothing in it.
+		{http.MethodGet, "/v1/grant-log", accountAuth(readsGrantLog, (*server).listGrantLog)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},

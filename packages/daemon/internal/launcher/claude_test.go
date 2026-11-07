@@ -426,11 +426,7 @@ func processRig(t *testing.T) (g *rig, kill func()) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	private, err := os.MkdirTemp("", "lch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(private) })
+	private := shortTempDir(t)
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

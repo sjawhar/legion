@@ -58,6 +58,11 @@ type Project struct {
 	// Deploys are `deploys`, the workflows that deploy the project's repositories, in the file's
 	// order; nil when the file names none.
 	Deploys []Deploy
+	// CommitIssueTrailerRepos are `commit_issue_trailer_repos`, the repositories whose commits a
+	// pane stamps with the issue key, in the file's order; nil when the file names none. The
+	// project's repositories are Dispatch's mapping (Settings → Repositories → Projects), and this
+	// key only selects among them, so a name the project does not serve stamps nothing.
+	CommitIssueTrailerRepos []ghrepo.Repository
 	// Memory is `memory`, the project's per-tree memory setting; its zero value is off, which a
 	// file that names no block leaves.
 	Memory Memory
@@ -149,7 +154,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "deploys", "memory", "slack_channels")
+	fields, err := members(value, key, "commit_issue_trailer_repos", "deploys", "memory", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		if unknown.name == "repo" {
@@ -169,6 +174,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	}
 	if deploys := fields["deploys"]; deploys != nil {
 		if project.Deploys, err = readDeploys(deploys, key+".deploys"); err != nil {
+			return Project{}, err
+		}
+	}
+	if repos := fields["commit_issue_trailer_repos"]; repos != nil {
+		if project.CommitIssueTrailerRepos, err = readCommitIssueTrailerRepos(repos, key+".commit_issue_trailer_repos"); err != nil {
 			return Project{}, err
 		}
 	}
@@ -259,6 +269,32 @@ func workflowFile(path string) bool {
 		}
 	}
 	return false
+}
+
+// readCommitIssueTrailerRepos is a project's `commit_issue_trailer_repos`: a list of strings, each
+// exactly a repository Parse takes, whose commits a pane stamps with the issue key. One repository
+// is named once, compared as GitHub compares names, without case: a second entry stamps the same
+// commits the first does, so it is the file saying one thing twice rather than a second rule. An
+// empty list is no repository, as an absent key is.
+func readCommitIssueTrailerRepos(value *yaml.Node, key string) ([]ghrepo.Repository, error) {
+	names, err := readStrings(value, key)
+	if err != nil || len(names) == 0 {
+		return nil, err
+	}
+	repos := make([]ghrepo.Repository, 0, len(names))
+	for index, name := range names {
+		repo, err := ghrepo.Parse(fmt.Sprintf("%s[%d]", key, index), name)
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(repos, func(named ghrepo.Repository) bool {
+			return strings.EqualFold(named.String(), repo.String())
+		}) {
+			return nil, fmt.Errorf("%s names %s twice", key, repo)
+		}
+		repos = append(repos, repo)
+	}
+	return repos, nil
 }
 
 func readGates(value *yaml.Node, key string) (*Gates, error) {

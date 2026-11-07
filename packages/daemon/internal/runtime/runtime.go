@@ -313,7 +313,12 @@ func (k Known) Validate() error {
 // the project's memory group (record.Issue.MemoryGroup on the tree's root, which internal/daemon's
 // specs reads): such a launch names the project's memory overlays last in PI_CONFIG_FILES and ends
 // its system prompt with the memory instructions; false for every no-memory tree and for the
-// controller, which runs in no tree. Backend is the harness the process runs (`worker_backends`,
+// controller, which runs in no tree. IssueTrailer is the issue key this pane stamps into its
+// commits, as the `Dispatch: <KEY>` trailer the agent's jj overlay writes (LEGION_ISSUE_TRAILER,
+// which each runtime sets itself): the claim's own issue when the project names its repository in
+// `commit_issue_trailer_repos` (which internal/daemon's specs reads); "" for a repository the
+// project does not name, for a launch with no repository, and for the controller, which works
+// neither. Backend is the harness the process runs (`worker_backends`,
 // Backends); "" is Oh My Pi (Of).
 type SpawnSpec struct {
 	Claim             claim.Token
@@ -331,6 +336,7 @@ type SpawnSpec struct {
 	ResumeSessionFile string
 	Plugins           *PluginInstall
 	Memory            bool
+	IssueTrailer      string
 	Backend           Backend
 }
 

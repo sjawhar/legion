@@ -27,6 +27,14 @@ export interface ClaimCapability {
   readonly secret: string;
   readonly claimToken: string;
   readonly generation: number;
+  /** The task agents the registration answered with (`LegionRegistration.promptAgents`), which
+   * the session's own capability measurements check its discovered agents against long after the
+   * boot returned. `bootLegionClaim` is this field's only producer, and every claim in production
+   * carries the list: `packages/claude-envoy/src/legion-claim.ts`, the other host that records a
+   * claim, records what that boot hands it. It is optional because a reader that finds no value
+   * has a defined answer — it measures against no prompt agents — so a claim built without it,
+   * which only a test does, is read rather than refused. */
+  readonly promptAgents?: readonly string[];
 }
 
 /**

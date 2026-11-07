@@ -154,6 +154,11 @@ type workflowRuntime struct {
 	releaseWaits      map[string]map[string]releaseWait
 	recoveryHeldSince time.Time
 	recheckAfter      func(time.Duration) <-chan time.Time
+	// commitIssueTrailerRepos is the project's `commit_issue_trailer_repos`, the repositories
+	// whose commits a pane stamps with the issue key, as the file names them. The boot's mapping
+	// load says of each one the project does not serve that it stamps nothing
+	// (logUnservedCommitIssueTrailerRepos); nothing else in the daemon reads it.
+	commitIssueTrailerRepos []ghrepo.Repository
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.

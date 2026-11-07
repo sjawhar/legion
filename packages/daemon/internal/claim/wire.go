@@ -40,8 +40,9 @@ type RegisterResponse struct {
 // ReadyRequest says the agent has finished booting and can be prompted. It is a separate call
 // from the registration because registration is the plugin's first act and readiness is its last:
 // the role claim on Envoy, the session attribution, and the tool gate all happen in between.
-// Capabilities is what the session measured of the live capability rows while it booted
-// (LEGION-663); the controller's ready carries none.
+// Capabilities is a report a claimed session sends after its boot, from the interval it runs
+// while it is idle (LEGION-663, INFRA-927); a boot's ready and a role-regain's carry none, and
+// the controller sends no report either.
 type ReadyRequest struct {
 	ClaimToken   Token             `json:"claimToken"`
 	SessionID    string            `json:"sessionId"`
@@ -50,7 +51,7 @@ type ReadyRequest struct {
 	Capabilities *CapabilityReport `json:"capabilities,omitempty"`
 }
 
-// CapabilityReport is what a session measured of the live capability rows at boot (LEGION-663):
+// CapabilityReport is what a session measured of the live capability rows (LEGION-663):
 // when it measured, how long the measuring took, and one row per capability it checked. The
 // daemon normalises the rows (capabilities.Normalize) before it keeps them.
 type CapabilityReport struct {

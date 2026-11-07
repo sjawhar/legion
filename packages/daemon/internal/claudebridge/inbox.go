@@ -43,13 +43,27 @@ type inbox struct {
 	wg       sync.WaitGroup
 }
 
+// inboxDirPrefix names the inbox's directory, which os.MkdirTemp makes under the process TMPDIR,
+// and inboxSocketName the socket the bridge binds in it.
+const (
+	inboxDirPrefix  = "legion-claude-"
+	inboxSocketName = "inbox.sock"
+)
+
+// InboxLongestPath is the longest path the bridge makes under the process TMPDIR, written
+// relative to it: the inbox directory and the socket in it. The ten digits are os.MkdirTemp's own
+// suffix at its widest, a random number below 1e10. A test that runs the bridge in-process hands
+// this to testtmp.Dir as the room the TMPDIR it places needs, so that the socket's path stays
+// inside the 107 bytes Linux holds.
+const InboxLongestPath = inboxDirPrefix + "0123456789" + "/" + inboxSocketName
+
 // listenInbox opens the inbox and serves it until close, handing each delivery to the loop.
 func listenInbox(events chan<- event, stop <-chan struct{}, logger *log.Logger) (*inbox, error) {
-	dir, err := os.MkdirTemp("", "legion-claude-")
+	dir, err := os.MkdirTemp("", inboxDirPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("make the inbox directory: %w", err)
 	}
-	path := filepath.Join(dir, "inbox.sock")
+	path := filepath.Join(dir, inboxSocketName)
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		_ = os.RemoveAll(dir)

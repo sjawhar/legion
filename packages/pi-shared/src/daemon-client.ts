@@ -91,7 +91,10 @@ export interface LegionDaemonClient {
   /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
    * controller start` fetched, and the answer is the controller's registration. */
   readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
-  readonly ready: (input: ReadyInput) => Promise<void>;
+  /** The agent saying it can be prompted. `signal` aborts the request, its answer's body
+   * included: a caller that stops waiting for a daemon that does not answer (the capability
+   * schedule's bounded send) aborts it rather than leave it open. */
+  readonly ready: (input: ReadyInput, options?: { readonly signal?: AbortSignal }) => Promise<void>;
   readonly readyForUpdate: (input: ReadyForUpdateInput) => Promise<void>;
   readonly exit: (input: ExitInput) => Promise<void>;
   /** `claim.TurnOutcomeRequest`: how one of the claim's turns ended, under the sequence the
@@ -441,8 +444,8 @@ export function createLegionDaemonClient(
   ): Promise<Output> => read("POST", path, response, request.parse(body) as object);
 
   /** The claim routes that answer 204 and nothing else. */
-  const acknowledge = async (path: string, body: object): Promise<void> => {
-    const { status, text } = await call("POST", path, body);
+  const acknowledge = async (path: string, body: object, signal?: AbortSignal): Promise<void> => {
+    const { status, text } = await call("POST", path, body, signal);
     if (status !== 204 || text !== "") {
       throw new LegionDaemonContractError(
         "POST",
@@ -459,7 +462,7 @@ export function createLegionDaemonClient(
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) =>
       read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
-    ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    ready: (input, options) => acknowledge("/legion/v1/claims/ready", input, options?.signal),
     readyForUpdate: (input) => acknowledge("/legion/v1/claims/ready-for-update", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     turnOutcome: (input) =>

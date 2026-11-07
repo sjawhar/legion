@@ -181,6 +181,7 @@ test("registers once the transcript exists, claims the claim token's role soft, 
     secret: String(registered["secret"]),
     claimToken: String(registered["claimToken"]),
     generation: Number(registered["generation"]),
+    promptAgents: registered["promptAgents"] as never,
   })
   expect(stops).toBe(0)
   expect(lines).toEqual([])
