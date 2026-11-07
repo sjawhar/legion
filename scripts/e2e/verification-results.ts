@@ -41,18 +41,41 @@ const session = "verification-results-e2e";
 const repo = "acme/verification-live";
 const hiddenRepo = "acme/verification-hidden";
 
-/** The commits the cases record at. A result's commit is 40 lowercase hex characters, which is
- *  all Dispatch reads of it; the fake GitHub answers for these and no others. */
-const commits = {
+/** The commits the proof's repository holds, which is every commit a case records against it:
+ *  the record route asks GitHub whether the repository the check's issue resolves to holds a
+ *  result's commit and refuses one it does not, and the seed below gives that repository these
+ *  and nothing else. A result's commit is 40 lowercase hex characters, which is all Dispatch
+ *  reads of it. */
+const heldCommits = {
+  /** The result read back under its check. */
   a2: "1".repeat(40),
+  /** The pull request's first head. */
   headOne: "2".repeat(40),
+  /** The pull request's second head, which ages the result at the first. */
   headTwo: "3".repeat(40),
+  /** The after-merge result the closed issue takes. */
   closed: "4".repeat(40),
+  /** One of the two commits the default-branch check records at, the one the compare calls
+   *  behind. The branch holds it as well, and it is named here so the fixture says what the case
+   *  needs rather than leaning on the compare's seed. */
   behind: "5".repeat(40),
+  /** The other of those two, the one the compare calls diverged. */
   diverged: "6".repeat(40),
+  /** The head of the stranger's pull request. */
+  fork: "9".repeat(40),
+};
+
+/** Every commit the cases name: the ones that repository holds, and three it does not.
+ *  `mainHead` is nobody's result, only the end of the default branch, which the branch below
+ *  holds; `unheld` is the commit the seed leaves out, so that GitHub's answer that the
+ *  repository holds no such commit is what the refusal case drives; and `hidden` is recorded
+ *  against the repository the App is not installed on, where the installation's 404 stops
+ *  Dispatch before it can ask about a commit at all. */
+const commits = {
+  ...heldCommits,
   mainHead: "7".repeat(40),
   hidden: "8".repeat(40),
-  fork: "9".repeat(40),
+  unheld: "a".repeat(40),
 };
 
 type Json = Record<string, unknown>;
@@ -84,22 +107,32 @@ function asSession(method: string, path: string, body?: Json): Promise<unknown> 
   return call(method, path, headers, payload);
 }
 
-/** A write the server refuses: its status and its code, for a case that asserts the refusal. */
-async function refusal(method: string, path: string, body: Json): Promise<string> {
+/** A write the server refuses, as the case that asserts the refusal reads it: `answer` is its
+ *  status and its code, and `error` the words it carries, which a case may read for the commit
+ *  and the repository they name. */
+interface Refusal {
+  readonly answer: string;
+  readonly error: string;
+}
+
+async function refusal(method: string, path: string, body: Json): Promise<Refusal> {
   const response = await fetch(new URL(path, dispatchUrl), {
     body: JSON.stringify({ ...body, actor: { id: session, kind: "session" } }),
     headers: { Authorization: `Bearer ${agentToken}`, "Content-Type": "application/json" },
     method,
   });
   const text = await response.text();
-  if (response.ok) return `${response.status} (the write was taken)`;
+  if (response.ok) return { answer: `${response.status} (the write was taken)`, error: text };
   let code = "";
+  let error = text;
   try {
-    code = String((JSON.parse(text) as Json).code ?? "");
+    const parsed = JSON.parse(text) as Json;
+    code = String(parsed.code ?? "");
+    error = String(parsed.error ?? text);
   } catch {
     code = text;
   }
-  return `${response.status} ${code}`;
+  return { answer: `${response.status} ${code}`, error };
 }
 
 async function signIn(login: string): Promise<string> {
@@ -237,13 +270,21 @@ function summarise(stopped?: string): never {
 
 // The fake GitHub answers for two repositories: the one the proof's issues resolve to, whose
 // default branch holds the `behind` commit and ends at `mainHead`, and one the App is not
-// installed on, whose every read is GitHub's 404. `commit_pulls` is empty on purpose: the record
-// route's read-through asks GitHub which pull requests name a result's commit, and with no answer
-// there the only thing that can teach Dispatch a head is the envelope the cases publish.
+// installed on, whose every read is GitHub's 404.
+//
+// The first is given `heldCommits` and no commit besides, so every commit a case records against
+// it is held and the one the refusal case drives earns the 422 GitHub answers for a commit a
+// repository does not hold. What each commit is for stands at its own declaration above, which
+// is the one list of them.
+//
+// `commit_pulls` is empty on purpose: the record route's read-through asks GitHub which pull
+// requests name a result's commit, and with no answer there the only thing that can teach
+// Dispatch a head is the envelope the cases publish.
 const seeded = await fetch(new URL("/__fixture/repos", githubUrl), {
   body: JSON.stringify({
     [repo]: {
       branch_commits: { main: [commits.behind, commits.mainHead] },
+      commits: Object.values(heldCommits),
       contents: "read",
       default_branch: "main",
       installation_id: 256,
@@ -322,7 +363,7 @@ console.log(
 // result and judges the check it names. A binary that does not serve the route at all answers 404
 // and the run stops here, which is what this proof's negative control reads.
 await runCase("the-results-route-is-served", async () => {
-  const answer = await refusal("POST", issuePath(probeIssue, "/results"), {
+  const { answer } = await refusal("POST", issuePath(probeIssue, "/results"), {
     check: "no-such-check",
     commit: commits.a2,
     role: "tester",
@@ -551,7 +592,7 @@ The pre-merge check runs before it.
   if (check.results.length !== 1)
     return `the after-merge check holds ${check.results.length} results, want 1`;
 
-  const beforeMerge = await refusal("POST", issuePath(a5Issue, "/results"), {
+  const { answer: beforeMerge } = await refusal("POST", issuePath(a5Issue, "/results"), {
     check: "before",
     commit: commits.closed,
     role: "tester",
@@ -560,7 +601,7 @@ The pre-merge check runs before it.
   note(`a result for the before-merge check there answers ${beforeMerge}`);
   if (beforeMerge !== "409 ISSUE_CLOSED") return `the before-merge result answers ${beforeMerge}`;
 
-  const document = await refusal("POST", issuePath(a5Issue, "/artifacts"), {
+  const { answer: document } = await refusal("POST", issuePath(a5Issue, "/artifacts"), {
     content: "A note the closed issue must refuse.\n",
     name: "note.md",
   });
@@ -603,6 +644,46 @@ The default branch holds the commit this check ran at.
     `the result at ${commits.diverged.slice(0, 12)}, which the compare calls diverged, reads ${apart}`
   );
   return apart === "current" ? `the result at the diverged commit reads ${apart}` : undefined;
+});
+
+// A commit the repository does not hold: the record route asks GitHub about every result's
+// commit before it writes anything, and the fake answers the 422 GitHub answers for a 40-hex
+// commit it was not seeded with. The refusal names the commit whole and the `owner/repo` the
+// check's issue resolves to, and the check keeps no row, since nothing is written before the
+// read.
+await runCase("a-result-at-a-commit-the-repository-does-not-hold-is-refused", async () => {
+  const unheldIssue = await seedIssue(
+    "VRF",
+    "An unpushed commit earns a refusal",
+    `:::check{#unheld serves="dispatch://%KEY%/spec#b-r1" surface="cli" run="bash scripts/e2e/verification-results.sh"}
+A result is recorded only at a commit the repository holds.
+:::
+`
+  );
+  const refused = await refusal("POST", issuePath(unheldIssue, "/results"), {
+    check: "unheld",
+    commit: commits.unheld,
+    observed: "the run passed at a commit nobody pushed",
+    role: "tester",
+    run: "bash scripts/e2e/verification-results.sh",
+    surface: "cli",
+    verdict: "pass",
+  });
+  note(`a result at ${commits.unheld.slice(0, 12)} answers ${refused.answer}: ${refused.error}`);
+  if (refused.answer !== "400 RESULT_COMMIT_UNKNOWN") {
+    return `the record route answers ${refused.answer}`;
+  }
+  if (!refused.error.includes(commits.unheld)) {
+    return `the refusal does not name the commit: ${refused.error}`;
+  }
+  if (!refused.error.includes(repo)) {
+    return `the refusal does not name ${repo}: ${refused.error}`;
+  }
+  const check = await checkOf(unheldIssue, "unheld");
+  note(`${unheldIssue} check unheld holds ${check.results.length} result(s)`);
+  return check.results.length === 0
+    ? undefined
+    : `the refused result left ${check.results.length} row(s) under the check`;
 });
 
 // The unreadable repository: Dispatch cannot say, so it marks the result neither way — for a

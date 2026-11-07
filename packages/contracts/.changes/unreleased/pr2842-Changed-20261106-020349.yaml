@@ -1,0 +1,5 @@
+kind: Changed
+body: The `POST /api/v1/issues/{key}/results` contract declares `400 RESULT_COMMIT_UNKNOWN`, and the results read states the order it answers a check's results in.
+time: 2026-11-06T02:03:49.414398415Z
+custom:
+    Issue: pr2842
