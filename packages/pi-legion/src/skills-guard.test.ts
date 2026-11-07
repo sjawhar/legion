@@ -15,8 +15,8 @@ import {
 } from "@legion/pi-shared/test/skills-guard";
 
 // The Claude Code plugin is generated from this repository's skills/ and this package's agents/,
-// and only main's Rebuild Claude Envoy plugin workflow commits packages/claude-envoy/legion/, so
-// a check of what a Claude Code role loads builds a fresh one, as
+// and nothing commits packages/claude-envoy/legion/, so a check of what a Claude Code role loads
+// builds a fresh one, as
 // packages/claude-envoy/tests/legion-plugin-fresh.test.ts does. The build runs as its own command,
 // the way stageSkills runs the prepack script: imported, that package's sources would be
 // typechecked under this package's `tsc`, whose `lib` is older than the one they are written
@@ -250,8 +250,9 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
 // Three of the four trees that carry this text are read here — the repository's skills/, the
 // plugin's agents/, and a
 // fresh `buildLegionPlugin` output, which is generated from those two and so is the only copy of
-// `packages/claude-envoy/legion/` a pull request can check (that tree is committed by main's
-// Rebuild Claude Envoy plugin workflow alone). The daemon's prompts are the fourth, read by
+// `packages/claude-envoy/legion/` there is (nothing commits that tree; the release that
+// publishes the plugin builds it in its own build job). The daemon's prompts are the fourth,
+// read by
 // packages/daemon/internal/prompts/roles_test.go, which walks both of its embed trees and so
 // reaches go/claude-mechanics.md, a part `Compose` never joins.
 //
@@ -299,19 +300,19 @@ test("no skill, agent or plugin file keeps work in the foreground, and each that
     expect(silent).toEqual([]);
     expect(dispatching.sort()).toEqual([
       "skills/AGENTS.md",
-      "skills/ce-simplify-code/SKILL.md",
       "skills/dispatch-writing-specs/SKILL.md",
       "skills/legion-architect/references/decomposition.md",
       "skills/legion-architect/references/design-gate.md",
       "skills/legion-oracle/SKILL.md",
       "skills/legion-retro/SKILL.md",
       "skills/legion-worker/references/merge-gate.md",
-      "the fresh Claude plugin's skills/ce-simplify-code/SKILL.md",
+      "skills/simplify-settled-diff/SKILL.md",
       "the fresh Claude plugin's skills/legion-architect/references/decomposition.md",
       "the fresh Claude plugin's skills/legion-architect/references/design-gate.md",
       "the fresh Claude plugin's skills/legion-oracle/SKILL.md",
       "the fresh Claude plugin's skills/legion-retro/SKILL.md",
       "the fresh Claude plugin's skills/legion-worker/references/merge-gate.md",
+      "the fresh Claude plugin's skills/simplify-settled-diff/SKILL.md",
     ]);
   } finally {
     rmSync(path.dirname(out), { recursive: true, force: true });
@@ -346,7 +347,7 @@ function countedOncePerFile(rule: string, relativePaths: string[]) {
 // R1: the simplify pass covers every file of the diff, docs-only diffs included, and a defect it
 // sees is reported rather than dropped as out of scope (dispatch://INFRA-198).
 test("the simplify pass reads every file of its scope and reports the defects it sees", () => {
-  const simplify = collapsed(path.join(staged, "ce-simplify-code", "SKILL.md"));
+  const simplify = collapsed(path.join(staged, "simplify-settled-diff", "SKILL.md"));
   expect(simplify).toContain(
     "Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs."
   );
@@ -469,7 +470,8 @@ test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CH
 });
 
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes
-// another role's open directory (dispatch://INFRA-654).
+// another role's open directory (dispatch://INFRA-654). The reviewer's pair states it in
+// `thermonuclear-code-quality`, which the Envoy plugin now ships and whose guard holds it there.
 test("every prompt and agent that may write says to make its own scratch and delete only what it made", () => {
   countedOncePerFile(
     'Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact path. Never delete by a glob in a shared directory: every role of this issue writes into the same `$TMPDIR` on the issue\'s volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories another role has open.',
@@ -477,8 +479,6 @@ test("every prompt and agent that may write says to make its own scratch and del
       "packages/pi-legion/agents/deep-worker.md",
       "packages/pi-legion/agents/thermonuclear-deep-review.md",
       "packages/pi-legion/agents/thermonuclear-code-quality.md",
-      "skills/thermonuclear-deep-review/SKILL.md",
-      "skills/thermonuclear-code-quality/SKILL.md",
       "packages/daemon/internal/prompts/go/worker-common.md",
       "packages/daemon/internal/prompts/go/architect-common.md",
     ]

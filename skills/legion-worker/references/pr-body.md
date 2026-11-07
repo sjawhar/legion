@@ -30,12 +30,12 @@ later phase keeps it current rather than replacing it:
 - Thread <node id>: accepted by the reviewer — <its reason, one line>; resolved at <head-sha>.
 - Thread <node id>: still open — <what remains>; unresolved at <head-sha>.
 
-**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; defects reported: <none | <n>, fixed in <sha>>; thermonuclear pair at the reviewed head <sha>:
+**Thermo:** `simplify-settled-diff` once at <head-sha>: <0 applied | applied → new head <sha>>; defects reported: <none | <n>, fixed in <sha>>; thermonuclear pair at the reviewed head <sha>:
 <verdict>. (on a docs-only PR the simplify half and the defects are recorded as on any other diff, and the pair half reads `thermonuclear pair: not run (docs-only)`)
 
 **Checks:** one line per `check` block of the issue's Verification document, in the document's
 order, each the line `dispatch result` printed when the result was recorded:
-- Check <block id> (<when>): <pass|fail> at <the commit's first 12 characters>, recorded by <role>. <the check's first words>
+- Check <block id> (<when>): <pass|fail> at <the commit>, recorded by <role>. <the check's first words>
 - Check <block id> (after_merge): not yet run
 
 **Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
@@ -103,6 +103,12 @@ unit suite is not it. A unit or integration test is a regression lock, never the
 check. The agent that develops the change records its results this way before the merge, and
 whatever blocks a check is fixed, not skipped (*When no surface reaches the changed path*, below).
 
+**Record a result after the commit is pushed.** Dispatch asks GitHub whether the repository of
+the check's issue holds the commit, and refuses a result at one it does not hold with `400
+RESULT_COMMIT_UNKNOWN`, naming the commit and the repository; a commit that is still only local
+is such a commit. Where Dispatch cannot read the repository at all it stores the result as
+before, and the result reads `unknown`.
+
 **A check that cannot fail is not a result.** Before a check counts as evidence, show it
 failing: the negative control is that demonstration, run on the same command with a deliberately
 wrong input or call. A check whose pass survives empty output, a missing file or the wrong head
@@ -160,7 +166,9 @@ gap and decides there, which is the only gate on such an issue.
   `failures`). Otherwise record your own result for each `before_merge` check before you complete,
   and put each printed line in the body. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is a check
-  marked `after_merge`, recorded after the merge, unless the implementer can execute it against a
+  marked `after_merge`, recorded after the merge on a look of the production check by the role
+  the project's `production_check` names — the tester, unless the setting is `off`, where the
+  close opens no check and nothing records it — unless the implementer can execute it against a
   devN stack before then; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
@@ -175,7 +183,7 @@ gap and decides there, which is the only gate on such an issue.
   real-surface verification is not repeated, except in a parent's last round, which the architect
   or the implementer's forward-merge comment names to you: then run a full test round. Different:
   a full test round.
-- **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
+- **The implementer runs `skill://simplify-settled-diff` once per pull request, in its first
   implementing round, after its own results and before it completes that round,
   whatever the diff touches, a docs-only diff included.** The daemon starts no implementing round
   between a clean review and the approval, so this is the one slot before the tester and the
@@ -213,6 +221,7 @@ the architect with `envoy_publish` to its role topic. The architect builds it in
 once it lands. A code path
 whose first execution would be after the merge — a deploy
 workflow's inline step, a post-merge helper, a production-only resource — is a check marked
-`after_merge`, recorded once the merge reaches production, and no reason to leave a
+`after_merge`, recorded once the merge reaches production by the role the project's
+`production_check` names, on the look its own `wake_at` brought back, and no reason to leave a
 `before_merge` check unrecorded; completing with a unit suite as the only evidence is the
 failure this rule exists to stop.

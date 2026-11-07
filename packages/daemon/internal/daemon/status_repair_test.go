@@ -8,10 +8,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -130,10 +132,22 @@ func staleStatusIssue(at phase.Phase, status, shown string) record.Issue {
 		Generation: 1, Status: status, DispatchStatus: shown, Rank: "U", HandedOver: true, LastDispatchSeq: 1}
 }
 
+// putStatusRepairSlot grants the issue's slot and opens its tree's lifecycle under the workflow's
+// authority, as admission's own promotion does in one transaction. The lifecycle, not the slot
+// row, is what says a tree runs (record.TreeRuns, which the repair reads), so a fixture that
+// granted a slot and nothing else would describe a tree the daemon reads as never opened.
 func putStatusRepairSlot(t *testing.T, pool *pgxpool.Pool, records record.Store, issue string) {
 	t.Helper()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutSlot(context.Background(), tx, record.Slot{Issue: issue, Index: 0, AdmittedAt: time.Now().UTC()})
+		if err := records.PutSlot(context.Background(), tx, record.Slot{Issue: issue, Index: 0, AdmittedAt: time.Now().UTC()}); err != nil {
+			return err
+		}
+		project, err := claim.ProjectToken("LEGION")
+		if err != nil {
+			return err
+		}
+		_, err = records.OpenTreeLifecycle(context.Background(), tx, project, issue, treelifecycle.AuthorityWorkflow)
+		return err
 	}); err != nil {
 		t.Fatalf("seed the slot of %s: %v", issue, err)
 	}

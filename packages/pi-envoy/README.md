@@ -162,16 +162,18 @@ omp plugin install @sjawhar/pi-envoy
 ```
 
 A session that had the pre-split package installed (the one package that carried both entries
-until 7.x) uninstalls it and installs this one once; the `CHANGELOG.md` entry that renames the
-package `@sjawhar/pi-envoy` gives the two commands. A Legion deployment installs
+until 7.x) uninstalls it and installs this one once; `CHANGELOG.md`, this package's history, gives
+the two commands in the entry that renamed the package. A Legion deployment installs
 `@sjawhar/pi-legion` as well (`packages/pi-legion/README.md`); the daemon's boot gate refuses a
 pane that still loads the pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
-`dist/THIRD_PARTY_NOTICES`, and the eight skills every session with Dispatch reads,
-`agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`,
-`outside-message` and `plain-words`, staged from the repository's `skills/` at
+`dist/THIRD_PARTY_NOTICES`, and the ten skills it ships: the eight every session with Dispatch
+reads, `agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-writing-specs`,
+`envoy`, `outside-message` and `plain-words`, and the reviewer's pair,
+`thermonuclear-code-quality` and `thermonuclear-deep-review`, which ships here so one copy of each
+rubric reaches both harnesses. All ten are staged from the repository's `skills/` at
 `dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside `omp.extensions`:
 OMP's own plugin discovery only reads `skill://`-resolvable skills from `<plugin root>/skills` or
 from directories a manifest's `omp.skills` array names, and this package ships skills at
@@ -189,8 +191,9 @@ for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` 
 a repo checkout after the prepack and the published tarball), while the committed manifest keeps
 the TypeScript entry for repo checkouts. In `.github/workflows/release.yaml`, the `pi_envoy_build`
 job rewrites the manifest before `bun pm pack` and uploads the tarball (its tree is discarded,
-nothing is restored); the `publish` job publishes that tarball and commits the version bump to the
-committed manifest, touching `.version` alone.
+nothing is restored); the `publish` job publishes that tarball, and nothing commits a version: the
+committed manifest's `.version` stays where it last was, and the `pi-envoy-v` tag the release makes
+is what records the release, with this release's changelog entries in its GitHub release notes.
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 

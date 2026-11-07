@@ -143,6 +143,11 @@ type Claim struct {
 	// backs the worker's turn. Empty is a claim that has retired no confirmed task of an
 	// assignment, which every claim of a daemon upgraded in place is until its role's next start.
 	ServingAssignmentID string
+	// ServingCheckLook is the production check look of the last confirmed delivery this claim
+	// retired, the look side of ServingGeneration: what ServingCheck answers with once no delivery
+	// backs the worker's turn. The zero value is a claim that has retired no confirmed task of a
+	// look, which is every claim whose last task was a phase's.
+	ServingCheckLook CheckLook
 	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
@@ -187,9 +192,14 @@ type Claim struct {
 	// registration records Session/SessionFile/CapabilityHash (register, reregister).
 	PluginContract int
 	// PluginRelaunchFor is the daemon contract the last stale-plugin relaunch was made for, 0 when
-	// none. It is set at every stale relaunch (refreshPlugin) and cleared when a registration
-	// records the daemon's own contract, so a registration that still differs while it equals the
-	// daemon's contract is the one that is charged rather than relaunched again uncharged.
+	// none. It is written where that relaunch starts the process the stale one is replaced with
+	// (launchNow, commitPluginRelaunch), by that launch's own write, and cleared when a
+	// registration records the daemon's own contract, so a registration that still differs while
+	// it equals the daemon's contract is the one that is charged rather than relaunched again
+	// uncharged. A relaunch that was decided but never launched — refused, abandoned at its turn,
+	// or ended in a suspension — writes nothing here, so the mark always names a relaunch whose
+	// launch was recorded (relaunchMarked, staleRegistration); that write comes before the runtime
+	// starts the process (commitPluginRelaunch).
 	PluginRelaunchFor int
 	// UpdateRound is the update round this claim is in, and "" when none is open: the round's
 	// identity and its kind in one string. PodRoundPrefix and the pod's uid is the drift round of
@@ -360,6 +370,13 @@ type ClaimView struct {
 	// shows the state it is leaving. A process retired and relaunched in one decision
 	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
 	Stopping bool
+	// WakeWaiting is the wake the pacing holds over this claim until its turn (reserveWake), nil
+	// while none waits. It travels on the published view rather than behind the machine's lock
+	// because the one reader of it is a reader of every claim — the state route, through the
+	// daemon's supervision (api.State.WakesWaiting) — and such a reader must never wait on the
+	// decision in flight, which is the whole reason View exists. That reader takes it through
+	// Machine.WaitingWake, which copies no claim.
+	WakeWaiting *WakeWaiting
 }
 
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
@@ -453,6 +470,9 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// WakePace is how fast the daemon lets this machine's launches out (reserveWake); its zero
+	// value is the pacing off.
+	WakePace WakePace
 	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
@@ -710,6 +730,22 @@ type Machine struct {
 	// lives as long as that timer, which letGo disarms with it. It is memory only, as the timer is: a
 	// restart launches that claim again as an unfinished launch.
 	relaunch func(context.Context) error
+	// wake is the launch the wake pacing holds until its turn (reserveWake), run when TimerWake
+	// fires (wakeNow); nil for none. It lives as long as that timer, which letGo disarms with it,
+	// and it is memory only, as relaunch and staleRelaunch are: a restart loses no wake. A
+	// process-less one parked the claim launching with no process, which the boot repairs to
+	// launch_uncertain and relaunches; one over a process still running is posted again by the
+	// boot's own stale-plugin pass, or raised again by the runtime's next observation of a
+	// process that has died. Each is paced again from an empty bucket, and no wake runs twice.
+	wake *wake
+	// pluginRelaunch is the intent of the stale-plugin relaunch this machine is raising: the
+	// contract that relaunch is made for (markPluginRelaunch), and nil whenever the launch being
+	// raised is not one. It is memory only, and it belongs to one launch at a time: the gate
+	// takes it onto the wake it parks and the turn hands it back (reserveWake, wake.pluginMark,
+	// holdPluginRelaunch), the launch consumes it as it starts (launchNow,
+	// commitPluginRelaunch), and the decider drops whatever neither took (relaunchMarked). The
+	// mark itself is the claim's and durable, written by the launch that commits this intent.
+	pluginRelaunch *int
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.
@@ -794,7 +830,11 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // the claim's state does not allow is refused with a RefusedError; a fenced request is refused
 // with the claim refusal it violates (claim.StaleGeneration, claim.SameAgentRefusal). Any other
 // event that is stale is logged once and dropped. A suspension of a claim whose agent is in a turn
-// answers ErrSuspendHeld (holdSuspension).
+// answers ErrSuspendHeld (holdSuspension). A request the wake pacing never makes wait, reaching a
+// claim a paced wake parked with no process, drops that wake before the lookup and is then
+// decided against the state the gate found (dropWakeFor); an operator's task the claim can take,
+// over a launch parked above a process the claim still records, runs that launch first, so the
+// row that queues the task is the row of the claim that launch leaves (runParkedLaunchNow).
 //
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
@@ -823,16 +863,24 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		m.identity = &heldIdentity{incarnation: m.claim.Locator.Incarnation, AgentSecretsIdentity: identity}
 		m.enrollmentSent = false
 	}
+	dropped := m.dropWakeFor(ev)
+	if err := m.runParkedLaunchNow(ctx, ev); err != nil {
+		return err
+	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
 	if !ok {
 		return fmt.Errorf("supervise: no row for %s in %s", k.kind, k.state)
 	}
 	if r.act == nil {
+		// The refusal names the state that decided it, which is the state the gate found for a
+		// claim whose wake was just dropped: the re-park moves the claim back to launching after.
+		var refusal error
 		if name, ok := requestName(ev); ok {
-			return &RefusedError{State: m.claim.State, Request: name, Reason: r.ignore}
+			refusal = &RefusedError{State: m.claim.State, Request: name, Reason: r.ignore}
 		}
-		return nil
+		m.reparkWake(ctx, dropped)
+		return refusal
 	}
 	// A row ends only in a state it names, except that a held suspension may end in suspended from
 	// whichever row the end comes through (holdSuspension); a claim that holds none may not.
@@ -842,6 +890,7 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 		err = errors.Join(err, fmt.Errorf("supervise: row %q moved %s from %s to %s, outside %v",
 			r.name, m.claim.Token, from, to, r.to))
 	}
+	m.reparkWake(ctx, dropped)
 	return err
 }
 
@@ -937,8 +986,10 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 // three sources serving reads are read for it.
 //
 // An operator's task belongs to no run and answers for none of them: it carries generation 0.
+// The older work an unread task's run could be mistaken for is a run this claim was left
+// serving, and nothing else (serving's rule 3).
 func (c Claim) ServingRun() uint64 {
-	return serving(c.Pending, deliveredRun, c.ServingGeneration)
+	return serving(c.Pending, deliveredRun, c.ServingGeneration, c.ServingGeneration != 0)
 }
 
 // ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
@@ -946,36 +997,91 @@ func (c Claim) ServingRun() uint64 {
 // carries that run, where each entry that hands this role a task carries an assignment of its own.
 // A task of no assignment answers for none of them: an operator's own, a resume, a production
 // check's look, and every task a daemon older than the assignment delivered — so a resumed
-// worker's in-flight completion is never refused for an assignment it was never given.
+// worker's in-flight completion is never refused for an assignment it was never given. The older
+// work an unread task's assignment could be mistaken for is an assignment this claim was left
+// serving, and nothing else: a worker whose last task carried none — a resume, a look, a
+// pre-assignment daemon's delivery — is on its first assignment still, and the fallback is what
+// lets it complete.
 func (c Claim) ServingAssignment() string {
-	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID)
+	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID, c.ServingAssignmentID != "")
 }
 
-// deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
-// picks between, named so the accessors read as one rule applied twice rather than two rules.
-func deliveredRun(d Delivery) uint64        { return d.Generation }
-func deliveredAssignment(d Delivery) string { return d.Assignment }
+// ServingCheck is the production check look of the task this claim's worker took, and the zero
+// CheckLook for a claim that has taken none that carried one. It is what says which kind of
+// completion a turn reports: a worker whose live assignment is a check look reports on that look
+// (api/handoff.go, checkReport), and every other worker reports a phase completion. The look is
+// the one the task was given, not whichever look the check has reached, so a report of a look the
+// check has left is held to it and refused by the engine (CHECK_LOOK_NOT_OPEN).
+//
+// A task of a phase is the one task that takes a look back rather than leaving it: a worker
+// handed phase work again — a root reopened inside its linger, whose check still stands — is back
+// in the workflow, and the completion of that phase is no report on production. Every other task
+// of no look (an operator's own, a resume) leaves the look the claim is serving alone, as it
+// leaves the run and the assignment.
+//
+// The look is the one field whose fallback (serving's rule 3) is held to more than its own
+// retired value: a look an unread task carries is taken only by a claim that has served nothing
+// at all. A claim records no look until a look's task is given to it, so a tester in the middle
+// of its testing run reads the zero look while its run and its assignment answer the testing
+// task; held to the look alone, the fallback would hand that tester a look it has not begun to
+// serve, and its testing verdict — pass or fail, which a check report also names — would close
+// the check with nobody having looked at production. The look, the run and the assignment are
+// one serving, not three. The cost is a look whose own turn starts after the daemon's wait for
+// it: that turn counts as the agent's own, its report is refused, and the task is re-sent once
+// the turn ends (noTurn keeps the mark, sendPending sends it again), so the next turn confirms
+// it and reports. The look's own bound (workflow.CheckLookBound, two hours) is the backstop
+// under that, and a refusal the agent sees beats a silent false pass.
+func (c Claim) ServingCheck() CheckLook {
+	retired := c.ServingCheckLook
+	if c.Pending != nil && c.Pending.Phase != "" {
+		retired = CheckLook{}
+	}
+	return serving(c.Pending, deliveredCheckLook, retired, c.servedAnything())
+}
+
+// servedAnything is whether this claim's worker has taken any task at all — a run, an assignment
+// or a look — which is what older work means for the look alone (ServingCheck). Only that
+// accessor reads it: the retire writes what a confirmed delivery leaves behind, and a confirmed
+// delivery is taken by serving's first rule, before any question of older work.
+func (c Claim) servedAnything() bool {
+	return c.ServingGeneration != 0 || c.ServingAssignmentID != "" || c.ServingCheckLook != (CheckLook{})
+}
+
+// deliveredRun, deliveredAssignment and deliveredCheckLook are what a delivery carries of each:
+// the three values serving picks between, named so the three accessors read as one order of
+// sources with a guard of their own rather than three rules.
+func deliveredRun(d Delivery) uint64          { return d.Generation }
+func deliveredAssignment(d Delivery) string   { return d.Assignment }
+func deliveredCheckLook(d Delivery) CheckLook { return d.CheckLook }
 
 // serving picks what a claim's worker is on — the run for ServingRun, the assignment for
-// ServingAssignment — from the three sources both read, in this order. carried is what the pending
-// delivery holds of it, and retired what the claim was left serving (ServingGeneration,
-// ServingAssignmentID); the zero value of either is a task, or a claim, that answers for none of
-// them. The precedence lives here once, so a later fix to it — the DeliveredAt fallback, say —
-// cannot land on one of the two and miss the other.
+// ServingAssignment, the production check look for ServingCheck — from the three sources all
+// three read, in this order. carried is what the pending delivery holds of it, and retired what
+// the claim was left serving (ServingGeneration, ServingAssignmentID, ServingCheckLook); the zero
+// value of any of them is a task, or a claim, that answers for none of them. The order of the
+// three sources lives here once, and each caller supplies what counts as older work for the
+// field it is asking about (servedOlder, below).
 //
 //  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
 //     runs one turn at a time.
 //  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
-//     worker goes on working that run and that assignment — a tester waiting on CI, a merger
-//     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
-//     no delivery behind it.
-//  3. Otherwise, for a claim that has served none at all, a task it holds that the agent may
-//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
-//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
-//     nothing; a worker on its first task would otherwise have its completion refused. This
-//     cannot be mistaken for older work, because there is none this claim served. A task the
-//     agent refused is not one it read, and carries no such mark.
-func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T) T {
+//     worker goes on working that run, that assignment and that look — a tester waiting on CI, a
+//     merger waiting on a person, a checking agent between a look's start and its report — until
+//     another delivery carrying one replaces it. A notice's turn has no delivery behind it.
+//  3. Otherwise, for a claim that has served no older work this value could be mistaken for, a
+//     task it holds that the agent may have read. Oh My Pi's own agent_start names no prompt, so
+//     a turn that starts after the daemon's wait for it is indistinguishable from a turn of the
+//     agent's own and confirms nothing; a worker on its first task would otherwise have its
+//     completion refused. A task the agent refused is not one it read, and carries no such mark.
+//
+// What counts as older work is servedOlder, which each caller answers for what it is guarding
+// against, because the three fields are not zero on the same claims: for the run and the
+// assignment it is that field's own retired value, since a claim left serving neither has taken
+// no task that carried one; for the look it is anything the claim has served at all
+// (Claim.servedAnything), since a claim in the middle of a phase run records no look, and a look
+// held to its own retired value alone would be handed to that worker while its run and its
+// assignment answer the phase task.
+func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T, servedOlder bool) T {
 	var none T
 	if pending == nil {
 		return retired
@@ -987,7 +1093,7 @@ func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired 
 	if !pending.ConfirmedAt.IsZero() {
 		return value
 	}
-	if retired == none && !pending.DeliveredAt.IsZero() {
+	if !servedOlder && !pending.DeliveredAt.IsZero() {
 		return value
 	}
 	return retired
@@ -1009,6 +1115,21 @@ func (m *Machine) View() ClaimView {
 	v := *m.view.Load()
 	v.Claim = copyClaim(v.Claim)
 	return v
+}
+
+// WaitingWake is the wake the pacing holds over this claim, nil while none waits: what the
+// published view names (ClaimView.WakeWaiting) with the claim's token, issue and role beside it,
+// for the reader of every claim the state route is (the daemon's waitingWakes,
+// api.WakesWaitingOf). It never waits on the decision in flight, as View does not, and it copies
+// no claim: publish stores a view built fresh and mutates no stored one, so every field read here
+// is one nothing writes again. A machine holding no wake allocates nothing, which is every machine
+// outside a wave.
+func (m *Machine) WaitingWake() *WaitingWake {
+	v := m.view.Load()
+	if v.WakeWaiting == nil {
+		return nil
+	}
+	return &WaitingWake{Claim: v.Token, Issue: v.Issue, Role: v.Role, Kind: v.WakeWaiting.Kind, At: v.WakeWaiting.At}
 }
 
 // Deciding is the event the decision in flight handles (Handle), or nil when the machine decides
@@ -1037,9 +1158,15 @@ func (m *Machine) current() Claim {
 	return c
 }
 
-// publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
+// publish makes the claim as the machine holds it now the one View reports, with the wake the
+// pacing holds over it, if any: a fresh value each time, since the view is read without mu. The
+// caller holds mu.
 func (m *Machine) publish() {
-	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping})
+	view := &ClaimView{Claim: m.current(), Stopping: m.stopping}
+	if m.wake != nil {
+		view.WakeWaiting = &WakeWaiting{Kind: m.wake.kind, At: m.wake.at}
+	}
+	m.view.Store(view)
 }
 
 // stoppingProcess marks the claim's process as being stopped for good, for View, until the runtime
@@ -1096,7 +1223,8 @@ func (m *Machine) Wait() {
 // refused. The process that sent it is not the claim's: its launch was cut short by the daemon's
 // stop, which the next boot launches again once its orphan reconciliation has reaped every process
 // no claim records, or it is the process a relaunch waiting at the probe interval let go
-// (relaunchLater), which the relaunch waits out.
+// (relaunchLater) or a wake waiting its turn in the pacing let go (reserveWake), which that
+// relaunch and that wake each wait out.
 func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	pending := m.claim.Pending
 	switch ev := ev.(type) {
@@ -1214,8 +1342,9 @@ func (m *Machine) fenceRequest(request string, generation uint64, session string
 }
 
 // launchRecordsNoProcess is whether the claim is launching with no process recorded: a launch
-// written launching before it starts (launchAfter) and cut short, or a relaunch waiting at the
-// probe interval (relaunchLater). Every other live state records its process.
+// written launching before it starts (launchAfter) and cut short, a relaunch waiting at the probe
+// interval (relaunchLater), or a wake the pacing parked there until its turn (reserveWake). Every
+// other live state records its process.
 func (m *Machine) launchRecordsNoProcess() bool {
 	return m.claim.State == StateLaunching && m.claim.Locator == nil
 }
@@ -1242,21 +1371,61 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // let go (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch)
 // starts nothing and is charged nothing (relaunchRefused), and so is one whose context ended under
 // it — the daemon's stop. A runtime waits out a cluster that answers a launch's requests overloaded
-// inside the launch's own deadline, so what reaches here failed the launch.
+// inside the launch's own deadline, so what reaches here failed the launch. This launch waits its
+// turn in the wake pacing first (reserveWake), the project controller's claim excepted: it is the
+// recovery path, which no request raises, so there is no request here to let one through. A
+// launch a request raised that the pacing lets through goes by launchAfter (revive).
 func (m *Machine) launch(ctx context.Context) error {
-	return m.launchAfter(ctx, false)
+	return m.launchAfter(ctx, false, false)
 }
 
 // launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
-// launch failure charged just before it (relaunchAfterFailure). Each try is written launching, at
-// its generation and with every charge so far, before its backoff waits. A try whose write fails
-// has started nothing and is tried again at the probe interval (relaunchLater), the process it let
-// go stopped: by then the claim records no process, so nothing else would launch it before a
-// restart. One the daemon's stop cut short is left to the next boot, as a start it cut short is.
-func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
+// launch failure charged just before it (relaunchAfterFailure). exempt is whether the request
+// that raised it is one the wake pacing never makes wait (exemptWake); every other path into a
+// launch is paced, and the gate sits here, between the lifecycle check and letGo, because a
+// launch the tree lifecycle refuses charges no budget and so takes no token either, while a
+// launch that waits its turn keeps the process it still runs until that turn comes.
+//
+// Which retries pass this gate again, and which do not. The gate is taken once for the launch
+// that gets as far as the runtime: the loop's own retry of a start the runtime refused and the
+// turn the wake waited for both re-enter launchNow, which takes no second token. Two retries do
+// re-enter here, and so reserve again: a launch whose write of StateLaunching failed
+// (relaunchLater, from launchNow), and a launch the lifecycle check could not answer, from here
+// or from the wake's own turn (relaunchRefused, wake.again). Both are kept paced because both
+// are rare — the store answers every other launch, and one that does not has just failed a write
+// this daemon makes before every process it starts, so a daemon meeting them often is a daemon
+// whose store is down, where a token spent waiting is the least of it — and because each is a
+// fresh launch from the top: it rechecks the tree lifecycle, as every launch of this package
+// does, and a retry that skipped the gate would launch outside the pace the operator set while
+// the queue behind it still waited.
+func (m *Machine) launchAfter(ctx context.Context, charged, exempt bool) error {
+	again := func(ctx context.Context) error { return m.launchAfter(ctx, charged, exempt) }
 	if err := m.checkLaunch(ctx); err != nil {
-		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged) }, err)
+		return m.relaunchRefused(ctx, again, err)
 	}
+	return m.reserveWake(ctx, WakeLaunch, exempt, func(ctx context.Context) error {
+		return m.launchNow(ctx, charged, exempt)
+	}, again)
+}
+
+// launchNow is launchAfter past its lifecycle check and its wake gate: the launch itself, and the
+// one entry the wake's own turn re-enters by (wakeNow), which is what keeps that turn from taking
+// a second token. Each try is written launching, at its generation and with every charge so far,
+// before its backoff waits. A try whose write fails has started nothing and is tried again at the
+// probe interval (relaunchLater), the process it let go stopped: by then the claim records no
+// process, so nothing else would launch it before a restart. One the daemon's stop cut short is
+// left to the next boot, as a start it cut short is.
+//
+// This is where a stale-plugin relaunch marks its claim (commitPluginRelaunch): the process the
+// relaunch replaces is let go here and the mark is written with the launch itself, so
+// PluginRelaunchFor names a relaunch whose launch was recorded and reaches the store with the
+// write that records it, before the runtime starts the process. A relaunch abandoned anywhere
+// before this line — refused by the lifecycle recheck, cut off by a take-back the store refused,
+// ended in a suspension, or dropped with the wake a second launch replaced — never reaches it
+// and marks nothing (relaunchMarked, runWake). A try whose own write fails keeps the mark it
+// has already written in memory, which the retry's write then stores (relaunchLater).
+func (m *Machine) launchNow(ctx context.Context, charged, exempt bool) error {
+	m.commitPluginRelaunch()
 	m.letGo()
 	for {
 		m.claim.Generation++
@@ -1272,7 +1441,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 			}
 			m.log.Warn("supervise: the launch could not be written; trying it again at the probe interval",
 				"generation", m.claim.Generation, "error", err)
-			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged) })
+			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged, exempt) })
 			return err
 		}
 		if charged {
@@ -1306,6 +1475,17 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		}
 		charged = true
 	}
+}
+
+// launchWaits is whether a launch the pacing holds waits over this claim: the one wake whose turn
+// lets the claim's process go and starts the next (WakeLaunch, launchNow). It is what tells a
+// claim that only waits its turn from one that is to be replaced, and two decisions read it: the
+// delivery that would be handed to a process this launch is about to end (sendPending), and every
+// observation of that same process, whichever path reports it (judge). A plugin task's wake is
+// neither — it replaces no process and the session it wakes goes on taking work — so it is not
+// one of these.
+func (m *Machine) launchWaits() bool {
+	return m.wake != nil && m.wake.kind == WakeLaunch
 }
 
 // leftPodRoundAt records that the claim has left its pod round, in the one decision that records
@@ -1514,14 +1694,16 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
-// relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
-// and the process the claim records, when it records one, moves into previous — the claim no
-// longer runs it (it was stopped, found dead, or left behind), and the next launch of the same
-// session waits it out.
+// on one (relaunchLater), no wake of the pacing waits its turn (reserveWake) — the launch it was
+// to make is the one this end replaces — no send talks to it, no suspension is held for its turn,
+// no stale-plugin relaunch waits for that turn either (refreshPlugin) — the process it was to
+// replace is gone — and the process the claim records, when it records one, moves into previous —
+// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch
+// of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
+	m.wake = nil
 	m.forgetSend()
 	m.held = nil
 	m.staleRelaunch = nil
@@ -1538,7 +1720,31 @@ func (m *Machine) letGo() {
 // judge acts on what a probe or the sweep says about the claim's process. alive is what a live
 // process means to the caller; an uncertain one, or a runtime that could not answer, is asked
 // again after the given wait on the given timer — and is never read as alive or gone.
+//
+// Nothing is judged at all while a launch the pacing holds waits over the process the observation
+// is about (launchWaits): what happens to that process is already decided, and its turn replaces
+// it (wakeNow). A second report of the one death would otherwise be a second death, charging
+// Deaths and LaunchFailures again (died, chargeDeath) and replacing the wake with a fresh token
+// at the back of the queue, so a claim with work outstanding would fail before
+// launch_failure_limit real failures. The same holds for every other verdict: a process found
+// stale, displaced, uncertain or alive says nothing the relaunch this wake holds does not already
+// answer.
+//
+// The report this guard answers is the runtime's sweep (observe), which observes the process
+// whatever the claim is doing. The four other paths that report one — a closed connection
+// (closed), the boot interval (bootInterval), the probe timer (reprobe) and the registration
+// deadline (registrationDeadline) — ask the runtime through probe, whose own guard stops each of
+// them inside the wait: no call is made, and nothing arms the probe interval there. So the pair
+// covers every path, one report here and four in probe. The guard stays in the judgement rather
+// than in the fence because it answers every verdict the sweep can carry — gone, stale,
+// displaced, uncertain, alive — where each of them is acted on.
 func (m *Machine) judge(ctx context.Context, observation runtime.Observation, alive func(context.Context) error, again TimerKind, after time.Duration) error {
+	if m.launchWaits() {
+		m.log.Info("supervise: an observation of the process a waiting launch replaces decides nothing; its turn replaces that process",
+			"incarnation", observation.Locator.Incarnation, "observed", string(observation.Kind),
+			"detail", observation.Detail, "due", m.wake.at)
+		return nil
+	}
 	switch observation.Kind {
 	case runtime.Alive:
 		if m.claim.UncertainStreak > 0 {
@@ -1570,9 +1776,22 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 // nothing about whether its claim is still the one that opened it. There is nothing to probe and
 // nothing to arm in that case — the claim's own relaunch path, not this probe, decides what
 // happens to it next.
+//
+// A claim whose launch waits its turn over the process this would probe is asked nothing either.
+// What becomes of that process is already decided — the turn lets it go and starts the next
+// (wakeNow, launchNow) — so every answer the runtime could give decides nothing (judge), and
+// the one that reaches no judgement at all, a runtime that cannot answer, would arm the probe
+// interval the park disarmed (parkWake) and ask again at every interval of a wait that is tens
+// of minutes long in a wave. The callers' own timers are not armed again here for the same
+// reason: the launch's turn arms the new process's (armBoot).
 func (m *Machine) probe(ctx context.Context, alive func(context.Context) error, again TimerKind, after time.Duration) error {
 	if m.claim.Locator == nil {
 		m.log.Info("supervise: probed with no process to probe; nothing to do")
+		return nil
+	}
+	if m.launchWaits() {
+		m.log.Info("supervise: the process a waiting launch replaces is not probed; its turn replaces that process",
+			"incarnation", m.claim.Locator.Incarnation, "due", m.wake.at)
 		return nil
 	}
 	observation, err := m.deps.Runtime.Probe(ctx, *m.claim.Locator)

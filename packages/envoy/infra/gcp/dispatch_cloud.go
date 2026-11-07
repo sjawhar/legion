@@ -46,8 +46,10 @@ type dispatchDatabase struct {
 	listenerToken *random.RandomPassword
 	principal     pulumi.StringOutput
 	seedAccessor  *secretmanager.SecretIamMember
-	// azureKeyAccessor is set only with azureEmbedKeySecret.
-	azureKeyAccessor *secretmanager.SecretIamMember
+	// azureKeyAccessor is set only with azureEmbedKeySecret, and chatTokenAccessor only with
+	// chatTokenSecret: each is the per-secret grant that one feature's mounted secret needs.
+	azureKeyAccessor  *secretmanager.SecretIamMember
+	chatTokenAccessor *secretmanager.SecretIamMember
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -269,9 +271,19 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 			return nil, err
 		}
 	}
+	var chatTokenAccessor *secretmanager.SecretIamMember
+	if s.answerer.place == dispatchAnswererEndpoint {
+		// The endpoint answerer's bearer token is read by the app on every call through the CSI
+		// driver, so the pods' principal needs the same per-secret accessor grant.
+		chatTokenAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-chat-token-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.ChatTokenSecret, dispatch, "chatTokenSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &dispatchDatabase{
 		instance: instance, password: password, signing: signing,
 		agentToken: agentToken, listenerToken: listenerToken,
-		principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor,
+		principal: principal, seedAccessor: seedAccessor,
+		azureKeyAccessor: azureKeyAccessor, chatTokenAccessor: chatTokenAccessor,
 	}, nil
 }

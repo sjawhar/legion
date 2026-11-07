@@ -169,7 +169,12 @@ Playwright through `e2e/run.ts` with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on
 port, each is used as given when set and chosen by the OS when unset; the proxy starts before
 the servers, since both serve its origin, so A's and B's ports are held first (a
 `held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
-cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+cookies with one key the run generates, so a person stays signed in whichever answers.
+`DISPATCH_E2E_SERVER_BIN` runs a prebuilt `envoy-dispatch` instead of the one `run-server.sh`
+builds from this checkout, and `DISPATCH_E2E_SERVER_BIN_B` gives Dispatch B one of its own, so a
+run can put two builds of the server against the one database as `DISPATCH_E2E_WEB_DIST_B` puts
+two builds of the dashboard there; `scripts/e2e/dispatch-two-builds.sh` is the proof that uses
+them. It runs
 the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
 leaves out; arguments after `--` reach Playwright
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
@@ -325,20 +330,36 @@ cleared by a check of the issue and by a check of a child, back when that check 
 the missing plan task named only once the issue has a plan document; the gap an approval request's
 answer names and the covered spec that earns none; `dispatch plan-approve`, refused `409
 NOT_PLAN_DOCUMENT` on a spec, and `dispatch request-approval`, refused `409
-PLAN_APPROVED_BY_REVIEW` on a plan; and the one request that names a spec and its Verification
-document together. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two optional ones:
+PLAN_APPROVED_BY_REVIEW` on a plan; the one request that names a spec and its Verification
+document together; and, in the currency section, the newest result of a check printed with all
+forty characters of its commit, beside a result at a commit that repository does not hold refused
+`400 RESULT_COMMIT_UNKNOWN`. Its inputs are `DISPATCH_URL`, the bearer, `PROJECT`, and two
+optional ones:
 
 - `FAKE_GITHUB_PORT`, the harness's fake GitHub, which the server reads as
-  `DISPATCH_GITHUB_API_BASE`. The currency section seeds it with one repository holding one pull
-  request whose title names the issue, replacing every repository the fake served, maps that
-  repository as `PROJECT`'s default and removes the mapping on exit, so a result recorded at that
-  pull request's head reads `current`. Unset, or with `PROJECT` already naming a default
-  repository, one `SKIP: currency …` line stands in for the section.
+  `DISPATCH_GITHUB_API_BASE`. The run gives it one repository holding one pull request whose
+  title names the issue and one further commit beside that pull request's head, replacing every
+  repository the fake served: where `PROJECT` maps no default repository the currency section
+  seeds a repository of its own, maps it as `PROJECT`'s default and removes the mapping on exit;
+  where `PROJECT` maps one, the setup seeds that repository and maps nothing. A result recorded
+  at that pull request's head reads `current`, a result at the further commit — whose first
+  twelve characters are the head's — is stored, and a result at a commit the repository holds
+  neither of is refused. Unset, one `SKIP: currency …` line stands in for the section, which no
+  other way of running has a pull request's head to read.
 - `DEV_SIGNIN_LOGIN`, as `block-graph.sh` takes it. Recording a review is a person's write alone,
   so the two review sections sign that person in with a cookie jar and answer the approval requests
   the script opened; unset, each prints one
   `SKIP: review …: DEV_SIGNIN_LOGIN is unset; POST /api/v1/artifacts/{id}/reviews needs a person's …`
   line and every other section runs.
+
+One rule governs every result the script records, beside the refusals above.
+A result at a 40-character commit the repository of the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and that `owner/repo`.
+Only GitHub's `422 No commit found for SHA` refuses, and the script reads `PROJECT`'s repository mappings once, in its setup, to know which of two runs it is.
+Where `PROJECT` maps no default repository, every result recorded outside the currency section is stored because the check's issue resolves to no repository, which is never asked about; inside the section, each stored result names a commit it seeded its fake GitHub with, and the one commit it seeds nothing with is the refusal it drives.
+Where `PROJECT` already maps one, every issue the script writes resolves to that repository, so the setup reads that repository's default-branch head from GitHub with `gh` and every result is recorded at that head: no check stands down, and the run prints no `SKIP` for a recorded result.
+A repository `gh` cannot read fails the run, naming it.
+Where `FAKE_GITHUB_PORT` is set the setup also gives that repository, that head, the look-alike and the pull request to the fake, since a server reading the fake asks the fake and not GitHub; a server reading the real GitHub needs no such seeding, and a fake-backed run proves this script's fixture and its count rather than a server talking to GitHub.
+Every other check runs either way, the `result` section's two refusals among them: a malformed field and an unknown check are refused before any commit is read.
 
 It writes four issues in `PROJECT` — a root with a spec, a Verification document and a plan, a
 child of it, a sibling in another tree and one more whose spec and Verification document are
@@ -408,16 +429,19 @@ docker rmi "ghcr.io/cybermonklabs/legion/envoy:${acceptance_image_tag}"
 The suite has eleven projects. `chromium` runs every spec except the two plain-HTTP specs and the
 three the `-alone` projects below take. `iphone`
 runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
-its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
-acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
+its `test.describe`'s title); a test takes the tag when the phone viewport can change what it
+asserts, and not when it only reaches the same control by another route, which is in
+`packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out of `iphone` with no
+failure, and `e2e/__tests__/row-configurations.test.ts` refuses a row that runs twice in one
+engine, viewport, origin and server-process count. The iPhone project uses
 Chromium with iPhone 13 viewport, touch, and user-agent emulation. A deployed run
 (`bun run e2e:deployed`) uses the same projects, so its `iphone` project also runs only the
-`@phone` tests. `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a
-collaborator's cursor differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since
-Firefox's own editing mishandles text typed over what follows a block's last line break; both also
-run `e2e/deep-links.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
-`e2e/keyboard-session-pickers.e2e.ts` and `e2e/offline-edits.e2e.ts`, and `firefox` runs
-`e2e/picture-link-click.e2e.ts` too. `firefox-download-navigation` runs the one row of
+`@phone` tests. `webkit` and `firefox` select by tag as well, `@webkit` and `@firefox`: each
+tagged row exercises one engine behaviour the comment above the project in
+`e2e/playwright.config.ts` names, and a comment beside the tag names which. `webkit` covers
+where a caret lands beside a collaborator's cursor, and `firefox` covers text typed over what
+follows a block's last line break, which that engine's own editing mishandles.
+`firefox-download-navigation` runs the one row of
 `e2e/shell.e2e.ts` that follows a Download link before a chunk fails. `webkit-iphone` runs the
 phone-layout rows of `e2e/agent-view.e2e.ts`, `e2e/agent-view-settings.e2e.ts` and
 `e2e/delivery-live.e2e.ts`, and the rows of `e2e/phone-conversation.e2e.ts` that check what the

@@ -1,0 +1,54 @@
+-- 20261105070440_pull_request_heads_attribution_rule.up.sql
+--
+-- Which attribution rule last judged a pull_request_heads row, so the reconcile can offer a
+-- merged row to a rule newer than the one that judged it, and offer it once.
+--
+--   attribution_rule  the rule that decided the row's issue_key and attribution_source, as
+--                     delivery.AttributionRuleVersion numbers it; 0, what every row written
+--                     before this column has, is the rule that took the first candidate the
+--                     five sources named outright, whatever repository that issue resolved to.
+--
+-- A merged row is the one row nothing revisits. An open row comes round every five minutes, but
+-- ListStalePullRequestHeads (delivery/pull_request_heads.go) took a merged row only while its
+-- checked_at was null, a merge envelope that named a head repository stamps checked_at, and a
+-- recorded result reads through only for a commit no head Dispatch knows. So a pull request
+-- merged before the attribution changed keeps for ever whatever the rule of its day concluded —
+-- for a title that named another repository's issue first, no issue at all, and every
+-- `before_merge` result at that merged head reads `older` for ever (INFRA-1240's own witness,
+-- theorem-labs/agent-infra#2131 for INFRA-1219, merged at 2026-11-05T01:09:12Z, is such a row).
+--
+-- This column is what bounds the repair. The reconcile takes a merged row credited to nobody
+-- whose attribution_rule is below the rule the running build judges by, and the read stamps the
+-- row at that rule whether or not it could attribute it, so every row stored before this deploy
+-- is re-judged once and then left: one offer per rule version, not a merged row re-read every
+-- pass for ever. A later change to the attribution reaches the merged rows already stored by
+-- raising that constant by one, which is the only writer that ever revisits one.
+--
+-- Adding a column with a constant default writes the catalog alone (Postgres 11 on), so the
+-- statement holds pull_request_heads' ACCESS EXCLUSIVE lock for milliseconds and rewrites no
+-- row, `not null` included: every stored row reads as the default. The release before this one
+-- neither reads nor writes the column, and its insert names its columns
+-- (UpsertPullRequestHead), so the default serves every row it writes while it still serves
+-- (cmd/dispatch/README.md, "Database migrations").
+alter table pull_request_heads add column attribution_rule integer not null default 0;
+
+-- The merged arm's index follows the arm it serves. pull_request_heads_merged_unread
+-- (20261102122300) was partial on `state = 'merged' and issue_key is null and checked_at is
+-- null`; the new arm drops the checked_at half of that predicate, since it takes a merged row
+-- credited to nobody whether or not a read has reached it, so the index drops it too and stays
+-- partial on the two columns that still bound the arm.
+--
+-- Replacing it leaves the release before this one working, which is what the expand-then-
+-- contract rule asks of a drop. That release's query is partial on all three columns, and its
+-- predicate is a subset of the new index's, so the new index serves it — every row that query
+-- wants is in it, with the one extra test on checked_at left to the recheck. And an index
+-- decides a plan, never an answer: the release before this one would still answer that query
+-- correctly from a sequential scan if the planner chose one.
+--
+-- `drop index` takes ACCESS EXCLUSIVE on pull_request_heads for the instant it unlinks the
+-- index, and `create index` SHARE while it builds, both inside the runner's one transaction:
+-- the table holds a row per pull request Dispatch has seen an event for, so the build reads
+-- thousands of rows, not millions.
+drop index pull_request_heads_merged_unread;
+create index pull_request_heads_merged_unread on pull_request_heads (repo, number)
+  where state = 'merged' and issue_key is null;

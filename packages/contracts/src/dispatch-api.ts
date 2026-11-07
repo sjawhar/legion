@@ -212,6 +212,14 @@ export interface RepoProject {
   /** The project's default repository: an issue with no repository of its own and none on its
    *  parent chain resolves to it. At most one mapping of a project is its default. */
   readonly default: boolean;
+  /** The full `owner/name` this repository is called today, null for one that was never
+   *  renamed. Dispatch holds both names of a renamed repository and canonicalises every
+   *  comparison through this field, so an issue recorded under the old name is held to a pull
+   *  request on the new one. `PUT /api/v1/settings/repo-projects/{owner}/{repo}` takes it:
+   *  absent or null leaves the stored pair alone, `""` clears it. Optional here because a
+   *  client written before the field existed builds this shape without it; Dispatch always
+   *  answers it. */
+  readonly renamed_to?: string | null;
   readonly created_by: Actor;
   readonly created_at: string;
 }
@@ -2380,7 +2388,8 @@ export interface Agent {
   readonly machine_id: string;
   /**
    * The session's real machine, as its own Envoy plugin reported it (envoy-client's
-   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * machineID(): `ENVOY_MACHINE_ID`, then an agent box's `AGENTBOX_HOST`, falling back to the
+   * kernel hostname). `machine_id` is
    * always the listener that registered the session and owns its delivery, which may be a
    * single shared listener for every machine; this is the one to show and filter on. The
    * listener falls back to `machine_id` itself for a session whose plugin predates this field,
@@ -2581,6 +2590,25 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+// ReferenceQuestion is one question block of a document on
+// GET /api/v1/references/questions: the block id a `#id` in the source's text writes, the whole
+// id of the ask settlement made for it (for a copied block, the ask it was copied from), and
+// that ask's `dispatch://` address, the one the `#id`'s own edge is stored under. `reference` is
+// empty for an ask no address names, one on an agent conversation's document.
+export interface ReferenceQuestion {
+  readonly block_id: string;
+  readonly ask: string;
+  readonly reference: string;
+}
+
+// ReferenceQuestions is GET /api/v1/references/questions?kind=&id=: the document one reference
+// source's text belongs to (`refs.ScopeOf`) and every question block that document's latest
+// version declares, by block id. A source whose text belongs to no document answers 404.
+export interface ReferenceQuestions {
+  readonly document: string;
+  readonly questions: ReferenceQuestion[];
+}
+
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
 // both block nodes, and when and in which version of its document the source block first held
 // it.
@@ -2771,7 +2799,9 @@ export interface CheckResult {
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
 
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. */
+ *  first: `created_at` descending — the time the recording transaction began — with `id`
+ *  descending breaking a tie. Two results recorded in transactions that overlapped can come
+ *  back in either order. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
@@ -2788,7 +2818,11 @@ export interface CheckBlock {
 }
 
 /** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order. An issue with no Verification document answers no checks. */
+ *  document order, each check's results newest first, by `created_at` descending — the time the
+ *  recording transaction began — with `id` descending breaking a tie; a client that reads one
+ *  result per check reads `results[0]`, which is what `dispatch results` prints. Two results
+ *  recorded in transactions that overlapped can come back in either order. An issue with no
+ *  Verification document answers no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
   /** The issue's Verification document, `""` for an issue that has none. */
@@ -2805,7 +2839,9 @@ export interface CheckResultRecorded {
 }
 
 /** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. */
+ *  them is refused `400 RESULT_CONTRADICTS`. `commit` is 40 lowercase hex; one the repository of
+ *  the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and
+ *  that `owner/repo`, while a repository Dispatch cannot read stores the result as before. */
 export interface RecordCheckResultInput {
   readonly actor?: Actor;
   readonly check: string;
@@ -2988,8 +3024,8 @@ export type IssueReleasedEventPayload = IssueClaimEventPayload & {
  * shipped it (by intake or by the reconcile), with the system actor `delivery-timeline`, and
  * published on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`) as every
  * issue event is. `repo` and `number` name the pull request, `run_id` the production run, and
- * `completed_at` when that run's production job completed, in UTC. The Legion daemon wakes the
- * issue's production check on it. Strict: the Go writer
+ * `completed_at` when that run's production job completed, in UTC. The Legion daemon no longer
+ * reads it: nothing a deployment publishes wakes a production check. Strict: the Go writer
  * (`packages/envoy/internal/dispatch/delivery/deployed.go`) emits exactly these four fields.
  */
 export const IssueDeployedEventPayloadSchema = z.strictObject({
@@ -3048,8 +3084,8 @@ export type HandoffRecordedPayload = z.infer<typeof HandoffRecordedPayloadSchema
  * last process of the build before has gone, a restart on the announced build is not announced, and
  * a rollback to an earlier build is announced again. Its event id, source event id and dedupe key
  * are `dispatch-server-started-<commit>-<seq>`, `seq` being the announcement's own number. Mirrored
- * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`, and matched whole by the
- * Legion daemon's intake.
+ * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`. The Legion daemon's intake
+ * matches no subject to it: an envelope on it is no fact.
  */
 export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
 
@@ -3057,9 +3093,9 @@ export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.st
  * The payload of a `server.started` envelope: the build commit every live Dispatch server process
  * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
  * the fleet was found serving it, by the database's clock, in UTC. The field is named `started_at`
- * because the Go writer and the Legion daemon carry that name. The Legion daemon compares the
- * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
- * two fields.
+ * because the Go writer carries that name. The Legion daemon reads none of
+ * it: nothing a Dispatch build announces wakes a production check. Strict: the Go writer emits
+ * exactly these two fields.
  */
 export const DispatchServerStartedPayloadSchema = z.strictObject({
   commit: z.string().min(1),
@@ -3773,10 +3809,37 @@ export interface TargetCandidate {
   readonly context: string;
 }
 
+/**
+ * The code of the `409` Dispatch answers an id written as a prefix two items or more carry: a
+ * page address, a `dispatch://` reference or a dashboard address in text, or a route that takes
+ * an id in its path (INFRA-869). `candidates` then lists the items it names, at most ten, in id
+ * order, for the caller to write more of the id or to choose one. Generated into Go as
+ * `contracts.IDAmbiguous`.
+ */
+export const ID_AMBIGUOUS = "ID_AMBIGUOUS";
+
+/**
+ * One item an ambiguous id prefix names (`ID_AMBIGUOUS`). `id` is the whole id the prefix
+ * shortens - the item's uuid, or the block id a document block is unique under - and `ref` its
+ * whole `dispatch://` reference, empty for an item that has no address (a direct message, a
+ * document of an agent's conversation). At most one of `issue_key` and `document` names its
+ * owner: the issue that owns it, or the reference of the project document it is written on.
+ * `first_line` is the head of what tells two candidates apart, absent for a direct message a
+ * caller may not read.
+ */
+export interface IDCandidate {
+  readonly kind: "ask" | "comment" | "message" | "artifact" | "block";
+  readonly id: string;
+  readonly ref: string;
+  readonly issue_key?: string;
+  readonly document?: string;
+  readonly first_line?: string;
+}
+
 export interface DispatchServiceErrorShape {
   readonly error?: string;
   readonly code?: string;
-  readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
+  readonly candidates?: TargetCandidate[] | DuplicateCandidate[] | IDCandidate[];
   readonly current?: EditPreconditionCurrent;
   readonly mismatches?: EditPreconditionMismatch[];
 }

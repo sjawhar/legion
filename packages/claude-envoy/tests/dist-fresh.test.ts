@@ -349,7 +349,7 @@ function describeMismatch(file: string, first: Buffer, second: Buffer): string {
 // either. (A second Bun.build in a test process that has already run other test files fails
 // reading its sources with EISDIR on Bun 1.3.14.)
 test("two builds of one tree are byte for byte the same", async () => {
-  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-rebuild-"))
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-second-build-"))
   try {
     const run = Bun.spawn(
       [process.execPath, join(packageRoot, "scripts", "build.ts"), "--out", scratch],
@@ -370,7 +370,7 @@ test("two builds of one tree are byte for byte the same", async () => {
   }
 }, 60_000)
 
-// `bun run build`/`bun run check-dist` spawn a new "bun" to run scripts/build.ts, and that spawn
+// `bun run verify-build` spawns a new "bun" to run scripts/build.ts, and that spawn
 // resolves "bun" from PATH rather than reusing whichever binary the caller invoked `bun run` with
 // (LEGION-568): a devbox whose default Bun (a version manager's active version) differs from the
 // pin would otherwise silently bundle with it instead, and the bundler's output depends on the

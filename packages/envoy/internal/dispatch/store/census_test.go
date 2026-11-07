@@ -598,9 +598,68 @@ func TestCensusExemptsAMigrationOfOnlyCatalogStatementsFromTheTableLimit(t *test
 	}
 }
 
+// The four shipped migrations that drop an embedding trigger and the function only that trigger
+// ran are exempt from the table limit whatever their tables hold. Over a database at
+// 20261102122400, the version production's schema_migrations records before this release, the
+// census of the whole shipped set runs with the limit at one byte: no table in the database is
+// under it, so a migration the census does not refuse on a table's size is one the limit never
+// applies to, at any size. That is the whole argument of the one byte. Their neighbours in the
+// same release show what the exemption is not: 20261102233625 alters embeddings and creates an
+// index on it, and 20261105084017 adds two columns and two constraints to artifact_reviews, and
+// no exemption of statement kinds reaches either, so each is refused on its table's size.
+func TestCensusExemptsTheShippedEmbeddingTriggerDropsAtAnyTableSize(t *testing.T) {
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 20261102122400)
+	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, 20261105084017), pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	pending := map[int]*pgmigrate.MigrationCensus{}
+	for i := range report.Pending {
+		pending[report.Pending[i].Migration.Version] = &report.Pending[i]
+	}
+	for _, version := range []int{20261102233626, 20261102233627, 20261102233628, 20261102233629} {
+		entry := pending[version]
+		if entry == nil {
+			t.Fatalf("%d is not pending; report:\n%s", version, reportText(report))
+		}
+		if entry.TableSizeExemption != "drop trigger and drop function" {
+			t.Errorf("%s: TableSizeExemption = %q, want %q", entry.Migration.Name, entry.TableSizeExemption, "drop trigger and drop function")
+		}
+		if len(entry.Refusals) != 0 {
+			t.Errorf("%s refused: %v", entry.Migration.Name, entry.Refusals)
+		}
+	}
+	// Refusals of the other pending migrations of the release are no business of this test: at a
+	// one-byte limit every migration that is not exempt is refused on some table.
+	for _, want := range []struct {
+		version int
+		table   string
+	}{
+		{20261102233625, "embeddings"},
+		{20261105084017, "artifact_reviews"},
+	} {
+		entry := pending[want.version]
+		if entry == nil {
+			t.Fatalf("%d is not pending; report:\n%s", want.version, reportText(report))
+		}
+		if entry.TableSizeExemption != "" {
+			t.Errorf("%s: TableSizeExemption = %q, want none", entry.Migration.Name, entry.TableSizeExemption)
+		}
+		refused := slices.ContainsFunc(entry.Refusals, func(reason string) bool {
+			return strings.Contains(reason, want.table+" is ") && strings.Contains(reason, "above the 1 bytes a table a migration touches may be")
+		})
+		if !refused {
+			t.Errorf("%s: refusals = %v, want %s refused on its size", entry.Migration.Name, entry.Refusals, want.table)
+		}
+	}
+}
+
 // An enabled event trigger on create trigger runs code of its own when the migration runs, so a
 // migration of only a trigger is not exempt while one exists, and the size refusal names it. A
-// disabled one changes nothing.
+// disabled one changes nothing. A drop fires sql_drop as well as ddl_command_start and
+// ddl_command_end, so an event trigger on that event takes a migration of only drops out of the
+// exemption exactly as one on create trigger does.
 func TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn(t *testing.T) {
 	ctx := context.Background()
 	store, url := migratedToOne(t)
@@ -633,6 +692,32 @@ func TestCensusDoesNotExemptACatalogMigrationAnEventTriggerRunsOn(t *testing.T) 
 	}
 	if report.Refused() {
 		t.Errorf("a disabled event trigger kept the exemption off: %v", refusals(report))
+	}
+	// A drop of the trigger the migration above created: an event trigger on sql_drop runs on it,
+	// so the drop's own exemption goes the same way.
+	if _, err := store.Pool.Exec(ctx, "create event trigger on_drop_trigger on sql_drop when tag in ('DROP TRIGGER') execute function noop_event()"); err != nil {
+		t.Fatal(err)
+	}
+	drops := fstest.MapFS{
+		"migrations/0001_things.up.sql": censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_owed.up.sql":   {Data: []byte("drop trigger things_owed on things")},
+	}
+	report, err = census(ctx, url, drops, pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "above the 1 bytes a table a migration touches may be; its statements are only drop trigger, which would exempt it from the limit, but the enabled event triggers on_drop_trigger run code of their own on them") {
+		t.Errorf("refusals = %v, want things refused on its size, naming the event trigger on sql_drop", got)
+	}
+	if _, err := store.Pool.Exec(ctx, "alter event trigger on_drop_trigger disable"); err != nil {
+		t.Fatal(err)
+	}
+	report, err = census(ctx, url, drops, pgmigrate.CensusOptions{TableLimit: 1})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if report.Refused() {
+		t.Errorf("a disabled event trigger on sql_drop kept the drop's exemption off: %v", refusals(report))
 	}
 }
 

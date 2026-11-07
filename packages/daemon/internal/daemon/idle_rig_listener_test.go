@@ -14,12 +14,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 // idleRigListener is the real Envoy listener of packages/envoy/cmd/listener, built once per test
-// binary and run as its own process for the rig: the one component that sees a message published
-// to a role topic nobody holds and a message sent to the agent subject of a session that is gone,
-// and reports both to the daemon on notifications.legion.wake.
+// process (testbuild.EnvoyBinary) and run as its own process for the rig: the one component that
+// sees a message published to a role topic nobody holds and a message sent to the agent subject
+// of a session that is gone, and reports both to the daemon on notifications.legion.wake.
 //
 // It is started the way scripts/e2e/envoy-session-delivery.sh starts one — a build of this
 // checkout's cmd/listener, then PORT, ENVOY_LISTEN_HOST, ENVOY_MACHINE_ID, NATS_URLS and a HOME of
@@ -35,42 +38,6 @@ type idleRigListener struct {
 	stop   func()
 }
 
-// idleRigListenerBuild builds cmd/listener once per test binary, under the test's temporary root.
-var idleRigListenerBuild struct {
-	once sync.Once
-	path string
-	err  error
-}
-
-// idleRigListenerBinary is the built listener, built on first use.
-func idleRigListenerBinary(t *testing.T) string {
-	t.Helper()
-	idleRigListenerBuild.once.Do(func() {
-		dir, err := os.MkdirTemp("", "lgb")
-		if err != nil {
-			idleRigListenerBuild.err = err
-			return
-		}
-		source, err := filepath.Abs(filepath.Join("..", "..", "..", "envoy"))
-		if err != nil {
-			idleRigListenerBuild.err = err
-			return
-		}
-		path := filepath.Join(dir, "envoy-listener")
-		build := exec.Command("go", "build", "-o", path, "./cmd/listener")
-		build.Dir = source
-		if output, err := build.CombinedOutput(); err != nil {
-			idleRigListenerBuild.err = fmt.Errorf("build the Envoy listener in %s: %v\n%s", source, err, output)
-			return
-		}
-		idleRigListenerBuild.path = path
-	})
-	if idleRigListenerBuild.err != nil {
-		t.Fatal(idleRigListenerBuild.err)
-	}
-	return idleRigListenerBuild.path
-}
-
 // startIdleRigListener runs a listener of machine id against natsURL until t ends, and returns it
 // once /healthz answers healthy.
 func startIdleRigListener(t *testing.T, natsURL, machine string) *idleRigListener {
@@ -82,12 +49,10 @@ func startIdleRigListener(t *testing.T, natsURL, machine string) *idleRigListene
 // listener restarted mid-test comes back where every URL already handed out reaches it.
 func startIdleRigListenerOn(t *testing.T, natsURL, machine string, port int) *idleRigListener {
 	t.Helper()
-	binary := idleRigListenerBinary(t)
-	home, err := os.MkdirTemp("", "lgh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	binary := testbuild.EnvoyBinary(t, "./cmd/listener")
+	// The listener's HOME is also where it runs, and the only path the test writes under it is
+	// the log below.
+	home := testtmp.Dir(t, "listener.log")
 	logs := filepath.Join(home, "listener.log")
 	file, err := os.Create(logs)
 	if err != nil {
