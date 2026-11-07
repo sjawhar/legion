@@ -222,6 +222,7 @@ export type {
   Suggestion,
   Suggestions,
   TargetCandidate,
+  TmuxPlace,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
