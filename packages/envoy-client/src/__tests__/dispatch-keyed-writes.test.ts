@@ -1128,10 +1128,11 @@ async function socketDispatch(intakes: readonly Intake[]) {
         // already hold when the last wait ends, the connection is still taking bytes and the client
         // still sees progress.
         const step = taken.length / 2 / intake.pauses;
-        if (taken.received >= (paused + 1) * step) {
+        if (paused < intake.pauses && taken.received >= (paused + 1) * step) {
           paused++;
           socket.pause();
-          setTimeout(() => socket.resume(), intake.pauseMs);
+          const resume = setTimeout(() => socket.resume(), intake.pauseMs);
+          socket.once("close", () => clearTimeout(resume));
         }
       }
     });
@@ -1140,13 +1141,10 @@ async function socketDispatch(intakes: readonly Intake[]) {
   server.listen(0, "127.0.0.1", resolve);
   await listening;
   const { port } = server.address() as AddressInfo;
-  let closed = false;
   return {
     url: `http://127.0.0.1:${port}`,
     writes,
     close(): void {
-      if (closed) return;
-      closed = true;
       for (const socket of sockets) socket.destroy();
       server.close();
     },
@@ -1163,11 +1161,11 @@ describe("DispatchClient's uploads on a real connection", () => {
 
   beforeEach(forgetKeyedLayerMemory);
 
-  // A row that hits its hang guard never reaches its own `finally`, so its server and its sockets
-  // would outlive it and their errors would land on the row after it. Each row still closes its own
-  // server, and closing twice does nothing; this is the second line, not the first.
+  // The row that hits its hang guard never reaches the end of its own body, so this hook is what
+  // closes its server and its sockets; left open, their errors would land on the row after it. It
+  // is the one owner of the close, which is why no row closes its own server.
   afterEach(() => {
-    while (opened.length > 0) opened.pop()?.close();
+    for (const made of opened.splice(0)) made.close();
   });
 
   const dispatchOn = async (intakes: readonly Intake[]) => {
@@ -1197,20 +1195,16 @@ describe("DispatchClient's uploads on a real connection", () => {
   // swallow whole leaves the client silent for every pause that follows, and measured in this pod a
   // 4 MiB body was swallowed whole and cut off 3 runs of 3 under that load. The 30 s limit is a
   // hang guard, not a budget: it fires only if the server's resume or the client's stream never
-  // comes. Measured in that pod: 3.38 s idle, 5.09 s at most under those 16 loops.
+  // comes. Measured in that pod: 1.99 s idle, 3.09 s at most under those 16 loops.
   test("an upload going out for longer than silenceMs lands in one attempt", async () => {
     const silenceMs = 1_500;
     const dispatch = await dispatchOn([{ pauses: 4, pauseMs: 450 }]);
-    try {
-      const started = performance.now();
-      await upload(dispatch.url, silenceMs, 24 << 20);
+    const started = performance.now();
+    await upload(dispatch.url, silenceMs, 24 << 20);
 
-      expect(performance.now() - started).toBeGreaterThan(silenceMs);
-      expect(dispatch.writes).toHaveLength(1);
-      expect(dispatch.writes[0]?.received).toBe(dispatch.writes[0]?.length as number);
-    } finally {
-      dispatch.close();
-    }
+    expect(performance.now() - started).toBeGreaterThan(silenceMs);
+    expect(dispatch.writes).toHaveLength(1);
+    expect(dispatch.writes[0]?.received).toBe(dispatch.writes[0]?.length as number);
   }, 30_000);
 
   // The claim is that an upload its connection stops taking is cut off and sent again under its key,
@@ -1221,25 +1215,21 @@ describe("DispatchClient's uploads on a real connection", () => {
   // body is 2 MiB, just over `STREAMED_BODY_MIN`, so the attempt that lands is short, and the
   // silence bound is 1,000 ms so a stall of the machine's own does not cut a healthy attempt. The
   // 30 s limit is a hang guard, not a budget: it fires only if the resend never lands. Measured in
-  // a 2-CPU pod: 2.04 s idle, 2.33 s at most under 16 busy loops (8 x nproc).
+  // a 2-CPU pod: 2.03 s idle, 2.40 s at most under 16 busy loops (8 x nproc).
   test("an upload its connection stops taking is cut off and sent again under its key", async () => {
     const silenceMs = 1_000;
     const dispatch = await dispatchOn(["stall", "full"]);
-    try {
-      const started = performance.now();
-      await upload(dispatch.url, silenceMs, 2 << 20);
+    const started = performance.now();
+    await upload(dispatch.url, silenceMs, 2 << 20);
 
-      expect(performance.now() - started).toBeGreaterThanOrEqual(silenceMs);
-      const { writes } = dispatch;
-      expect(writes.length).toBeGreaterThan(1);
-      const first = writes[0] as Taken;
-      const landed = writes.at(-1) as Taken;
-      expect(first.received).toBeLessThan(first.length);
-      expect(landed.received).toBe(landed.length);
-      expect(first.key).toMatch(IDEMPOTENCY_KEY_PATTERN);
-      for (const write of writes) expect(write.key).toBe(first.key as string);
-    } finally {
-      dispatch.close();
-    }
+    expect(performance.now() - started).toBeGreaterThanOrEqual(silenceMs);
+    const { writes } = dispatch;
+    expect(writes.length).toBeGreaterThan(1);
+    const first = writes[0] as Taken;
+    const landed = writes.at(-1) as Taken;
+    expect(first.received).toBeLessThan(first.length);
+    expect(landed.received).toBe(landed.length);
+    expect(first.key).toMatch(IDEMPOTENCY_KEY_PATTERN);
+    for (const write of writes) expect(write.key).toBe(first.key as string);
   }, 30_000);
 });
