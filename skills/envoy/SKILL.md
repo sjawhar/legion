@@ -118,8 +118,7 @@ Every topic starts with `notifications.`.
 
 - A `pr.<n>` event with `closed` and `merged: true` means the PR merged; it carries `merge_commit_sha`, `merged_by` and `head_sha`.
 
-- A later settlement of the same commit can carry `superseded_settlement: "true"`.
-  Code that orders settlements follows `skill://envoy/references/check-settlement.md`.
+- Code that orders settlements of one commit follows `skill://envoy/references/check-settlement.md`.
 
 - A Legion implementer waits this way only on a re-run of a red check its task names.
   Otherwise it pushes and completes its phase, and the daemon reads CI for it (`skill://legion-worker`).
