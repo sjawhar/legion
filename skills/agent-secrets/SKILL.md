@@ -75,14 +75,20 @@ secret's rule names. Three things follow for the command you write:
 
 A refusal comes from the proxy, not from the service:
 
-- An HTTP error naming the rule that refused it: a host no entry binds, a header the entry does
-  not name, a method or a path outside the entry's `allow`, or a private address.
+- An HTTP error naming the rule that refused it: a TLS name or `Host` that is not the host the
+  command asked for, a method or a path outside the entry's `allow`, a path with a `.` or `..`
+  segment, plain `http://` to a host an entry binds, or a private address.
 
 - `407` once the grant ends, on every call to any host.
 
-A retry fixes neither, and neither does another name. The fix is a change to the rules file in the
-deployment's own repository, which a person reviews. Report the refusal as you report a service
-out of reach: the command you ran and the output you saw.
+A retry fixes neither, and neither does another name. A `407` needs a new grant. A rule's refusal
+needs a change to the rules file in the deployment's own repository, which a person reviews.
+Report the refusal as you report a service out of reach: the command you ran and the output you
+saw.
+
+Two calls are not refused by the proxy. A call to a host no entry binds goes out unread, and a
+placeholder in a header the entry does not name goes out as it is, so the service refuses the
+placeholder and its own error is what you see.
 
 ## The value never reaches your transcript
 
