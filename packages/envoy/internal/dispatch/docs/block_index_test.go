@@ -2435,12 +2435,12 @@ func ownerKeys(t *testing.T, database *store.Store, owner wholeTextOwner, limit 
 }
 
 // explainPlan is the plan of statement under arguments, read in a transaction that is rolled
-// back, with sequential scans off and any further setting the caller passes. A fixture of a
-// few hundred rows sits in a page or two, so what a plan costs here says nothing about what it
-// costs on a production table, and the planner's choice between one read of that page and
-// another says as little; the index a read can be served through, and the column it is keyed
-// on, are the same either way, and they are what these tests pin (explaintest).
-func explainPlan(t *testing.T, database *store.Store, settings []string, statement string, arguments ...any) json.RawMessage {
+// back, with sequential scans off. A fixture of a few hundred rows sits in a page or two, so
+// what a plan costs here says nothing about what it costs on a production table, and the
+// planner's choice between one read of that page and another says as little; the index a read
+// can be served through, and the column it is keyed on, are the same either way, and they are
+// what these tests pin (explaintest).
+func explainPlan(t *testing.T, database *store.Store, statement string, arguments ...any) json.RawMessage {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
@@ -2448,10 +2448,8 @@ func explainPlan(t *testing.T, database *store.Store, settings []string, stateme
 		t.Fatalf("begin the explain transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	for _, setting := range append([]string{"set local enable_seqscan = off"}, settings...) {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			t.Fatalf("%s: %v", setting, err)
-		}
+	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
+		t.Fatalf("set local enable_seqscan = off: %v", err)
 	}
 	var raw []byte
 	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
@@ -2481,7 +2479,7 @@ func explainPlan(t *testing.T, database *store.Store, settings []string, stateme
 // picked's columns and names no kind at all.
 func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeTextOwner, ids []string) {
 	t.Helper()
-	plan := explainPlan(t, database, nil, owner.retire(), ids)
+	plan := explainPlan(t, database, owner.retire(), ids)
 	kept := 0
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		if !strings.Contains(scan.Cond, "'"+owner.kind+"'") {
@@ -2512,7 +2510,7 @@ func requireRetireByPrimaryKey(t *testing.T, database *store.Store, owner wholeT
 // for, so a plan of it answers that question for the fixture and not for the statement.
 func requireOwnersReadTheWindowIndex(t *testing.T, database *store.Store, owner wholeTextOwner) {
 	t.Helper()
-	plan := explainPlan(t, database, nil, owner.owners(), "", blockIndexRetireBatch)
+	plan := explainPlan(t, database, owner.owners(), "", blockIndexRetireBatch)
 	subject := "the walk over the " + owner.windowKind + " owners"
 	explaintest.NewIndexKeys(database.Pool).RequireIndexKeyed(t, plan,
 		"embeddings_window_owner", subject, explaintest.CondRequired)

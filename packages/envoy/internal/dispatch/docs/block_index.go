@@ -637,8 +637,16 @@ func (owner wholeTextOwner) pass(ctx context.Context, pool *store.Pool, after st
 // at most what the kinds before it left of the budget, so one tick deletes at most
 // blockIndexRetireBatch rows and reads at most len(wholeTextOwners) times as many owner keys.
 // It adds what it deleted to tick.Retired and leaves each kind's cursor in tick.Cursor.Retire.
+// Every kind's cursor goes there before the first pass, so a kind the budget leaves nothing for,
+// and a kind after one whose pass returned an error, keep the cursor they had. That matters
+// because this walk reads every window owner of a kind, not only the owners that owe a delete:
+// a cursor dropped back to the empty string costs the kind a whole lap over its owners, one
+// slice every BlockIndexReconcileInterval for as long as the slices retire nothing.
 func (s *Service) retireWholeText(ctx context.Context, cursors map[string]string, tick *BlockIndexTick) error {
 	next := make(map[string]string, len(wholeTextOwners))
+	for _, owner := range wholeTextOwners {
+		next[owner.kind] = cursors[owner.kind]
+	}
 	tick.Cursor.Retire = next
 	budget := blockIndexRetireBatch
 	for _, owner := range wholeTextOwners {
