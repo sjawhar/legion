@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { Agent, Issue, IssueClaim, IssueDetails } from "../../api/types";
+import { NoTooltips } from "../../components/tooltips";
 import { MarginProvider } from "../margin/margin-context";
 import { IssueHeader } from "./IssueHeader";
 import { stateForIssue } from "./pins";
@@ -66,10 +67,15 @@ function header(issue: Issue): { unmount: () => void } {
   // The header reads the project's repository mappings at once for an issue that resolves to
   // none, as these do; a project that maps none shows no repository item.
   const mappings = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  // The issue page draws no tooltip anywhere (dispatch://INFRA-1196 R21,
+  // `components/tooltips.tsx`), so the header is rendered on that surface here too: it is what
+  // decides whether the claim's instant is drawn in words or left to a tooltip.
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <MarginProvider>{children}</MarginProvider>
+        <MarginProvider>
+          <NoTooltips>{children}</NoTooltips>
+        </MarginProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );

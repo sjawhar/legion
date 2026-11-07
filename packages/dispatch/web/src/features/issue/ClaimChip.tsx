@@ -40,10 +40,13 @@ export function claimHasLapsed(
  * List row, a Board card. The holder is drawn by `AgentName`, as every agent is: its current
  * registry title, else the title stamped on the claim, else `session:<8>…`, with its running
  * state and a link to its live conversation. The age keeps itself current through the shared
- * `Timestamp` tick and is followed by the instant itself, in words: the chip carries no
- * tooltip at all, because the time a claim was taken is what decides whether it is stale and a
- * tooltip saying so reaches no reader on a phone or on the keyboard (dispatch://INFRA-1196
- * R21). An unclaimed issue renders nothing at all, so a board of unclaimed work stays quiet.
+ * `Timestamp` tick, and on a surface that raises no tooltip - the issue page
+ * (dispatch://INFRA-1196 R21) - the instant itself follows it in words, because the time a
+ * claim was taken is what decides whether it is stale and a tooltip saying so reaches no
+ * reader on a phone or on the keyboard. Where a tooltip does carry it, a Board card and a List
+ * row, it is not drawn as well: it would say the same thing twice and widen a chip those hosts
+ * have no room for (`Timestamp.tsx`). An unclaimed issue renders nothing at all, so a board of
+ * unclaimed work stays quiet.
  *
  * A holder the registry no longer lists reads "· not running" in the muted tone, beside its
  * name's own not-running mark, because that claim is free for the taking and a chip that looked
@@ -79,9 +82,9 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
       <span aria-hidden="true" className="shrink-0" {...pageChrome}>
         ·
       </span>
-      {/* The instant itself, in words rather than in a tooltip: how long a session has held
-          the issue is what decides whether its claim is stale, and a tooltip saying so reaches
-          no reader on a phone or on the keyboard (dispatch://INFRA-1196 R21). */}
+      {/* The instant itself where no tooltip carries it: how long a session has held the issue
+          is what decides whether its claim is stale, and on the issue page a tooltip saying so
+          reaches no reader on a phone or on the keyboard (dispatch://INFRA-1196 R21). */}
       <Timestamp at={claim.at} className="shrink-0" exact />
       {lapsed ? (
         <>

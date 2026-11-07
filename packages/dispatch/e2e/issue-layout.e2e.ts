@@ -44,7 +44,7 @@ import {
   seedTwiceTheNodes,
   seedWholeIssue,
 } from "./issue-layout-seed";
-import { asPlanner, REVIEWER } from "./issue-layout-seed-support";
+import { asPlanner } from "./issue-layout-seed-support";
 import {
   checkBlockId,
   OPEN_QUESTION_BLOCK_ID,
@@ -1415,13 +1415,26 @@ interface PageInventoryFixture {
   readonly "closed-390": readonly InventoryEntry[];
 }
 
+/** Opens the identity block's one actions control, which holds Close, Reopen and the control
+ *  that sets the parent (R11). A press inside it closes it again, so it is opened only while
+ *  it is closed. */
+async function openIssueActions(page: Page): Promise<void> {
+  const control = offered(page, "button", CONTROL_LABELS.issue_actions);
+  if ((await control.getAttribute("aria-expanded")) !== "true") await control.click();
+}
+
 // c-nothing-lost.
 test("the new page carries every element of the old one @phone", async ({ browser }) => {
   // Four states, each read through the page's own views - its five presets, the two addresses
-  // beside them, the three views behind a control, the three a width opens, and one per row of
-  // the tree, with the presets walked again where the narrow tree is the way in: about 220
-  // loads of the issue page, each settled over two readings of its accessibility tree. The row
-  // carries a deadline of its own, because that outlasts the 30 s default many times over.
+  // beside them, the three views behind a control, the three a width opens, one per row of the
+  // tree, and, where the narrow tree is the way in, the presets and the zooms walked again.
+  // Each walk loads the page once and moves through its rows from there, which is how a reader
+  // moves through them: 42 loads of the issue page per 390 px state and 13 per 1440 px one,
+  // 124 and 36 views, each settled over two readings of its accessibility tree, and the write
+  // walk below after them. Measured on an issue pod's two CPUs: a view costs about 1 s, which
+  // is 5.8 minutes for the desktop project's four states and 4.4 for the phone project's two.
+  // The row carries a deadline of its own because that outlasts the 30 s default many times
+  // over, and the deadline leaves room for a loaded box.
   test.setTimeout(900_000);
   const fixture = JSON.parse(
     await readFile(
@@ -1480,9 +1493,11 @@ test("the new page carries every element of the old one @phone", async ({ browse
       // One view per row of the tree, because a tree opens one body at a time and a node's own
       // text, its facts and its controls are in that body (R2). The seeded issue draws fewer
       // rows than this at either width, and a view whose row is not there reads the tree as it
-      // stands and adds nothing.
+      // stands and adds nothing. The walk loads the page once and then moves through the rows,
+      // which is how a reader moves through them: each view is still read, and still fitted,
+      // on its own.
       ...Array.from({ length: 24 }, (_unused, index) => async () => {
-        await gotoIssue(page, `/issues/${seeded.key}`);
+        if (index === 0) await gotoIssue(page, `/issues/${seeded.key}`);
         const rows = nodeRows(page);
         if ((await rows.count()) > index) await rows.nth(index).focus();
       }),
@@ -1492,12 +1507,12 @@ test("the new page carries every element of the old one @phone", async ({ browse
       // zoom per row of the issue's own address, because a node that hangs off a row - the
       // document a requirement cites - is behind that row's own twisty and nowhere else. At a
       // width that draws the whole tree the views above already open every row, so neither
-      // walk runs there.
+      // walk runs there. Each walk loads its page once, as the walk above does.
       ...(width > 1024
         ? []
         : PRESET_ORDER.flatMap((preset) =>
             Array.from({ length: 8 }, (_unused, index) => async () => {
-              await gotoIssue(page, presetAddress(seeded.key, preset));
+              if (index === 0) await gotoIssue(page, presetAddress(seeded.key, preset));
               const rows = nodeRows(page);
               if ((await rows.count()) > index) await rows.nth(index).focus();
             })
@@ -1506,12 +1521,14 @@ test("the new page carries every element of the old one @phone", async ({ browse
         ? []
         : Array.from({ length: 24 }, (_unused, into) =>
             Array.from({ length: 2 }, (_also, index) => async () => {
-              await gotoIssue(page, `/issues/${seeded.key}`);
-              const rows = nodeRows(page);
-              if ((await rows.count()) <= into) return;
-              const twisty = rows.nth(into).getByRole("button", { name: CONTROL_LABELS.unfold });
-              if ((await twisty.count()) === 0) return;
-              await twisty.first().click();
+              if (index === 0) {
+                await gotoIssue(page, `/issues/${seeded.key}`);
+                const rows = nodeRows(page);
+                if ((await rows.count()) <= into) return;
+                const twisty = rows.nth(into).getByRole("button", { name: CONTROL_LABELS.unfold });
+                if ((await twisty.count()) === 0) return;
+                await twisty.first().click();
+              }
               // The zoomed node is the first row; its own nodes follow it.
               const under = nodeRows(page);
               if ((await under.count()) > index + 1) await under.nth(index + 1).focus();
@@ -1558,9 +1575,11 @@ test("the new page carries every element of the old one @phone", async ({ browse
     await expectIssuePageDrawn(page);
 
     // Each recorded name that writes today still writes: the write is made through the page and
-    // the value read back from Dispatch.
+    // the value read back from Dispatch. Close, Reopen and the parent editor are behind the
+    // identity block's one actions control now (R11), so each is reached through it.
     await page.setViewportSize({ height: DESKTOP.height, width: DESKTOP.width });
     await gotoIssue(page, `/issues/${seeded.key}`);
+    await openIssueActions(page);
     await offered(page, "button", "Reopen issue").click();
     await expect.poll(async () => (await getIssue(seeded.key)).status).not.toBe("done");
 
@@ -1570,7 +1589,13 @@ test("the new page carries every element of the old one @phone", async ({ browse
     await offered(page, "combobox", `Priority of ${seeded.key}`).selectOption("3");
     await expect.poll(async () => (await getIssue(seeded.key)).priority).toBe(3);
 
-    await offered(page, "combobox", `Assignee of ${seeded.key}`).selectOption("bob");
+    // A picker whose list is read when the reader reaches for it - the people and the
+    // repositories (`AssigneeControl.tsx`, `RepoControl.tsx`) - is reached for first, as a
+    // reader reaches for it; without that it offers the value it already holds and nothing else.
+    const assignee = offered(page, "combobox", `Assignee of ${seeded.key}`);
+    await assignee.focus();
+    await expect(assignee.locator('option[value="bob"]')).toHaveCount(1);
+    await assignee.selectOption("bob");
     await expect.poll(async () => (await getIssue(seeded.key)).assignee).toBe("bob");
 
     await offered(page, "button", "Edit labels").click();
@@ -1582,26 +1607,27 @@ test("the new page carries every element of the old one @phone", async ({ browse
     await page.keyboard.press("Escape");
     await expect.poll(async () => (await getIssue(seeded.key)).labels).toContain("carried");
 
+    await openIssueActions(page);
     await offered(page, "button", "Edit parent issue").click();
-    await page.getByRole("combobox", { name: /parent/i }).fill(seeded.children.done);
-    await page
-      .getByRole("option", { name: new RegExp(seeded.children.done) })
-      .first()
-      .click();
-    await expect.poll(async () => (await getIssue(seeded.key)).parent).toBe(seeded.children.done);
+    await page.getByRole("textbox", { name: "Parent" }).fill("");
+    await offered(page, "button", CONTROL_LABELS.save_parent).click();
+    await expect.poll(async () => (await getIssue(seeded.key)).parent).toBeNull();
 
     await offered(page, "button", `Messages default to ${PLANNER_TITLE}`).click();
-    await page
-      .getByRole("option", { name: /Reviewer/ })
-      .first()
-      .click();
-    await expect.poll(async () => (await getIssue(seeded.key)).route).toBe(`session:${REVIEWER}`);
+    const route = page.getByRole("textbox", { name: "Message route" });
+    await route.fill("role:reviewer");
+    await offered(page, "button", CONTROL_LABELS.save_route).click();
+    await expect.poll(async () => (await getIssue(seeded.key)).route).toBe("role:reviewer");
 
     const repository = offered(page, "combobox", `Repository of ${seeded.key}`);
+    await repository.focus();
     const repoBefore = (await getIssue(seeded.key)).repo;
+    await expect.poll(async () => (await optionsOf(repository)).length).toBeGreaterThan(1);
     const other = (await optionsOf(repository)).find((option) => option.value !== repoBefore);
     await repository.selectOption(other?.value ?? "");
-    await expect.poll(async () => (await getIssue(seeded.key)).repo).toBe(other?.value ?? "");
+    // The control's empty option is "No repository", which the issue reads back as none.
+    const wroteRepo = other?.value === "" || other === undefined ? null : other.value;
+    await expect.poll(async () => (await getIssue(seeded.key)).repo).toBe(wroteRepo);
 
     await offered(page, "button", `Edit components of ${seeded.key}`).click();
     await page.getByRole("option", { name: "Issue panel" }).first().click();
@@ -1613,26 +1639,41 @@ test("the new page carries every element of the old one @phone", async ({ browse
     await offered(page, "button", "Unpin issue").click();
     await expect.poll(async () => (await getMyState("alice"))[seeded.key]?.pinned).toBe(false);
 
-    await offered(page, "button", "Close issue").click();
-    await expect.poll(async () => (await getIssue(seeded.key)).status).toBe("done");
-    await offered(page, "button", "Reopen issue").click();
-    await expect.poll(async () => (await getIssue(seeded.key)).status).not.toBe("done");
-
+    // The close before the closed-state inventory took the seed's claim with it, so the issue
+    // is claimed again for the one control that hands a claim back.
+    await claimIssue(seeded.key, asPlanner);
+    await expect(offered(page, "button", `Release the claim on ${seeded.key}`)).toBeVisible();
     await offered(page, "button", `Release the claim on ${seeded.key}`).click();
     await expect.poll(async () => (await getIssue(seeded.key)).claim).toBeNull();
+
+    await openIssueActions(page);
+    await offered(page, "button", "Close issue").click();
+    await expect.poll(async () => (await getIssue(seeded.key)).status).toBe("done");
+    await openIssueActions(page);
+    await offered(page, "button", "Reopen issue").click();
+    await expect.poll(async () => (await getIssue(seeded.key)).status).not.toBe("done");
 
     await offered(page, "button", "Subscribers: 3").click();
     await page
       .getByRole("button", { name: /Unsubscribe/ })
       .first()
       .click();
+    // Unsubscribing asks first: Confirm is the only path that removes a subscriber
+    // (`UnsubscribeDialog.tsx`).
+    await page
+      .getByRole("dialog", { name: "Unsubscribe" })
+      .getByRole("button", { name: "Confirm" })
+      .click();
     await expect.poll(async () => (await getUnsubscribeCalls()).length).toBeGreaterThan(0);
 
     // The approval: the seed requests none, so it is requested here and approved from the page.
     await requestApproval(seeded.specArtifactId, { summary: "Read it back." });
     await openPreset(page, seeded.key, "spec");
-    await presetToolbar(page)
-      .getByRole("button", { name: /Approve/ })
+    // Approve is the identity block's own chip: the preset's toolbar draws how the document
+    // stands and no action (`features/doc/ApprovalChip.tsx`'s `showActions`).
+    await page
+      .getByTestId("issue-state-actions")
+      .getByRole("button", { name: /^Approve( v\d+)?$/ })
       .click();
     await expect
       .poll(async () => (await getArtifact(seeded.specArtifactId)).approval?.state)
@@ -1640,10 +1681,14 @@ test("the new page carries every element of the old one @phone", async ({ browse
 
     // Keep and Change, on the decision node they moved to.
     await openPreset(page, seeded.key, "decisions");
-    await offered(page, "button", "Keep").click();
-    await offered(page, "button", "Change").click();
-    await page.getByRole("textbox", { name: "Comment" }).fill("Change this decision.");
-    await offered(page, "button", "Send").click();
+    await offered(page, "button", CONTROL_LABELS.keep_decision).click();
+    await offered(page, "button", CONTROL_LABELS.change_decision).click();
+    // The change is written in the decision's own composer, which names its box and its send
+    // apart from the conversation's (`DecisionActions.tsx`, R7).
+    await page
+      .getByRole("textbox", { name: CONTROL_LABELS.your_change })
+      .fill("Change this decision.");
+    await offered(page, "button", CONTROL_LABELS.send_change).click();
     await expect
       .poll(async () => (await listComments(seeded.key)).map((comment) => comment.body))
       .toContain("Change this decision.");
@@ -1662,17 +1707,24 @@ test("the new page carries every element of the old one @phone", async ({ browse
       .poll(async () => (await getIssue(seeded.key)).artifacts.map((artifact) => artifact.name))
       .toContain("carried.md");
 
+    // The panel's conversation, and its composer with it, is mounted once the conversation's
+    // own address has been opened (`IssuePage.tsx`'s `activatedTabs`), so the composer is
+    // written in where a reader writes in it.
+    await gotoIssue(page, `/issues/${seeded.key}/conversation`);
     await marginSlot(page).getByRole("textbox", { name: "Comment" }).fill("The composer writes.");
     await marginSlot(page).getByRole("button", { name: "Send" }).click();
     await expect
       .poll(async () => (await listComments(seeded.key)).map((comment) => comment.body))
       .toContain("The composer writes.");
 
+    // Back to the issue's own address, where the tree opens on the spec's nodes.
+    await gotoIssue(page, `/issues/${seeded.key}`);
     const specSlug = (await getArtifact(seeded.specArtifactId)).slug;
-    await nodeRow(page, blockNodeId(specSlug, OPEN_QUESTION_BLOCK_ID)).first().focus();
-    await page.getByRole("button", { name: "Add a note or answer in your own words" }).click();
-    await page.getByRole("textbox", { name: /answer/i }).fill("1280 px.");
-    await page.getByRole("button", { name: /^Answer/ }).click();
+    // The ask is drawn as a row of the tree and again as a card in the panel (R1, R12), so the
+    // answer is written on the row the reader focused.
+    const question = marginSlot(page).getByTestId(`ask-${seeded.openQuestion.askId}`);
+    await question.getByRole("radio").first().check();
+    await question.getByRole("button", { name: /^Answer/ }).click();
     await expect
       .poll(async () => (await getAsk(seeded.openQuestion.askId)).ask.state)
       .toBe("answered");
@@ -1687,8 +1739,9 @@ test("the new page carries every element of the old one @phone", async ({ browse
       .toContain("Edited in place.");
 
     await presetToolbar(page).getByRole("button", { name: "Name version" }).click();
-    await page.getByRole("textbox", { name: /version/i }).fill("Carried over");
-    await page.getByRole("button", { name: /^Save/ }).click();
+    const naming = page.getByRole("dialog", { name: "Name this version" });
+    await naming.getByRole("textbox", { name: "What changed?" }).fill("Carried over");
+    await naming.getByRole("button", { name: /^Save/ }).click();
     await expect
       .poll(async () =>
         (await getArtifact(seeded.specArtifactId)).versions.map((version) => version.summary)

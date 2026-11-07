@@ -164,9 +164,12 @@ test("a project with two architecture sources shows both in Settings, on its Arc
         }))
       )
       .toEqual({ ids: ["infra-ingress", "web"], mode: "explicit" });
+    // A chip draws the component's name, which is what the architecture calls it, rather than
+    // the model's own id (dispatch://INFRA-1196 R21): `web` reads "Web", `infra-ingress`
+    // "Ingress", the names the picker offered them under.
     const chips = [
-      line.getByText("web", { exact: true }),
-      line.getByText("infra-ingress", { exact: true }),
+      line.getByText("Web", { exact: true }),
+      line.getByText("Ingress", { exact: true }),
     ];
     for (const chip of chips) {
       await expect(chip).toBeVisible();

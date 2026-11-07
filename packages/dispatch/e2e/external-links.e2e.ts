@@ -20,9 +20,12 @@ test("an unsafe stored external link is rendered as inert text", async ({ browse
   try {
     await page.goto(`/issues/${issue.key}`);
 
+    // The page keeps nothing for a pointer alone (dispatch://INFRA-1196 R21): the address is
+    // drawn whole, the refusal is drawn in words beside it, and neither is a link.
     const unsafeLink = page.getByText(unsafeUrl);
-    await expect(unsafeLink).toHaveAttribute("title", "Unsafe external link");
+    await expect(unsafeLink).toBeVisible();
     await expect(unsafeLink).not.toHaveAttribute("href");
+    await expect(unsafeLink.locator("..")).toContainText("(unsafe external link)");
   } finally {
     await context.close();
   }

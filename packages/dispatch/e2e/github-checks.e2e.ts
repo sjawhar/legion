@@ -49,7 +49,9 @@ async function expectChecksPill(
     const page = await context.newPage();
     await page.goto(`/issues/${issue.key}`);
     const link = page.getByRole("link", { name: `#7 ${title}` });
-    await expect(link).toHaveAttribute("title", `${repository}#7: ${title}`);
+    // The link carries no tooltip (dispatch://INFRA-1196 R21): its number and title are drawn
+    // whole, and which repository they belong to is the address it opens.
+    await expect(link).toHaveAttribute("href", `https://github.com/${repository}/pull/7`);
     await expect(link.getByText(/^checks: /)).toHaveText(`checks: ${checks}`);
   } finally {
     await context.close();

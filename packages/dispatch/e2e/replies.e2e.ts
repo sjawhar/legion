@@ -111,11 +111,18 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
       await expect(row).toContainText("Done: the build is green.");
       await expect(row).toContainText("Release bot");
       await expectRepliesCount(page, isPhone, 1);
-      // Opening the thread shows its reply, and reading it clears the row and the count.
+      // Opening the thread shows its reply, and reading it clears the row and the count. The
+      // reply is drawn twice on the issue page (dispatch://INFRA-1196 R1, R12) - as a row of
+      // the issue's one tree and as the conversation's own turn - and what the reader was sent
+      // to is the turn.
       await row.getByRole("link", { name: "Open" }).click();
       await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/`));
       await expect(
-        page.getByText("Done: the build is green.").filter({ visible: true }).first()
+        page
+          .getByRole("region", { name: "Conversation" })
+          .getByText("Done: the build is green.")
+          .filter({ visible: true })
+          .first()
       ).toBeInViewport();
       await expectRepliesCount(page, isPhone, 0);
       await expect.poll(async () => (await listMyReplies()).total).toBe(0);

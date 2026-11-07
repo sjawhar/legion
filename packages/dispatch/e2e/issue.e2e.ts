@@ -311,10 +311,11 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     await expect(subscribedAgents).toContainText("e2e-session-title");
     await expect(subscribedAgents.getByText("e2e-session", { exact: true })).toHaveCount(0);
     await expect(subscribedAgents.locator("[title='e2e-session']")).toHaveCount(1);
-    // Without GitHub App credentials the link still reads as the reference, never the raw address.
-    await expect(page.getByRole("link", { name: "#815 sjawhar/legion" })).toHaveAttribute(
-      "title",
-      "GitHub details are unavailable for this repository."
+    // Without GitHub App credentials the link still reads as the reference, never the raw
+    // address, and says why it can say no more in words beside it rather than in a tooltip
+    // (dispatch://INFRA-1196 R21).
+    await expect(page.getByRole("link", { name: "#815 sjawhar/legion" })).toContainText(
+      "(GitHub details are unavailable for this repository)"
     );
     await expect(
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })

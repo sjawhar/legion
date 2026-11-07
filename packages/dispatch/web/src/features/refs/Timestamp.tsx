@@ -63,8 +63,11 @@ export function relativeTimeLabel(at: Date, now: number): string | undefined {
 export interface TimestampProps {
   at: string;
   className?: string;
-  /** Draws the instant itself after the relative age, for a surface where the clock time is
-   *  what a reader weighs (a claim's age decides whether it is stale). */
+  /** Draws the instant itself after the relative age on a surface that raises no tooltip, for
+   *  one where the clock time is what a reader weighs (a claim's age decides whether it is
+   *  stale). Where a tooltip carries the instant it is not drawn as well: the two say the same
+   *  thing, and the drawn one would widen a chip a narrow host - a Board card, a List row -
+   *  has no room for. */
   exact?: boolean;
 }
 
@@ -98,7 +101,7 @@ export function Timestamp({ at, className, exact = false }: TimestampProps): Rea
       {...authorText}
     >
       {relativeTimeLabel(date, Date.now())}
-      {exact
+      {exact && !tooltips
         ? ` (${date.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })})`
         : null}
     </time>

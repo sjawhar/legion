@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { primarySpec } from "../../api/issue-cache";
 import type { Artifact, IssueDetails } from "../../api/types";
 import { textMutedOnCanvas } from "../../theme/classes";
+import { PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { IssueChildren } from "./IssueChildren";
 import { IssuePresets } from "./IssuePresets";
 import { IssueThreeThings, nodesOfType, specSummary } from "./IssueThreeThings";
@@ -97,6 +98,16 @@ export function IssueBody({
   // What a key reported when it had nowhere to go, raised by the tree (`IssueTree`'s
   // `onReport`) and drawn here as the page's own status.
   const [report, setReport] = useState("");
+  // Where the open document's toolbar goes. From `md` it sits beside the preset row, as the
+  // design draws it (R16). Below `md` it is 96 px of a 844 px screen - the version picker, the
+  // name-a-version control and the approval, two lines of 44 px controls - and the identity
+  // block, the head, the preset row and the children section already take 700 px of it, so it
+  // is drawn under the tree instead, where the document it belongs to is: the same move the
+  // identity block's fourth row makes at that width (`IssueHeader.tsx`), and for the same
+  // reason - the first open question has to be on a phone's first screen (R6). Nothing is
+  // behind a control either way, so every one of its controls is still drawn with nothing
+  // opened (R18).
+  const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
 
   return (
     <>
@@ -130,7 +141,7 @@ export function IssueBody({
           const rest = query.toString();
           navigate(`${pathname}${rest === "" ? "" : `?${rest}`}${hash}`, { replace: true });
         }}
-        toolbar={toolbar}
+        toolbar={isPhoneViewport ? undefined : toolbar}
         uncited={uncited}
       />
       <IssueChildren issue={issue} />
@@ -154,6 +165,9 @@ export function IssueBody({
         reveal={reveal}
         root={view.root}
       />
+      {isPhoneViewport && toolbar !== undefined ? (
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">{toolbar}</div>
+      ) : null}
     </>
   );
 }

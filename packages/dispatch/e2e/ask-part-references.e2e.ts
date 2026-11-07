@@ -125,9 +125,11 @@ test("the backlink an ask's option writes names the ask as its source, not an ar
   const optionText = `Wait — Hold until dispatch://${target.key} ships.`;
 
   await page.goto(`/issues/${target.key}`);
-  const header = page.getByTestId("issue-header");
-  await header.getByRole("button", { name: /^Referenced by/ }).click();
-  const references = header.getByRole("region", { name: "Referenced by" });
+  // The backlink panel is the References section of the issue page's one panel, where what
+  // references the issue is one of its properties (dispatch://INFRA-1196 R12).
+  const panel = page.locator('[data-margin-section="references"]');
+  await panel.getByRole("button", { name: /^Referenced by/ }).click();
+  const references = panel.getByRole("region", { name: "Referenced by" });
 
   // The source is the ask the part belongs to, as a block of a comment reads as its comment, and
   // it links to the ask at that part. A part of an ask is no document, so nothing here reads

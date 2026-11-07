@@ -381,7 +381,12 @@ test("dispatch inbox under the person's own token lists the Inbox page's own row
     );
     expect(reviewed.status, await reviewed.text()).toBe(201);
     await page.goto(`/issues/${seeded.reviewedIssue}`);
-    await page.getByRole("button", { name: "Approved v1" }).click();
+    // The approval chip is drawn twice on the issue page (dispatch://INFRA-1196 R16): the
+    // identity block's state row and the open preset's toolbar. The row's is the issue's own.
+    await page
+      .getByTestId("issue-state-actions")
+      .getByRole("button", { name: "Approved v1" })
+      .click();
     await expect(page.getByRole("dialog", { name: "Reviews" })).toContainText(
       `${actingThrough} approved v1`
     );
@@ -447,7 +452,9 @@ test("dispatch inbox under the person's own token lists the Inbox page's own row
     );
     expect(approvedNow.status, await approvedNow.text()).toBe(200);
     await page.goto(`/issues/${seeded.gateIssue}`);
-    await expect(page.getByRole("button", { name: "Approved v1" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-state-actions").getByRole("button", { name: "Approved v1" })
+    ).toBeVisible();
   } finally {
     await alice.close();
     rmSync(home, { force: true, recursive: true });

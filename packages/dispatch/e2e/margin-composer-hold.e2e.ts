@@ -340,7 +340,9 @@ test("a margin send out when its issue closes keeps the draft and shows the refu
     await sendFromBar(page, "brown", "Before the close");
 
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
-    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    // Reopen sits behind the identity block's actions control now (dispatch://INFRA-1196 R11);
+    // what says the page has taken the close in is the line the block draws for it.
+    await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
     const form = composer(page);
     await expect(form.getByLabel("Comment")).toHaveValue("Before the close");
 

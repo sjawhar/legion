@@ -90,10 +90,11 @@ function newestCheckRuns(checkRuns: CheckRun[], workflowRuns: WorkflowRun[]): Ch
 }
 
 /**
- * One external link on the issue header's details line. A GitHub issue or pull request is
+ * One external link in the panel's Development section. A GitHub issue or pull request is
  * shown as its number and title (the repository while the title is unknown — loading, or no
- * GitHub App installation for the repository), never as the raw address, so it fits the line on a
- * phone; the title is truncated and carried in full by the link's tooltip.
+ * GitHub App installation for the repository), never as the raw address, so it fits the line on
+ * a phone; the title is drawn whole and wraps, because the page keeps nothing for a pointer
+ * alone (dispatch://INFRA-1196 R21).
  */
 export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   const href = safeExternalHref(link.url);

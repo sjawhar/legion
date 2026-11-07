@@ -38,6 +38,28 @@ export async function scrollConversationTo(page: Page, top: number): Promise<voi
   })()`);
 }
 
+/** Moves the reader `delta` pixels down the conversation, in whichever box its turns scroll in. */
+export async function scrollConversationBy(page: Page, delta: number): Promise<void> {
+  await page.evaluate(`(() => {
+    const port = ${FIND_SCROLLPORT};
+    if (port === null) window.scrollBy(0, ${delta});
+    else port.scrollBy({ top: ${delta} });
+  })()`);
+}
+
+/** The box the turns are clipped to: the scrollport's own, or the window's where the page
+ *  itself scrolls them. It is what the page measures the reader's place against
+ *  (`features/shell/ViewportAnchor.tsx`'s `rowAtCenter`), so a test that reads where the
+ *  reader is reads the same box. */
+export function conversationViewport(page: Page): Promise<{ bottom: number; top: number }> {
+  return page.evaluate(`(() => {
+    const port = ${FIND_SCROLLPORT};
+    if (port === null) return { bottom: window.innerHeight, top: 0 };
+    const box = port.getBoundingClientRect();
+    return { bottom: box.bottom, top: box.top };
+  })()`) as Promise<{ bottom: number; top: number }>;
+}
+
 /** Takes the reader away from the newest card, which is the end of the turns furthest from it. */
 export async function scrollAwayFromLatest(page: Page): Promise<void> {
   await page.evaluate(`(() => {

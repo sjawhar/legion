@@ -17,37 +17,41 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 /**
- * What the issue page offers a reader today, before dispatch://INFRA-1196 redraws it: every
+ * The recorder of what the issue page offered before dispatch://INFRA-1196 redrew it: every
  * landmark and every control of the whole issue (`seedWholeIssue`), in four states - open and
  * closed, at 1440x900 and at 390x844 CSS pixels - written to
  * `e2e/fixtures/issue-page-inventory.json`. The redesign's own check reads that fixture and
- * asserts the new page still carries all of it (`assertInventoryCarried`), so the fixture is the
- * ground truth and must be recorded against the page as it stands.
+ * asserts the new page still carries all of it (`assertInventoryCarried`, c-nothing-lost), so
+ * the fixture is the ground truth and has to be recorded against the page as it stood.
  *
- * The spec therefore does one of two things, and `RECORD_PAGE_INVENTORY` says which:
+ * **It is a recorder and no check of the page it runs against.** It reads the page through the
+ * eight tabs that page had (`#issue-<tab>-tab`), which the redesign replaced with five presets
+ * over one tree, so it runs in a worktree at the commit before the change - that is where those
+ * tabs are - and `test.skip` leaves it alone everywhere else. Re-run it whenever the branch
+ * takes its base again, because the base moves and the fixture describes the base's page.
  *
- * - **With `RECORD_PAGE_INVENTORY=1` it records**: it writes the fixture from the page it just
- *   read. That is a write, so it is guarded: the suite CI runs would otherwise rewrite the ground
- *   truth on every run, and a redesign that dropped a control would quietly record its own loss
- *   as the new truth.
- * - **Unguarded it checks**: it records the same four states and asserts the fixture on disk is
- *   exactly what the page offers now. So the committed form is a real test - it fails on a
- *   control the page loses, gains or renames - rather than a no-op that only runs when a person
- *   sets a variable. It does not assert the fixture's commit is `HEAD`: the fixture is recorded
- *   once and `HEAD` moves with every later commit.
+ * Two things it deliberately is not, so neither is decided again:
  *
- * Any other value of the guard is refused rather than read as "check", so a typed
- * `RECORD_PAGE_INVENTORY=true` cannot silently skip the write a person asked for.
+ * - It is **not** repointed at the new page. A fixture recorded from the redesign would have
+ *   c-nothing-lost compare the redesign against a recording of itself, which proves nothing.
+ * - It is **not** retired in favour of c-nothing-lost. Retiring it would leave nothing able to
+ *   record the fixture the next time the base moves.
  *
- * The fixture names two commits, because a recording is made on a branch: `commit` is the branch's
- * base (`git merge-base HEAD origin/main`), which is the commit whose page the fixture describes
- * and the one a reader of the redesign compares against, and `recordedAtHead` is the working
- * copy's own commit, which carries the seeds and this spec and moves with every later commit. The
- * recorded page is the base's page only while nothing under `packages/dispatch/web/src` differs
- * between the two, so the spec asserts that: a recording made on a branch that has already
- * redrawn the page fails here rather than recording the new page as the old ground truth.
+ * `RECORD_PAGE_INVENTORY=1` is what makes it run at all: without it the row skips, because the
+ * page it reads is not the page the suite runs against. Any other value is refused rather than
+ * read as "do not record", so a typed `RECORD_PAGE_INVENTORY=true` cannot silently skip the
+ * recording a person asked for.
  *
- * Today's page renders only the active tab's panel - every other panel is `hidden`, which the
+ * The fixture names two commits, because a recording is made on a branch: `commit` is the
+ * branch's base (`git merge-base HEAD origin/main`), which is the commit whose page the fixture
+ * describes and the one a reader of the redesign compares against, and `recordedAtHead` is the
+ * working copy's own commit, which carries the seeds and this spec and moves with every later
+ * commit. The recorded page is the base's page only while nothing under
+ * `packages/dispatch/web/src` differs between the two, so the spec asserts that: a recording
+ * made on a branch that has already redrawn the page fails here rather than recording the new
+ * page as the old ground truth.
+ *
+ * That page renders only the active tab's panel - every other panel is `hidden`, which the
  * accessibility snapshot leaves out - so a state's inventory is the merge of the eight tabs'
  * panels, visited in turn at each width, and each panel is asserted to offer a control of its
  * own.
@@ -190,6 +194,9 @@ test.beforeEach(async () => {
 test("the issue page's landmarks and controls, open and closed, at 1440 and at 390", async ({
   browser,
 }) => {
+  // A recorder, not a check: it reads the page through the eight tabs the commit before the
+  // redesign had, so it runs only when a person asks it to record (the header above).
+  test.skip(!recording(), "set RECORD_PAGE_INVENTORY=1, in a worktree at the branch's base");
   test.setTimeout(600_000);
   // The branch's base is the page this records; the working copy's own commit carries the
   // recorder, and the two are the same page only while `packages/dispatch/web/src` is untouched
@@ -198,7 +205,6 @@ test("the issue page's landmarks and controls, open and closed, at 1440 and at 3
   const recordedAtHead = git("rev-parse", "HEAD");
   expect(commit, "git merge-base answered no commit").toMatch(/^[0-9a-f]{40}$/);
   expect(recordedAtHead, "git rev-parse HEAD answered no commit").toMatch(/^[0-9a-f]{40}$/);
-  const record = recording();
   const seeded = await seedWholeIssue();
 
   const alice = await asUser(browser, "alice");
@@ -213,7 +219,7 @@ test("the issue page's landmarks and controls, open and closed, at 1440 and at 3
         await patchIssue(seeded.key, { status: "done" });
         closed = true;
       }
-      recorded.set(state.key, await recordState(page, seeded.key, state, record));
+      recorded.set(state.key, await recordState(page, seeded.key, state, true));
     }
   } finally {
     await alice.close();
@@ -226,45 +232,32 @@ test("the issue page's landmarks and controls, open and closed, at 1440 and at 3
     "open-390": recorded.get("open-390") ?? [],
   };
 
-  if (record) {
-    const redrawn = git("diff", "--name-only", commit, recordedAtHead)
-      .split("\n")
-      .filter((path) => path.startsWith("packages/dispatch/web/src/"));
-    expect(
-      redrawn,
-      `${recordedAtHead} redraws the page ${commit} holds, so this run would record the new page as the old ground truth: ${redrawn.join(", ")}`
-    ).toEqual([]);
-    const fixture: PageInventoryFixture = {
-      commit,
-      recordedAtHead,
-      recordedAt: new Date().toISOString(),
-      "open-1440": states["open-1440"],
-      "open-390": states["open-390"],
-      "closed-1440": states["closed-1440"],
-      "closed-390": states["closed-390"],
-      renames: {},
-    };
-    await writeFile(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
-    const written = JSON.parse(await readFile(fixturePath, "utf8")) as PageInventoryFixture;
-    expect(written.commit, "the fixture names another commit than the page it describes").toBe(
-      commit
-    );
-    expect(written.recordedAtHead, "the fixture names another working copy").toBe(recordedAtHead);
-    for (const state of STATES) {
-      expect(written[state.key], `the fixture holds another ${state.key} than was read`).toEqual(
-        states[state.key]
-      );
-    }
-    return;
-  }
-
-  const fixture = JSON.parse(await readFile(fixturePath, "utf8")) as PageInventoryFixture;
-  expect(fixture.commit, "the fixture names no commit").toMatch(/^[0-9a-f]{40}$/);
-  expect(fixture.recordedAtHead, "the fixture names no working copy").toMatch(/^[0-9a-f]{40}$/);
+  const redrawn = git("diff", "--name-only", commit, recordedAtHead)
+    .split("\n")
+    .filter((path) => path.startsWith("packages/dispatch/web/src/"));
+  expect(
+    redrawn,
+    `${recordedAtHead} redraws the page ${commit} holds, so this run would record the new page as the old ground truth: ${redrawn.join(", ")}`
+  ).toEqual([]);
+  const fixture: PageInventoryFixture = {
+    commit,
+    recordedAtHead,
+    recordedAt: new Date().toISOString(),
+    "open-1440": states["open-1440"],
+    "open-390": states["open-390"],
+    "closed-1440": states["closed-1440"],
+    "closed-390": states["closed-390"],
+    renames: {},
+  };
+  await writeFile(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`);
+  const written = JSON.parse(await readFile(fixturePath, "utf8")) as PageInventoryFixture;
+  expect(written.commit, "the fixture names another commit than the page it describes").toBe(
+    commit
+  );
+  expect(written.recordedAtHead, "the fixture names another working copy").toBe(recordedAtHead);
   for (const state of STATES) {
-    expect(
-      states[state.key],
-      `${state.key} no longer offers what the fixture recorded at ${fixture.commit}`
-    ).toEqual(fixture[state.key]);
+    expect(written[state.key], `the fixture holds another ${state.key} than was read`).toEqual(
+      states[state.key]
+    );
   }
 });

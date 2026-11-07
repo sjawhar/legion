@@ -43,6 +43,13 @@ function commentTurn(page: Page, commentId: string): Locator {
   return page.locator(`[data-turn="comment:${commentId}"]`);
 }
 
+/** The conversation's turns. An entry of the issue is drawn in the page's tree as well as in
+ *  the conversation (dispatch://INFRA-1196 R1, R12), so a turn's text names two elements on the
+ *  page; these rows read the conversation, so they name its list. */
+function turns(page: Page): Locator {
+  return page.getByRole("list", { name: "Conversation turns" });
+}
+
 function threadView(page: Page): Locator {
   return page.getByRole("dialog", { name: "Thread" });
 }
@@ -687,7 +694,7 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
     await page.clock.install();
     await page.setViewportSize(phone);
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByText("Older turn 14")).toBeVisible();
+    await expect(turns(page).getByText("Older turn 14")).toBeVisible();
     const form = page.getByRole("form", { name: "Comment composer" });
     const field = form.getByLabel("Comment");
     const jump = page.getByTestId("jump-to-latest");
@@ -710,7 +717,9 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
     expect(send.posts()).toBe(1);
     await patchIssue(issue.key, { status: "done" }, { login: "bob" });
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
-    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    // Reopen sits behind the identity block's actions control now (dispatch://INFRA-1196 R11);
+    // what says the page has taken the close in is the line the block draws for it.
+    await expect(page.getByText("This issue is closed.", { exact: true })).toBeVisible();
     send.release();
     await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
 
@@ -890,7 +899,7 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
     const page = await alice.newPage();
     await page.setViewportSize(phone);
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByText("Newer turn 14")).toBeVisible();
+    await expect(turns(page).getByText("Newer turn 14")).toBeVisible();
     const jump = page.getByTestId("jump-to-latest");
     await scrollToOldest(page);
     await expect(jump).toBeVisible();
@@ -997,12 +1006,11 @@ test("on a phone, Jump to latest covers none of the issue's tabs or the controls
     const page = await alice.newPage();
     await page.setViewportSize(phone);
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByText("Older turn 14")).toBeVisible();
+    await expect(turns(page).getByText("Older turn 14")).toBeVisible();
     const jump = page.getByTestId("jump-to-latest");
-    const turns = page.getByRole("list", { name: "Conversation turns" });
     // Where the page settled on the latest turn, the one place in the band with no pill.
     const settled = await page.evaluate(() => window.scrollY);
-    const turnsTop = await turns.evaluate(
+    const turnsTop = await turns(page).evaluate(
       (list) => list.getBoundingClientRect().top + window.scrollY
     );
     // Both ends of the band keep Playwright's own visibility check; the sweep between them runs

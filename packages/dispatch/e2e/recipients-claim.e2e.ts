@@ -276,10 +276,12 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
     await page.goto(`/issues/${issue.key}`);
     const headerMarker = page.getByTestId("issue-route-unknown");
     await expect(headerMarker).toHaveText("Route reach unknown");
-    const headerTitle = await headerMarker.getAttribute("title");
-    expect(headerTitle).toBe(
-      "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
-    );
+    // The issue page raises no tooltip at all (dispatch://INFRA-1196 R21), so its marker keeps
+    // nothing for a pointer: the words are the whole of what it says there. The ask card, which
+    // does raise one, still carries the reason below.
+    await expect(headerMarker).not.toHaveAttribute("title");
+    const reason =
+      "The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route.";
 
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
@@ -292,7 +294,7 @@ test("unfollowing a follower while a role route's holder is unknown says the rou
       .filter({ has: page.locator("[title='role:reviewer']") });
     await expect(routeRow).toContainText("via route");
     const rowMarker = routeRow.getByText("Route reach unknown");
-    await expect(rowMarker).toHaveAttribute("title", headerTitle ?? "");
+    await expect(rowMarker).toHaveAttribute("title", reason);
 
     await recipients
       .getByRole("list", { name: "Followers" })

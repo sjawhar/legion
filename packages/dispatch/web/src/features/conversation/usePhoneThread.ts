@@ -3,7 +3,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useSending } from "../../hooks/useSending";
 import type { ReplyTarget } from "./composer-model";
-import { redirectedReplyTarget, useHeldReplyTo, useHeldSends } from "./held-sends";
+import {
+  redirectedReplyTarget,
+  useHeldReplyTo,
+  useHeldSends,
+  useHeldSendsUnder,
+} from "./held-sends";
 
 /** The name every comment thread card's own reply send in a tab sits beneath. */
 export function threadRepliesSendKey(sendKey: MutationKey): MutationKey {
@@ -66,7 +71,16 @@ export function usePhoneThread({
   readonly sendingNow: () => boolean;
 }): PhoneThread {
   const store = useHeldSends();
-  const [openId, setOpenId] = useState<string>();
+  // Which thread the reader has open. The viewport crossing the width the margin keeps a column
+  // at moves the whole conversation between the page's column and the panel, which is a remount
+  // (`features/issue/IssuePage.tsx`), so the thread a card's own reply is still out in is taken
+  // from the held send rather than lost with the state - the same restoration the tab makes for
+  // the threads it has open inline (`ConversationTab.tsx`'s `openThreads`). The thread composer's
+  // own reply comes back with `useHeldReplyTo` below, and the effect opens its thread again.
+  const cardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
+  const [openId, setOpenId] = useState<string | undefined>(
+    () => cardReplies.at(-1)?.request.replyTo?.id
+  );
   const composerKey = useMemo<MutationKey>(() => [...sendKey, "phone-thread"], [sendKey]);
   const [replyTo, setReplyTo] = useHeldReplyTo(composerKey);
   // Set when the viewport widened past the phone layout while a send from the view was out - its

@@ -288,7 +288,11 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     const controlPending = trackApiRequests(control);
     const controlSocket = control.waitForEvent("websocket", isLiveSocket);
     await control.goto(`/issues/${baselineIssue.key}/activity`);
-    await expect(control.getByText("Comment request control", { exact: true })).toBeVisible();
+    // The title is drawn as the page's heading and again as a fact of the focused node
+    // (dispatch://INFRA-1196 R12): the page has loaded when its heading says it.
+    await expect(
+      control.getByRole("heading", { exact: true, name: "Comment request control" })
+    ).toBeVisible();
     await controlSocket;
     await waitForReads(controlPending);
 
@@ -333,7 +337,7 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     });
     const first = page.waitForEvent("websocket", isLiveSocket);
     await page.goto(`/issues/${issue.key}/activity`);
-    await expect(page.getByText("Rotation target", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { exact: true, name: "Rotation target" })).toBeVisible();
     await expect(conversationState(page, "everything")).toHaveAttribute("aria-selected", "true");
     await first;
     await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
@@ -391,7 +395,10 @@ test("a change committed while the page loads is shown without a reload @phone",
     });
 
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByText("Before the page load", { exact: true })).toBeVisible();
+    // The title is the page's heading; the focused node's facts draw it a second time.
+    await expect(
+      page.getByRole("heading", { exact: true, name: "Before the page load" })
+    ).toBeVisible();
     await expect.poll(() => held !== undefined).toBe(true);
     await waitForReads(pending);
 
@@ -401,9 +408,9 @@ test("a change committed while the page loads is shown without a reload @phone",
     firstSocketReleased.resolve();
     await opened;
 
-    await expect(page.getByText("Committed during the page load", { exact: true })).toBeVisible({
-      timeout: 5_000,
-    });
+    await expect(
+      page.getByRole("heading", { exact: true, name: "Committed during the page load" })
+    ).toBeVisible({ timeout: 5_000 });
     expect(loaded).toHaveLength(1);
   } finally {
     await alice.close();
@@ -437,7 +444,8 @@ test("a first live socket opening without a change makes no API request @phone",
     });
 
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByText("Quiet page load", { exact: true })).toBeVisible();
+    // The title is the page's heading; the focused node's facts draw it a second time.
+    await expect(page.getByRole("heading", { exact: true, name: "Quiet page load" })).toBeVisible();
     await expect.poll(() => held !== undefined).toBe(true);
     await waitForReads(pending);
     if (held === undefined) throw new Error("the first live socket was not held");

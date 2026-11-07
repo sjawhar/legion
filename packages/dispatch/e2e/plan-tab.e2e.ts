@@ -68,8 +68,10 @@ Draw the panel.
         name: "Every issue page shows a Plan tab.",
       })
     ).toHaveAttribute("href", `/issues/${issue.key}/spec#b-r1`);
-    // A task nothing comes before says so rather than showing an empty row.
-    await expect(routes.getByTestId("plan-task-needs")).toHaveText("Needsnone");
+    // A task nothing comes before says so rather than showing an empty row. The label is the
+    // block attribute's own name, lowercase, as the page declares it (`BLOCK_ATTRIBUTE_LABELS`,
+    // dispatch://INFRA-1196 R21).
+    await expect(routes.getByTestId("plan-task-needs")).toHaveText("needsnone");
 
     const panel = tasks.nth(1);
     await expect(panel).toContainText("Draw the panel.");

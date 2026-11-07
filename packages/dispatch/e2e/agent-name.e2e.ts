@@ -141,6 +141,14 @@ function agentIn(scope: Locator, id: string): Locator {
   return scope.locator(`[data-agent-name="${id}"]`).first();
 }
 
+/** The accessible name of an agent's state mark: the state alone where the surface raises a
+ *  tooltip, which carries how long ago a running agent was seen, and the state with that
+ *  reading where it raises none - the issue page draws no tooltip at all
+ *  (dispatch://INFRA-1196 R21), so the mark says the whole of it (`AgentName.tsx`). */
+function markName(state: "Not running" | "Running"): RegExp {
+  return new RegExp(`^${state}(?: · seen .+)?$`);
+}
+
 /** The component in `scope` for `id`: the name it shows, its state mark, and its live link. */
 async function expectAgent(
   scope: Locator,
@@ -158,10 +166,10 @@ async function expectAgent(
     shown.running ? "running" : "not-running"
   );
   await expect(
-    agent.getByRole("img", { exact: true, name: shown.running ? "Running" : "Not running" })
+    agent.getByRole("img", { name: markName(shown.running ? "Running" : "Not running") })
   ).toBeVisible();
   await expect(
-    agent.getByRole("img", { exact: true, name: shown.running ? "Not running" : "Running" })
+    agent.getByRole("img", { name: markName(shown.running ? "Not running" : "Running") })
   ).toHaveCount(0);
   await expect(agent.locator(`a[href="${livePath(id)}"]`)).toHaveCount(1);
 }

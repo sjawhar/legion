@@ -108,7 +108,11 @@ async function openIssueAndInbox(
   const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
   await expectOpenDecision(decision);
   await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (3)");
-  await expect(page.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
+  // The approval chip is drawn in the identity block's state row and again in the open
+  // preset's toolbar (dispatch://INFRA-1196 R16); the issue's own state is the row's.
+  await expect(
+    page.getByTestId("issue-state-actions").getByRole("button", { name: "Awaiting approval" })
+  ).toBeVisible();
   return { decision, inbox, page, sockets };
 }
 
@@ -226,7 +230,9 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     await expect(page.getByText("Reload to edit.")).toHaveCount(0);
     await expectOpenDecision(decision);
     await expect(decision.getByRole("radio", { name: "Hold Wait for review" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Awaiting approval" })).toBeVisible();
+    await expect(
+      page.getByTestId("issue-state-actions").getByRole("button", { name: "Awaiting approval" })
+    ).toBeVisible();
     for (const id of seeded.askIds) {
       await expect(inboxRow(inbox, id)).toBeVisible();
     }

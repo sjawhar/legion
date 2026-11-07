@@ -94,9 +94,13 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     await expect.poll(() => getIssue(issue.key).then((read) => read.status)).toBe("done");
 
     // The guards follow the buttons: the closed issue offers Reopen and neither Close nor a
-    // priority, exactly as its header renders Reopen and disables the priority select.
+    // priority, exactly as its header renders Reopen and disables the priority select. Close
+    // and Reopen sit behind the identity block's one actions control now
+    // (dispatch://INFRA-1196 R11), which is where the button is read.
     await page.reload();
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
+    await page.keyboard.press("Escape");
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
     await expect(actions.getByRole("option", { name: "Reopen issue" })).toBeVisible();
@@ -278,6 +282,7 @@ test("/ searches only, and a query that is no action's start lists the hits abov
         .getByTestId("issue-header")
         .getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
     ).toBeVisible();
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
     expect((await getIssue(issue.key)).status).not.toBe("done");
@@ -618,9 +623,15 @@ test("a header write in flight withdraws the rows whose buttons it disables", as
     });
     await openIssue(page, issue.key, "In-flight guard");
 
-    const closeButton = page.getByRole("button", { name: "Close issue" });
-    await closeButton.click();
-    await expect(closeButton).toBeDisabled();
+    // Close sits behind the identity block's one actions control (dispatch://INFRA-1196 R11),
+    // and running an action closes that control: the disabled state is read where the control
+    // draws it, which is the group opened again while the write is still out.
+    const actionsControl = page.getByRole("button", { name: "Issue actions" });
+    await actionsControl.click();
+    await page.getByRole("button", { name: "Close issue" }).click();
+    await actionsControl.click();
+    await expect(page.getByRole("button", { name: "Close issue" })).toBeDisabled();
+    await page.keyboard.press("Escape");
     await expect(page.getByLabel(`Priority of ${issue.key}`)).toBeDisabled();
 
     await page.locator("body").focus();
@@ -942,6 +953,7 @@ test("an arrow pressed before the search answers reaches no action the query fin
     await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
     expect((await getIssue(issue.key)).status).toBe("in_progress");
@@ -1007,6 +1019,7 @@ test("a stale answer refreshing for the same query keeps the arrows off the acti
     release.resolve();
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
     expect((await getIssue(issue.key)).status).toBe("in_progress");
@@ -1030,6 +1043,9 @@ test("a row whose control has gone since the palette opened does nothing", async
       }
     });
     await openIssue(page, issue.key, "Stale row");
+    // Reopen sits behind the identity block's one actions control (dispatch://INFRA-1196 R11).
+    // The group stays open under the palette, so the check below reads the header's own button.
+    await page.getByRole("button", { name: "Issue actions" }).click();
     await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
     await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog", { name: "Search" });
