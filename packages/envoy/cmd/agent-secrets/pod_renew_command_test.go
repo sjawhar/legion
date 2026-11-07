@@ -121,7 +121,12 @@ func TestThePrintedRenewalCommandRunsFromAnOutDirectory(t *testing.T) {
 	renew := exec.Command("/bin/sh", "-c", command)
 	renew.Env = environment()
 	renew.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var renewErr strings.Builder
+	// This stderr is read while the command still runs — the test watches for the renewal and
+	// then reads what it said — and os/exec copies the pipe into it on a goroutine of its own
+	// until Wait, so it is the locked writer renew_test.go already keeps for exactly this and
+	// never a bare strings.Builder. A renewal the broker refuses 5xx makes the renewer print a
+	// retry line on every attempt, which is when the unlocked read raced the copy.
+	var renewErr syncWriter
 	renew.Stderr = &renewErr
 	if err := renew.Start(); err != nil {
 		t.Fatalf("run the printed command: %v", err)
