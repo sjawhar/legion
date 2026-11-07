@@ -291,7 +291,7 @@ const legionPendingStatusWrite = z.object({
  * that brings it back (`api.StrandedClaim.Move`). A `retired` entry is a claim a close or a stop
  * retired while its tree runs: only a start of the phase it owns relaunches it, and no rule the
  * daemon runs queues that start, so nothing will wake it either. That state arrived with contract
- * 53, and a pod whose claims record a contract below it is served this report without its retired
+ * 55, and a pod whose claims record a contract below it is served this report without its retired
  * entries (`api`'s `stateFor`, `withoutRetiredStranded`) rather than being made to refuse the
  * whole state over a third value its enum does not name.
  *

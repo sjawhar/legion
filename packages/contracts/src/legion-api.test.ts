@@ -1322,7 +1322,7 @@ test("a reader at the previous contract parses the state body this daemon serves
   const state = fixture("state.json") as { strandedClaims: { state: string }[] };
   // The golden carries all three kinds: a failed claim, a released one whose wake never brought
   // its pod back — the entry a `suspendedBy` would have ridden on — and the retired claim
-  // contract 53 added. Every entry but the retired one is read by the 45 reader as it stands.
+  // contract 55 added. Every entry but the retired one is read by the 45 reader as it stands.
   const older = state.strandedClaims.filter((stranded) => stranded.state !== "retired");
   expect(older.length).toBeGreaterThan(1);
   for (const stranded of older) {
@@ -1332,7 +1332,7 @@ test("a reader at the previous contract parses the state body this daemon serves
   // A retired entry is the one this reader cannot take: its state enum names two values, so the
   // entry — and with it the whole state body, since `strandedClaims` is an array this reader
   // parses whole — is refused over the third. That is why the state route serves a pod below
-  // contract 53 the report without its retired entries (`api`'s `withoutRetiredStranded`, pinned
+  // contract 55 the report without its retired entries (`api`'s `withoutRetiredStranded`, pinned
   // on the Go side) rather than the body it would refuse: what such a pod is served is the list
   // above, which parses.
   const retired = state.strandedClaims.filter((stranded) => stranded.state === "retired");
@@ -1471,7 +1471,7 @@ test("the state golden shows a claim's capability report beside its locator", ()
 // whose issue is held, LEGION-211's released one, whose wake never brought its pod back, and
 // LEGION-212's retired tester, which a close or a stop retired while its tree runs, so only a
 // start of the phase it owns — one no rule the daemon runs queues — would relaunch it (contract
-// 53) — three keys each, neither the released nor the retired one wider than the failed one —
+// 55) — three keys each, neither the released nor the retired one wider than the failed one —
 // and a state with none carries an empty list rather than none.
 test("the state golden names the claims nothing will wake, and the list cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));

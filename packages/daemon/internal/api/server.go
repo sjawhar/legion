@@ -638,10 +638,10 @@ const memoryContract = 49
 const treeContract = 51
 
 // retiredStrandedContract is the daemon contract whose entry in version.go added `retired` to the
-// states a stranded claim may be in (version.go's 53): a plugin before it reads
+// states a stranded claim may be in (version.go's 55): a plugin before it reads
 // `strandedClaims[].state` with a strict enum of two values, `suspended` and `failed`, and refuses
 // the whole body for a third.
-const retiredStrandedContract = 53
+const retiredStrandedContract = 55
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

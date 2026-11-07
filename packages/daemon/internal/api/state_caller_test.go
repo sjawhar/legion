@@ -165,7 +165,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			}
 			// Nothing else of the body differs: it is the full state with the two claim keys gone,
 			// and with the three memory keys, contract 51's two tree keys — `admission.trees` and
-			// each issue's `tree` — and contract 53's retired entries under `strandedClaims` gone
+			// each issue's `tree` — and contract 55's retired entries under `strandedClaims` gone
 			// too, since a pod below this contract's own reader refuses those as well
 			// (memory_test.go and tree_test.go hold two of those halves, and
 			// strandedWithoutRetired below the third).
@@ -300,7 +300,7 @@ func TestTheStateRouteServesAPodItsPluginContractsStrandedClaims(t *testing.T) {
 // a stranded claim may be in, and this daemon's own contract is never below it: a caller at this
 // contract is served the retired entries.
 func TestTheRetiredStrandedContractIsTheContractThatAddedTheState(t *testing.T) {
-	const addedRetiredStranded = 53
+	const addedRetiredStranded = 55
 	if retiredStrandedContract != addedRetiredStranded {
 		t.Fatalf("retiredStrandedContract = %d, want %d, the contract whose entry in version.go added `retired` to a stranded claim's state",
 			retiredStrandedContract, addedRetiredStranded)

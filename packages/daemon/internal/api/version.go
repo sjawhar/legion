@@ -573,13 +573,13 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 53: dispatch://INFRA-1480 -- `api.StrandedClaim.state` on `GET /legion/v1/state` may now be
+// 55: dispatch://INFRA-1480 -- `api.StrandedClaim.state` on `GET /legion/v1/state` may now be
 // `retired` as well as `suspended` and `failed`, because `workflow.Stranded` now reports a retired
 // claim that owns the phase its issue's worker works: only a start of that phase relaunches such a
 // claim, and no rule the daemon runs queues that start by itself, so nothing will wake it. A plugin
-// before 53 parses `strandedClaims[].state` with a strict enum of two values and refuses the whole
+// before 55 parses `strandedClaims[].state` with a strict enum of two values and refuses the whole
 // state body for a third, and every worker's `read_record` goes through that parse. The route
-// authenticates nobody, so a caller from a pod whose claims record a contract below 53 is served
+// authenticates nobody, so a caller from a pod whose claims record a contract below 55 is served
 // the report without its retired entries (api's stateFor, withoutRetiredStranded), as a caller
 // below 49 is served it without the memory group. Dropping those entries, rather than serving
 // them, is the only choice that keeps such a pod able to read the state at all: the value is the
@@ -587,17 +587,18 @@ package api
 // the whole body, which takes every role's `read_record` in that pod with it. Such a pod is served
 // a report missing its retired entries until the pod is replaced, and that window is the one the
 // plugin pair already bounds: the boot gate and `legion probe-image` refuse a daemon and a plugin
-// that declare different contracts, so the only reader below 53 is a pod of the contract before
+// that declare different contracts, so the only reader below 55 is a pod of the contract before
 // this one still being replaced. The same change adds three fields to the operator claim view's
 // pending delivery (api.DeliveryView): `sendFailures`, `lastSendFailureAt` and `lastSendError`,
 // how many sends of the task failed, when the last one failed and the error it failed with. They
 // need no gate, because no plugin calls the operator routes. This change adds one store migration,
 // for those three columns, named for the UTC moment it was written, since the numbered series is
-// closed. (This branch declared 51; it read main at 52 — INFRA-1307's commit-trailer variable —
-// and takes the number above every number main declares, as the collision note says; main's 52
-// entry arrives here with a later forward merge. Another open branch may declare 53 too:
-// whichever merges after another takes the next free number, and the number is read again at every
-// forward merge, as
+// closed. (This branch declared 51, then 53 when it read main at 52 — INFRA-1307's commit-trailer
+// variable — and main has since reached 54: 53 is INFRA-976's paced wakes and 54 INFRA-809's
+// production-check role. So it takes 55, the number above every number main declares, as the
+// collision note says; main's 52, 53 and 54 entries arrive here with a later forward merge.
+// Another open branch may declare 55 too: whichever merges after another takes the next free
+// number, and the number is read again at every forward merge, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 53
+const DaemonAPIVersion = 55
