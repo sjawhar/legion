@@ -1,15 +1,18 @@
 //go:build natslive
 
-// The two transitions of the consumer cap that no test in this process can show, each against a
-// real nats-server image. packages/envoy/go.mod links nats-server v2.10.29, the server every
-// in-process test of this package runs: it is older than streamMaxConsumersFloor, so it refuses
-// every update that changes MaxConsumers on a stream that already exists (maxConsumersRefusal),
-// and older than 2.15, so it caps no stream that sets no cap and this binary leaves such a stream
-// alone there (serverDefaultsAnUnsetCap). Every in-process fixture therefore deploys the stream
-// already holding the cap (deployStream, publish_only_test.go), which leaves both transitions
-// proved nowhere. They are proved here instead: the raise of an uncapped stream on the image the
-// hub runs, which caps such a stream at 1000 itself and takes the update, and on the copy of
-// nats:2.10 both the stream this binary must not touch and the one it must raise and cannot.
+// The cases of the consumer cap that no server in this process can show, each against a real
+// nats-server image. packages/envoy/go.mod links nats-server v2.15.1, the server every in-process
+// test of this package runs, and it is the release the hub runs: the raise of an uncapped stream,
+// the keeper's restore of a cap an operator lowered or unset and the version read each pass makes
+// are therefore proved in process
+// (TestAStartRaisesAnUncappedStreamAndTheKeeperPutsBackACapAnOperatorLoweredOrUnset). What is
+// left needs a server this binary cannot link. One is the copy of nats:2.10: it is older than
+// streamMaxConsumersFloor, so it refuses every update that changes MaxConsumers on a stream that
+// already exists (maxConsumersRefusal), and older than 2.15, so it caps no stream that sets no
+// cap and this binary leaves such a stream alone there (serverDefaultsAnUnsetCap), and both of
+// those cases are proved here. The other is the image the deployment itself runs,
+// nats:2.15.1-alpine, which the hub half below reconciles the stream on: only a real image is the
+// image the hub runs, and the issue's c-hub-reconcile check names it.
 //
 // A real image needs a container runtime, which Envoy's agents do not have, so the file sits
 // behind the natslive tag, and the envoy-go CI job runs the tests that tag adds to this package,
@@ -22,7 +25,6 @@ package bus
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,34 +38,11 @@ import (
 // monitor port: the store the server keeps for the run lives at /data, as the hub's does.
 var liveServerArgs = []string{"-js", "--store_dir", "/data"}
 
-// deployedStreamFixtureID is the id the deployed fixture already carries, so a start finds the
-// stream identified and the consumer cap is the one setting it has left to write.
-const deployedStreamFixtureID = "deployed-stream-fixture"
-
 // olderServerDeployedCap is the cap the stream carries where a subtest wants a start to raise one
 // rather than leave it: 1000, the number the hub's own uncapped stream behaved as, and below the
 // cap this binary compiles, so a start raises it and a server before streamMaxConsumersFloor
 // refuses that raise.
 const olderServerDeployedCap = 1000
-
-// deployStreamWithCap creates ENVOY_NOTIFICATIONS on js as a deployment stands before this
-// release: this binary's own configuration (streamCfg) with maxConsumers as its cap and an id
-// already in its metadata, so nothing but the cap differs from what a start writes. A maxConsumers
-// of 0 deploys a stream that sets no cap. It returns the cap the server answers for what it was
-// given, which the caller records rather than assumes.
-func deployStreamWithCap(t *testing.T, js nats.JetStreamContext, maxConsumers int) int {
-	t.Helper()
-	deployed := *streamCfg
-	deployed.Subjects = slices.Clone(streamCfg.Subjects)
-	deployed.MaxConsumers = maxConsumers
-	deployed.Replicas = 1
-	deployed.Metadata = map[string]string{StreamIDMetadataKey: deployedStreamFixtureID}
-	info, err := js.AddStream(&deployed)
-	if err != nil {
-		t.Fatalf("deploy the stream with a consumer cap of %d: %v", maxConsumers, err)
-	}
-	return info.Config.MaxConsumers
-}
 
 // liveServerEnvironment is the environment the starts below read (WithEnvironment): the opt-in to
 // a NATS server that is not this machine's, and nothing else. A container's client URL is a
@@ -122,8 +101,11 @@ func liveServerJetStream(t *testing.T, image string) (string, nats.JetStreamCont
 //     for, the first server that can take the change (refusedSettings) and the server's own
 //     words, so an operator reading it knows both what was refused and what takes it.
 //
-// Neither the raise nor the refusal can be shown in this process: the module links nats-server
-// v2.10.29, and every in-process fixture deploys the stream already capped.
+// Only the "2.10" cases need a server this process cannot run: the module links nats-server
+// v2.15.1, so the "hub" cases above are each proved in process as well
+// (TestAStartRaisesAnUncappedStreamAndTheKeeperPutsBackACapAnOperatorLoweredOrUnset). They stay
+// here because the image the hub runs is the one the deployment reconciles its stream on, and
+// only a real image is that.
 func TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereALowerCapIsRefused(t *testing.T) {
 	t.Run("hub", func(t *testing.T) {
 		uri, js := liveServerJetStream(t, testnats.HubImage)

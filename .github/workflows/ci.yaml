@@ -3195,12 +3195,14 @@ jobs:
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
       # behind the natslive tag, and this step is where it runs (INFRA-250). internal/bus has one
-      # test of its own on that matrix: the module links nats-server v2.10.29 in process, which
-      # refuses every update that changes a stream's MaxConsumers and caps no stream that sets
-      # no cap, so the raise of the hub's uncapped ENVOY_NOTIFICATIONS to the consumer cap this
-      # binary compiles - and, on 2.10, both the stream with no cap the binary must leave alone
-      # and the refusal of the raise of a lower cap, naming the field, the cap and the first
-      # server taking the change - is provable only against a real image (INFRA-1384). Each
+      # test of its own on that matrix: the module links nats-server v2.15.1 in process, which
+      # caps a stream that sets no cap at a default of its own and takes a change of MaxConsumers
+      # on a stream that already exists, so the raise of an uncapped ENVOY_NOTIFICATIONS to the
+      # consumer cap this binary compiles and the keeper's restore of a cap an operator lowered or
+      # unset are proved in process. What is left for a real image is the pair of 2.10 cases - the
+      # stream with no cap the binary must leave alone, and the refusal of the raise of a lower
+      # cap, naming the field, the cap and the first server taking the change - and the hub's own
+      # reconcile on the nats:2.15.1-alpine image the deployment runs (INFRA-1384). Each
       # package runs only the tests its tag adds: `-tags natslive ./pkg` would re-run the
       # package's untagged tests, which already run elsewhere - internal/testnats in the unit step
       # above, and internal/bus in envoy-go-race, which the unit step's grep -Ev leaves out - so
