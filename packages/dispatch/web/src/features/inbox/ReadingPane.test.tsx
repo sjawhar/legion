@@ -842,6 +842,9 @@ test("a comment thread in a document opens that document at its block", async ()
 });
 
 test("an orphaned anchor falls back to the thread alone, with its quote", async () => {
+  // On the fake clock from before the first render, so the settle the pane starts there is a
+  // timer this test moves the clock past rather than a wait of its own.
+  jest.useFakeTimers();
   const listArtifactComments = spyOn(api, "listArtifactComments").mockResolvedValue([]);
   const thread = threadRow({
     anchor: anchor({ orphaned: true }),
@@ -857,9 +860,10 @@ test("an orphaned anchor falls back to the thread alone, with its quote", async 
     expect(body.hasAttribute("data-inbox-pane-fallback")).toBe(true);
     expect(body.querySelector("[data-inbox-thread-quote]")?.textContent).toBe("three attempts");
     // Nothing opened the document: an anchor nothing can be placed at opens no room.
-    await Bun.sleep(SETTLE_MS * 2);
+    await tick(SETTLE_MS * 2);
     expect(runtime.connections).toHaveLength(0);
   } finally {
+    realClock();
     view.unmount();
     listArtifactComments.mockRestore();
   }
