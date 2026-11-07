@@ -28,11 +28,11 @@ import {
  * 3. **The tool's own runner for this session**, where exactly one call of that tool is open and
  *    the host holds no background job of that tool. A runner is kept between calls, so it is the
  *    one thing here older than the call that may still be ended: the `eval` kernel is
- *    `/usr/bin/python3 -u <tmp>/omp-python-runner-<id>.py`, one process per session, and it names
- *    the session it serves in `PI_SESSION_FILE` — never in `PI_SESSION_ID`, which it does not
- *    carry (measured). A runner whose environment names no session, or names another, is left
- *    alone, which is how a subagent's own runner of the same command, with the same parent and
- *    the same working directory, is spared.
+ *    `/usr/bin/python3 -u <tmp>/omp-python-runner-<uid>/runner-<id>.py`, one process per session,
+ *    and it names the session it serves in `PI_SESSION_FILE` — never in `PI_SESSION_ID`, which
+ *    it does not carry (measured). A runner whose environment names no session, or names another,
+ *    is left alone, which is how a subagent's own runner of the same command, with the same
+ *    parent and the same working directory, is spared.
  *
  * **Three things it never ends.**
  *
@@ -54,11 +54,16 @@ import {
  */
 
 /** The runner one tool keeps between calls, by tool name, and the command that identifies one.
- * `eval`'s is the Python kernel measured on 2026-11-07: one process per session, a direct child
- * of the agent, `/usr/bin/python3 -u $TMPDIR/omp-python-runner-<id>.py`. A tool with no entry has
- * no runner this module knows, so rule 3 never runs for it. */
+ * `eval`'s is the Python kernel, one process per session, a direct child of the agent: measured
+ * on 2026-11-07 against `omp/18.16.0` in this deployment's pod as
+ * `/usr/bin/python3 -u /tmp/omp-python-runner-1000/runner-2gcnasrh1f37g.py`, a directory named
+ * for the user holding a file named for the kernel, and recorded earlier the same day in the flat
+ * `<tmp>/omp-python-runner-<id>.py` shape. The pattern spans both, because a path separator
+ * between the two is exactly what the live proof found it refusing
+ * (extensions/legion-stall-watchdog-omp.test.ts). A tool with no entry has no runner this module
+ * knows, so rule 3 never runs for it. */
 export const STALL_TOOL_RUNNERS: Readonly<Record<string, RegExp>> = {
-  eval: /omp-python-runner-[^/\s]*\.py/,
+  eval: /omp-python-runner-[^\s]*\.py/,
 };
 
 /** Which rule found the processes a step ended, or why it found none. */

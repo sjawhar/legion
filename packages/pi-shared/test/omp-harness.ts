@@ -163,6 +163,13 @@ export interface Rpc {
    * against a step's own settle; it carries a handler, so a case that has settled never sees it.
    */
   readonly closed: Promise<never>;
+  /**
+   * The status omp exited with, for a case whose proposition is the exit itself: the stall
+   * watch's last step ends the worker with a status the daemon reads as a death
+   * (`pi-legion/extensions/legion-stall-watchdog-omp.test.ts`). It settles only when omp has
+   * exited, so a case that expects it alive races it against its own clock.
+   */
+  readonly exited: Promise<number>;
 }
 
 /**
@@ -224,6 +231,7 @@ export function spawnRpc(
       await child.exited;
     },
     closed,
+    exited: child.exited,
   };
 }
 
