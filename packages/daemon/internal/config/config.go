@@ -205,6 +205,14 @@ type Config struct {
 	// records keep the name each was written under. The zero value, which answers as
 	// strings.EqualFold does, while the file configures none.
 	RepositoryRenames ghrepo.Renames
+	// Warnings are what the loader has to say to the operator and nothing the daemon runs on: one
+	// line per place the file still sets a key this daemon no longer reads, which is accepted and
+	// warned about rather than refused, since the deployment that writes it releases on its own
+	// schedule
+	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
+	// `legion start` logs each before any other work, and `legion start --check-config` prints
+	// each right after its OK line.
+	Warnings []string
 }
 
 const (
@@ -333,16 +341,18 @@ type fileConfig struct {
 	WorkerBackends           map[claim.Role]runtime.Backend
 	RoleConfigFiles          map[claim.Role][]string
 	RepositoryRenames        []ghrepo.Rename
+	Warnings                 []string
 }
 
-// Load reads the daemon's complete runtime configuration. App private-key commands and secrets
-// resolve only after the YAML's non-secret validation has passed.
+// Load reads the daemon's complete runtime configuration, Warnings among it. App private-key
+// commands and secrets resolve only after the YAML's non-secret validation has passed.
 func Load(path string, env func(string) string) (Config, error) {
 	return load(path, env, true)
 }
 
 // LoadForValidation checks a configuration without executing its App private-key commands or
-// secrets reads. It is the Go equivalent of the shipped daemon's --check-config path.
+// secrets reads, and answers its Warnings as Load does. It is the Go equivalent of the shipped
+// daemon's --check-config path.
 func LoadForValidation(path string, env func(string) string) (Config, error) {
 	return load(path, env, false)
 }
@@ -451,7 +461,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "dispatch_token_file":
 			file.DispatchTokenFile, err = readNonEmptyString(value, key)
 		case "projects":
-			file.Projects, err = readProjects(value, key)
+			file.Projects, file.Warnings, err = readProjects(value, key)
 		case "gates":
 			file.Gates, err = readGates(value, key)
 		case "github_apps":
@@ -1035,9 +1045,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, err
 	}
 	if err := checkRepositoryRenames(file, &cfg); err != nil {
-		return Config{}, err
-	}
-	if err := checkDeployRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if err := checkCommitIssueTrailerRenames(&cfg); err != nil {

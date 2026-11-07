@@ -86,7 +86,7 @@ I recommend Server: the second criterion needs the cart on another device, which
   },
   merge: "4b7d2a1",
   acceptance:
-    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the tester's production check follows the merge, on the pull request.",
 };
 
 export const DELIVERY_DATE: Example = {
@@ -125,7 +125,7 @@ I recommend Carrier: its estimate already counts the warehouse's cut-off time an
   },
   merge: "7d03b9e",
   acceptance:
-    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the tester's production check follows the merge, on the pull request.",
 };
 
 /** An example issue in Dispatch: its key and its spec document. */
@@ -187,13 +187,13 @@ export async function writeDesign(issue: Tracked, example: Example): Promise<voi
     { ops: [{ after: "end", markdown: example.design, op: "insert" }] },
     agent(issue.key, "architect")
   );
-  await expect.poll(async () => (await api.getIssue(issue.key)).open_asks.length).toBe(1);
+  await expect.poll(async () => (await api.getIssue(issue.key)).open_asks?.length ?? 0).toBe(1);
 }
 
 /** The number of versions the spec has, to wait for the one an answer writes. */
 export async function specVersions(issue: Tracked): Promise<number> {
   const api = await dispatchApi();
-  return (await api.getArtifact(issue.spec)).versions.length;
+  return (await api.getArtifact(issue.spec)).versions?.length ?? 0;
 }
 
 /** Waits until the spec has more versions than `before`: an answer is written into its decision
@@ -202,14 +202,17 @@ export async function specVersions(issue: Tracked): Promise<number> {
 export async function specVersionAfter(issue: Tracked, before: number): Promise<void> {
   const api = await dispatchApi();
   await expect
-    .poll(async () => (await api.getArtifact(issue.spec)).versions.length)
+    .poll(async () => (await api.getArtifact(issue.spec)).versions?.length ?? 0)
     .toBeGreaterThan(before);
 }
 
 /** The human answers the decision block. */
 export async function answerDecision(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();
-  const [decision] = (await api.getIssue(issue.key)).open_asks;
+  const [decision] = (await api.getIssue(issue.key)).open_asks ?? [];
+  if (decision === undefined) {
+    throw new Error(`journey: ${issue.key} has no open ask to answer`);
+  }
   const versions = await specVersions(issue);
   await api.answerAsk(decision.id, { expected_edited_at: null, selected: [example.decision.pick] });
   await specVersionAfter(issue, versions);
@@ -223,6 +226,9 @@ export async function requestSpecApproval(issue: Tracked, example: Example): Pro
     { summary: example.approvalSummary },
     agent(issue.key, "architect")
   );
+  if (requested.ask === null) {
+    throw new Error(`journey: the approval request on ${issue.key}'s spec opened no ask`);
+  }
   return requested.ask.id;
 }
 
@@ -290,8 +296,11 @@ export async function accept(issue: Tracked, example: Example): Promise<void> {
   await api.patchIssue(issue.key, { status: "retro" }, DAEMON);
 }
 
-/** The merge closes the issue: the daemon writes done. The implementer's production check follows
- *  on the pull request, which the example's GitHub does not show; a closed issue takes no comment. */
+/** The merge closes the issue: the daemon writes done. The production check the project's
+ *  `production_check` opens — the tester's, unless the setting is `off` — follows on the pull
+ *  request, which the example's GitHub does not show; a closed issue takes no comment. Each look
+ *  that finds the deploy missing names its own next look with `wake_at`, and nothing else wakes
+ *  the check. */
 export async function closeAtMerge(issue: Tracked): Promise<void> {
   const api = await dispatchApi();
   await api.patchIssue(issue.key, { status: "done" }, DAEMON);

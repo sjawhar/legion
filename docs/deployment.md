@@ -477,7 +477,8 @@ written by whichever daemon wrote last — so the order matters:
    retries that phase).
 5. Remove `take_over` once no claim can still wake on a session a pod recorded: every claim that
    was running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a
-   production check waiting for its deploy among them) is left to wake. From then on a session
+   production check's checking role — the one the project's `production_check` names — waiting
+   for the look its own `wake_at` asked for among them) is left to wake. From then on a session
    found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
    drives refuses to start rather than take its claims.
 

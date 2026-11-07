@@ -46,8 +46,8 @@ func OutOfWorkflow(status string) bool {
 // will run — a root reopened inside its linger (admit's readmit) stands in admitted with no
 // role's phase until its architect reaches planning, and is running again from the reopen. It is
 // the production check's "runs again" predicate (workflow's check.go) and the outbox's
-// (checkLookHolds): a look of an issue that runs again would resume the implementer and relaunch
-// its Sandbox under the run, so none starts.
+// (checkLookHolds): a look of an issue that runs again would resume the checking role and
+// relaunch its Sandbox under the run, so none starts.
 //
 // It lives here, beside the status rule it is written over, because every judgement that reads
 // the daemon's own records against Dispatch's mirror needs it — the children-first wait

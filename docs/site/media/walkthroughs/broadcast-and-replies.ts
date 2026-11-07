@@ -39,7 +39,9 @@ async function seed(): Promise<Seeded> {
   const api = await dispatchApi();
   const earlier = await api.getBroadcast(workspace.broadcast.id);
   for (const [title, reply] of Object.entries(EARLIER_REPLIES)) {
-    const recipient = earlier.recipients.find((one) => one.session_id === sessionOf(title).id);
+    const recipient = (earlier.recipients ?? []).find(
+      (one) => one.session_id === sessionOf(title).id
+    );
     if (recipient === undefined) throw new Error(`the workspace's broadcast skipped ${title}`);
     await api.replyToMessageDelivery(
       recipient.message.id,
@@ -160,7 +162,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
       act: async (page, seeded, cue) => {
         if (seeded.sent === undefined) throw new Error("the send section sent no broadcast");
         const api = await dispatchApi();
-        const { recipients } = await api.getBroadcast(seeded.sent);
+        const recipients = (await api.getBroadcast(seeded.sent)).recipients ?? [];
         await pointTo(page, card(page, "Tester").getByText("Sent to Tester (Send)"));
         // The first reply is sent as the line ends.
         await linger(page, 1.35);
