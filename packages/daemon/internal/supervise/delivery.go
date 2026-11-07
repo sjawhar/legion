@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -197,11 +198,11 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		// failed leaves the row undelivered, so its retry queues the task.
 		stored := m.stored()
 		stored.DeliveredRows = append(slices.Clone(m.claim.DeliveredRows), request.Row)
-		if err := m.deps.Store.PutClaimAndDelivery(ctx, stored, d); err != nil {
+		if err := m.putClaimAndDelivery(ctx, stored, d); err != nil {
 			return err
 		}
 		m.claim.DeliveredRows = stored.DeliveredRows
-	} else if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
+	} else if err := m.putDelivery(ctx, d); err != nil {
 		return err
 	}
 	m.claim.Pending, m.unsaved = &d, false
@@ -363,6 +364,10 @@ func (m *Machine) sendPending(ctx context.Context) error {
 			// The turn is the agent's own word, not an agent_start this daemon read, so nothing
 			// here knows what it has already done (Machine.unseenTurn).
 			m.unseenTurn = true
+			// The turn this claim is put in is logged before the write that records it, as
+			// turnStarted logs its own: a line written after the write would say nothing of the
+			// turn whose write failed.
+			m.startTurn(p.ID)
 			m.log.Info("supervise: the agent is in a turn; confirming the delivery an earlier daemon sent", "delivery", p.ID)
 			return m.confirm(ctx)
 		}
@@ -432,7 +437,7 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 	}
 	next := *p
 	next.Task, next.Kept = task, kept
-	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+	if err := m.saved(m.putDelivery(ctx, next)); err != nil {
 		return false, err
 	}
 	*p = next
@@ -487,6 +492,9 @@ func (m *Machine) answerAskFirstAfterDrop(ctx context.Context) error {
 	}
 	m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
 	m.claim.State, m.unseenTurn = StateWorking, true
+	// The guard above has already established that the claim holds no delivery, so this turn is
+	// no task's and the line names none. It goes before the write, as the other two do.
+	m.startTurn("")
 	return m.persist(ctx)
 }
 
@@ -528,6 +536,45 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // a merger on a person — and a daemon that crashed between the two writes, or was restarted in
 // that wait, rebuilds the machine from the store, where a run left unwritten would refuse the
 // completion the worker's next turn reports.
+//
+// A refusal that says the claim holds no such delivery (ErrNoSuchDelivery) is read as the
+// retirement the store has already made rather than as a failure. The store runs the claim write
+// and the fenced delete in one transaction, so a delete that removed no row with nothing stored
+// under the claim at all is a retirement some earlier call committed — this one, whose answer a
+// broken connection lost. Memory moves to match the store, because the delivery is gone there: a
+// machine that went on holding it would call this function again at the head of every decision
+// (settle) and be refused the same way every time, and each refusal drops that claim's event for
+// good (supervisor.decisionFailed in internal/daemon), which is the opposite of what the owed
+// write exists to do. The claim write is marked owed all the same, because the same transaction
+// rolled it back with the delete, so what the store holds of the claim is older than what this
+// retirement wrote; the repair at the claim's next decision is what records it.
+//
+// The store's other refusal of a delete that removed no row — the claim's row holding a delivery
+// under another id (ErrOtherDelivery) — is no retirement already made, and is returned as the
+// failure it is. The row holds a delivery this machine is not retiring: a write that rotated the
+// id (interrupted, takeBackPending) had its answer cut off by the claim-write bound and
+// committed all the same, so the store holds the new delivery while memory holds the old. Read
+// as a retirement already made, it would drop the delivery memory holds and leave the stored one
+// behind, pending, unconfirmed and never retired, with the decisions it keeps never released.
+//
+// So the decision fails, and the delivery memory holds is marked unsaved on the way out, because
+// the refusal says exactly what the row is missing: that delivery. The next settle writes it
+// before it retires anything (putClaimAndPending), which puts the row back under memory's own id
+// — PutDelivery upserts on the claim token (internal/store's claims.go), so the row the rotation
+// left is the one it writes over — and the retirement that follows it, where that settle
+// retires at all, then finds the delivery it is of. What the rotated row held of the decisions
+// it keeps is held under an id no row carries any more, and a hold whose delivery is not stored
+// unconfirmed counts for nothing (keptCounts in internal/record), so the tree's next start or
+// catch-up names those decisions again: at worst one is told twice, and none is lost.
+//
+// Without the mark nothing would ever write the row: this path owes no claim write, so no repair
+// makes one, and the settle at the head of every decision from here on would meet the same
+// refusal and drop that claim's event (supervisor.decisionFailed in internal/daemon), which is
+// the wedge the owed write exists to end. One event is lost, the one whose decision met the
+// refusal; the claim decides the next and every one after it.
+//
+// A retirement that landed is the repair of any claim write the machine owed: the store wrote
+// the claim beside the delete, so the row is no longer behind memory (settleOwedWrite).
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
@@ -537,10 +584,26 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0
-	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
+	err := m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.RetireDelivery(ctx, retired, p.ID)
+	})
+	// The row holds a delivery this machine is not retiring, so what it lacks is exactly the
+	// delivery memory holds; the mark is what has the next settle write it there.
+	if errors.Is(err, ErrOtherDelivery) {
+		m.unsaved = true
+		return err
+	}
+	if err != nil && !errors.Is(err, ErrNoSuchDelivery) {
 		return err
 	}
 	m.claim, m.unsaved = retired, false
+	if err != nil {
+		m.log.Warn("supervise: the store holds no such delivery; the refusal is of a retirement it has already made",
+			"delivery", p.ID, "error", err)
+		m.oweWrite("RetireDelivery", err)
+		return nil
+	}
+	m.settleOwedWrite("RetireDelivery")
 	return nil
 }
 
@@ -558,7 +621,7 @@ func (m *Machine) saved(err error) error {
 
 // putPending writes the pending delivery as memory holds it (saved).
 func (m *Machine) putPending(ctx context.Context) error {
-	return m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending))
+	return m.saved(m.putDelivery(ctx, *m.claim.Pending))
 }
 
 // streaming asks the agent whether a turn is in flight; answered is false when the agent could not
@@ -626,14 +689,19 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 // its worker is never prompted again, and an idle claim holding a confirmed delivery holds one
 // nothing retires. Once the write holds, the workflow is told the agent took its work
 // (Deps.TaskConfirmed): a root whose wait that untaken task held is decided on this fact rather
-// than at the next tick. A write that failed tells no one.
+// than at the next tick. A write that failed tells no one, and is owed: the claim it carries is
+// the claim memory holds from here on — the turn started whether or not the row says so — so the
+// write is marked and made again at the claim's next decision (owes). The mark is taken beside
+// saved rather than instead of it, and saved still sees the same error, because the two say
+// different things: saved is the delivery's own, and settle writes it again before the next
+// decision, where the mark is the claim's.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+	if err := m.saved(m.owes("PutClaimAndDelivery", m.putClaimAndPending(ctx))); err != nil {
 		return err
 	}
 	if m.deps.TaskConfirmed != nil {
@@ -671,7 +739,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		return nil
 	}
 	if m.unsaved {
-		if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+		if err := m.saved(m.putClaimAndPending(ctx)); err != nil {
 			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
 		}
 	}
@@ -747,7 +815,7 @@ func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool)
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+	if err := m.putDelivery(ctx, next); err != nil {
 		return err
 	}
 	*p = next
@@ -818,7 +886,7 @@ func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	}
 	next := *p
 	next.ID = rotateTaskID(p.ID)
-	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+	if err := m.saved(m.putDelivery(ctx, next)); err != nil {
 		return err
 	}
 	p.ID = next.ID

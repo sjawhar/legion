@@ -387,6 +387,18 @@ func (s *Store) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d su
 // that has forgotten the run its worker is still working. What the delivery held is left KEPT in
 // that same transaction: a retired task tells nothing, so each row waits for the next start or
 // catch-up of its own issue's tree to name it.
+//
+// A delete that removes no row is refused two ways, because pending_task_deliveries is keyed on
+// the claim: the row holds no delivery at all, or it holds one under another id. The first is
+// the retirement this call already committed and whose answer the caller lost, and it carries
+// supervise.ErrNoSuchDelivery so that the caller can read it as its own write made good rather
+// than as a fresh failure. The second is a different claim altogether — a write that rotated the
+// delivery's id committed after its answer was cut off, so the row holds the new delivery while
+// the caller is retiring the old one — and it carries supervise.ErrOtherDelivery, naming both
+// ids, which is not ErrNoSuchDelivery and must never be read as one: that would drop the
+// delivery memory holds and leave the stored one behind, pending and unretired. Which it is can
+// only be read from the row, so it is read here, in the same transaction as the delete that
+// found nothing.
 func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := putClaim(ctx, tx, c); err != nil {
@@ -400,7 +412,19 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 			return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, err)
 		}
 		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+			var stored string
+			switch err := tx.QueryRow(ctx,
+				"select delivery_id from pending_task_deliveries where claim_token = $1",
+				string(c.Token),
+			).Scan(&stored); {
+			case errors.Is(err, pgx.ErrNoRows):
+				return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, supervise.ErrNoSuchDelivery)
+			case err != nil:
+				return fmt.Errorf("read the pending delivery of %s: %w", c.Token, err)
+			default:
+				return fmt.Errorf("retire delivery %s on %s: the row holds delivery %s: %w",
+					deliveryID, c.Token, stored, supervise.ErrOtherDelivery)
+			}
 		}
 		return releaseKeptDecisions(ctx, tx, c.Token, deliveryID)
 	})
