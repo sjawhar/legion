@@ -84,7 +84,7 @@ test("every machine the agent list names is a row with its counts and a link to 
 
 test("a machine name that needs encoding is encoded in its link", async () => {
   const agents = spyOn(api, "listAgents").mockResolvedValue([
-    session("a".repeat(16), "sami-devbox.tail12ec1c.ts.net"),
+    session("a".repeat(16), "example-host-devbox.example-tailnet.ts.net"),
     session("b".repeat(16), "box one/two"),
   ]);
   const view = renderMachines();
@@ -93,7 +93,7 @@ test("a machine name that needs encoding is encoded in its link", async () => {
 
     expect(rows.map((row) => within(row).getByRole("link").getAttribute("href"))).toEqual([
       "/machines/box%20one%2Ftwo",
-      "/machines/sami-devbox.tail12ec1c.ts.net",
+      "/machines/example-host-devbox.example-tailnet.ts.net",
     ]);
   } finally {
     view.unmount();

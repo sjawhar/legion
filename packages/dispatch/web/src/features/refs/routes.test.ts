@@ -1044,7 +1044,7 @@ test("routeIsInbox covers every path that renders the Inbox, and not the machine
 test("a machine path percent-encodes its name and reads it back", () => {
   for (const host of [
     "sami-devbox",
-    "sami-devbox.tail12ec1c.ts.net",
+    "example-host-devbox.example-tailnet.ts.net",
     "legion infra/daemon",
     "box%2F1",
     "ホスト",
@@ -1055,8 +1055,8 @@ test("a machine path percent-encodes its name and reads it back", () => {
     expect([host, path.includes("/", "/machines/".length)]).toEqual([host, false]);
     expect(parseMachinePath(path)).toBe(host);
   }
-  expect(buildMachinePath("sami-devbox.tail12ec1c.ts.net")).toBe(
-    "/machines/sami-devbox.tail12ec1c.ts.net"
+  expect(buildMachinePath("example-host-devbox.example-tailnet.ts.net")).toBe(
+    "/machines/example-host-devbox.example-tailnet.ts.net"
   );
   expect(buildMachinePath("legion infra/daemon")).toBe("/machines/legion%20infra%2Fdaemon");
 });
