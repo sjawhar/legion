@@ -210,7 +210,7 @@ describe("the delivery a card gets", () => {
 
     expect(host.card("busy").delivery).toEqual({
       ...aside,
-      details: { envoyCard: expect.any(String), wake: "fold" },
+      details: { envoyCard: expect.any(String), handOver: "run-active", wake: "fold" },
     });
   });
 
@@ -221,7 +221,7 @@ describe("the delivery a card gets", () => {
 
     expect(host.card("idle").delivery).toEqual({
       ...aside,
-      details: { envoyCard: expect.any(String), wake: "fold" },
+      details: { envoyCard: expect.any(String), handOver: "idle", wake: "fold" },
     });
   });
 
@@ -234,8 +234,8 @@ describe("the delivery a card gets", () => {
     const idle = host.card("idle-aside", true).delivery;
 
     expect([busy, idle]).toEqual([
-      { ...aside, details: { envoyCard: expect.any(String) } },
-      { ...aside, details: { envoyCard: expect.any(String) } },
+      { ...aside, details: { envoyCard: expect.any(String), handOver: "run-active" } },
+      { ...aside, details: { envoyCard: expect.any(String), handOver: "idle" } },
     ]);
   });
 
@@ -280,6 +280,52 @@ describe("the delivery a card gets", () => {
     );
 
     expect(new Set(ids).size).toBe(2);
+  });
+});
+
+// What state the host was in when the card was handed over, which the card's `details` carry onto
+// the record and the entry the host persists, so a later reading of the stored transcripts can say
+// which state held a waiting card.
+describe("the host state a card's details carry", () => {
+  test("names the startup phase for a card that phase holds", () => {
+    const host = harness();
+    host.setIdle(true);
+
+    expect(host.card("startup-state").delivery.details.handOver).toBe("startup");
+  });
+
+  test("names an idle host for a card that finds one after the startup phase", async () => {
+    const host = harness();
+    await host.endStartup();
+    host.setIdle(true);
+
+    expect(host.card("idle-state").delivery.details.handOver).toBe("idle");
+  });
+
+  test("names the run for a card handed over while one is going", async () => {
+    const host = harness();
+    await host.endStartup();
+    host.run();
+    host.setIdle(false);
+
+    expect(host.card("run-active-state").delivery.details.handOver).toBe("run-active");
+  });
+
+  test("names a prompt's setup for a card on a busy host with no run", async () => {
+    const host = harness();
+    await host.endStartup();
+    host.setIdle(false);
+
+    expect(host.card("prompt-setup-state").delivery.details.handOver).toBe("prompt-setup");
+  });
+
+  // A context with no `isIdle` says nothing about the host, the run this module last heard of
+  // included: no state of it can be read, so none is recorded.
+  test("names no state on a host that reports no idle state, though a run is active", () => {
+    const host = harness({ reportsIdle: false });
+    host.run();
+
+    expect(host.card("unknown-state").delivery.details.handOver).toBe("unknown");
   });
 });
 
@@ -524,7 +570,7 @@ describe("in the startup phase", () => {
 
       expect(host.card("startup-follow-up", targeted).delivery).toEqual({
         ...followUp,
-        details: { envoyCard: expect.any(String), wake: "startup" },
+        details: { envoyCard: expect.any(String), handOver: "startup", wake: "startup" },
       });
     });
   }
@@ -539,7 +585,7 @@ describe("in the startup phase", () => {
 
       expect(host.card("startup-aside").delivery).toEqual({
         ...aside,
-        details: { envoyCard: expect.any(String), wake: "fold" },
+        details: { envoyCard: expect.any(String), handOver: "idle", wake: "fold" },
       });
     });
   }
@@ -677,7 +723,7 @@ describe("while the start-turn mark names the session", () => {
     const card = host.card("terminal-startup");
     expect(card.delivery).toEqual({
       ...followUp,
-      details: { envoyCard: expect.any(String), wake: "startup" },
+      details: { envoyCard: expect.any(String), handOver: "startup", wake: "startup" },
     });
 
     host.message(card.message);
