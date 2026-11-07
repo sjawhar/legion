@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
@@ -646,7 +647,7 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	// the identity Isolated supplies, and nothing of the home but that.
 	fixture := fixtureenv.Isolated(t.TempDir())
 	for _, args := range [][]string{
-		{"init", "-q"},
+		fixturegit.InitWorkTree("", "")[1:],
 		{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
 		{"config", "remote.origin.pushurl", "https://github.com/acme/pushed.git"},
 		{"remote", "add", "upstream", "gh:sjawhar/legion"},
@@ -700,7 +701,7 @@ func TestReadGitRemotesRefusesALineGhReadsOtherwise(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repository := t.TempDir()
 			t.Chdir(repository)
-			config := [][]string{{"init", "-q"}, {"remote", "add", "origin", tc.url}}
+			config := [][]string{fixturegit.InitWorkTree("", "")[1:], {"remote", "add", "origin", tc.url}}
 			if tc.filter != "" {
 				config = append(config, []string{"config", "remote.origin.promisor", "true"}, []string{"config", "remote.origin.partialclonefilter", tc.filter})
 			}
@@ -860,7 +861,7 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 
 	// In a clone of sjawhar's repository, a command naming none acts on sjawhar's repository.
 	clone := t.TempDir()
-	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", "https://github.com/sjawhar/legion-smoke"}} {
+	for _, args := range [][]string{fixturegit.InitWorkTree("", "")[1:], {"remote", "add", "origin", "https://github.com/sjawhar/legion-smoke"}} {
 		git := exec.Command("git", args...)
 		git.Dir, git.Env = clone, []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
 		if out, err := git.CombinedOutput(); err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 )
 
 // This package's TestMain takes every variable that names another repository, remote or credential
@@ -36,7 +37,8 @@ func TestFixtureCommandsIgnoreAPlantedRepository(t *testing.T) {
 	}
 	// The planting target is made by a command that already has a clean environment, so what the
 	// test measures is what the rig's commands do, never what made the target.
-	initialise := exec.Command(realGit, "init", "--quiet", target)
+	initArgv := fixturegit.InitWorkTree(target, "")
+	initialise := exec.Command(realGit, initArgv[1:]...)
 	initialise.Dir = dir
 	initialise.Env = fixtureenv.Isolated(home)
 	if output, err := initialise.CombinedOutput(); err != nil {

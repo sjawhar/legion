@@ -138,8 +138,8 @@ func (v *issueVolume) withRemote(t *testing.T, defaultBranch string) *issueVolum
 	remote := filepath.Join(dir, "remote.git")
 	seed := filepath.Join(dir, "seed")
 	for _, argv := range [][]string{
-		{"git", "init", "--bare", "--initial-branch=" + defaultBranch, remote},
-		{v.realJJ, "git", "init", "--colocate", seed},
+		fixturegit.InitBare(remote, defaultBranch),
+		append([]string{v.realJJ}, fixturegit.JJInit(seed, true)[1:]...),
 		{v.realJJ, "describe", "-m", "seed", "-R", seed},
 		{v.realJJ, "bookmark", "set", defaultBranch, "-r", "@", "-R", seed},
 		{v.realJJ, "git", "remote", "add", "origin", remote, "-R", seed},

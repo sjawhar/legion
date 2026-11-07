@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
@@ -723,7 +724,8 @@ func TestEveryRolesGitStartsNoPlantedFsmonitorOrHook(t *testing.T) {
 			t.Fatalf("git %v: %v\n%s", args, err, output)
 		}
 	}
-	initialise := exec.Command(git, "init", "--quiet", clone)
+	initArgv := fixturegit.InitWorkTree(clone, "")
+	initialise := exec.Command(git, initArgv[1:]...)
 	// The init creates the clone, so it runs in the directory holding it rather than in the one
 	// the test process happens to have; every later command runs in the clone itself.
 	initialise.Dir = dir

@@ -78,7 +78,8 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 		if err := os.MkdirAll(located.Clone, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		initialise := exec.Command(realGit, "init", "-q", located.Clone)
+		initArgv := fixturegit.InitWorkTree(located.Clone, "")
+		initialise := exec.Command(realGit, initArgv[1:]...)
 		// The clone's directory is made just above, so the init runs inside it rather than in
 		// whatever directory the test process has, and under an environment of its own, as the
 		// git helper above does.

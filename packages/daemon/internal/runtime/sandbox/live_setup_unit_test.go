@@ -409,7 +409,7 @@ func TestLiveSetupIgnoresARepositoryAboveItsDirectory(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 			}))
 			defer server.Close()
-			r.git("init", "--quiet", r.tmp)
+			r.git(fixturegit.InitWorkTree(r.tmp, "")[1:]...)
 			r.git("-C", r.tmp, "config", "url."+server.URL+"/.insteadOf", "https://github.com/")
 
 			attacked := r.probe(r.start)
@@ -845,7 +845,7 @@ func (r *setupRig) poisons() map[string]map[string]string {
 		r.t.Fatal(err)
 	}
 	headers := filepath.Join(r.root, "headers")
-	r.git("init", "--quiet", headers)
+	r.git(fixturegit.InitWorkTree(headers, "")[1:]...)
 	r.git("-C", headers, "config", "http.https://github.com/.extraheader", "Authorization: basic Zm9yZ2Vk")
 	askpass := filepath.Join(r.root, "askpass")
 	if err := os.WriteFile(askpass, []byte("#!/bin/sh\necho forged\n"), 0o700); err != nil {
@@ -881,7 +881,7 @@ func (r *setupRig) configuredClone() string {
 func (r *setupRig) plainClone() string {
 	r.t.Helper()
 	clone := filepath.Join(r.root, "clone")
-	r.git("init", "--quiet", clone)
+	r.git(fixturegit.InitWorkTree(clone, "")[1:]...)
 	return clone
 }
 
@@ -1045,7 +1045,8 @@ func (h *helperLog) repo(name string, keys ...[2]string) string {
 	git := fixturegit.Isolated(h.t, h.dir)
 	// The init creates path, so it runs in the log's own directory, which holds it; the configure
 	// below runs in the repository it names with -C, which the init has made by then.
-	if output, err := git.Try(h.dir, h.realGit, "init", "--quiet", path); err != nil {
+	initArgv := append([]string{h.realGit}, fixturegit.InitWorkTree(path, "")[1:]...)
+	if output, err := git.Try(h.dir, initArgv...); err != nil {
 		h.t.Fatalf("init %s: %v: %s", name, err, output)
 	}
 	for _, kv := range keys {

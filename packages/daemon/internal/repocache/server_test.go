@@ -187,7 +187,7 @@ func newRemote(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
-	git(t, root, "init", "--bare", "--quiet", "--initial-branch=main", remote)
+	git(t, root, fixturegit.InitBare(remote, "main")[1:]...)
 	advance(t, remote, "seed")
 	return remote
 }

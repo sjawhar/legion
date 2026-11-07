@@ -114,13 +114,13 @@ func bundledWorkspace(t *testing.T) (workspace, home string) {
 			t.Fatal(err)
 		}
 	}
-	jjGit(t, home, workspace, "init", "--quiet", "-b", "main", workspace)
+	jjGit(t, home, workspace, fixturegit.InitWorkTree(workspace, "main")[1:]...)
 	if err := os.WriteFile(filepath.Join(workspace, "f.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	jjGit(t, home, workspace, "add", "-A")
 	jjGit(t, home, workspace, "-c", "user.name=tester", "-c", "user.email=tester@example.test", "commit", "--quiet", "-m", "one")
-	jjRun(t, home, workspace, "git", "init", "--colocate", workspace)
+	jjRun(t, home, workspace, fixturegit.JJInit(workspace, true)[1:]...)
 	jjRun(t, home, workspace, "new", "-R", workspace, "-m", "unpushed")
 	if err := os.WriteFile(filepath.Join(workspace, "wip.txt"), []byte(strings.Repeat("work\n", 4096)), 0o644); err != nil {
 		t.Fatal(err)

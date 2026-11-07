@@ -10,6 +10,10 @@
 // the output's own whitespace is part of what is read, Out where what is read must hold no stderr,
 // and Try where the caller keeps the failure for itself.
 //
+// The repositories those fixtures are built out of have one argv apiece, which InitBare,
+// InitWorkTree and JJInit return whole, command name and all, so no fixture spells the flags of an
+// init itself and no two of them spell one flag differently.
+//
 // It is an ordinary package rather than a _test.go file of one of them because cmd/legion is
 // package main, which can import no other package's test-only helpers.
 package fixturegit
@@ -95,4 +99,55 @@ func (r Runner) command(dir string, argv []string) *exec.Cmd {
 	command.Dir = dir
 	command.Env = r.Env
 	return command
+}
+
+// InitBare is the argv of a bare git repository in dir, which is what a fixture's remote is: a
+// repository with no working tree of its own, whose HEAD names branch.
+func InitBare(dir, branch string) []string {
+	return gitInit(dir, branch, true)
+}
+
+// InitWorkTree is the argv of a git repository with a working tree in dir, which is what a
+// fixture's seed or clone is. It reads dir and branch as InitBare does.
+func InitWorkTree(dir, branch string) []string {
+	return gitInit(dir, branch, false)
+}
+
+// gitInit is git init in dir, bare when the repository is to have no working tree. It is always
+// quiet, because what init prints is a sentence about the directory it made and no fixture reads
+// it. An empty branch leaves --initial-branch out, so the repository takes the default branch name
+// git itself holds: under fixtureenv.Isolated, which shuts out both configuration files, that is
+// git's compiled-in one, and naming a branch there would make a repository other than the one the
+// fixture asks for. An empty dir leaves the directory out, for a fixture that gives its runner the
+// directory to run in instead.
+func gitInit(dir, branch string, bare bool) []string {
+	argv := make([]string, 0, 6)
+	argv = append(argv, "git", "init", "--quiet")
+	if bare {
+		argv = append(argv, "--bare")
+	}
+	if branch != "" {
+		argv = append(argv, "--initial-branch="+branch)
+	}
+	if dir != "" {
+		argv = append(argv, dir)
+	}
+	return argv
+}
+
+// JJInit is the argv of a jj repository in dir, colocated with a git repository beside it when
+// colocate and holding its git repository under .jj alone when not. The two are different
+// repositories rather than two spellings of one, so each call site keeps the one it asks for. An
+// empty dir leaves the directory out, as InitBare does.
+func JJInit(dir string, colocate bool) []string {
+	colocation := "--no-colocate"
+	if colocate {
+		colocation = "--colocate"
+	}
+	argv := make([]string, 0, 5)
+	argv = append(argv, "jj", "git", "init", colocation)
+	if dir != "" {
+		argv = append(argv, dir)
+	}
+	return argv
 }

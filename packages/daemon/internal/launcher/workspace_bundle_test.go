@@ -362,9 +362,9 @@ func newBundleFixture(t *testing.T) *bundleFixture {
 			t.Fatal(err)
 		}
 	}
-	f.run(f.remote, "git", "init", "--quiet", "--bare", f.remote)
+	f.run(f.remote, fixturegit.InitBare(f.remote, "")...)
 	f.run(f.remote, "git", "--git-dir="+f.remote, "symbolic-ref", "HEAD", "refs/heads/main")
-	f.run(seed, "git", "init", "--quiet", "-b", "main", seed)
+	f.run(seed, fixturegit.InitWorkTree(seed, "main")...)
 	f.write(filepath.Join(seed, "f.txt"), "one\n")
 	f.run(seed, "git", "add", "-A")
 	f.run(seed, "git", "commit", "--quiet", "-m", "one")
@@ -388,7 +388,7 @@ func (f *bundleFixture) pod(clone, ws string) {
 	// --no-local: a local clone hardlinks the whole object store, unreachable objects included,
 	// where a pod clones over the network and gets only what the remote's refs reach.
 	f.run(f.root, "git", "clone", "--quiet", "--no-local", f.remote, clone)
-	f.run(clone, "jj", "git", "init", "--colocate", clone)
+	f.run(clone, fixturegit.JJInit(clone, true)...)
 	f.run(clone, "jj", "bookmark", "track", "main@origin", "legion/"+bundleIssue+"@origin")
 	f.run(clone, "jj", "workspace", "add", "--name", filepath.Base(ws), ws)
 	if err := workspace.RecordCreated(ws, time.Now()); err != nil {

@@ -355,7 +355,7 @@ func hostWorkspace(t *testing.T, stateDir, repo, issue string) {
 		}
 	}
 	if _, err := os.Stat(filepath.Join(located.Clone, ".jj")); errors.Is(err, os.ErrNotExist) {
-		jj("git", "init", "--no-colocate", located.Clone)
+		jj(fixturegit.JJInit(located.Clone, false)[1:]...)
 	} else if err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -30,9 +31,9 @@ func seedSkillsRemote(t *testing.T, path, catalog string) (remote, commit string
 	t.Helper()
 	root := t.TempDir()
 	remote = filepath.Join(root, "remote.git")
-	runSetup(t, root, "git", "init", "--bare", "--initial-branch=main", remote)
+	runSetup(t, root, fixturegit.InitBare(remote, "main")...)
 	seed := filepath.Join(root, "seed")
-	runSetup(t, root, "git", "init", "--initial-branch=main", seed)
+	runSetup(t, root, fixturegit.InitWorkTree(seed, "main")...)
 	if path != "" {
 		file := filepath.Join(seed, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {

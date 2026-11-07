@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/rescue/rescuetest"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -1203,7 +1204,8 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				}
 				return strings.TrimSpace(string(output))
 			}
-			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			initArgv := fixturegit.JJInit(workspace, true)
+			initialize := exec.Command(jj, initArgv[1:]...)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
 			initialize.Dir = workspace
@@ -1273,7 +1275,7 @@ func TestAdoptWorkingCopyLeavesTheRepositoryTheShimRunsInUntouched(t *testing.T)
 	home := t.TempDir()
 	initialize := func(dir string) {
 		t.Helper()
-		command := exec.Command(jj, "git", "init", "--colocate", dir)
+		command := exec.Command(jj, fixturegit.JJInit(dir, true)[1:]...)
 		command.Dir = dir
 		command.Env = fixtureenv.Isolated(home)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -1382,7 +1384,8 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			workspace := t.TempDir()
-			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			initArgv := fixturegit.JJInit(workspace, true)
+			initialize := exec.Command(jj, initArgv[1:]...)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
 			initialize.Dir = workspace

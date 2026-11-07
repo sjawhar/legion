@@ -78,8 +78,8 @@ func New(t testing.TB, issue string, before ...func(d *Disk)) *Disk {
 	}
 	d.Provisioned = time.Now()
 	seed := filepath.Join(root, "seed")
-	d.Run(root, "git", "init", "--quiet", "--bare", "--initial-branch=main", d.Remote)
-	d.Run(root, "git", "init", "--quiet", "--initial-branch=main", seed)
+	d.Run(root, fixturegit.InitBare(d.Remote, "main")...)
+	d.Run(root, fixturegit.InitWorkTree(seed, "main")...)
 	d.Write(seed, "base.txt", "base\n")
 	d.Run(seed, "git", "add", "base.txt")
 	d.Run(seed, "git", "commit", "--quiet", "-m", "base")
