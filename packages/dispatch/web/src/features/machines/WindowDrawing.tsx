@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import {
   inlineWarningText,
@@ -52,6 +52,26 @@ const LIST_REASON_TEXT: Record<ListReason, string> = {
   "unreadable-layout":
     "This window's layout could not be read, so its panes are listed by pane index instead.",
 };
+
+/**
+ * What a window comes to at the width it is drawn at: the layout to draw it from, or the reason
+ * its panes are listed instead. A listed window still carries its layout where the parser read
+ * one, since the list is then in layout order rather than pane-index order.
+ */
+type WindowShape =
+  | { readonly layout: TmuxLayout; readonly reason: undefined }
+  | { readonly layout: TmuxLayout | undefined; readonly reason: ListReason };
+
+function windowShape(
+  reported: string | undefined,
+  layout: TmuxLayout | undefined,
+  width: number
+): WindowShape {
+  if (reported === undefined) return { layout: undefined, reason: "no-layout" };
+  if (layout === undefined) return { layout: undefined, reason: "unreadable-layout" };
+  if (panesTooSmall(layout, width)) return { layout, reason: "panes-too-small" };
+  return { layout, reason: undefined };
+}
 
 const STATE_LABEL: Record<AgentGroup, string> = {
   active: "Active",
@@ -211,46 +231,47 @@ export function WindowDrawing({
   const measured = useMeasuredWidth(box);
   const drawnWidth = width ?? measured ?? ASSUMED_WIDTH_PX;
 
-  const parsed = shown.layout === undefined ? undefined : parseTmuxLayout(shown.layout);
-  // A layout whose root has no size divides to nothing: it is read as one the parser refused,
-  // since a drawing made from it would be a box of NaNs.
-  const layout =
-    parsed !== undefined && parsed.root.width > 0 && parsed.root.height > 0 ? parsed : undefined;
-  const panes = new Map(shown.panes.map((pane) => [pane.paneId, pane]));
-
-  const reason: ListReason | undefined =
-    shown.layout === undefined
-      ? "no-layout"
-      : layout === undefined
-        ? "unreadable-layout"
-        : panesTooSmall(layout, drawnWidth)
-          ? "panes-too-small"
-          : undefined;
+  // Parsed once per layout string, not once per measured pixel: the observer re-renders the
+  // component for every width the reader drags it through, and the layout is the same string.
+  const layout = useMemo(() => {
+    const parsed = shown.layout === undefined ? undefined : parseTmuxLayout(shown.layout);
+    // A layout whose root has no size divides to nothing: it is read as one the parser refused,
+    // since a drawing made from it would be a box of NaNs.
+    return parsed !== undefined && parsed.root.width > 0 && parsed.root.height > 0
+      ? parsed
+      : undefined;
+  }, [shown.layout]);
+  const panes = useMemo(
+    () => new Map(shown.panes.map((pane) => [pane.paneId, pane])),
+    [shown.panes]
+  );
+  // Whether the panes fit is the width's answer, so this is read on every render.
+  const shape = windowShape(shown.layout, layout, drawnWidth);
 
   return (
     <section
       aria-label={`Window ${shown.windowIndex}: ${shown.windowName}`}
-      data-drawn={reason === undefined ? "layout" : "list"}
+      data-drawn={shape.reason === undefined ? "layout" : "list"}
       data-testid="window-drawing"
       data-window={shown.windowId}
       data-window-index={shown.windowIndex}
       data-window-name={shown.windowName}
       ref={setBox}
     >
-      {layout === undefined || reason !== undefined ? (
+      {shape.reason !== undefined ? (
         <PaneList
           counts={counts}
-          layout={layout}
+          layout={shape.layout}
           now={now}
           panes={panes}
-          reason={reason ?? "no-layout"}
+          reason={shape.reason}
           window={shown}
         />
       ) : (
         <PaneBoxes
           counts={counts}
-          height={drawingHeight(layout, drawnWidth)}
-          layout={layout}
+          height={drawingHeight(shape.layout, drawnWidth)}
+          layout={shape.layout}
           now={now}
           panes={panes}
         />
@@ -282,41 +303,33 @@ function PaneBoxes({
       data-testid="window-layout"
       style={{ height: `${height}px` }}
     >
-      {rows.map(({ cell, pane, paneIndex }) => {
-        return (
+      {rows.map(({ cell, pane, paneIndex }) => (
+        <div
+          className="absolute overflow-hidden"
+          data-agent={pane?.session.session_id}
+          data-pane={cell.paneId}
+          data-pane-index={paneIndex}
+          data-testid="window-pane"
+          data-zoomed={pane?.zoomed === true ? "true" : "false"}
+          key={cell.paneId}
+          style={{
+            height: `${(cell.height / layout.root.height) * 100}%`,
+            left: `${(cell.x / layout.root.width) * 100}%`,
+            top: `${(cell.y / layout.root.height) * 100}%`,
+            width: `${(cell.width / layout.root.width) * 100}%`,
+          }}
+        >
           <div
-            className="absolute overflow-hidden"
-            data-agent={pane?.session.session_id}
-            data-pane={cell.paneId}
-            data-pane-index={paneIndex}
-            data-testid="window-pane"
-            data-zoomed={pane?.zoomed === true ? "true" : "false"}
-            key={cell.paneId}
-            style={{
-              height: `${(cell.height / layout.root.height) * 100}%`,
-              left: `${(cell.x / layout.root.width) * 100}%`,
-              top: `${(cell.y / layout.root.height) * 100}%`,
-              width: `${(cell.width / layout.root.width) * 100}%`,
-            }}
+            className={`flex h-full flex-col gap-1 overflow-hidden p-2 text-xs ${
+              pane === undefined
+                ? `${surfaceRecessedBg} ${textMutedOnSurface}`
+                : `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}`
+            }`}
           >
-            <div
-              className={`flex h-full flex-col gap-1 overflow-hidden p-2 text-xs ${
-                pane === undefined
-                  ? `${surfaceRecessedBg} ${textMutedOnSurface}`
-                  : `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}`
-              }`}
-            >
-              <PaneBody
-                compact={false}
-                counts={counts}
-                now={now}
-                pane={pane}
-                paneIndex={paneIndex}
-              />
-            </div>
+            <PaneBody compact={false} counts={counts} now={now} pane={pane} paneIndex={paneIndex} />
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }

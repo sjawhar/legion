@@ -219,7 +219,6 @@ test("the drawing's age is the oldest pane it drew, and over three minutes it is
   ];
 
   expect(machineModel(agents, "devbox", NOW).age).toEqual({
-    ageMs: 200_000,
     oldestSeen: NOW - 200_000,
     stale: true,
   });
@@ -237,7 +236,6 @@ test("a machine whose sessions all report no place says so instead of drawing a 
   expect(model.noneInTmux).toBe(true);
   expect(model.servers).toEqual([]);
   expect(model.age).toBeUndefined();
-  expect(model.outsideTmux.map((agent) => agent.session_id)).toEqual(["two", "one"]);
   expect(model.summary).toEqual({ host: "devbox", inTmux: 0, sessions: 2 });
 });
 

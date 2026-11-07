@@ -205,9 +205,9 @@ const drawIds = {
   tester: "019a1c23-8f6d-7a0c-9b5b-6c3d7e0f1a23",
 } as const;
 
-/** A place on the person's tmux server: its first window (`@1`) unless the caller says
- *  otherwise. */
-function personPlace(overrides: Partial<TmuxPlace>): TmuxPlace {
+/** The place every seeded machine is drawn from: the first pane of the first window of the
+ *  person's tmux server. Each case names what it is about and keeps the rest. */
+function tmuxPlace(overrides: Partial<TmuxPlace> = {}): TmuxPlace {
   return {
     layout: FOUR_PANE_LAYOUT,
     pane_id: "%0",
@@ -235,29 +235,29 @@ async function seedDrawnMachine(now: number): Promise<void> {
     machineSession(drawIds.planner, "Planner", {
       host: DRAW_HOST,
       lastSeen: now - 30_000,
-      place: personPlace({ pane_id: "%0", pane_index: 0 }),
+      place: tmuxPlace({ pane_id: "%0", pane_index: 0 }),
     }),
     machineSession(drawIds.builder, "Builder", {
       host: DRAW_HOST,
       lastSeen: now - 30_000,
-      place: personPlace({ pane_id: "%1", pane_index: 1 }),
+      place: tmuxPlace({ pane_id: "%1", pane_index: 1 }),
     }),
     machineSession(drawIds.tester, "Tester", {
       host: DRAW_HOST,
       lastSeen: now - 30_000,
-      place: personPlace({ pane_id: "%2", pane_index: 2 }),
+      place: tmuxPlace({ pane_id: "%2", pane_index: 2 }),
     }),
     // Heard from two minutes before the Tester, and naming the Tester's pane: one of the two
     // moved or ended without the registry hearing of it.
     machineSession(drawIds.stray, "Stray", {
       host: DRAW_HOST,
       lastSeen: now - 150_000,
-      place: personPlace({ pane_id: "%2", pane_index: 2 }),
+      place: tmuxPlace({ pane_id: "%2", pane_index: 2 }),
     }),
     machineSession(drawIds.builds, "Builds", {
       host: DRAW_HOST,
       lastSeen: now - 30_000,
-      place: personPlace({
+      place: tmuxPlace({
         layout: onePaneLayout(4),
         pane_id: "%4",
         pane_index: 0,
@@ -434,21 +434,15 @@ const honestyIds = {
   kubeTwo: "019a1c32-7e5c-7f9b-8a4a-5b2c6d9e0f32",
 };
 
-/** A single-pane place on one server, for a machine the page has to draw before it can say how
- *  old its drawing is. */
+/** A single-pane place on a tmux server of its own, for a machine the page has to draw before
+ *  it can say how old its drawing is. */
 function lonePlace(paneNumber: number): TmuxPlace {
-  return {
+  return tmuxPlace({
     layout: onePaneLayout(paneNumber),
     pane_id: `%${paneNumber}`,
-    pane_index: 0,
     server_pid: "7700",
     session_name: "work",
-    socket: "/tmp/tmux-1000/default",
-    window_id: "@1",
-    window_index: 1,
-    window_name: "agents",
-    zoomed: false,
-  };
+  });
 }
 
 test.describe("@machines-honesty", () => {
@@ -691,20 +685,16 @@ const widthIds = {
   writerTwo: "019a1c58-dbac-7f51-8a0a-1b8c2d5e6f58",
 };
 
+/** A place on the machine the width cases draw: one tmux server, one tmux session, windows the
+ *  caller names. */
 function widthPlace(overrides: Partial<TmuxPlace>): TmuxPlace {
-  return {
+  return tmuxPlace({
     layout: THREE_PANE_LAYOUT,
-    pane_id: "%0",
-    pane_index: 0,
     server_pid: "5150",
     session_name: "work",
-    socket: "/tmp/tmux-1000/default",
-    window_id: "@1",
-    window_index: 1,
     window_name: "release-notes",
-    zoomed: false,
     ...overrides,
-  };
+  });
 }
 
 /**

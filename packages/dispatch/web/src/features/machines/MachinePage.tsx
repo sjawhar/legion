@@ -20,11 +20,18 @@ import {
 import { tallyBySession } from "../agents/ask-tally";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { parseMachinePath } from "../refs/routes";
+import { buildAgentsMachinePath, parseMachinePath } from "../refs/routes";
 import { relativeTimeLabel } from "../refs/Timestamp";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { type MachineTmuxServer, type MachineWindow, machineModel } from "./machine-model";
+import {
+  type MachineTmuxServer,
+  type MachineWindow,
+  machineDrawingAge,
+  machineGrouping,
+  serverKey,
+  sessionCountSentence,
+} from "./machine-model";
 import { type PaneCounts, WindowDrawing } from "./WindowDrawing";
 
 /**
@@ -93,9 +100,11 @@ function MachineView({ host }: { host: string }): ReactNode {
     }),
     [agentState, inbox.data, viewer]
   );
-  // The model is the registry grouped, and the drawing's age is this render's clock.
+  // The grouping is the registry's alone, so it is rebuilt only when the rows change; the
+  // drawing's age is this render's clock, so it goes on ageing while the page sits open.
+  const model = useMemo(() => machineGrouping(agents, host), [agents, host]);
   const now = Date.now();
-  const model = machineModel(agents, host, now);
+  const age = machineDrawingAge(model, now);
 
   if (isPending) return <LoadingSkeleton label="Loading machine" />;
   if (isError && agents.length === 0) {
@@ -103,9 +112,9 @@ function MachineView({ host }: { host: string }): ReactNode {
   }
 
   const oldest =
-    model.age === undefined
+    age === undefined
       ? undefined
-      : (relativeTimeLabel(new Date(model.age.oldestSeen), now) ?? "just now");
+      : (relativeTimeLabel(new Date(age.oldestSeen), now) ?? "just now");
 
   return (
     <section aria-label={`Machine ${host}`} data-machine={host} data-testid="machine-page">
@@ -119,14 +128,8 @@ function MachineView({ host }: { host: string }): ReactNode {
           {host}
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
-          <span>
-            {model.summary.sessions === 1 ? "1 session" : `${model.summary.sessions} sessions`} ·{" "}
-            {model.summary.inTmux} in a pane
-          </span>
-          <Link
-            className={`${linkText} ${linkHoverText}`}
-            to={`/agents?${new URLSearchParams({ machine: host })}`}
-          >
+          <span>{sessionCountSentence(model.summary)}</span>
+          <Link className={`${linkText} ${linkHoverText}`} to={buildAgentsMachinePath(host)}>
             Agents on this machine
           </Link>
         </p>
@@ -136,12 +139,12 @@ function MachineView({ host }: { host: string }): ReactNode {
           {SHARED_NAME}
         </p>
       ) : null}
-      {model.age === undefined ? null : (
+      {age === undefined ? null : (
         <p className={`mb-3 text-sm ${textMutedOnCanvas}`} data-testid="machine-drawing-age">
           Oldest report drawn: {oldest}.
         </p>
       )}
-      {model.age?.stale === true ? (
+      {age?.stale === true ? (
         <p className={`mb-3 text-sm ${inlineWarningText}`} data-testid="machine-drawing-stale">
           {DRAWING_STALE}
         </p>
@@ -159,7 +162,7 @@ function MachineView({ host }: { host: string }): ReactNode {
           {model.servers.map((server) => (
             <ServerPart
               counts={counts}
-              key={`${server.socket}\u0000${server.serverPid}`}
+              key={serverKey(server.socket, server.serverPid)}
               now={now}
               picked={picked}
               server={server}

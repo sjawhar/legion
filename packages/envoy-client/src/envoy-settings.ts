@@ -109,6 +109,16 @@ function namedInterval(raw: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+/** The interval `raw` names, held to the bounds every resolved interval keeps, or `fallback`
+ * when it names none. The pass deadline is not one of these: it has a floor of its own, the
+ * heartbeat. */
+function resolvedInterval(raw: string | undefined, fallback: number): number {
+  const named = namedInterval(raw);
+  return named === undefined
+    ? fallback
+    : Math.min(Math.max(named, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+}
+
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
   readonly ENVOY_URL?: string | undefined;
@@ -350,16 +360,11 @@ export function envoySettings(
       inbound = { off: messageFor(error) };
     }
   }
-  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs =
-    namedHeartbeatMs === undefined
-      ? DEFAULT_HEARTBEAT_MS
-      : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
-  const namedTmuxPlaceCacheMs = namedInterval(env.ENVOY_TMUX_PLACE_CACHE_MS);
-  const tmuxPlaceCacheMs =
-    namedTmuxPlaceCacheMs === undefined
-      ? DEFAULT_TMUX_PLACE_CACHE_MS
-      : Math.min(Math.max(namedTmuxPlaceCacheMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const heartbeatMs = resolvedInterval(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
+  const tmuxPlaceCacheMs = resolvedInterval(
+    env.ENVOY_TMUX_PLACE_CACHE_MS,
+    DEFAULT_TMUX_PLACE_CACHE_MS
+  );
   const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   // The pass deadline is never shorter than the heartbeat: a shorter one abandons every pass
   // before the next tick, so the heartbeat's `healing` latch — and the registration backstop that

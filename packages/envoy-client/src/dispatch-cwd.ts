@@ -55,22 +55,26 @@ export interface DispatchOrigin {
   readonly sessionTitle?: string;
 }
 
-/** Which way a bounded call came to nothing. A caller that treats them alike reads the null and
- *  asks for neither; one that does not — a reader whose last answer stands until tmux refuses —
- *  cannot tell them apart from the null alone. */
+/** Which way a bounded call came to nothing. A caller that treats them alike asks for neither;
+ *  one that does not — a reader whose last answer stands until tmux refuses — tells them
+ *  apart here. */
 export type ExecFailure = "refused" | "timedOut";
 
-/** One bounded shell-out: its stdout, or null when it fails or has not answered within `limitMs`.
- *  At the bound the call's signal is aborted and nothing waits for an exec that ignores it.
- *  `report` is told which of the two happened, exactly once, on a null. */
+/** What one bounded shell-out came to: its stdout, or which way it came to nothing. */
+export type ExecAttempt =
+  | { readonly ok: true; readonly stdout: string }
+  | { readonly ok: false; readonly failure: ExecFailure };
+
+/** One bounded shell-out: its stdout, or the failure when it fails or has not answered within
+ *  `limitMs`. At the bound the call's signal is aborted and nothing waits for an exec that
+ *  ignores it. */
 export async function tryExec(
   exec: ExecFn,
   file: string,
   args: string[],
   cwd: string,
-  limitMs: number,
-  report?: (failure: ExecFailure) => void
-): Promise<string | null> {
+  limitMs: number
+): Promise<ExecAttempt> {
   const controller = new AbortController();
   const expired = Promise.withResolvers<null>();
   const timer = setTimeout(() => {
@@ -83,13 +87,11 @@ export async function tryExec(
       expired.promise,
     ]);
     if (answer === null) {
-      report?.("timedOut");
-      return null;
+      return { failure: "timedOut", ok: false };
     }
-    return answer.stdout;
+    return { ok: true, stdout: answer.stdout };
   } catch {
-    report?.("refused");
-    return null;
+    return { failure: "refused", ok: false };
   } finally {
     clearTimeout(timer);
   }
@@ -146,19 +148,19 @@ export function parseGitHubRemoteUrl(url: string): string | null {
  * Returns null when nothing resolves to a GitHub repo.
  */
 export async function resolveCwdRepo(cwd: string, exec: ExecFn): Promise<string | null> {
-  const jjOutput = await tryExec(exec, "jj", ["git", "remote", "list"], cwd, REMOTE_LOOKUP_MS);
-  if (jjOutput !== null) {
-    const url = selectRemoteUrl(parseRemoteList(jjOutput));
+  const remoteList = await tryExec(exec, "jj", ["git", "remote", "list"], cwd, REMOTE_LOOKUP_MS);
+  if (remoteList.ok) {
+    const url = selectRemoteUrl(parseRemoteList(remoteList.stdout));
     return url ? parseGitHubRemoteUrl(url) : null;
   }
-  const originUrl = await tryExec(
+  const originRemote = await tryExec(
     exec,
     "git",
     ["remote", "get-url", "origin"],
     cwd,
     REMOTE_LOOKUP_MS
   );
-  return originUrl ? parseGitHubRemoteUrl(originUrl) : null;
+  return originRemote.ok ? parseGitHubRemoteUrl(originRemote.stdout) : null;
 }
 
 type OriginEnvironment = {
@@ -187,14 +189,14 @@ export async function resolveOrigin(
     // `#S:#I.#P` reads well but names one session of a session group at
     // random; the pane id is what `switch-client -t` needs to land in the
     // right session, window, and pane from wherever the human is attached.
-    const output = await tryExec(
+    const answer = await tryExec(
       exec,
       "tmux",
       ["display-message", "-p", "-t", pane, "#S:#I.#P #{pane_id}"],
       cwd,
       TMUX_PANE_LOOKUP_MS
     );
-    const [target, paneId] = output?.trim().split(" ") ?? [];
+    const [target, paneId] = answer.ok ? answer.stdout.trim().split(" ") : [];
     if (target) origin.tmux = target;
     if (paneId) origin.pane = paneId;
   }

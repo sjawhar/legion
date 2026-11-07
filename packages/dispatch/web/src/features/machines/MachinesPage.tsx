@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import { Link } from "react-router-dom";
 
 import { EmptyState } from "../../components/EmptyState";
@@ -15,7 +15,7 @@ import {
 import { useAgents } from "../conversation/useAgents";
 import { buildMachinePath } from "../refs/routes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { machineList } from "./machine-model";
+import { machineList, sessionCountSentence } from "./machine-model";
 
 /**
  * Every machine a live session names, with how many sessions are on it and how many of those are
@@ -26,7 +26,7 @@ import { machineList } from "./machine-model";
 export function MachinesPage(): ReactNode {
   useDocumentTitle("Machines · Dispatch");
   const { agents, current, error, isError, isPending } = useAgents(true, true);
-  const machines = machineList(agents);
+  const machines = useMemo(() => machineList(agents), [agents]);
 
   if (isPending) return <LoadingSkeleton label="Loading machines" />;
   // A refresh that failed keeps the rows it has; with no rows there is nothing to keep.
@@ -71,8 +71,7 @@ export function MachinesPage(): ReactNode {
                   {machine.host}
                 </span>
                 <span className={`text-xs ${textMutedOnCanvas}`}>
-                  {machine.sessions === 1 ? "1 session" : `${machine.sessions} sessions`} ·{" "}
-                  {machine.inTmux} in a pane
+                  {sessionCountSentence(machine)}
                 </span>
               </Link>
             </li>

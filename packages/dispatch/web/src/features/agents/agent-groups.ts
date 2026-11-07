@@ -5,9 +5,9 @@ import { compareTimestamps, isTimestamp } from "../../lib/timestamps";
 const ACTIVE_WITHIN_MS = 2 * 60_000;
 
 /** Past this much silence from the registry the session is Quiet. It is the ten minutes the
- *  Agents page has always folded on, kept so one session does not sit in two groups' worth of
- *  rules. */
-const QUIET_AFTER_MS = 10 * 60_000;
+ *  Agents page has always folded `Inactive` on, which it takes from here, so one session does
+ *  not sit in two groups' worth of rules. */
+export const QUIET_AFTER_MS = 10 * 60_000;
 
 /**
  * Which of the four groups a session's row belongs in.

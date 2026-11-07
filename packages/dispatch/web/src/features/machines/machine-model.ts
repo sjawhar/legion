@@ -2,9 +2,10 @@ import type { Agent, TmuxPlace } from "../../api/types";
 
 /**
  * The model the machine pages draw, built from the agent list alone: `/machines` lists what
- * `machineList` returns, `/machines/<machine>` draws what `machineModel` returns. Both are pure —
- * nothing here fetches, and nothing knows React — so the page is a drawing of this value and the
- * rules below are tested without a browser.
+ * `machineList` returns, `/machines/<machine>` draws what `machineGrouping` returns and dates it
+ * by what `machineDrawingAge` says; `machineModel` is the two together, which is how the model's
+ * own test reads it. All of them are pure — nothing here fetches, and nothing knows React — so
+ * the page is a drawing of these values and the rules below are tested without a browser.
  */
 
 /**
@@ -70,16 +71,14 @@ export interface MachineTmuxServer {
 export interface MachineDrawingAge {
   /** The oldest `last_seen`, in epoch ms, among the sessions the drawing shows. */
   readonly oldestSeen: number;
-  readonly ageMs: number;
   readonly stale: boolean;
 }
 
-export interface MachineModel {
+/** One machine's grouping: everything the page draws that the clock has no part in. */
+export interface MachineGrouping {
   readonly summary: MachineSummary;
   /** Grouped by tmux server, then by tmux session name, then by window. */
   readonly servers: readonly MachineTmuxServer[];
-  /** The machine's sessions that reported no tmux place, freshest first. */
-  readonly outsideTmux: readonly Agent[];
   /** True when no session on the machine is in tmux: the page says so rather than drawing an
    *  empty machine. */
   readonly noneInTmux: boolean;
@@ -91,8 +90,18 @@ export interface MachineModel {
    * rather than drawing a different machine.
    */
   readonly sharedName: boolean;
+}
+
+export interface MachineModel extends MachineGrouping {
   /** Absent when the model drew no pane, since nothing was drawn to be behind. */
   readonly age?: MachineDrawingAge;
+}
+
+/** The one sentence both machine pages say about a machine: how many sessions name it, and how
+ *  many of those are in a pane. */
+export function sessionCountSentence(summary: MachineSummary): string {
+  const sessions = summary.sessions === 1 ? "1 session" : `${summary.sessions} sessions`;
+  return `${sessions} · ${summary.inTmux} in a pane`;
 }
 
 interface PlacedSession {
@@ -109,16 +118,20 @@ function freshestFirst(left: Agent, right: Agent): number {
   return right.last_seen - left.last_seen || left.session_id.localeCompare(right.session_id);
 }
 
+/** `value` under `key`, in a map of groups that keeps each group in insertion order. */
+function pushInto<T>(groups: Map<string, T[]>, key: string, value: T): void {
+  const group = groups.get(key);
+  if (group === undefined) {
+    groups.set(key, [value]);
+  } else {
+    group.push(value);
+  }
+}
+
 function groupBy<T>(rows: readonly T[], key: (row: T) => string): Map<string, T[]> {
   const groups = new Map<string, T[]>();
   for (const row of rows) {
-    const id = key(row);
-    const group = groups.get(id);
-    if (group === undefined) {
-      groups.set(id, [row]);
-    } else {
-      group.push(row);
-    }
+    pushInto(groups, key(row), row);
   }
   return groups;
 }
@@ -127,10 +140,11 @@ function groupBy<T>(rows: readonly T[], key: (row: T) => string): Map<string, T[
  * A tmux server is the pair (socket, server pid), never the socket alone: a socket path is reused
  * when a server is started again, and a pane id names a pane only on the server that gave it out,
  * so panes of two servers that share a socket must not be matched to each other. A socket path
- * holds no NUL, so joining on one is unambiguous.
+ * holds no NUL, so joining on one is unambiguous. The page draws each server's part under this
+ * same key.
  */
-function serverKey(place: TmuxPlace): string {
-  return `${place.socket}\u0000${place.server_pid}`;
+export function serverKey(socket: string, serverPid: string): string {
+  return `${socket}\u0000${serverPid}`;
 }
 
 function buildWindow(
@@ -151,8 +165,10 @@ function buildWindow(
   };
 }
 
-function buildServer(key: string, reports: PlacedSession[]): Omit<MachineTmuxServer, "showPid"> {
-  const [socket = "", serverPid = ""] = key.split("\u0000");
+function buildServer(reports: PlacedSession[]): Omit<MachineTmuxServer, "showPid"> {
+  // Every report of the group names the server the group is keyed by (`serverKey`), so the
+  // first one names it for all of them.
+  const { server_pid: serverPid, socket } = reports[0].place;
   const freshest = [...reports].sort((left, right) => freshestFirst(left.agent, right.agent));
 
   // One pane holds one session. Where two named it, the freshest is drawn and the rest counted.
@@ -166,12 +182,7 @@ function buildServer(key: string, reports: PlacedSession[]): Omit<MachineTmuxSer
       session: shown.agent,
       zoomed: shown.place.zoomed,
     };
-    const window = panesByWindow.get(shown.place.window_id);
-    if (window === undefined) {
-      panesByWindow.set(shown.place.window_id, [pane]);
-    } else {
-      window.push(pane);
-    }
+    pushInto(panesByWindow, shown.place.window_id, pane);
   }
 
   // A window's own fields come from every report naming it, the panes it draws from above: a
@@ -183,14 +194,7 @@ function buildServer(key: string, reports: PlacedSession[]): Omit<MachineTmuxSer
     if (panes === undefined) {
       continue;
     }
-    const window = buildWindow(windowId, named, panes);
-    const sessionName = named[0].place.session_name;
-    const windows = windowsBySession.get(sessionName);
-    if (windows === undefined) {
-      windowsBySession.set(sessionName, [window]);
-    } else {
-      windows.push(window);
-    }
+    pushInto(windowsBySession, named[0].place.session_name, buildWindow(windowId, named, panes));
   }
 
   const sessions = [...windowsBySession]
@@ -205,12 +209,19 @@ function buildServer(key: string, reports: PlacedSession[]): Omit<MachineTmuxSer
   return { serverPid, sessions, socket };
 }
 
-function drawingAge(
-  servers: readonly MachineTmuxServer[],
+/**
+ * How far behind the drawing `grouping` makes is, read against `now`: the oldest report it drew
+ * a pane from, and whether that is past the bound above. Undefined where it drew no pane, since
+ * nothing was drawn to be behind. It is apart from the grouping because it is the one part of
+ * the model that follows the clock: a caller memoizing the grouping on the rows reads this on
+ * every render, so the drawing goes stale while the page sits open.
+ */
+export function machineDrawingAge(
+  grouping: Pick<MachineGrouping, "servers">,
   now: number
 ): MachineDrawingAge | undefined {
   let oldestSeen: number | undefined;
-  for (const server of servers) {
+  for (const server of grouping.servers) {
     for (const session of server.sessions) {
       for (const window of session.windows) {
         for (const pane of window.panes) {
@@ -224,66 +235,61 @@ function drawingAge(
   if (oldestSeen === undefined) {
     return undefined;
   }
-  const ageMs = now - oldestSeen;
-  return { ageMs, oldestSeen, stale: ageMs > DRAWING_STALE_AFTER_MS };
+  return { oldestSeen, stale: now - oldestSeen > DRAWING_STALE_AFTER_MS };
 }
 
 /** Every machine the agent list names, by name, with how many of its sessions are in tmux. */
 export function machineList(agents: readonly Agent[]): MachineSummary[] {
-  const counts = new Map<string, { inTmux: number; sessions: number }>();
-  for (const agent of agents) {
-    const count = counts.get(agent.host) ?? { inTmux: 0, sessions: 0 };
-    count.sessions += 1;
-    if (agent.tmux_place !== undefined) {
-      count.inTmux += 1;
-    }
-    counts.set(agent.host, count);
-  }
-  return [...counts]
-    .map(([host, count]) => ({ host, inTmux: count.inTmux, sessions: count.sessions }))
+  return [...groupBy(agents, (agent) => agent.host)]
+    .map(([host, sessions]) => ({
+      host,
+      inTmux: sessions.filter((agent) => agent.tmux_place !== undefined).length,
+      sessions: sessions.length,
+    }))
     .sort((left, right) => left.host.localeCompare(right.host));
 }
 
 /**
- * One machine's whole model: its servers, each server's tmux sessions and windows, and the
- * sessions on the machine that are in no pane. `now` is an argument so the drawing's age is the
- * caller's clock and the model stays pure.
+ * One machine's grouping: its servers, each server's tmux sessions and windows, and the counts
+ * its pages say. Nothing here reads a clock, so a page rebuilds it only when the rows change.
  */
-export function machineModel(agents: readonly Agent[], host: string, now: number): MachineModel {
+export function machineGrouping(agents: readonly Agent[], host: string): MachineGrouping {
   const onMachine = agents.filter((agent) => agent.host === host);
   const placed: PlacedSession[] = [];
-  const outsideTmux: Agent[] = [];
   for (const agent of onMachine) {
     const place = agent.tmux_place;
-    if (place === undefined) {
-      outsideTmux.push(agent);
-    } else {
+    if (place !== undefined) {
       placed.push({ agent, place });
     }
   }
-  outsideTmux.sort(freshestFirst);
 
-  const built = [...groupBy(placed, (report) => serverKey(report.place))]
-    .map(([key, reports]) => buildServer(key, reports))
+  const built = [
+    ...groupBy(placed, (report) => serverKey(report.place.socket, report.place.server_pid)),
+  ]
+    .map(([, reports]) => buildServer(reports))
     .sort(
       (left, right) =>
         left.socket.localeCompare(right.socket) || left.serverPid.localeCompare(right.serverPid)
     );
-  const socketCounts = new Map<string, number>();
-  for (const server of built) {
-    socketCounts.set(server.socket, (socketCounts.get(server.socket) ?? 0) + 1);
-  }
+  const bySocket = groupBy(built, (server) => server.socket);
   const servers = built.map((server) => ({
     ...server,
-    showPid: (socketCounts.get(server.socket) ?? 0) > 1,
+    showPid: (bySocket.get(server.socket)?.length ?? 0) > 1,
   }));
 
   return {
-    age: drawingAge(servers, now),
     noneInTmux: placed.length === 0,
-    outsideTmux,
     servers,
     sharedName: new Set(onMachine.map((agent) => agent.dir)).size > 1,
     summary: { host, inTmux: placed.length, sessions: onMachine.length },
   };
+}
+
+/**
+ * One machine's whole model: its grouping and the age of the drawing that grouping makes, read
+ * against `now`. `now` is an argument so the age is the caller's clock and the model stays pure.
+ */
+export function machineModel(agents: readonly Agent[], host: string, now: number): MachineModel {
+  const grouping = machineGrouping(agents, host);
+  return { ...grouping, age: machineDrawingAge(grouping, now) };
 }

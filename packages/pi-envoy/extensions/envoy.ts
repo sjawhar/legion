@@ -2729,26 +2729,28 @@ export default function envoyExtension(pi: PiApi): void {
     await registrationState.deregister(id);
   };
 
-  // Where this session's pane sits in tmux, as the last reading left it, and when that reading
-  // was taken. Every registration carries the place, so Dispatch can draw the machine's layout
-  // from what the sessions themselves report; a tmux server driving a wall of panes answers
-  // slowly under load, so one reading serves every registration for `tmuxPlaceCacheMs` — several
-  // heartbeats — instead of each paying for its own round trip.
+  // Where this session's pane sits in tmux, as the last reading left it, when that reading was
+  // taken, and the reading in flight where one is. Every registration carries the place, so
+  // Dispatch can draw the machine's layout from what the sessions themselves report; a tmux
+  // server driving a wall of panes answers slowly under load, so one reading serves every
+  // registration for `tmuxPlaceCacheMs` — several heartbeats — instead of each paying for its
+  // own round trip.
   let tmuxPlace: TmuxPlace | undefined;
   let tmuxPlaceReadAt: number | undefined;
+  let tmuxPlaceReading: Promise<TmuxPlace | undefined> | undefined;
 
-  // The place the registration going out now carries. A reading of any kind restamps the cache,
-  // so a session outside tmux and a server too loaded to answer each cost one call per lifetime
-  // rather than one per registration. `refused` drops the place, which clears the listener's
-  // entry for a session that has left its pane; `timedOut` keeps the last place read, so one slow
-  // call does not take a live session off the layout. A reader that throws says nothing about
-  // where the session sits, so it is kept like a timeout — and above all it never reaches the
-  // caller: a failed place read must not fail the registration, and with it the heartbeat.
-  const currentTmuxPlace = async (): Promise<TmuxPlace | undefined> => {
-    const lifetimeMs = active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS;
-    if (tmuxPlaceReadAt !== undefined && Date.now() - tmuxPlaceReadAt < lifetimeMs) {
-      return tmuxPlace;
-    }
+  // One reading, however many registrations are waiting on it. The cache is stamped only once a
+  // reading comes back, so two registrations in flight together — a queued pass and the
+  // heartbeat's stall backstop, which refreshes outside the queues — would otherwise each shell
+  // out to tmux, and the slower of the two would overwrite the newer answer with its older one.
+  // A reading of any kind restamps the cache, so a session outside tmux and a server too loaded
+  // to answer each cost one call per lifetime rather than one per registration. `refused` drops
+  // the place, which clears the listener's entry for a session that has left its pane;
+  // `timedOut` keeps the last place read, so one slow call does not take a live session off the
+  // layout. A reader that throws says nothing about where the session sits, so it is kept like a
+  // timeout — and above all it never reaches the caller: a failed place read must not fail the
+  // registration, and with it the heartbeat.
+  const readTmuxPlaceOnce = async (): Promise<TmuxPlace | undefined> => {
     try {
       const reading = await readTmuxPlace(
         process.env,
@@ -2759,9 +2761,24 @@ export default function envoyExtension(pi: PiApi): void {
       else if (reading.kind === "refused") tmuxPlace = undefined;
     } catch (error) {
       logger.debug("envoy: the tmux place reading failed", { error: messageFor(error) });
+    } finally {
+      // Cleared before this answer reaches anyone, so the next cold read starts a reading of
+      // its own rather than taking this one's.
+      tmuxPlaceReading = undefined;
     }
     tmuxPlaceReadAt = Date.now();
     return tmuxPlace;
+  };
+
+  /** The place the registration going out now carries: the cached one while it stands, else the
+   *  reading already in flight, else a reading of its own. */
+  const currentTmuxPlace = async (): Promise<TmuxPlace | undefined> => {
+    const lifetimeMs = active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS;
+    if (tmuxPlaceReadAt !== undefined && Date.now() - tmuxPlaceReadAt < lifetimeMs) {
+      return tmuxPlace;
+    }
+    tmuxPlaceReading ??= readTmuxPlaceOnce();
+    return await tmuxPlaceReading;
   };
 
   // What this session registers with the listener, read afresh at every registration. The

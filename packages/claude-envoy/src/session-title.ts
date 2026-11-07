@@ -1,5 +1,6 @@
 import { basename } from "node:path"
 import { isAncestor } from "@legion/envoy-client/process-ancestry"
+import { tmuxServer } from "@legion/envoy-client/tmux-server"
 import { configuredValue } from "./claude-session"
 
 export interface SessionTitleEnvironment {
@@ -195,10 +196,7 @@ export async function sessionTitle(
   // A title with nothing that shows once cleaned (a zero-width space, a colour code alone) would
   // be a blank row.
   if (visible(explicit)) return () => explicit
-  // `TMUX` is `<socket>,<server pid>,<session>`, and a socket path may hold a comma.
-  const parts = configuredValue(environment.TMUX)?.split(",") ?? []
-  const socket = parts.slice(0, -2).join(",")
-  const serverPid = parts.at(-2) ?? ""
+  const { serverPid, socket } = tmuxServer(configuredValue(environment.TMUX))
   const pane = configuredValue(environment.TMUX_PANE)?.trim()
   // A directory name holds whatever the filesystem allows, newlines and overrides among them.
   const directoryName = oneLine(basename(directory) || directory)

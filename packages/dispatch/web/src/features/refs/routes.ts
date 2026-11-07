@@ -460,6 +460,16 @@ export function buildMachinePath(host: string): string {
   return `/machines/${encodeURIComponent(host)}`;
 }
 
+/** The `?machine=` the Agents page filters on, named once here so the page reading it
+ *  (`useAgentMachine`) and the links building it cannot drift apart. */
+export const AGENTS_MACHINE_PARAM = "machine";
+
+/** The Agents page narrowed to one machine, `/agents?machine=<host>`: the link a machine's own
+ *  page sends a reader to its sessions by. */
+export function buildAgentsMachinePath(host: string): string {
+  return `/agents?${new URLSearchParams({ [AGENTS_MACHINE_PARAM]: host })}`;
+}
+
 /** The machine `/machines/<machine>` names, its segment percent-decoded as every other segment
  *  is (`decodedSegment`); `undefined` for any other path and for a segment naming nothing. */
 export function parseMachinePath(pathname: string): string | undefined {

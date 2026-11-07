@@ -1,5 +1,6 @@
 import type { Agent, InboxRow } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
+import { AGENTS_MACHINE_PARAM } from "../refs/routes";
 
 /**
  * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
@@ -24,7 +25,7 @@ export function useAgentSearch(): readonly [string, (next: string) => void] {
  *  a session whose directory holds the machine's name, while `/machines/<machine>`'s link to
  *  `/agents?machine=<host>` must name exactly the sessions on that machine. */
 export function useAgentMachine(): readonly [string, (next: string) => void] {
-  return useCappedSearchParam("machine");
+  return useCappedSearchParam(AGENTS_MACHINE_PARAM);
 }
 
 /** Every word `search` names, lowercased; an empty query has none. The page splits this once per

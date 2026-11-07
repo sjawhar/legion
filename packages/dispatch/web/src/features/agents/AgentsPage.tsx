@@ -84,6 +84,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
+import { QUIET_AFTER_MS } from "./agent-groups";
 import {
   type AgentFilters,
   filterOptions,
@@ -104,8 +105,6 @@ import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap }
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
-const INACTIVE_AFTER_MS = 10 * 60_000;
-
 /** The composer's one notice slot: the recipient limit, the exclusions, or the mode the selection
  *  sends in, one at a time. In the compact grid it is one line that scrolls sideways like the
  *  chips: between the mode and Send on a narrow screen, adding no height, and the third and last
@@ -114,9 +113,10 @@ const composerLineLayout =
   "mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1";
 const composerLine = `${composerLineLayout} ${dangerText}`;
 
-/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. */
+/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. It is the
+ *  Quiet bound of the four groups, taken from there so the two cannot drift. */
 function isInactive(agent: Agent, now: number): boolean {
-  return now - agent.last_seen >= INACTIVE_AFTER_MS;
+  return now - agent.last_seen >= QUIET_AFTER_MS;
 }
 
 /** Whether Dispatch has heard from the session at all: an event, or an open ask. */

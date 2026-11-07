@@ -364,10 +364,14 @@ const tmuxPlaceState = {
     cwd: string
   ) => TmuxPlaceReading | Promise<TmuxPlaceReading>,
 };
-// Copied out before the mock replaces the module, for the row that drives the real reader over an
-// exec that records every call (`@legion/envoy-client/tmux-place` runs none outside tmux).
-const { readTmuxPlace: realReadTmuxPlace } = await import("@legion/envoy-client/tmux-place");
+// Copied out before the mock replaces the module: the row that drives the real reader over an
+// exec that records every call (`@legion/envoy-client/tmux-place` runs none outside tmux), and
+// the wire schema, which the transport parses every registration answer with.
+const { readTmuxPlace: realReadTmuxPlace, TmuxPlaceSchema } = await import(
+  "@legion/envoy-client/tmux-place"
+);
 mock.module("@legion/envoy-client/tmux-place", () => ({
+  TmuxPlaceSchema,
   readTmuxPlace: async (env: Record<string, string | undefined>, exec: ExecFn, cwd: string) => {
     tmuxPlaceState.calls.push({ env, cwd });
     return tmuxPlaceState.reading(env, exec, cwd);
@@ -15013,6 +15017,20 @@ console.log(JSON.stringify(args));
           for (const tick of heartbeats) tick();
           await sent.promise;
         },
+        /** Ticks every interval and waits for nothing: what a case that overlaps two
+         *  registrations drives each of them from. */
+        tick: () => {
+          for (const tick of heartbeats) tick();
+        },
+        /** Resolves once `count` further registrations have landed at the listener. */
+        landed: (count: number) => {
+          const reached = Promise.withResolvers<void>();
+          const target = places.length + count;
+          registered = () => {
+            if (places.length >= target) reached.resolve();
+          };
+          return reached.promise;
+        },
       };
     }
 
@@ -15026,6 +15044,40 @@ console.log(JSON.stringify(args));
         setSystemTime();
       }
     }
+
+    test("two registrations in flight together read tmux once", async () => {
+      await withEnvoyTimings({ heartbeatMs: 25, tmuxPlaceCacheMs: 25 }, async () => {
+        tmuxPlaceState.reading = () => ({ kind: "place", place: PLACE });
+        const session = await bootPlacedSession("tmux-place-one-flight", "ses_tmux_one_flight");
+        // A reading that has not answered yet. The pass the first tick starts waits on it; the
+        // second tick finds that pass still holding the queue and refreshes the registration on
+        // its own, outside it, while the first reading is still in flight.
+        const reading = Promise.withResolvers<TmuxPlaceReading>();
+        const started = Promise.withResolvers<void>();
+        tmuxPlaceState.reading = () => {
+          started.resolve();
+          return reading.promise;
+        };
+        setSystemTime(new Date(Date.now() + 1_000));
+        try {
+          const landed = session.landed(2);
+          session.tick();
+          // The pass's own reading is away; the tick that follows it finds the pass still
+          // holding the queue and registers outside it, with that reading unanswered.
+          await started.promise;
+          session.tick();
+          reading.resolve({ kind: "place", place: MOVED });
+          await landed;
+        } finally {
+          setSystemTime();
+        }
+
+        // Two registrations, and the one reading they shared: the second took the first's
+        // answer rather than shelling out to tmux of its own.
+        expect(tmuxPlaceState.calls).toHaveLength(2);
+        expect(session.places).toEqual([PLACE, MOVED, MOVED]);
+      });
+    });
 
     test("the first registration a session sends carries its place", async () => {
       tmuxPlaceState.reading = () => ({ kind: "place", place: PLACE });
