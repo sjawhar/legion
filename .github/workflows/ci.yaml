@@ -914,7 +914,7 @@ jobs:
               # reads and parses with the app's own remark pipeline: a filter change that moves
               # them must run this job.
               - 'packages/envoy/going/testdata/**'
-              # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
+              # e2e/cli-reply-answers.e2e.ts:7 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
               # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
               # import @legion/envoy-client/test/fake-dispatch.

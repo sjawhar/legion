@@ -1,9 +1,12 @@
 // Run with bun, not by Playwright: Node can't load the proof editor's TypeScript dependencies
-// from node_modules. Reads markdown on stdin and prints the headless engine's reading of it: each
-// table's rows, as the text of their cells, and each paragraph's text.
+// from node_modules. Reads markdown on stdin and prints the headless engine's reading of it, the
+// `DocumentReading` the pmdoc fixture table stores for every corpus file: each table's rows, as
+// the text of their cells, and each paragraph's text with the text of the marks drawn in it.
 import { readFileSync } from "node:fs";
 
 import { createHeadlessProof } from "@legion/proof-editor/headless";
+import { readDocument } from "@legion/proof-editor/reading";
+import { Window } from "happy-dom";
 
 const blockSchema = JSON.parse(
   readFileSync(
@@ -12,18 +15,12 @@ const blockSchema = JSON.parse(
   )
 );
 const engine = await createHeadlessProof({ blockSchema });
-const tables: string[][][] = [];
-const paragraphs: string[] = [];
-// A table cell holds a paragraph, so the walk goes on into a table after reading its rows.
-engine.parseMarkdown(readFileSync(0, "utf8")).descendants((node) => {
-  if (node.type.name === "table") {
-    tables.push(
-      node.content.content.map((row) => row.content.content.map((cell) => cell.textContent))
-    );
-  } else if (node.type.name === "paragraph") {
-    paragraphs.push(node.textContent);
-    return false;
-  }
-  return true;
-});
-process.stdout.write(JSON.stringify({ tables, paragraphs }));
+// The reading is the serialized document's DOM, so this command brings a document of its own. It
+// is also the global one, because the commonmark preset's inline `html` node draws itself from
+// `globalThis.document` rather than from the document the serializer hands its `toDOM`.
+const window = new Window();
+const document = window.document as unknown as Document;
+Object.assign(globalThis, { document });
+const reading = readDocument(engine.parseMarkdown(readFileSync(0, "utf8")), document);
+process.stdout.write(JSON.stringify(reading));
+await window.happyDOM.close();

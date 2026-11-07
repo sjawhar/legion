@@ -74,6 +74,7 @@
         "!packages/proof-editor/src/typed-block-drawing.ts",
         "!packages/proof-editor/src/ask-content.ts",
         "!packages/proof-editor/src/editor-change-decorations.ts",
+        "!packages/proof-editor/src/document-reading.ts",
         "!packages/proof-editor/src/reference-decorations.ts",
         "packages/proof-editor/upstream/**"
       ],

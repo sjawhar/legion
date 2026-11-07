@@ -1,12 +1,17 @@
 // What a heavy body costs a reader's own thread, in the surfaces that draw one: the Conversation,
-// the Inbox's ask card and a hover card. The same shapes written as documents through the API are
-// `heavy-document-writes.e2e.ts`, and both specs read the bodies from `heavy-bodies.ts`, so the
-// two measure the very same bytes. The one surface where a body grows under a paint - the live
-// view, where a streaming turn arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`,
-// which reads a drawn body through the same `heavy-bodies-page.ts` as the rows here
-// (sjawhar/legion#2519). What a row here holds the main thread for is measured by
-// `main-thread-hold.ts`, which `nested-directive.e2e.ts` measures its own two rows with, so one
-// instrument and one bound answer for both (sjawhar/legion#2612).
+// the Inbox's ask card and a hover card. Six of the seven shapes drawn here are written as
+// documents through the API by Go, in `packages/envoy/internal/dispatch/api`'s
+// heavy-document-write test over `pmdoc/heavybodies`, which spells those six as the very bytes
+// `heavy-bodies.ts` does - the seventh, `nestedThenTextLines`, no Go shape spells. What holds
+// the two spellings to each other is the digest table
+// `pmdoc/heavybodies/testdata/shared-bodies.json`, read over this side by
+// `e2e/__tests__/heavy-bodies-digests.test.ts` and over Go's by `heavybodies/digests_test.go`.
+// The one surface where a body grows under a paint - the live view, where a streaming turn
+// arrives whole with every frame - is `heavy-streamed-turn.e2e.ts`, which reads a drawn body
+// through the same `heavy-bodies-page.ts` as the rows here (sjawhar/legion#2519). What a row
+// here holds the main thread for is measured by `main-thread-hold.ts`, which
+// `nested-directive.e2e.ts` measures its own two rows with, so one instrument and one bound
+// answer for both (sjawhar/legion#2612).
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
 // `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the

@@ -3,6 +3,8 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockIdGenerator } from "@legion/proof-editor";
 import { createHeadlessProof } from "@legion/proof-editor/headless";
+import { readDocument } from "@legion/proof-editor/reading";
+import { Window } from "happy-dom";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { Transform } from "prosemirror-transform";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
@@ -14,6 +16,14 @@ const out = join(here, "..", "testdata", "fixtures.json");
 const spliceOut = join(here, "..", "testdata", "splices.json");
 const check = process.argv.includes("--check");
 const blockSchema = JSON.parse(readFileSync(join(here, "..", "schema", "blocks.json"), "utf8"));
+
+// One happy-dom document draws every file's reading: `readDocument` serializes into the document
+// it is given, and a window per corpus file would buy nothing. It is also the global one, because
+// the commonmark preset's inline `html` node draws itself from `globalThis.document` rather than
+// from the document the serializer hands its `toDOM`.
+const domWindow = new Window();
+const domDocument = domWindow.document as unknown as Document;
+Object.assign(globalThis, { document: domDocument });
 
 const fixtures = [];
 for (const file of readdirSync(corpus)
@@ -33,6 +43,7 @@ for (const file of readdirSync(corpus)
     pm_json: doc.toJSON(),
     yjs_update_v1_b64: Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"),
     rendered_by_milkdown: engine.serializeMarkdown(doc),
+    reading: readDocument(doc, domDocument),
   });
 }
 
@@ -534,3 +545,4 @@ if (check) {
   console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }
 setBlockIdGenerator(null);
+await domWindow.happyDOM.close();

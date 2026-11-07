@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { fixture } from "../../__tests__/pmdoc-fixtures";
 import { api } from "../../api/client";
 import type {
   BroadcastSummary,
@@ -34,18 +35,43 @@ import { Unfurl } from "./Unfurl";
 
 /**
  * Every surface that shows text a person or an agent wrote, with one Markdown fixture, and
- * what each must never show: a literal markdown character. The fixture holds a heading, bold,
- * a list, a link, a `dispatch://` reference and a code span; a surface that passed the source
- * through as text would print `#`, `**`, `-`, `[`, `](`, a bare `dispatch://…` or a backtick,
- * and the assertion below reads the rendered text for each of those.
+ * what each must never show: a literal markdown character. The fixture is the table's
+ * `markdown-surfaces-fixture`, the corpus document written for these rows
+ * (`__tests__/pmdoc-fixtures.ts`): a paragraph of prose, a heading, bold, a list, a link, a
+ * `dispatch://` reference and a code span. A surface that passed the source through as text
+ * would print `#`, `**`, `-`, `[`, `](`, a bare `dispatch://…` or a backtick, and the assertion
+ * below reads the rendered text for each of those.
  */
-const FIXTURE =
-  "## Heading\n\n**Bold** then `code` and a [link](https://example.com/docs) to dispatch://CORE-1.\n\n- first\n- second";
+const surfacesFixture = fixture("markdown-surfaces-fixture");
+const FIXTURE = surfacesFixture.markdown;
+
+/** The document's paragraphs as the table says they read: its opening prose, its body line and
+ *  its two items. The heading's words are no paragraph, so they are named below where the
+ *  rendered line is built; the body line holds the reference unresolved, since the engine that
+ *  read it resolves none. */
+const [OPENING, BODY, FIRST, SECOND] = surfacesFixture.reading.paragraphs.map(
+  (paragraph) => paragraph.text
+);
+
+/** `part` as a pattern that matches it literally. */
+function quoted(part: string): string {
+  return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /** What the fixture's text reads as once formatted on one line: no syntax, the words in order,
- *  the reference replaced by its resolved title, which for an issue is its key then its title
+ *  the heading's own words between the opening paragraph and the body, and the reference
+ *  replaced by its resolved title, which for an issue is its key then its title
  *  (`CORE-1 Design decision`). */
-const RENDERED = /Heading\s+Bold then code and a link to CORE-1 Design decision\.?\s+first second/;
+const RENDERED = new RegExp(
+  [
+    OPENING,
+    "Heading",
+    BODY.replace("dispatch://CORE-1", "CORE-1 Design decision"),
+    `${FIRST} ${SECOND}`,
+  ]
+    .map(quoted)
+    .join("\\s+")
+);
 
 /** The characters a raw-text surface leaks. The bare reference is listed by its scheme, so a
  *  surface that showed `dispatch://CORE-1` unresolved fails too. */
@@ -373,30 +399,58 @@ test("the unfurl card under a bare reference renders the target's text formatted
     replies: [],
   });
   const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issue);
-  const view = render(
-    <Providers>
-      <Unfurl body="dispatch://CORE-1/comment/comment-1" />
-    </Providers>
-  );
+  // Both spies are restored however the rows below end: the second render would otherwise leave
+  // `api.getComment` and `api.getIssueSummary` stubbed for every later test in this file.
   try {
-    // The card is the one link; the body's own links and references inside it are inert text.
-    const card = await within(view.container).findByRole("link", { name: /^Heading Bold/ });
-    await waitFor(() => expect(card.textContent).toContain("Design decision"));
-    const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
-    if (body === null) throw new Error("the unfurl body is not a MarkdownPreview");
-    expectFormatted(body);
-    expectOneLine(body);
-    // The card's title is the comment's words as plain text, cut to a title's length: a link's
-    // text can hold no formatting or nested link, so the markup is dropped and the reference
-    // reads as its short form, as a body's reference link does before its title resolves.
-    const title = card.firstElementChild?.textContent ?? "";
-    expect(title).toStartWith("Heading Bold then code and a link to CORE-1. first second");
-    expect(title).toEndWith("…");
-    for (const syntax of LITERAL_SYNTAX) {
-      expect(title).not.toContain(syntax);
+    const view = render(
+      <Providers>
+        <Unfurl body="dispatch://CORE-1/comment/comment-1" />
+      </Providers>
+    );
+    try {
+      // The card is the one link; the body's own links and references inside it are inert text.
+      // The card's accessible name opens with its title, which is cut well inside the fixture's
+      // opening paragraph, so the card is found by that paragraph's first words.
+      const card = await within(view.container).findByRole("link", {
+        name: new RegExp(`^${quoted(OPENING.slice(0, 40))}`),
+      });
+      await waitFor(() => expect(card.textContent).toContain("Design decision"));
+      const body = card.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (body === null) throw new Error("the unfurl body is not a MarkdownPreview");
+      expectFormatted(body);
+      expectOneLine(body);
+    } finally {
+      view.unmount();
+    }
+
+    // The same card over the fixture from its heading on. A title is cut at 60 characters
+    // (`reference-target.ts`'s `TITLE_HEADLINE_MAX`), which the fixture's opening paragraph fills
+    // by itself, so this is the body whose title reaches the markup: a link's text can hold no
+    // formatting or nested link, so the markup is dropped and the reference reads as its short
+    // form, as a body's reference link does before its title resolves.
+    getComment.mockResolvedValue({
+      comment: { ...comment, body: long.slice(long.indexOf("## ")) },
+      replies: [],
+    });
+    const titled = render(
+      <Providers>
+        <Unfurl body="dispatch://CORE-1/comment/comment-1" />
+      </Providers>
+    );
+    try {
+      const card = await within(titled.container).findByRole("link", { name: /^Heading Bold/ });
+      const title = card.firstElementChild?.textContent ?? "";
+      expect(title).toStartWith(
+        `Heading ${BODY.replace("dispatch://CORE-1", "CORE-1")} ${FIRST} ${SECOND}`
+      );
+      expect(title).toEndWith("…");
+      for (const syntax of LITERAL_SYNTAX) {
+        expect(title).not.toContain(syntax);
+      }
+    } finally {
+      titled.unmount();
     }
   } finally {
-    view.unmount();
     getComment.mockRestore();
     getIssueSummary.mockRestore();
   }

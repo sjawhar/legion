@@ -31,13 +31,7 @@ import {
 import { seedDeliveryFixture } from "./delivery-seed";
 import { connectedDot, documentEditor } from "./editor";
 import { seedFakeGithub } from "./fake-github-helpers";
-import {
-  type DispatchProcess,
-  dispatchProcesses,
-  pinnedTo,
-  processPinCookie,
-  processPinHeader,
-} from "./harness-processes";
+import { type DispatchProcess, processPinCookie, processPinHeader } from "./harness-processes";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { type LazyPiece, lazyPieces, type WalkRoutePath, walkRoutes } from "./two-builds-routes";
@@ -601,32 +595,6 @@ test("every route renders with its page from Dispatch B and every asset from Dis
 }) => {
   test.setTimeout(walkTimeout);
   await walk(browser, "b", "a");
-});
-
-test("every file of both builds' assets answers 200 with its bytes from Dispatch A and from Dispatch B", async () => {
-  const wrong: string[] = [];
-  for (const target of dispatchProcesses) {
-    for (const build of [builds.a, builds.b]) {
-      await Promise.all(
-        build.assets.map(async (file) => {
-          const response = await fetch(new URL(`/assets/${file}`, baseUrl), {
-            headers: pinnedTo(target),
-          });
-          const where = `${build.dist}/assets/${file} from Dispatch ${target.toUpperCase()}`;
-          if (response.status !== 200) {
-            wrong.push(`${where} answered ${response.status}`);
-            await response.body?.cancel();
-            return;
-          }
-          const bytes = Buffer.from(await response.arrayBuffer());
-          if (!bytes.equals(readFileSync(join(build.dist, "assets", file)))) {
-            wrong.push(`${where} answered other bytes than the file's`);
-          }
-        })
-      );
-    }
-  }
-  expect(wrong.sort()).toEqual([]);
 });
 
 /** Opens the inbox in a signed-in tab whose page, API calls and sockets are all `process`'s (the

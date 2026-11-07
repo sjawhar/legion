@@ -64,17 +64,58 @@ func BenchmarkUploadVersion(b *testing.B) {
 	})
 }
 
-// newUploadVersionSpec creates an issue whose spec has uploadVersionHistory uploaded versions,
-// with uploadVersionComments anchored comments spread over its history and its paragraphs.
-func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifactID string) {
+// BenchmarkHeavyDocumentWrite measures POST /api/v1/issues/{key}/artifacts over the heavy bodies
+// of pmdoc/heavybodies: the nine shapes at full size, stored or refused, and the two deeply
+// nested bare-directive bodies, which are refused. Each iteration writes its body under a name
+// of its own, so what is timed is a first write of such a body into a document of its own -
+// what a writer sending one of these meets - rather than another version of a growing document,
+// which is what BenchmarkUploadVersion above measures. The document service settles after an
+// hour, keeping settlement out of the timed writes.
+//
+// Nothing here gates: no CI step passes -bench, and none can. The listing
+// .github/scripts/go-test-step-expansion.py leaves every `Benchmark…` name out of what a step
+// runs (:57-58), because `go test` builds those functions and runs none of them, and the script
+// refuses outright a step that would pass -bench (:327-329). The gate over these bodies is
+// TestHeavyDocumentWriteVerdicts (heavy_document_write_test.go); this is here to be measured by
+// hand when the reader or the write path changes.
+func BenchmarkHeavyDocumentWrite(b *testing.B) {
+	// The access log's line for every request would split the benchmark's result line; warnings
+	// and errors still reach stderr.
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	b.Cleanup(func() { slog.SetDefault(previous) })
+	handler, _, _ := newTestServer(b, testServerOptions{settle: time.Hour})
+	issueKey := newBenchmarkIssue(b, handler, "HEAVY", "Heavy bodies", "Heavy document writes")
+	for index, heavy := range heavyWrites() {
+		b.Run(heavy.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(heavy.body)))
+			for iteration := range b.N {
+				response := uploadVersionRequest(b, handler, "/api/v1/issues/"+issueKey+"/artifacts", map[string]string{
+					"name": fmt.Sprintf("heavy-%d-%d.md", index, iteration), "content": heavy.body,
+				})
+				if heavy.stored && response.Code != http.StatusCreated {
+					b.Fatalf("%s: status=%d body=%s, want 201", heavy.name, response.Code, response.Body.String())
+				}
+				if !heavy.stored && response.Code != http.StatusBadRequest {
+					b.Fatalf("%s: status=%d body=%s, want 400", heavy.name, response.Code, response.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// newBenchmarkIssue creates a project and one issue in it, and answers the issue's key: the
+// prologue both benchmarks' fixtures open with.
+func newBenchmarkIssue(tb testing.TB, handler http.Handler, projectKey, projectName, title string) string {
 	tb.Helper()
 	if response := uploadVersionRequest(tb, handler, "/api/v1/projects", map[string]string{
-		"key": "BENCH", "name": "Benchmark project",
+		"key": projectKey, "name": projectName,
 	}); response.Code != http.StatusCreated {
 		tb.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
 	response := uploadVersionRequest(tb, handler, "/api/v1/issues", map[string]string{
-		"project": "BENCH", "title": "Upload benchmark",
+		"project": projectKey, "title": title,
 	})
 	if response.Code != http.StatusCreated {
 		tb.Fatalf("create issue: status=%d body=%s", response.Code, response.Body.String())
@@ -85,9 +126,17 @@ func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifa
 	if err := json.Unmarshal(response.Body.Bytes(), &issue); err != nil {
 		tb.Fatalf("decode issue: %v", err)
 	}
+	return issue.Key
+}
+
+// newUploadVersionSpec creates an issue whose spec has uploadVersionHistory uploaded versions,
+// with uploadVersionComments anchored comments spread over its history and its paragraphs.
+func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifactID string) {
+	tb.Helper()
+	issueKey = newBenchmarkIssue(tb, handler, "BENCH", "Benchmark project", "Upload benchmark")
 	comment := 0
 	for version := 1; version <= uploadVersionHistory; version++ {
-		uploaded := uploadSpecVersion(tb, handler, issue.Key, version)
+		uploaded := uploadSpecVersion(tb, handler, issueKey, version)
 		if version == 1 {
 			var upload struct {
 				Artifact struct {
@@ -102,7 +151,7 @@ func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifa
 		// Comment i follows version 1 + i*(history-1)/comments.
 		for comment < uploadVersionComments && 1+comment*(uploadVersionHistory-1)/uploadVersionComments == version {
 			quote := fmt.Sprintf("Paragraph %d revision", 8+16*comment)
-			if response := uploadVersionRequest(tb, handler, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			if response := uploadVersionRequest(tb, handler, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 				"body":   fmt.Sprintf("Comment %d on this paragraph.", comment),
 				"anchor": map[string]any{"artifact": "spec", "quote": quote},
 			}); response.Code != http.StatusCreated {
@@ -117,7 +166,7 @@ func newUploadVersionSpec(tb testing.TB, handler http.Handler) (issueKey, artifa
 	if artifactID == "" {
 		tb.Fatal("the first upload named no artifact")
 	}
-	return issue.Key, artifactID
+	return issueKey, artifactID
 }
 
 // uploadSpecVersion uploads version of the spec and fails unless the upload succeeds.

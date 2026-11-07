@@ -24,6 +24,11 @@
       "bun": "./src/mermaid-render.ts",
       "default": "./src/mermaid-render.ts"
     },
+    "./reading": {
+      "types": "./src/document-reading.ts",
+      "bun": "./src/document-reading.ts",
+      "default": "./src/document-reading.ts"
+    },
     "./style.css": "./src/lib.css"
   },
   "main": "src/lib.ts",
@@ -60,6 +65,7 @@
     "micromark-util-symbol": "^2.0.1",
     "micromark-util-types": "^2.0.2",
     "proof-sdk-upstream": "github:sjawhar/proof-sdk#dc6a852b2ab45463dc9d3d17762235450c8ff0d6",
+    "prosemirror-model": "^1.25.11",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-inline-links": "^7.0.0",

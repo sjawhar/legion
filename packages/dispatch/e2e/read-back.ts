@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import type { DocumentReading } from "@legion/proof-editor/reading";
+
 import { createIssue, getArtifactText } from "./api";
 
 /** Go's reading of stored markdown: written as a new issue's spec, parsed and rendered again. */
@@ -10,7 +12,7 @@ export async function goReadBack(markdown: string): Promise<string> {
 }
 
 /** The headless engine's reading of stored markdown, from engine-reading.ts. */
-function engineReading(markdown: string): { tables: string[][][]; paragraphs: string[] } {
+function engineReading(markdown: string): DocumentReading {
   const script = fileURLToPath(new URL("./engine-reading.ts", import.meta.url));
   return JSON.parse(execFileSync("bun", [script], { encoding: "utf8", input: markdown }));
 }
@@ -22,5 +24,5 @@ export function engineTables(markdown: string): string[][][] {
 
 /** The headless engine's reading of stored markdown: each paragraph's text. */
 export function engineParagraphs(markdown: string): string[] {
-  return engineReading(markdown).paragraphs;
+  return engineReading(markdown).paragraphs.map(({ text }) => text);
 }

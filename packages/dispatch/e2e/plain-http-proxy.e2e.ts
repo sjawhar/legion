@@ -1,76 +1,21 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
-import { devSignInPath, sessionCookieName } from "./api";
 import { withoutHarnessPort } from "./harness-ports";
-import {
-  httpsTarget,
-  plainHttpHost,
-  plainHttpOrigin,
-  plainHttpSkipReason,
-} from "./plain-http-origin";
-import { resetDatabase } from "./seed";
+import { httpsTarget, plainHttpHost, plainHttpSkipReason } from "./plain-http-origin";
 
 // Runs only in the `chromium-plain-http` project, whose host name Chromium maps to loopback: the
-// proxy that stands in for a plain-HTTP origin (e2e/plain-http-proxy.ts) must not open the server
-// under test to names its own fence refuses, nor hold a live socket open upstream after its page
-// goes.
+// proxy that stands in for a plain-HTTP origin (e2e/plain-http-proxy.ts) must not hold a live
+// socket open upstream after its page goes. Its host fence, which no browser varies, is
+// e2e/__tests__/plain-http-proxy.test.ts.
 const proxyModule = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 
 test.skip(httpsTarget, plainHttpSkipReason);
-
-test.beforeEach(async () => {
-  await resetDatabase();
-});
-
-interface PlainResponse {
-  readonly body: string;
-  readonly headers: IncomingHttpHeaders;
-  readonly status: number;
-}
-
-/** One GET to the harness proxy's listener carrying `host`, the `Host` a browser sends for the
- *  name it reached the listener by; `fetch` decides that header itself. */
-function getThroughProxy(path: string, host: string): Promise<PlainResponse> {
-  const { promise, reject, resolve } = Promise.withResolvers<PlainResponse>();
-  httpRequest(
-    { headers: { host }, host: "127.0.0.1", path, port: new URL(plainHttpOrigin).port },
-    (response) => {
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk: string) => {
-        body += chunk;
-      });
-      response.on("end", () =>
-        resolve({ body, headers: response.headers, status: response.statusCode ?? 0 })
-      );
-    }
-  )
-    .on("error", reject)
-    .end();
-  return promise;
-}
-
-test("the proxy refuses a Host that is not the plain-HTTP origin and forwards its own", async () => {
-  const { host, port } = new URL(plainHttpOrigin);
-  // A page DNS-rebound to loopback sends its own name. The dev sign-in server answers that name
-  // 421, and the proxy sends the server the server's own Host, so the proxy must refuse it first.
-  const rebound = await getThroughProxy(devSignInPath("alice"), `rebind.example:${port}`);
-  expect(rebound.status).toBe(421);
-  expect(JSON.parse(rebound.body)).toMatchObject({ code: "HOST_MISMATCH" });
-  expect(rebound.headers["set-cookie"]).toBeUndefined();
-
-  const own = await getThroughProxy(devSignInPath("alice"), host);
-  expect(own.status).toBe(302);
-  expect(
-    own.headers["set-cookie"]?.some((cookie) => cookie.startsWith(`${sessionCookieName}=`))
-  ).toBe(true);
-});
 
 test("a page that closes leaves no live socket open upstream of the proxy", async ({ browser }) => {
   // A stand-in upstream counts what the server under test would see: the page's live socket

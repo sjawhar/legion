@@ -1,202 +1,98 @@
-import { type Browser, expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
+import { fixture } from "../web/src/__tests__/pmdoc-fixtures";
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
 import { documentEditor, openSpec } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-/** A paragraph of markdown, the text the engine shows for it, and the links it reads in it. */
-interface AddressRow {
-  markdown: string;
-  text: string;
-  links: { name: string; href: string }[];
-}
+// A bare web address after punctuation or an escaped scheme colon is a link remark-gfm reads, and
+// a document written through the API holds the same links a comment holding the same markdown
+// does. This family has no past-version reading row of its own: its one browser row reads the
+// stored document in a browser, and what it adds to the table's own reading is a link's name
+// and href, which no paragraph reading holds. Its document and the text of each of its
+// paragraphs are the one fixture table's `bare-addresses-each-with-its-own-host`, whose
+// `pm_json` pins the link marks below without a browser and whose paragraphs
+// `web/src/features/refs/fixture-table-readings.test.ts` reads in a DOM. The rows that held a
+// `www.`, an uppercase scheme or a bare email are shapes of
+// `testdata/corpus/bare-address-after-punctuation.md`, which the Go reader's fixture tests pin
+// against the engine's `pm_json`, link marks and all.
 
-// Each row is a bare web address remark-gfm reads as a link: the engine a comment renders with.
-// Each row's `links` are the engine's reading, taken from `pmdoc/gen/differential.ts`, and a host
-// per row keeps every link name unique on the page.
-const afterPunctuation: AddressRow[] = [
-  {
-    markdown: "see http\\://lower.test b",
-    text: "see http://lower.test b",
-    links: [{ name: "http://lower.test", href: "http://lower.test" }],
-  },
-  {
-    markdown: "x;https://semi.test b",
-    text: "x;https://semi.test b",
-    links: [{ name: "https://semi.test", href: "https://semi.test" }],
-  },
-  {
-    markdown: "x#https://hash.test b",
-    text: "x#https://hash.test b",
-    links: [{ name: "https://hash.test", href: "https://hash.test" }],
-  },
-  {
-    markdown: "x&https://amp.test b",
-    text: "x&https://amp.test b",
-    links: [{ name: "https://amp.test", href: "https://amp.test" }],
-  },
-  {
-    markdown: "\\*https://star.test b",
-    text: "*https://star.test b",
-    links: [{ name: "https://star.test", href: "https://star.test" }],
-  },
-  {
-    markdown: '"www.a.test/?u=https://b.test"',
-    text: '"www.a.test/?u=https://b.test"',
-    links: [
-      { name: "www.a.test/?u=", href: "http://www.a.test/?u=" },
-      { name: "https://b.test", href: "https://b.test" },
-    ],
-  },
-  {
-    markdown: '"https://quote.test" b',
-    text: '"https://quote.test" b',
-    links: [{ name: "https://quote.test", href: "https://quote.test" }],
-  },
-  // The engine's two readers end these addresses differently: its tokenizer drops a trailing `_`
-  // after `;`, its transform keeps it after an escaped colon.
-  {
-    markdown: "x;https://a.test/a_ b",
-    text: "x;https://a.test/a_ b",
-    links: [{ name: "https://a.test/a", href: "https://a.test/a" }],
-  },
-  {
-    markdown: "see http\\://b.test/a_ b",
-    text: "see http://b.test/a_ b",
-    links: [{ name: "http://b.test/a_", href: "http://b.test/a_" }],
-  },
+const entry = fixture("bare-addresses-each-with-its-own-host");
+
+/** The links the engine reads in the entry's nine address paragraphs, one list per paragraph, in
+ *  the order of the paragraphs after the corpus file's opening sentence. Taken from the entry's
+ *  `pm_json` link marks, which `pmdoc/gen/differential.ts` recorded from the engine; a host per
+ *  paragraph keeps every link name unique on the page, since a reader tells two links apart by
+ *  their accessible names. The engine's two readers end the last two addresses differently: its
+ *  tokenizer drops a trailing `_` after `;`, its transform keeps it after an escaped colon. */
+const links: { href: string; name: string }[][] = [
+  [{ href: "http://lower.test", name: "http://lower.test" }],
+  [{ href: "https://semi.test", name: "https://semi.test" }],
+  [{ href: "https://hash.test", name: "https://hash.test" }],
+  [{ href: "https://amp.test", name: "https://amp.test" }],
+  [{ href: "https://star.test", name: "https://star.test" }],
+  [
+    { href: "http://www.a.test/?u=", name: "www.a.test/?u=" },
+    { href: "https://b.test", name: "https://b.test" },
+  ],
+  [{ href: "https://quote.test", name: "https://quote.test" }],
+  [{ href: "https://a.test/a", name: "https://a.test/a" }],
+  [{ href: "http://b.test/a_", name: "http://b.test/a_" }],
 ];
-
-// A `www.` or an uppercase scheme after an escape. Before INFRA-531 Go read each as text and wrote
-// that text bare, which its own reader reads as a link, so it refused the whole write: these rows
-// have a document of their own, so that refusal does not hide the rows above.
-const afterAnEscape: AddressRow[] = [
-  {
-    markdown: "see www\\.www1.test b",
-    text: "see www.www1.test b",
-    links: [{ name: "www.www1.test", href: "http://www.www1.test" }],
-  },
-  {
-    markdown: "see HTTP\\://upper.test b",
-    text: "see HTTP://upper.test b",
-    links: [{ name: "HTTP://upper.test", href: "HTTP://upper.test" }],
-  },
-  {
-    markdown: "\\(www.paren.test b",
-    text: "(www.paren.test b",
-    links: [{ name: "www.paren.test", href: "http://www.paren.test" }],
-  },
-];
-
-// A bare email the engine reads as a mail link, its href `mailto:` and the address: after
-// punctuation, an escape, a quote, a character reference, a letter outside ASCII or a scheme, at a
-// `www.` opening the local part, and at a `'` in the local part, which the engine's transform reads
-// as the address's start. A domain per row keeps every link name unique on the page.
-const emails: AddressRow[] = [
-  {
-    markdown: "x;a@semi.test b",
-    text: "x;a@semi.test b",
-    links: [{ name: "a@semi.test", href: "mailto:a@semi.test" }],
-  },
-  {
-    markdown: "www.a@www.test b",
-    text: "www.a@www.test b",
-    links: [{ name: "www.a@www.test", href: "mailto:www.a@www.test" }],
-  },
-  {
-    markdown: "\\*a@star.test c",
-    text: "*a@star.test c",
-    links: [{ name: "a@star.test", href: "mailto:a@star.test" }],
-  },
-  {
-    markdown: '"a@quote.test" c',
-    text: '"a@quote.test" c',
-    links: [{ name: "a@quote.test", href: "mailto:a@quote.test" }],
-  },
-  {
-    markdown: "x&amp;a@ref.test c",
-    text: "x&a@ref.test c",
-    links: [{ name: "a@ref.test", href: "mailto:a@ref.test" }],
-  },
-  {
-    markdown: "éa@accent.test c",
-    text: "éa@accent.test c",
-    links: [{ name: "a@accent.test", href: "mailto:a@accent.test" }],
-  },
-  {
-    markdown: "Mail mailto:a@scheme.test now.",
-    text: "Mail mailto:a@scheme.test now.",
-    links: [{ name: "a@scheme.test", href: "mailto:a@scheme.test" }],
-  },
-  {
-    markdown: "Mail a'b@apos.test now.",
-    text: "Mail a'b@apos.test now.",
-    links: [{ name: "b@apos.test", href: "mailto:b@apos.test" }],
-  },
-];
-
-/**
- * Writes `rows`, a paragraph each, as an issue's spec and as a comment on it, and expects each
- * address to be the engine's link in the Conversation and then in the live Document editor, which
- * shows the tree Go stored, with no backslash before a scheme's colon in the stored markdown.
- */
-async function expectLinksInCommentAndDocument(browser: Browser, rows: AddressRow[]) {
-  const markdown = `${rows.map((row) => row.markdown).join("\n\n")}\n`;
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: markdown, title: "Address links" });
-  await createComment(issue.key, { body: markdown });
-
-  const context = await asUser(browser, "alice");
-  try {
-    const page = await context.newPage();
-
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const turns = page.getByRole("list", { name: "Conversation turns" });
-    for (const row of rows) {
-      await expect(turns).toContainText(row.text);
-      for (const link of row.links) {
-        await expect(turns.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
-          "href",
-          link.href
-        );
-      }
-    }
-
-    // Each row's text is asserted before its links, so a row Go read as text fails as "text
-    // present, no link".
-    await openSpec(page, issue.key, rows[0].text);
-    const editor = documentEditor(page);
-    for (const row of rows) {
-      await expect(editor).toContainText(row.text);
-      for (const link of row.links) {
-        await expect(editor.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
-          "href",
-          link.href
-        );
-      }
-    }
-
-    expect((await getArtifactText(issue.primary_artifact_id)).markdown).not.toContain("\\:");
-  } finally {
-    await context.close();
-  }
-}
 
 test.beforeEach(async () => {
   await resetDatabase();
 });
 
 test.describe("a bare web address is a link in a document written through the API, as in a comment", () => {
+  // SLOW(>=2s): 3,811 ms in this head's four-worker CI report (`dispatch-e2e-report-1` of run
+  // 42334783358), 2,545 ms at the merge base's merge-group run. Nine paragraphs, each a bare
+  // address, asserted twice - once in the Conversation and once in the document editor - which
+  // is ten link lookups per surface.
   test("after punctuation or an escaped scheme colon", async ({ browser }) => {
-    await expectLinksInCommentAndDocument(browser, afterPunctuation);
-  });
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({
+      project: "CORE",
+      spec: entry.markdown,
+      title: "Address links",
+    });
+    await createComment(issue.key, { body: entry.markdown });
 
-  test("a www. or an uppercase scheme after an escape", async ({ browser }) => {
-    await expectLinksInCommentAndDocument(browser, afterAnEscape);
-  });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      // The corpus file's opening sentence holds no address; the nine paragraphs after it are the
+      // rows, each paired with its own links.
+      const rows = links.map((row, index) => ({
+        links: row,
+        text: entry.reading.paragraphs[index + 1].text,
+      }));
 
-  test("an email after punctuation, escape or scheme is a mailto: link", async ({ browser }) => {
-    await expectLinksInCommentAndDocument(browser, emails);
+      /** Asserts `root` shows every row's text and the name and href of every link in it. */
+      const expectRows = async (root: Locator): Promise<void> => {
+        for (const row of rows) {
+          await expect(root).toContainText(row.text);
+          for (const link of row.links) {
+            await expect(root.getByRole("link", { name: link.name, exact: true })).toHaveAttribute(
+              "href",
+              link.href
+            );
+          }
+        }
+      };
+
+      await page.goto(`/issues/${issue.key}/conversation`);
+      await expectRows(page.getByRole("list", { name: "Conversation turns" }));
+
+      // Each row's text is asserted before its links, so a row Go read as text fails as "text
+      // present, no link".
+      await openSpec(page, issue.key, rows[0].text);
+      await expectRows(documentEditor(page));
+
+      expect((await getArtifactText(issue.primary_artifact_id)).markdown).not.toContain("\\:");
+    } finally {
+      await context.close();
+    }
   });
 });
