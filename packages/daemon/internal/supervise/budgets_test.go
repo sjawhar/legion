@@ -74,6 +74,65 @@ func TestAnAgentThatDiesWithWorkOutstandingIsFailedAtTheLimit(t *testing.T) {
 	}
 }
 
+// The worker's own stall watch ends its process as the last step of its ladder, and only where
+// the turn it was stuck in is still running, so the claim still owes its task: the daemon reads
+// that exit as a death with work outstanding and charges it (chargeDeath, bounded by
+// launch_failure_limit). A stall the relaunched worker walks straight back into would end the
+// process again, which is why the plugin counts its own exits and stops at a cap one below that
+// limit (`STALL_EXIT_CAP`, `packages/pi-shared/src/stall-watchdog.ts`, kept in the state
+// directory by `packages/pi-legion/src/stall-exits.ts`). This is the daemon's side of that
+// pairing: a worker that spends the whole of its cap is relaunched on its own session every
+// time, with the task re-sent and still owed, and the claim is live for its owner to read; the
+// death at the limit — the one the plugin's cap never reaches — fails the claim instead, with
+// the task kept.
+func TestAWorkerThatEndsItselfForAStallIsRelaunchedToItsCapAndFailedAtTheDeathLimit(t *testing.T) {
+	// stallExitCap is the plugin's STALL_EXIT_CAP: how often the ladder's third step ends the
+	// worker's process before it ends nothing further and tells its owner instead.
+	const stallExitCap = 2
+	limit := testLimits().LaunchFailures
+	if stallExitCap >= limit {
+		t.Fatalf("the plugin ends its own process %d times for a stall and the claim fails at %d deaths: "+
+			"a stall that repeats would fail the very claim that cap exists to keep live", stallExitCap, limit)
+	}
+
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+
+	for exit := 1; exit <= stallExitCap; exit++ {
+		h.observe(runtime.Gone) // the ladder's third step, in the turn of the stuck call
+		h.relaunched()
+
+		h.wantBudgets(Budgets{Deaths: exit})
+		resent := h.wantPrompts(1 + exit)[exit]
+		if want := interruptedTask + "implement the plan"; resent.Message != want {
+			t.Fatalf("stall exit %d: the task was re-sent as %q, want %q", exit, resent.Message, want)
+		}
+		if p := h.pending(); p.ID != resent.DeliveryID || !p.ConfirmedAt.IsZero() {
+			t.Fatalf("stall exit %d: pending %+v, want the re-sent task still owed", exit, p)
+		}
+		h.must(StreamTurnStart{Claim: testToken}) // the relaunched worker walks into the same stall
+		h.wantState(StateWorking)
+	}
+	h.wantCalls("Spawn", 1) // every relaunch resumed the claim's own session
+
+	for death := stallExitCap + 1; death < limit; death++ {
+		h.observe(runtime.Gone)
+		h.relaunched()
+		h.must(StreamTurnStart{Claim: testToken})
+	}
+	h.observe(runtime.Gone)
+
+	h.wantState(StateFailed)
+	h.wantBudgets(Budgets{Deaths: limit})
+	stored := h.store.load(testToken)
+	if stored.State != StateFailed || stored.Pending == nil {
+		t.Errorf("stored claim %s with pending %+v, want it failed at %d deaths with its task kept",
+			stored.State, stored.Pending, limit)
+	}
+}
+
 // A process that dies before its agent is ready is a launch failure, however much work the claim
 // holds: Deaths counts only deaths after ready, so a boot death after earlier deaths with work is
 // charged once, to LaunchFailures, and does not bring the claim nearer the deaths limit.
