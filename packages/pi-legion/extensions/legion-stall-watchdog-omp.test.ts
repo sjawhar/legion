@@ -16,7 +16,12 @@ import {
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
 import { STALL_RESTART_MESSAGE } from "../src/stall-abort";
-import { STALL_WATCH_ENTRY, type StallWatchRecord } from "../src/stall-evidence";
+import {
+  STALL_WATCH_ENTRY,
+  type StallEvidenceProcess,
+  type StallEvidenceRecord,
+  type StallWatchRecord,
+} from "../src/stall-evidence";
 import { stallExitsFile } from "../src/stall-exits";
 
 // The stall watch's ladder on the real Oh My Pi (INFRA-1274's `k6`): a worker whose tool call
@@ -43,6 +48,23 @@ import { stallExitsFile } from "../src/stall-exits";
 //     call's clock, so the "started after the call" rule (`src/stall-recovery.ts`, rule 2) cannot
 //     see them. Each case that wants that rule has its cell wait before it forks; the case that
 //     wants the runner rule (the last one here) runs a cell with no child at all.
+//
+//     **On a session whose `eval` kernel does not exist yet, that second is a race, and the
+//     kernel is what it is played for.** The first cell of a session starts the kernel too, so
+//     the kernel's own start and the call's recorded start are that second of host plumbing
+//     apart, in no fixed order: measured here the kernel is the older by 0.95 s and the step ends
+//     the child alone, but the margin is that second less the interpreter's own startup, so a
+//     host slower to get `python3` onto `/proc` puts the kernel at or after the call's start,
+//     where rule 2 takes it along with the child. Measured by delaying the interpreter — a
+//     `python3` on the pane's PATH that sleeps two seconds before running the real one — the
+//     first step's outcome became "ended 3 processes of the call" (the shim, the interpreter and
+//     the child), the host answered the cell with "Kernel died", and the ladder took no further
+//     step, because a call that ends closes its own record. That is what CI's `pi-legion` lane
+//     reports as "ended 2 processes of the call" on a machine of its own speed. Every case whose
+//     kernel must outlive the call it wedges therefore warms the kernel with a cell of its own
+//     first (`warmedWedge`): a kernel started by a turn that has already ended is older than the
+//     call being judged by the whole of that turn — 1.4 s here — and the slower the host, the
+//     older it is.
 //  3. **`ctx.abort()` ends every wedged call this file could build, and resolves only once that
 //     call has ended.** Five shapes were tried against the pin: an `eval` cell looping in
 //     `time.sleep`; one ignoring SIGINT; one ignoring SIGINT, SIGTERM and SIGHUP, which the host
@@ -150,16 +172,16 @@ function exitsFile(stateDir: string): string {
 }
 
 /**
- * The cell a case wedges its turn with. It waits `wait` seconds before it starts its child, so the
+ * The cell a case wedges its turn with. It waits three seconds before it starts its child, so the
  * host's `tool_execution_start` has reached the plugin and the child is a process rule 2 can see
  * (measurement 2); with `goOn` it keeps running after that child has died, which is what carries
  * the ladder to its second step, and without it the cell is waiting on the child and returns the
  * moment the first step ends it.
  */
-function wedgeCell(pidFile: string, options: { readonly wait: number; readonly goOn: boolean }) {
+function wedgeCell(pidFile: string, options: { readonly goOn: boolean }) {
   return [
     "import pathlib, subprocess, time",
-    `time.sleep(${options.wait})`,
+    "time.sleep(3)",
     'p = subprocess.Popen(["/bin/sleep", "3000"])',
     `pathlib.Path(${JSON.stringify(pidFile)}).write_text(str(p.pid))`,
     "print('the child is', p.pid)",
@@ -167,6 +189,36 @@ function wedgeCell(pidFile: string, options: { readonly wait: number; readonly g
       ? ["while True:", "    time.sleep(0.5)"]
       : ["p.wait()", "print('the child is gone')"]),
   ].join("\n");
+}
+
+/** The cell that warms this session's `eval` kernel: a call of its own that starts the kernel and
+ * returns, so the kernel is older than every call made after it (measurement 2). */
+const WARM_CELL = call("eval", {
+  language: "py",
+  code: "print('the kernel is ready')",
+  timeout: 600,
+});
+
+/**
+ * The turns of a case whose kernel must outlive the call that wedges: the warming cell, then the
+ * wedging cell, then `then` for every turn after. The warming cell is what keeps the first step
+ * about the cell's own child. A kernel the wedged call itself started is a descendant of the agent
+ * that started inside that call, so rule 2 of `src/stall-recovery.ts` is right to take it — and on
+ * a host slower than this one to start `python3`, takes it, ending the cell with it (measurement
+ * 2). A case about what becomes of the cell must therefore be a case whose kernel is older.
+ */
+function warmedWedge(
+  pidFile: string,
+  options: { readonly goOn: boolean },
+  then: string
+): (index: number) => readonly Block[] {
+  return (index) => {
+    if (index === 1) return [WARM_CELL];
+    if (index === 2) {
+      return [call("eval", { language: "py", code: wedgeCell(pidFile, options), timeout: 600 })];
+    }
+    return [{ type: "text", text: then }];
+  };
 }
 
 /** The daemon's state with the issue past this pane's phase: the reviewer works it now, so the
@@ -501,6 +553,17 @@ function stepOf(
   return ofKind(records, "step").find((record) => record.step === step);
 }
 
+/** This session's `eval` kernel, as the evidence found it in the agent's tree: the one process
+ * whose command is the Python runner (`STALL_TOOL_RUNNERS`, `src/stall-recovery.ts`). */
+function kernelOf(evidence: StallEvidenceRecord): StallEvidenceProcess {
+  if (!evidence.tree.read) throw new Error(`the tree was not read: ${evidence.tree.reason}`);
+  const kernel = evidence.tree.processes.find((process) =>
+    process.command.includes("omp-python-runner-")
+  );
+  if (kernel === undefined) throw new Error("no `eval` kernel was in the agent's tree");
+  return kernel;
+}
+
 test.skipIf(skip)(
   "a cell that ends when its child dies: the call is judged from its execution start, the evidence names the child, the owner is told, and the first step ends the child with no abort sent",
   async () => {
@@ -509,16 +572,7 @@ test.skipIf(skip)(
     const pane = await startPane({
       name: "stall-child",
       stateDir: state,
-      reply: (index) =>
-        index === 1
-          ? [
-              call("eval", {
-                language: "py",
-                code: wedgeCell(pidFile, { wait: 3, goOn: false }),
-                timeout: 600,
-              }),
-            ]
-          : [{ type: "text", text: "The call came back." }],
+      reply: warmedWedge(pidFile, { goOn: false }, "The call came back."),
     });
     const child = await childOf(pane, pidFile);
 
@@ -552,13 +606,17 @@ test.skipIf(skip)(
       toolCallId: evidence.toolCallId,
     });
 
-    // The first step: the child, and only the child, ended.
+    // The first step: the child, and only the child. The outcome's count is not pinned, because
+    // what this case is about is whose processes the step took — the cell's own child gone and
+    // this session's kernel, which the warming cell started a turn earlier, untouched. A step
+    // that took the kernel too would end the call instead of letting it come back, which is what
+    // a kernel the wedged call started itself leads to (measurement 2).
     const ended = await pane.until("the first step of the ladder", async () =>
       stepOf(await pane.records(), "end-processes")
     );
     expect(ended.toolCallId).toBe(evidence.toolCallId);
-    expect(ended.outcome).toBe("ended 1 process of the call");
     expect(await runs(child)).toBe(false);
+    expect(await runs(kernelOf(evidence).pid)).toBe(true);
 
     // The cell was waiting on that child, so the call came back on its own: the next turn carries
     // its result, and the ladder never took a second step.
@@ -583,26 +641,23 @@ test.skipIf(skip)(
     const pane = await startPane({
       name: "stall-abort",
       stateDir: state,
-      reply: (index) =>
-        index === 1
-          ? [
-              call("eval", {
-                language: "py",
-                code: wedgeCell(pidFile, { wait: 3, goOn: true }),
-                timeout: 600,
-              }),
-            ]
-          : [{ type: "text", text: "Noted; I will do something else." }],
+      reply: warmedWedge(pidFile, { goOn: true }, "Noted; I will do something else."),
     });
     const child = await childOf(pane, pidFile);
 
-    // The same first step as the case above: the evidence, the owner's one notice, the child
-    // ended.
+    // The same first step as the case above, and for the same reason the count is not pinned:
+    // the evidence, the owner's one notice, the cell's own child ended, and the kernel the
+    // warming cell started still running — a step that took the kernel would end the call, and
+    // there would be no turn left for the second step to abort (measurement 2).
+    const evidence = await pane.until("the evidence for the stuck call", async () =>
+      ofKind(await pane.records(), "evidence").at(0)
+    );
     const ended = await pane.until("the first step of the ladder", async () =>
       stepOf(await pane.records(), "end-processes")
     );
-    expect(ended.outcome).toBe("ended 1 process of the call");
+    expect(ended.toolCallId).toBe(evidence.toolCallId);
     expect(await runs(child)).toBe(false);
+    expect(await runs(kernelOf(evidence).pid)).toBe(true);
     expect(pane.publishes().map((publish) => publish.topic)).toEqual([ARCHITECT_TOPIC]);
 
     // The cell went on without its child, so the second step ran: the host's own abort ended the
@@ -651,16 +706,10 @@ test.skipIf(skip)(
         name,
         stateDir: state,
         denyAbort: true,
-        reply: (index) =>
-          index === 1
-            ? [
-                call("eval", {
-                  language: "py",
-                  code: wedgeCell(pidFile, { wait: 3, goOn: true }),
-                  timeout: 600,
-                }),
-              ]
-            : [{ type: "text", text: "Noted." }],
+        // Warmed, as every case whose cell must outlive the first step is: a kernel this call
+        // started itself would go with the child, and a call that ends takes the ladder's
+        // remaining steps with it (measurement 2).
+        reply: warmedWedge(pidFile, { goOn: true }, "Noted."),
       });
       await childOf(pane, pidFile);
       return pane;
@@ -740,16 +789,7 @@ test.skipIf(skip)(
       name: "stall-unreadable",
       stateDir: state,
       denyAbort: true,
-      reply: (index) =>
-        index === 1
-          ? [
-              call("eval", {
-                language: "py",
-                code: wedgeCell(pidFile, { wait: 3, goOn: true }),
-                timeout: 600,
-              }),
-            ]
-          : [{ type: "text", text: "Noted." }],
+      reply: warmedWedge(pidFile, { goOn: true }, "Noted."),
     });
     await childOf(pane, pidFile);
 
@@ -828,11 +868,7 @@ test.skipIf(skip)(
       // the call that wedges: the one process rule 3 of `src/stall-recovery.ts` may end, and the
       // only thing left to end when a cell forks nothing.
       reply: (index) => {
-        if (index === 1) {
-          return [
-            call("eval", { language: "py", code: "print('the kernel is ready')", timeout: 600 }),
-          ];
-        }
+        if (index === 1) return [WARM_CELL];
         if (index === 2) {
           return [
             call("eval", {
@@ -849,22 +885,19 @@ test.skipIf(skip)(
     const evidence = await pane.until("the evidence for the stuck call", async () =>
       ofKind(await pane.records(), "evidence").at(0)
     );
-    if (!evidence.tree.read) throw new Error(`the tree was not read: ${evidence.tree.reason}`);
     // The runner as this host really writes it: a directory named for the user, holding a file
     // named for the kernel. The pattern that identified a runner stopped at the first path
     // separator, so it matched nothing here and this step ended nothing — which is what this case
     // caught and `STALL_TOOL_RUNNERS` now spans.
-    const runner = evidence.tree.processes.find((process) =>
-      process.command.includes("omp-python-runner-")
-    );
-    expect(runner?.command).toMatch(/omp-python-runner-[^\s]*\.py$/);
-    expect(runner?.command).toContain("/runner-");
+    const runner = kernelOf(evidence);
+    expect(runner.command).toMatch(/omp-python-runner-[^\s]*\.py$/);
+    expect(runner.command).toContain("/runner-");
 
     const ended = await pane.until("the first step of the ladder", async () =>
       stepOf(await pane.records(), "end-processes")
     );
     expect(ended.outcome).toBe("ended 1 process of the call");
-    expect(await runs(runner?.pid ?? -1)).toBe(false);
+    expect(await runs(runner.pid)).toBe(false);
 
     // Ending the runner ends the call: the host hands back a dead kernel, so the ladder takes no
     // second step and this worker goes on with its work.
