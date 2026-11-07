@@ -89,11 +89,13 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
 // still is.
 //
-// A ServiceAccount other than the configured one (accountDrift) is the one kind of drift no round
-// and no install answers, so a pod carrying it is replaced here whatever kind of pod it is and
-// whatever the launch is installing: the account is fixed for the pod's life, and until the pod is
-// created afresh its agents go on holding the identity the old account grants, so the old account
-// can be deleted only once every such pod has gone.
+// A ServiceAccount other than the configured one (accountDrift) is answered by whoever answers
+// the pod's other drift. A launch into a pod a round covers keeps it for the account as for every
+// other drift, and leaves it to that pod's round, which has every worker in it push its work
+// before the pod is ended. A launch into a pod no round covers replaces it for the account
+// whatever it is installing, since no round will ever come for such a pod: the account is fixed
+// for the pod's life, and until the pod is created afresh its agents go on holding the identity
+// the old account grants, so an old account can be deleted only once every pod of it has gone.
 //
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
@@ -161,13 +163,14 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	// facets come through movedInPod, and the shape its template was built from is read here,
 	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
 	//
-	// A pod running as a ServiceAccount other than the configured one is replaced here whatever
-	// kind of pod it is and whatever the launch is installing (accountDrift): the account is
-	// fixed for the pod's life, so no install can move it and no update round can either — the
-	// round's own replacement is what a covered pod's other drift waits for, and this one cannot
-	// wait, since until the pod is created afresh its agents go on holding the identity the old
-	// account grants.
-	replace := !live || accountDrifted || migrate ||
+	// A pod running as a ServiceAccount other than the configured one is this launch's to
+	// replace only where no round covers that pod (accountDrift, roundCovers), and then whatever
+	// the launch is installing: no round will ever come for such a pod, the account is fixed for
+	// the pod's life, and until the pod is created afresh its agents go on holding the identity
+	// the old account grants. A pod a round covers is kept for the account as for its other
+	// drift, and that round, which has every worker in it push its work first, is what replaces
+	// it.
+	replace := !live || (accountDrifted && !roundCovers(l.kind)) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
 		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
