@@ -50,24 +50,35 @@ func deliveryExceptionID(eventID, recipientSession, reason string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
-// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
-// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
-// however many listeners raise it for that message, each from its own durable.
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
+// deliveryExceptionEnvelope builds one exception envelope keyed to the original topic
+// (ExceptionTopicPrefix+item.Topic). It is the one place the shape the Legion daemon's consumer
+// decodes (packages/daemon/internal/daemon/notice_exceptions.go, roleLaneException) is written, so
+// the delivery path (publishDeliveryException) and the publish route's unheld-role refusal
+// (publishRefusalException, role_lane_refusal.go) cannot drift apart.
+//
+// The exception carries the original machine payload, so a large original would make an envelope
+// past the server's max payload, which NATS refuses whole (bus.ErrTooLarge). The delivery path has
+// always carried it and keeps doing so; a caller that must not fail that way passes a bound, and a
+// payload past it is left out rather than carried (payload_summary still names the message).
+// bound 0 carries the payload whatever its size.
+func deliveryExceptionEnvelope(item contracts.Envelope, reason, recipientSession string, bound int) (contracts.Envelope, error) {
+	carried := item.Payload
+	if bound > 0 && len(carried) > bound {
+		carried = ""
+	}
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
 		Reason:           reason,
 		RecipientSession: recipientSession,
 		PayloadSummary:   item.PayloadSummary,
-		Payload:          item.Payload,
+		Payload:          carried,
 		DedupeKey:        item.DedupeKey,
 		Source:           item.Source,
 		SourceSession:    item.SourceSession,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal delivery exception: %w", err)
+		return contracts.Envelope{}, fmt.Errorf("marshal delivery exception: %w", err)
 	}
 	exceptionID := deliveryExceptionID(item.EventID, recipientSession, reason)
 	exception := contracts.Envelope{
@@ -82,7 +93,22 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		TraceID:        id.New(),
 	}
 	if err := exception.Validate(); err != nil {
-		return fmt.Errorf("validate delivery exception: %w", err)
+		return contracts.Envelope{}, fmt.Errorf("validate delivery exception: %w", err)
+	}
+	return exception, nil
+}
+
+// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
+// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
+// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
+// however many listeners raise it for that message, each from its own durable.
+//
+// It runs inside a delivery handler, which has no request deadline of its own, so it keeps the
+// publish's own bound and carries the original payload whatever its size.
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
+	exception, err := deliveryExceptionEnvelope(item, reason, recipientSession, 0)
+	if err != nil {
+		return err
 	}
 	if fanoutRefusal {
 		if err := client.PublishCore(exception); err != nil {

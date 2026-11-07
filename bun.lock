@@ -56,19 +56,17 @@
     "packages/claude-envoy": {
       "name": "@sjawhar/claude-envoy",
       "version": "1.0.0",
-      "dependencies": {
+      "devDependencies": {
+        "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
         "@legion/pi-shared": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.30.0",
+        "bun-types": "latest",
         "ky": "^2.0.2",
         "nats": "^2.29.2",
-        "zod": "4.3.6",
-      },
-      "devDependencies": {
-        "@biomejs/biome": "^2.3.14",
-        "bun-types": "latest",
         "typescript": "^5.3.0",
+        "zod": "4.3.6",
       },
     },
     "packages/contracts": {
@@ -126,6 +124,7 @@
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@happy-dom/global-registrator": "^20.14.0",
+        "@legion/envoy-client": "workspace:*",
         "@playwright/test": "^1.64.1",
         "@testing-library/react": "^16.3.3",
         "@types/bun": "latest",
@@ -166,7 +165,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "16.12.0",
+      "version": "16.12.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -183,7 +182,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "18.14.0",
+      "version": "18.14.1",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -228,11 +227,14 @@
         "@milkdown/prose": "^7.5.0",
         "@milkdown/theme-nord": "^7.5.0",
         "@milkdown/transformer": "^7.5.0",
+        "devlop": "^1.1.0",
         "mdast-util-directive": "^3.1.0",
         "micromark-core-commonmark": "^2.0.3",
         "micromark-factory-space": "^2.0.1",
         "micromark-factory-whitespace": "^2.0.1",
         "micromark-util-character": "^2.1.1",
+        "micromark-util-html-tag-name": "^2.0.1",
+        "micromark-util-symbol": "^2.0.1",
         "micromark-util-types": "^2.0.2",
         "proof-sdk-upstream": "github:sjawhar/proof-sdk#dc6a852b2ab45463dc9d3d17762235450c8ff0d6",
         "remark-frontmatter": "^5.0.0",

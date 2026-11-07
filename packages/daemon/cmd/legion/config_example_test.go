@@ -79,6 +79,29 @@ func TestShippedLegionYAMLExamplesMemoryPassesCheckConfig(t *testing.T) {
 	}
 }
 
+// The example's commented commit_issue_trailer_repos, uncommented, passes the same check and
+// names the one repository whose commits a pane of the project stamps with its issue key. It
+// needs no volume and no mount: the key names repositories, not files.
+func TestShippedLegionYAMLExamplesCommitIssueTrailerReposPassesCheckConfig(t *testing.T) {
+	config := checkShippedExample(t, func(example string) string {
+		example = uncommentExample(t, example,
+			"  # WIDGETS:",
+			"  #   commit_issue_trailer_repos: [acme/widgets]",
+		)
+		// The example's two forms of the project entry are alternatives, as the memory test says:
+		// the active empty one is commented out so the uncommented one is the project's whole entry.
+		return strings.Replace(example, "\n  WIDGETS: {}", "\n  # WIDGETS: {}", 1)
+	})
+	cfg, err := configpkg.LoadForValidation(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamped := cfg.Projects["WIDGETS"].CommitIssueTrailerRepos
+	if len(stamped) != 1 || stamped[0].String() != "acme/widgets" {
+		t.Errorf("the WIDGETS commit_issue_trailer_repos = %v, want acme/widgets alone", stamped)
+	}
+}
+
 // uncommentExample is the example with each named line uncommented, each line the start of one of
 // the example's own commented lines: the file comments a block out line by line, so turning it on
 // is one `# ` removed per line, and a line the example does not hold is the test's own mistake.
@@ -136,7 +159,9 @@ current-context: legion-daemon
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-	want := "Config OK: project=WIDGETS\n" + defaultCacheLine +
+	want := "Config OK: project=WIDGETS design-gate-steps=spec\n" +
+		"projects.WIDGETS.production_check: tester — a merge that closes one of its issues opens a production check the tester works\n" +
+		defaultCacheLine +
 		"plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
 	if code != 0 || out.String() != want {
 		t.Fatalf("legion start --check-config on the shipped example = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)

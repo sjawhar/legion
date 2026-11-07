@@ -110,7 +110,7 @@ func TestADrawnTreeKeepsItsMemoryGroupThroughEveryLaterPass(t *testing.T) {
 	admission := quiet(t, 1)
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root = "LEGION-1"
 	seedWaiting(t, pool, root, "A")
@@ -188,7 +188,7 @@ func TestAHandedOverChildCarriesItsOldTreesMemoryGroupVerbatim(t *testing.T) {
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	seedWaiting(t, pool, root, "A")
 
@@ -226,7 +226,7 @@ func TestARootWithNoMemoryBeforeThisReleaseIsNeverDrawnAndItsChildCarriesNone(t 
 	// A project that would draw every new tree `memory`: a draw of this tree would be loud.
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root
@@ -285,7 +285,7 @@ func TestAChildHandedOverFromAnUndrawnTreeIsNeverDrawn(t *testing.T) {
 	admission.UseMemory(config.Memory{Mode: config.MemoryOn})
 	admission.coin = refusingCoin(t)
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The tree as the release found it: a lifecycle row opened before the draw existed, and a root
 	// recorded with none of the three columns set.
@@ -343,7 +343,7 @@ func TestAChildHandedOverFromATreeNeverOpenedIsDrawnAtItsOwnFirstOpen(t *testing
 	admission.UseMemory(config.Memory{Mode: config.MemoryRandom})
 	admission.coin = func() (bool, error) { return true, nil }
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-		DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+		Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-1", "LEGION-2"
 	// The old tree as the record holds it: a root recorded and waiting for a slot, and a child
 	// recorded under it. No pass admits the root here, so nothing ever opens its tree.
@@ -401,7 +401,7 @@ func TestAHandedOverChildsMemoryDoesNotTurnOnWhichRootIsPromotedFirst(t *testing
 			handing.UseMemory(config.Memory{Mode: config.MemoryRandom})
 			handing.coin = refusingCoin(t)
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
-				DesignGate: config.DesignGateRootIssues, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+				Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			// The old tree as the record holds it: a root waiting for a slot it never gets, so
 			// nothing ever opens its tree.
 			seedWaiting(t, pool, root, "B")
@@ -441,8 +441,11 @@ func TestAHandedOverChildsMemoryDoesNotTurnOnWhichRootIsPromotedFirst(t *testing
 // handOverChild records child in root's tree, signs root off, and hands child to Legion as a tree
 // of its own at at, the hour of the hand-over, which is where every test of a hand-over above
 // starts. The child is recorded carrying no memory of its own, as every child of a tree is, since
-// only a tree's root carries the group; the record the hand-over leaves says which tree it left
-// (record.Issue.HandedOverFrom) and carries whatever that hand-over settled, which this returns.
+// only a tree's root carries the group; the record the hand-over leaves is a tree of its own
+// carrying whatever that hand-over settled, which this returns. It is checked on the tree alone:
+// the hand-over writes the tree it left (record.Issue.HandedOverFrom), and the promotion that
+// opens the new root's own tree clears that mark in the same pass, so what the mark holds here
+// turns on whether a slot was free for the child, which is no part of what a carry settles.
 func handOverChild(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler,
 	root, child, rank string, at time.Time) record.Issue {
 	t.Helper()
@@ -458,7 +461,7 @@ func handOverChild(t *testing.T, pool *pgxpool.Pool, admission *Admission, engin
 	apply(t, pool, admission, "child-handed-over", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3,
 		Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: rank, HandedOver: handed}, engine)
 	handedOver := issue(t, pool, child)
-	if handedOver.Tree != child || handedOver.HandedOverFrom != root {
+	if handedOver.Tree != child {
 		t.Fatalf("the handed-over child = %+v, want a tree of its own left by %s", handedOver, root)
 	}
 	return handedOver

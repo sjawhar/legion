@@ -1,5 +1,68 @@
 # Changelog
 
+This file is history: every entry after the last release below is in the package's GitHub
+releases, one per `legion-envoy-v*` tag.
+
+## [29.17.0] - 2026-11-06
+
+### Added
+
+- `agent-secrets register --session-id <id>` names the session the machine's helper registers. The
+  helper keeps that name across its own restart and a reboot of the box, and states it as the
+  enrollment's `session_id`, so a session a person runs on a machine keeps its grants when it
+  moves box, as a container enrolled with `agent-secrets enroll --helper --session-id` and a
+  Legion role's pod already do.
+
+- The `envoy-infra` `gcp:NatsHub` component's `listener` takes the settings its Envoy listener
+  checks broker tokens with: `agentSecretsUrl`, `agentSecretsAudience` and `publicUrl`, rendered
+  into the hub's cloud-config as `ENVOY_AGENT_SECRETS_URL`, `ENVOY_AGENT_SECRETS_GOOGLE_AUDIENCE`
+  and `ENVOY_PUBLIC_URL`. A hub that sets none renders what it rendered before; a hub that sets
+  some but not all is refused at preview, naming the input it is missing, since the listener
+  refuses a partial set when it boots.
+
+- `github.com/sjawhar/envoy/sessiontiming` is the one public door onto the generated Envoy
+  session-registration timings — `Heartbeat`, `LiveWindow`, `ClaimStale`, `CallTimeout`,
+  `CallRetryDelay` and `CallAttempts` — for a caller in another Go module, which Go's internal
+  rule bars from `internal/contracts`. The listener's own uses read `internal/contracts`
+  directly: `session.LiveWindow`, the window every reader of the session registry judges a
+  record's age against, and `session.ClaimStaleAfter` each read the declaration rather than a
+  literal of their own. No value changed.
+
+### Fixed
+
+- A grant now follows its session to a new box. A grant, the request it is still waiting on a
+  person for, and the names its operator withheld from it belong to a session name under one
+  principal — the person for a box of theirs or their sign-in, the Google account for a machine's
+  own session, the service account for a pod — and the next enrollment of that name under that
+  principal takes them, writing `enrollment.adopted` and one `grant.moved` row per grant to the
+  audit record. Before this, each of them was bound to the enrollment the box made, so a helper
+  restart, a rebuilt machine, a person's second sign-in or a replaced pod lost the grant a person
+  had approved and left an approval given after the move with nothing to grant.
+
+  Ending the box no longer ends what the session holds: an enrollment that names a session,
+  records the principal that session belongs to, and still holds a live grant or a pending
+  request is left dormant, proving nothing, and the new `BROKER_SESSION_CARRY_SECONDS` (43200,
+  12 hours, 0 to 86400; 0 turns the carry off) bounds how long it waits before the broker's sweep
+  revokes it. An enrollment that records no principal can be taken by no later one, so it ends as
+  every end did before the carry, its grants revoked and its pending requests cancelled — among
+  them every enrollment made before the broker recorded principals, which is every enrollment
+  live on the day this ships. An approval given while the box is gone now mints a grant too: the
+  broker hangs it off the row the carry is keeping for that session, and the session's next
+  enrollment takes it with the rest. A person's revoke — of the grant, of the machine login, of
+  the sign-in — stays terminal and takes it at once. A session name another principal holds is
+  refused `403 SESSION_HELD`, and another session on either box is still refused the grant.
+
+- A migration collision is refused with the remedy the set that refused it takes: the next number
+  for a set numbered 1 to N, such as the broker's, and a 14-digit UTC timestamp for a set whose
+  numbered series has closed, such as Dispatch's and the daemon's. The message told every caller
+  to use a timestamp, which the broker's own guard then rejected.
+
+## [29.16.0] - 2026-11-06
+
+### Changed
+
+- The comment delivery audit's two psql runs open one read-only transaction on the command line (`--single-transaction -q -c 'SET TRANSACTION READ ONLY'`) in place of a read-only setting made for the whole session, which a server that pools in transaction mode keeps on the backend after the connection goes back to the pool. The SQL files and the Go code that embeds them are unchanged.
+
 ## [29.15.1] - 2026-11-05
 
 ### Added

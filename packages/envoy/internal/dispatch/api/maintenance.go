@@ -25,16 +25,19 @@ const MaintenanceSweepInterval = time.Minute
 const maintenanceLease = "suggestion-outcomes"
 
 // RunMaintenanceSweep deletes every Idempotency-Key past its window (sweepRequestKeys) and every
-// spent DPoP proof past its acceptance window (store.DPoPProofs.Sweep), and then sends every
-// delivery a process that died left owed (resumeDeliveries, the server's resumeOwedDeliveries).
-// resumeDeliveries is nil where nothing delivers. It stops when ctx is done.
+// spent DPoP proof past its acceptance window (store.DPoPProofs.Sweep), ends every answer run
+// past its window that stored no terminal event and deletes every run past its TTL
+// (sweepGoingRequests), and then sends every delivery a process that died left owed
+// (resumeDeliveries, the server's resumeOwedDeliveries). resumeDeliveries is nil where nothing
+// delivers. It stops when ctx is done.
 //
 // It is a timer and not a woken loop (duty.RunWoken), the shape every other sweep of this server
 // took, because no commit announces any of its work: a key and a proof record pass their windows
-// by the clock alone, and a delivery is owed because the process that claimed it died, which
-// commits nothing for a notification to carry. They share one loop rather than taking one each: a
-// loop of its own would need a lease connection of its own (store.leasePoolSize, whose headroom is
-// zero) for statements that cost milliseconds.
+// by the clock alone, an answer run passes its ends_at by the clock too, and a delivery is owed
+// because the process that claimed it died, which commits nothing for a notification to carry.
+// They share one loop rather than taking one each: a loop of its own would need a lease
+// connection of its own (store.LeasePoolSize, whose headroom is zero) for statements that cost
+// milliseconds.
 //
 // Each pass runs under maintenanceLease for one interval, so one process sweeps per interval
 // however many serve the database and a second process's tick, which falls between the first's
@@ -55,6 +58,9 @@ func RunMaintenanceSweep(
 		}
 		if _, err := store.NewDPoPProofs(pool).Sweep(ctx); err != nil {
 			slog.Warn("dispatch: DPoP proof sweep failed", "error", err)
+		}
+		if err := sweepGoingRequests(ctx, pool); err != nil {
+			slog.Warn("dispatch: going request sweep failed", "error", err)
 		}
 		if resumeDeliveries == nil {
 			return

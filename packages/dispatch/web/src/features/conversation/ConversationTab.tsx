@@ -53,10 +53,14 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath, sessionOfAddress } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { threadLayout } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useSendMarkOnce } from "../writes/useSendMarkOnce";
 import { Avatar } from "./Avatar";
@@ -190,7 +194,7 @@ function ConversationReply({
   currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
-  /** The Replies page's read mark, on the thread's newest reply. */
+  /** The shared thread read mark (`useMarkThreadRead`), on the thread's newest reply. */
   markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
   reply: Message;
@@ -217,7 +221,12 @@ function ConversationReply({
       actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
       at={reply.created_at}
       author={reply.author}
-      body={<MarkdownBody markdown={reply.body} />}
+      body={
+        <>
+          <MarkdownBody markdown={reply.body} source={textSourceOf("message", reply.id)} />
+          <Unfurl body={reply.body} source={textSourceOf("message", reply.id)} />
+        </>
+      }
       current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
@@ -271,7 +280,7 @@ function Thread({
   replyDisabled: boolean;
   root: MessageConversation;
 }): ReactNode {
-  // The Replies page's read mark: the thread is read once its newest reply has been on screen.
+  // The shared thread read mark: the thread is read once its newest reply has been on screen.
   // It watches that reply's own element, so a thread taller than the screen still clears.
   const newest = root.replies.at(-1);
   const markRef = useMarkThreadRead({
@@ -279,11 +288,15 @@ function Thread({
     newestShownAt: newest?.created_at,
     owner: { issue: issueKey },
     threadId: root.root.id,
-  });
+  }).ref;
+  // A thread in the Conversation folds nothing: the reader's order alone places its replies
+  // (`features/threads/thread-layout.ts`).
+  const [threadOrder] = useThreadOrder();
+  const { shown } = threadLayout({ collapse: false, order: threadOrder, replies: root.replies });
   if (root.replies.length === 0) return null;
   return (
     <ThreadReplies>
-      {root.replies.map((reply) => (
+      {shown.map((reply) => (
         <ConversationReply
           agents={agents}
           currentReplyId={currentReplyId}
@@ -346,7 +359,8 @@ function MessageTurn({
             <Timestamp at={item.root.created_at} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={textSourceOf("message", item.root.id)} />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </div>
         <TurnActions>
           <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
@@ -841,7 +855,8 @@ function TargetedMessageTurn({
             <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
             {item.unread ? <UnreadMark /> : null}
           </p>
-          <MarkdownBody markdown={item.root.body} />
+          <MarkdownBody markdown={item.root.body} source={textSourceOf("message", item.root.id)} />
+          <Unfurl body={item.root.body} source={textSourceOf("message", item.root.id)} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}

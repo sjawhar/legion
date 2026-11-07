@@ -9,10 +9,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // seedMirror writes what Dispatch says of key — its status and, in order, the keys it waits on —
@@ -36,32 +38,27 @@ func applyMirrored(t *testing.T, pool *pgxpool.Pool, engine *Engine, eventID str
 	}
 }
 
-// startUnblockedChildren is admission's call of the engine's own pass over the held children
-// (admit.Admission.promoteHolds): every issue, and the project's whole mirror, read once.
+// startUnblockedChildren is admission's own pass over the waiting line with nothing held
+// (admissionPass): the engine no longer chooses which issues start — record.Waiting does, from
+// the tree lifecycles, the design gates and the slots — so the pass reads the line as admission
+// reads it and gives each issue whose first phase can start what its slot would give it.
 func startUnblockedChildren(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
 	t.Helper()
-	scoped, committed := intake.WithCommitHooks(context.Background())
-	tx, err := pool.Begin(scoped)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(scoped)
-	store := record.NewStore()
-	issues, err := store.Issues(scoped, tx)
-	if err != nil {
-		t.Fatalf("list issues: %v", err)
-	}
-	mirrored, err := store.DispatchIssues(scoped, tx, "LEGION")
-	if err != nil {
-		t.Fatalf("list the mirror: %v", err)
-	}
-	if err := engine.StartUnblockedChildren(scoped, tx, issues, blockers.Rows(mirrored)); err != nil {
-		t.Fatalf("StartUnblockedChildren: %v", err)
-	}
-	if err := tx.Commit(scoped); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	committed()
+	admissionPass(t, pool, engine)
+}
+
+// seedTreeLifecycle opens key's tree lifecycle under the workflow's authority, as promotion's own
+// admission of the root does: that lifecycle, not a slot row, is what says the tree runs.
+func seedTreeLifecycle(t *testing.T, pool *pgxpool.Pool, key string) {
+	t.Helper()
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		project, err := claim.ProjectToken("LEGION")
+		if err != nil {
+			return err
+		}
+		_, err = record.NewStore().OpenTreeLifecycle(t.Context(), tx, project, key, treelifecycle.AuthorityWorkflow)
+		return err
+	})
 }
 
 // seedHeldTree records a running root whose design gate is gate, admitted at the engine's own
@@ -101,14 +98,26 @@ func TestAChildReleasedWhileABlockerIsUnfinishedStaysAdmitted(t *testing.T) {
 	}
 	assertOutboxKinds(t, pool, []string{})
 
+	// Neither child starts at its release now: each is an issue the cap counts, so each waits at
+	// admitted until the line reaches it. The pass below is the line's.
 	applyMirrored(t, pool, engine, "child-free", intake.DispatchIssue{
 		Key: "LEGION-210", ResolvedRepo: "sjawhar/legion", Seq: 3, Type: "issue.updated", Status: "todo",
 		Title: "a child that waits on nothing", Parent: "LEGION-208", Rank: "W"})
-
-	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
-		t.Fatalf("the unblocked child = %s, want planning", got)
+	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Admitted {
+		t.Fatalf("the unblocked child = %s at its release, want it left at admitted until it has a slot", got)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{})
+
+	startUnblockedChildren(t, pool, engine)
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the blocked child = %s after the line's pass, want it left at admitted", got)
+	}
+	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
+		t.Fatalf("the unblocked child = %s once the line reached it, want planning", got)
+	}
+	// The second notice is the architect's: every child the line starts tells it so
+	// (ChildStartedNotice), whether a blocker held it or its tree's gate did.
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 }
 
 // The close of the last issue a held child waited on starts it: its branch row, the in_progress
@@ -180,7 +189,7 @@ func TestAHeldChildWhoseLinksAreTakenOffStarts(t *testing.T) {
 	}
 	assertBranchRow(t, pool, "LEGION-209", 4)
 	assertPlannerStart(t, pool, "LEGION-209")
-	want := "LEGION-209 starts planning under LEGION-208: its blocked-by links were taken off, so it waits on nothing"
+	want := "LEGION-209 starts planning under LEGION-208: it reached the front of the waiting line and took an admission slot"
 	if got := childStatusNotices(t, pool); len(got) != 1 || got[0] != want {
 		t.Fatalf("child-status notices = %#v, want one reading %q", got, want)
 	}
@@ -201,15 +210,15 @@ func blockedNow(t *testing.T, pool *pgxpool.Pool) []record.BlockedIssue {
 		if err != nil {
 			return err
 		}
-		blocked = blockers.Blocked(blockers.Rows(mirrored), issues, nil)
+		blocked = blockers.Blocked(blockers.Rows(mirrored), issues, nil, nil)
 		return nil
 	})
 	return blocked
 }
 
-// The opening of a tree's design gate starts every admitted member it was holding, but not one
-// that waits on an unfinished issue of its own: that child's own blockers hold it where the gate
-// left it.
+// The opening of a tree's design gate releases every admitted member it was holding, and the
+// waiting line then starts each of them at its own slot — except one that waits on an unfinished
+// issue of its own, whose own blockers hold it where the gate left it.
 func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
@@ -221,18 +230,19 @@ func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 
 	applyMirrored(t, pool, engine, "approved", intake.DispatchArtifact{
 		Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+	startUnblockedChildren(t, pool, engine)
 
 	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
 		t.Fatalf("the blocked child = %s when the tree's gate opened, want it left at admitted", got)
 	}
 	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
-		t.Fatalf("the child that waits on nothing = %s when the tree's gate opened, want planning", got)
+		t.Fatalf("the child that waits on nothing = %s once the line reached it, want planning", got)
 	}
-	assertOutboxKinds(t, pool, []string{"notice", "issue_branch", "dispatch_status", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"notice", "issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 }
 
-// An unblocked child whose tree would not start it now is not started by this pass either: the
-// tree's gate is what holds it, and the gate's own opening starts it (advanceAdmittedTree).
+// An unblocked child whose tree would not start it now is in no line either: the tree's gate is
+// what holds it, and the line reads that gate (record.Waiting's LineFirstPhase).
 func TestAnUnblockedChildWaitsForItsTreesGate(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
@@ -248,13 +258,13 @@ func TestAnUnblockedChildWaitsForItsTreesGate(t *testing.T) {
 	assertOutboxKinds(t, pool, []string{})
 }
 
-// A root's own blockers are judged once, when promotion admits it into a slot; its tree is running
-// from then on, and running work is never re-checked. So the opening of its design gate starts the
-// root's planning whatever its links say now: a blocker a person added after the root took its
-// slot, or one a tree Legion took back still names (record.Issue.TakenBack, which promotion
-// admitted whatever its links say). A root left at phase.Admitted here would hold its slot with
-// nothing to start it: StartUnblockedChildren starts children, never a root, and the state
-// reports a slotted root under no `blocked` entry.
+// A root's own blockers are judged once, when promotion opens its tree; its tree is running from
+// then on, and running work is never re-checked. So its first phase starts whatever its links
+// say now: a blocker a person added after the tree was opened, or one a tree Legion took back
+// still names (record.Issue.TakenBack, which promotion admitted whatever its links say). The
+// line carries the root as an issue of its own (record.Waiting's LineFirstPhase) and
+// blockers.LineWaitsOn asks blockers.Holds of it, which answers nothing for a root, so no blocker
+// keeps it out.
 func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -269,12 +279,14 @@ func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 				Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 4, Status: "in_progress", Rank: "U",
 				HandedOver: true, TakenBack: tc.takenBack, LastDispatchSeq: 1})
 			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
-			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+			seedTreeLifecycle(t, pool, "LEGION-208")
 			seedMirror(t, pool, "LEGION-208", "in_progress", "LEGION-300")
 			seedMirror(t, pool, "LEGION-300", "backlog")
 
-			applyMirrored(t, pool, testEngine(config.DesignGateRootIssues, nil), "approved", intake.DispatchArtifact{
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyMirrored(t, pool, engine, "approved", intake.DispatchArtifact{
 				Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+			startUnblockedChildren(t, pool, engine)
 
 			if got := phaseOf(t, pool, "LEGION-208"); got != phase.Planning {
 				t.Fatalf("the admitted root = %s when its tree's gate opened, want planning: its tree already runs", got)
@@ -288,9 +300,11 @@ func TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay(t *testing.T) {
 // A child still waiting on an unfinished issue when its tree finishes is handed to Legion as a
 // root of its own, though it never started under its tree's design: its blockers outlive the
 // tree, and leaving it admitted inside a closed tree would park it for good. Its sibling, also
-// admitted but waiting on nothing, is left exactly where every admitted member was left before:
-// the tree's design gate, not a blocker, held it, and making a root of it would spend an
-// admission slot on work its tree's design never opened.
+// admitted but waiting on nothing, goes with it: the expiry decides by the member's own state —
+// in the workflow and never started — and not by what held it there (unfinishedHandOvers),
+// because nothing would start either of them where they stand. The sibling was waiting for a
+// slot its tree will never offer again, which the cap leaves an ordinary member doing because
+// it counts issues; left behind it would stand todo at admitted in a closed tree for good.
 func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	pool := migratedPool(t)
 	until := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
@@ -308,21 +322,23 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 		t.Fatalf("ApplyFact the linger's expiry: %v", err)
 	}
 
-	if got := handoverFences(t, pool); len(got) != 1 || got[0] != "LEGION-209" {
-		t.Fatalf("hand-over fences = %v, want the blocked child's alone", got)
+	if got := handoverFences(t, pool); len(got) != 2 || got[0] != "LEGION-209" || got[1] != "LEGION-210" {
+		t.Fatalf("hand-over fences = %v, want both admitted children's: neither would ever start where it stands", got)
 	}
-	// The hand-over's one Dispatch write puts the child todo under the fence of this linger, as
+	// Each hand-over's one Dispatch write puts the child todo under the fence of this linger, as
 	// the outbox's drop guard and intake.Handover read it.
-	var writes int
-	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'
-		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
-		and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`).Scan(&writes); err != nil || writes != 1 {
-		t.Fatalf("the blocked child's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", writes, err)
+	for _, child := range []string{"LEGION-209", "LEGION-210"} {
+		var writes int
+		if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = $1
+			and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
+			and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`, child).Scan(&writes); err != nil || writes != 1 {
+			t.Fatalf("%s's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", child, writes, err)
+		}
 	}
 	var others int
 	if err := pool.QueryRow(t.Context(),
-		`select count(*) from outbox where kind = 'dispatch_status' and issue <> 'LEGION-209'`).Scan(&others); err != nil || others != 0 {
-		t.Fatalf("status writes for another member = %d, %v; want none, the unblocked admitted child left as it was", others, err)
+		`select count(*) from outbox where kind = 'dispatch_status' and issue not in ('LEGION-209', 'LEGION-210')`).Scan(&others); err != nil || others != 0 {
+		t.Fatalf("status writes for another member = %d, %v; want none: the tree holds nobody else in the workflow", others, err)
 	}
 }
 
@@ -339,7 +355,7 @@ func TestTheRunMarkIsWrittenAsAPhaseStartsAndBelongsToThatRun(t *testing.T) {
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 4, Status: "in_progress", Rank: "U",
 		HandedOver: true, LastDispatchSeq: 1})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
-	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+	seedTreeLifecycle(t, pool, "LEGION-208")
 	seedAdmittedChild(t, pool, "LEGION-209")
 	seedAdmittedChild(t, pool, "LEGION-210")
 	seedMirror(t, pool, "LEGION-210", "todo", "LEGION-300")
@@ -361,6 +377,7 @@ func TestTheRunMarkIsWrittenAsAPhaseStartsAndBelongsToThatRun(t *testing.T) {
 
 	applyMirrored(t, pool, engine, "approved", intake.DispatchArtifact{
 		Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+	startUnblockedChildren(t, pool, engine)
 	for key, want := range map[string]struct {
 		at     phase.Phase
 		marked bool
@@ -462,7 +479,7 @@ func assertBranchRow(t *testing.T, pool *pgxpool.Pool, issue string, generation 
 func assertPlannerStart(t *testing.T, pool *pgxpool.Pool, issue string) {
 	t.Helper()
 	var gotIssue, op, role string
-	if err := pool.QueryRow(t.Context(), "select issue, payload->>'op', payload->>'role' from outbox where kind = 'supervise'").Scan(&gotIssue, &op, &role); err != nil {
+	if err := pool.QueryRow(t.Context(), "select issue, payload->>'op', payload->>'role' from outbox where kind = 'supervise' and coalesce(payload->>'task', '') <> ''").Scan(&gotIssue, &op, &role); err != nil {
 		t.Fatalf("read the supervise row: %v", err)
 	}
 	if gotIssue != issue || op != "start" || role != "planner" {

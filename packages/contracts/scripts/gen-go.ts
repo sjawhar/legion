@@ -10,6 +10,7 @@ import {
   DISPATCH_SIGN_IN_REQUIRED,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
+  ID_AMBIGUOUS,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
   IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_HEADER,
@@ -48,6 +49,35 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
+import {
+  LISTENER_CALL_ATTEMPTS,
+  LISTENER_CALL_RETRY_DELAY_MS,
+  LISTENER_CALL_TIMEOUT_MS,
+  SESSION_CLAIM_STALE_MS,
+  SESSION_HEARTBEAT_MS,
+  SESSION_LIVE_WINDOW_MS,
+} from "../src/envoy-session";
+import {
+  GOING_ANSWER_WORD_MAX,
+  GOING_ERROR_ANSWER_DID_NOT_ARRIVE,
+  GOING_ERROR_ANSWER_FAILED,
+  GOING_ERROR_NO_MODEL_CONFIGURED,
+  GOING_EVENT_CHANGED,
+  GOING_EVENT_CUT,
+  GOING_EVENT_END,
+  GOING_EVENT_ERROR,
+  GOING_EVENT_ITEM,
+  GOING_EVENT_NONE,
+  GOING_EVENT_TEXT,
+  GOING_HIT_RUNE_MAX,
+  GOING_MODEL_CALL_MAX,
+  GOING_REQUEST_RUNE_MAX,
+  GOING_REQUEST_TTL_MS,
+  GOING_RUN_MS,
+  GOING_SEARCH_MAX,
+  GOING_SEARCH_TOOL,
+  GOING_WORDS_MAX,
+} from "../src/going";
 import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -180,6 +210,74 @@ const SearchKindDepth = ${SEARCH_KIND_DEPTH}
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
 
+// The names of the frames one answer's stream carries: text as the answer arrives, item for each
+// thing the answer cites, cut when the answer reached its word cap, changed when the server did
+// not pass the answer on as the model wrote it, none when the model produced no answer text at
+// all, and end and error, the two that end a stream. A text frame carries plain text, every
+// ASCII punctuation byte of it backslash-escaped, which closes markdown's own constructs, so a
+// renderer makes no link, image, tag or code span of any of it; an escape closes none of GFM's
+// literal autolinks, so a word a renderer would link on its own is dropped from the answer
+// rather than sent; and an item frame is where the links of an answer live, each carrying a
+// cited item's own href.
+// Generated from GOING_EVENT_TEXT, GOING_EVENT_ITEM, GOING_EVENT_CUT,
+// GOING_EVENT_CHANGED, GOING_EVENT_NONE, GOING_EVENT_END and GOING_EVENT_ERROR in
+// packages/contracts so the frames the server writes and the frames the page reads cannot drift
+// apart.
+const GoingEventText = ${JSON.stringify(GOING_EVENT_TEXT)}
+const GoingEventItem = ${JSON.stringify(GOING_EVENT_ITEM)}
+const GoingEventCut = ${JSON.stringify(GOING_EVENT_CUT)}
+const GoingEventChanged = ${JSON.stringify(GOING_EVENT_CHANGED)}
+const GoingEventNone = ${JSON.stringify(GOING_EVENT_NONE)}
+const GoingEventEnd = ${JSON.stringify(GOING_EVENT_END)}
+const GoingEventError = ${JSON.stringify(GOING_EVENT_ERROR)}
+
+// The codes an error frame carries: the run reached its window without an answer, the deployment
+// has no text model configured, and the model service refused or failed. Generated from
+// GOING_ERROR_ANSWER_DID_NOT_ARRIVE, GOING_ERROR_NO_MODEL_CONFIGURED and
+// GOING_ERROR_ANSWER_FAILED in packages/contracts so the code the server writes and the wording
+// the page keys on it cannot drift apart.
+const GoingErrorAnswerDidNotArrive = ${JSON.stringify(GOING_ERROR_ANSWER_DID_NOT_ARRIVE)}
+const GoingErrorNoModelConfigured = ${JSON.stringify(GOING_ERROR_NO_MODEL_CONFIGURED)}
+const GoingErrorAnswerFailed = ${JSON.stringify(GOING_ERROR_ANSWER_FAILED)}
+
+// GoingSearchTool is the name of the one tool the model is given, another search of Dispatch.
+// Generated from GOING_SEARCH_TOOL in packages/contracts so the name the server declares and the
+// name the page explains cannot drift apart.
+const GoingSearchTool = ${JSON.stringify(GOING_SEARCH_TOOL)}
+
+// GoingAnswerWordMax is the most words an answer carries, past which the stream cuts it and says
+// so. Generated from GOING_ANSWER_WORD_MAX in packages/contracts so the server's cut and the
+// page's account of it cannot drift apart.
+const GoingAnswerWordMax = ${GOING_ANSWER_WORD_MAX}
+
+// GoingHitRuneMax is the most of one hit's own text the model is shown, and GoingRequestRuneMax
+// the most hit text one run shows it in total; a hit past the total is still named to the model
+// with no body, and stays something the answer may cite.
+// Generated from GOING_HIT_RUNE_MAX and GOING_REQUEST_RUNE_MAX in packages/contracts so the
+// server's bounds and the page's account of them cannot drift apart.
+const GoingHitRuneMax = ${GOING_HIT_RUNE_MAX}
+const GoingRequestRuneMax = ${GOING_REQUEST_RUNE_MAX}
+
+// GoingSearchMax is the most searches one run makes, the server's own seeding search counting as
+// the first, and GoingModelCallMax the most calls it makes to the model, which bounds a model
+// that keeps searching instead of answering. Generated from GOING_SEARCH_MAX and
+// GOING_MODEL_CALL_MAX in packages/contracts so the server's bounds and the page's account of
+// them cannot drift apart.
+const GoingSearchMax = ${GOING_SEARCH_MAX}
+const GoingModelCallMax = ${GOING_MODEL_CALL_MAX}
+
+// GoingWordsMax is the longest question the route accepts, in UTF-16 units. Generated from
+// GOING_WORDS_MAX in packages/contracts so the server's refusal and the page's own cannot drift
+// apart.
+const GoingWordsMax = ${GOING_WORDS_MAX}
+
+// GoingRunWindow is how long one run may take, measured from the POST that started it, and
+// GoingRequestTTL how long a run's rows are kept, so a reader that reconnects still finds its
+// answer. Generated from GOING_RUN_MS and GOING_REQUEST_TTL_MS in packages/contracts so the
+// server's windows and the page's account of them cannot drift apart.
+const GoingRunWindow = ${GOING_RUN_MS} * time.Millisecond
+const GoingRequestTTL = ${GOING_REQUEST_TTL_MS} * time.Millisecond
+
 // MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
 // MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
 const MaxIssueBlockers = ${MAX_ISSUE_BLOCKERS}
@@ -285,12 +383,44 @@ const IdempotencyAnswerNotKept = ${JSON.stringify(IDEMPOTENCY_ANSWER_NOT_KEPT)}
 const IdempotencyKeyTTL = ${IDEMPOTENCY_KEY_TTL_MS} * time.Millisecond
 const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
 
+// SessionHeartbeat is how often a pane's pi-envoy plugin refreshes its listener registration, and
+// SessionLiveWindow how long a session's last registration keeps it live to the listener. Three
+// heartbeats plus one whole listener call fit inside the live window, so two refreshes may fail
+// and the third still completes before the session stops reading live. Generated from
+// SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS in packages/contracts, whose doc comments state
+// that arrangement, so the pane's refresh and the listener's window cannot drift apart.
+const SessionHeartbeat = ${SESSION_HEARTBEAT_MS} * time.Millisecond
+const SessionLiveWindow = ${SESSION_LIVE_WINDOW_MS} * time.Millisecond
+
+// SessionClaimStale is how long a session's role claim may go unrefreshed before a reader treats
+// the process that wrote it as gone, which allows three missed heartbeats at SessionHeartbeat.
+// Generated from SESSION_CLAIM_STALE_MS in packages/contracts so session.ClaimStaleAfter and the
+// Legion daemon's copy of it, which times its last re-hold of a notice, are one number.
+const SessionClaimStale = ${SESSION_CLAIM_STALE_MS} * time.Millisecond
+
+// ListenerCallTimeout is how long one attempt of an envoy-client call waits for the listener,
+// ListenerCallRetryDelay the pause before the next attempt, and ListenerCallAttempts how many
+// attempts one call makes. Together they are a whole call's budget, which the heartbeat interval
+// is set to leave room for. Generated from LISTENER_CALL_TIMEOUT_MS, LISTENER_CALL_RETRY_DELAY_MS
+// and LISTENER_CALL_ATTEMPTS in packages/contracts so the client's cost and every check of that
+// budget are computed from one set of numbers.
+const ListenerCallTimeout = ${LISTENER_CALL_TIMEOUT_MS} * time.Millisecond
+const ListenerCallRetryDelay = ${LISTENER_CALL_RETRY_DELAY_MS} * time.Millisecond
+const ListenerCallAttempts = ${LISTENER_CALL_ATTEMPTS}
+
 // DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
 // of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
 // is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
 // packages/contracts so the server's check and the page's header cannot drift apart.
 const DispatchLoginHeader = ${JSON.stringify(DISPATCH_LOGIN_HEADER)}
 const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
+
+// IDAmbiguous is the code of the 409 an id written as a prefix two items or more carry is
+// refused with, on a page address, a dispatch:// reference and a dashboard address in text, and
+// on a route that takes an id in its path; the refusal's candidates list the items it names.
+// Generated from ID_AMBIGUOUS in packages/contracts so the server's refusal and the page that
+// lists its candidates cannot drift apart.
+const IDAmbiguous = ${JSON.stringify(ID_AMBIGUOUS)}
 
 // DispatchSignInRequired is the code of the 403 for a write by a broker-issued access token that
 // names a session and a service but no person: the machine holding it has signed nobody in.

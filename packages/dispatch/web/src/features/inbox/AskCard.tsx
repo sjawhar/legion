@@ -45,7 +45,10 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { textSourceOf } from "../refs/text-references";
+import { composerFirst } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { askRepliesOwner, useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
@@ -114,11 +117,16 @@ export interface AskCardProps {
   onAnswered?: (id: string) => void;
   /** `change` opens the seeded form when the viewer may replace the current answer. */
   mode?: "answer" | "change";
-  /** Marks the ask's thread read on the Replies page once its newest write (the newest reply, or
-   *  an answer given after every reply) has been on screen. Set only on the ask's own pages - its
-   *  Conversation turn, its margin card, its decision block - so the Inbox, its drawer and the
-   *  Answers page start no unread-set reads. */
+  /** Marks the ask's thread read through the shared thread read mark (`useMarkThreadRead`) once
+   *  its newest write (the newest reply, or an answer given after every reply) has been on
+   *  screen. Set only on the ask's own pages - its Conversation turn, its margin card, its
+   *  decision block - so the Inbox, its drawer and the Answers page start no unread-set reads. */
   markRead?: boolean;
+  /** The ids of the ask's replies the reader has not read, from a host that holds the fact
+   *  itself: the Inbox, whose row carries the thread's read mark. Without it the card reads the
+   *  set from the mark it makes under `markRead`, and a card that does neither folds by count
+   *  alone. An unread reply is never folded away (`threads/thread-layout.ts`). */
+  unread?: ReadonlySet<string>;
   /** The reply a deep link named: the Conversation marks that reply and opens the card's
    *  collapsed thread over it. No other surface lands on a reply. */
   currentReplyId?: string;
@@ -179,6 +187,7 @@ export function AskCard({
   onAnswered,
   mode = "answer",
   markRead = false,
+  unread,
   currentReplyId,
 }: AskCardProps): ReactNode {
   const {
@@ -244,6 +253,9 @@ export function AskCard({
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
+  // Where a `#id` in the ask's own text resolves: the document the server scopes this ask to -
+  // the one its block is on, the one it is anchored to, else its issue's spec (`refs.ScopeOf`).
+  const source = textSourceOf("ask", displayedAsk.id);
   // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
   // ask's issue, or the project of the document it was asked on.
   const documentProject = (displayedAsk.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
@@ -326,19 +338,31 @@ export function AskCard({
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
   const turnHolder = askTurnHolder(currentAsk, threadQuery.data?.replies.at(-1));
-  // The thread's newest write the card shows, which the Replies mark watches and reads through:
-  // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
+  // The thread's newest write the card shows, which the shared thread read mark watches and
+  // reads through: the newest reply, unless the record's answer came after it (an answer is a
+  // write like a reply).
   const newestReply = threadQuery.data?.replies.at(-1);
   const recordedAnswer = completed?.state === "answered" ? completed.answer : null;
   const answerIsNewest =
     recordedAnswer !== null &&
     (newestReply === undefined || compareTimestamps(recordedAnswer.at, newestReply.created_at) > 0);
-  const markNewest = useMarkThreadRead({
+  // The mark the card makes, and with it which of the replies on screen are still unread: an
+  // unread reply is never folded away. A card that marks nothing read reads nothing, so it takes
+  // what its host passes, and folds by count alone where the host passes none.
+  const threadRead = useMarkThreadRead({
     enabled: markRead,
     newestShownAt: answerIsNewest ? recordedAnswer?.at : newestReply?.created_at,
     owner: askRepliesOwner(displayedAsk),
     threadId: displayedAsk.id,
+    writes: threadQuery.data?.replies,
   });
+  const markNewest = threadRead.ref;
+  const unreadReplies = unread ?? threadRead.unread;
+  // The one order every thread reads in, the reader's own (`threads/thread-order.ts`): it places
+  // the replies, this card's options and answer box, and the thread's reply composer. Where the
+  // box goes is the layout's own rule, which this card reads rather than works out again.
+  const [threadOrder] = useThreadOrder();
+  const answerFirst = composerFirst(threadOrder);
   const referencedByNode =
     reference === undefined || referencedByCount === 0 ? null : (
       <div className="mt-3">
@@ -365,7 +389,9 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        order={threadOrder}
         thread={threadQuery}
+        unread={unreadReplies}
         uploadOwner={uploadOwner}
       />
     ) : (
@@ -375,7 +401,9 @@ export function AskCard({
         currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
+        order={threadOrder}
         thread={threadQuery}
+        unread={unreadReplies}
         uploadOwner={uploadOwner}
       />
     );
@@ -567,7 +595,7 @@ export function AskCard({
         ) : null}
         {inBlock ? null : (
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
+            <MarkdownBody markdown={displayedAsk.question} source={source} />
           </div>
         )}
         {/* A request to approve again names the approval it follows, under the question (the
@@ -675,7 +703,9 @@ export function AskCard({
           answer again; your draft text is still here.
         </p>
       ) : null}
-      {threadNode}
+      {/* The options and the answer box sit where the order puts a thread's reply box: under
+          the question in Newest first, at the foot of the card in Oldest first. */}
+      {answerFirst ? null : threadNode}
       <form className="mt-3 space-y-3" onSubmit={submit} ref={trackForm}>
         {displayedAsk.options.length === 0 ? null : (
           <fieldset className="min-w-0 space-y-2">
@@ -766,6 +796,7 @@ export function AskCard({
           />
         ) : null}
       </form>
+      {answerFirst ? threadNode : null}
       <AskRecipients
         askId={displayedAsk.id}
         claimant={threadQuery.data?.claimant ?? null}

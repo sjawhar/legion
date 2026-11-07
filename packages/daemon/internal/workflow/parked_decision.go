@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -28,7 +28,7 @@ func (e *Engine) relayParkedDecision(ctx context.Context, tx pgx.Tx, key, ask st
 	if err != nil || root == nil {
 		return err
 	}
-	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "")
+	outcome, err := record.RelayParkedDecision(ctx, tx, e.store, key, *root, root.Lingers(), decision, 0, "", e.cfg.Steps)
 	if err != nil {
 		return err
 	}
@@ -86,8 +86,8 @@ func (e *Engine) treeRoot(ctx context.Context, tx pgx.Tx, key string) (*record.I
 // (Store.ForgetKeptDecisions) and a start's task tells it at the confirmation of the delivery the
 // claim queued it as; one that reached no architect hands it over (HandOverKept). Both results are
 // zero when there was nothing.
-func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue) (string, *record.KeptDecisions, error) {
-	decisions, approved, latest, err := store.UnclaimedKept(ctx, tx, root.Key)
+func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, root record.Issue) (string, *record.KeptDecisions, error) {
+	decisions, approval, err := store.UnclaimedKept(ctx, tx, root.Key)
 	if err != nil {
 		return "", nil, err
 	}
@@ -96,8 +96,8 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate
 		kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
 			Decision: d.Decision, Actor: d.Actor})
 	}
-	if approved > 0 && gate != config.DesignGateOff {
-		kept.Approved, kept.Latest = approved, latest
+	if approval.Approved > 0 && len(steps) > 0 {
+		kept.KeptApproval = approval
 	}
 	task := KeptDecisionsTask(root.Key, kept)
 	if task == "" {
@@ -110,9 +110,10 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate
 // task and a catch-up both use (ParkedDecisionTask) and the one a held task is written back to
 // when an issue it names leaves that tree while the task waits to be sent (supervise's
 // Deps.RootTask, the daemon's rootTask): a task whose decisions have all left is written back to
-// "", which is a task that names nothing and is retired rather than sent. The approval pair is
-// the root's own, so it is named whenever kept carries one — the gate was read where the pair was
-// first kept.
+// "", which is a task that names nothing and is retired rather than sent. The approval is the
+// root's own, so it is named whenever kept carries one — the gate was read where it was first
+// kept — and it is named on the document of its own step (record.DesignStep.Document), which is
+// the document the person reviewed and the one whose approval the architect requests again.
 func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 	var parts []string
 	if len(kept.Decisions) > 0 {
@@ -124,15 +125,16 @@ func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
 			root, strings.Join(named, "; ")))
 	}
 	if kept.Approved > 0 {
-		parts = append(parts, fmt.Sprintf("The spec is approved at version %d and is now at version %d: request approval of version %d, "+
-			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.", kept.Approved, kept.Latest, kept.Latest))
+		parts = append(parts, fmt.Sprintf("The %s is approved at version %d and is now at version %d: request approval of version %d, "+
+			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.",
+			kept.Step.Document(), kept.Approved, kept.Latest, kept.Latest))
 	}
 	return strings.Join(parts, " ")
 }
 
-// ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.
+// ParkedDecisionTask is ParkedDecisionTask over the engine's store and gated steps.
 func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
-	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.DesignGate, root)
+	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.Steps, root)
 }
 
 // EnqueueNaming enqueues payload for issue, due at, a root-architect start or a catch-up notice
@@ -186,12 +188,12 @@ func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, tree strin
 // nobody either, and what the ending releases waits for that architect's next launch, whose ready
 // names every unclaimed decision. A receipt timeout that draws a copy neither tells nor hands
 // over: the re-held copy carries the claims on (Store.MoveKeptClaims).
-func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, from int64, now time.Time) error {
+func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, from int64, now time.Time) error {
 	trees, err := store.ReleaseKeptClaims(ctx, tx, from)
 	if err != nil || len(trees) == 0 {
 		return err
 	}
-	return CatchUpTheTreesOwed(ctx, tx, store, gate, trees, now)
+	return CatchUpTheTreesOwed(ctx, tx, store, steps, trees, now)
 }
 
 // CatchUpTheTreesOwed writes a fresh catch-up to the architect of each of trees that has one to
@@ -200,8 +202,10 @@ func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 // catch-up is not queued again behind it. A tree with no architect to hear it — no record, no
 // tree root, lingering, out of the workflow, or waiting in `todo` for its slot — is written
 // nothing, and what it is owed waits KEPT for its next start or ready to name, since a catch-up
-// queued for nobody would only be dropped by the ready that follows.
-func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, trees []string, now time.Time) error {
+// queued for nobody would only be dropped by the ready that follows. No catch-up of a hand-over
+// is paced: it answers a person who is waiting, and it reaches an architect the daemon did not
+// wake, so it is due at once (the zero moment QueueCatchUp reads as now).
+func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, steps []record.DesignStep, trees []string, now time.Time) error {
 	launches, err := store.ArchitectLaunches(ctx, tx, trees)
 	if err != nil {
 		return err
@@ -214,14 +218,14 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gat
 		if root == nil {
 			continue
 		}
-		hears, err := ArchitectHears(ctx, tx, store, *root)
+		hears, err := ArchitectHears(ctx, tx, store, *root, steps)
 		if err != nil {
 			return err
 		}
 		if !hears {
 			continue
 		}
-		if err := QueueCatchUp(ctx, tx, store, gate.OrDefault(), *root, launches[key], now); err != nil {
+		if err := QueueCatchUp(ctx, tx, store, steps, *root, launches[key], now, time.Time{}); err != nil {
 			return err
 		}
 	}
@@ -230,24 +234,39 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gat
 
 // ArchitectHears says whether root has an architect to hear a person's decision now: it is its
 // tree's root, it does not linger, it has not left the workflow, and it does not wait in `todo`
-// for an admission slot (record.WaitsForSlot). It is the one reading of that question the daemon
+// for an admission slot (record.WaitsForSlot, read with steps, the design-gate steps the
+// deployment gates). It is the one reading of that question the daemon
 // has, so the hand-over of what a row named (HandOverKept) and the hold of a root architect's task
 // that names decisions (supervise's Deps.RootHears, the daemon's rootHears) never drift: a root
 // that hears is told at once, and one that does not keeps what it is owed until it runs again.
-func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root record.Issue) (bool, error) {
+func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root record.Issue, steps []record.DesignStep) (bool, error) {
 	if !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return false, nil
 	}
-	waits, err := record.WaitsForSlot(ctx, tx, store, root)
+	waits, err := record.WaitsForSlot(ctx, tx, store, root, steps)
 	return !waits, err
 }
 
-// DesignGateOff says whether the engine runs with gates.design off, which asks no person to
-// approve a spec.
-func (e *Engine) DesignGateOff() bool { return e.cfg.DesignGate == config.DesignGateOff }
+// GatedSteps is the design-gate steps the deployment gates, in the order it names them, which
+// admission reads to decide a re-admitted root's kept approval (Admission.keepStaleApproval).
+func (e *Engine) GatedSteps() []record.DesignStep { return e.cfg.Steps }
 
-// specRef is the Dispatch reference of an issue's spec, the document its gate reviews.
-func specRef(key string) string { return "dispatch://" + key + "/spec" }
+// stepRef is the Dispatch reference of the document a design-gate step reviews on issue key: the
+// issue's spec for the spec step, which is the reference every design decision carried before a
+// deployment could gate more than one step, and the slug Dispatch files the document under for
+// the other two. A person's decision is kept and relayed under it (record.ParkedDecision.Ref,
+// the outbox's parkDecision), and the newest decision per reference is the one kept, so two
+// steps of one root must answer to two references or each person's decision would replace the
+// other's.
+func stepRef(key string, step record.DesignStep) string {
+	switch step {
+	case record.DesignStepDecisions:
+		return "dispatch://" + key + "/artifact/" + dispatch.DecisionsSlug
+	case record.DesignStepCriteria:
+		return "dispatch://" + key + "/artifact/" + dispatch.VerificationSlug
+	}
+	return "dispatch://" + key + "/spec"
+}
 
 // itemRef is the Dispatch reference of an ask or comment of an issue.
 func itemRef(key, kind, id string) string { return "dispatch://" + key + "/" + kind + "/" + id }

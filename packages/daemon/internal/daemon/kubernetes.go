@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,7 +184,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners, cfg.RepositoryRenames)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Accepted, p.repositories.serving, cfg.RepositoryRenames)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -476,16 +476,29 @@ func requirements(key string, reservation config.Reservation) (corev1.ResourceRe
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
-// bundle (gitHubCredential, a directory for each of owners) and the owner set those directories
-// are built from (appauth.GitHubOwners), which the runtime reads a running pod's gh projection
-// against, with the workflow's mapping as the repositories its repository caches follow (mapped),
-// with the store's own workspace bundles as what a replacement pod's launcher is sent and what
-// its restore drops, and registers its launcher acceptor on the stream listener. A daemon with no
-// GitHub Apps hands it neither tokens nor a mapping, and sandbox.New's own refusal names what is
-// missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed
-// and no Sandbox of a layout before this one — per-claim pods, or issue pods on one tree volume —
-// remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string, renames ghrepo.Renames) runtimeFactory {
+// bundle (gitHubCredential, a directory for each owner of repos and for each repository the
+// pod's own owner serves beside the one it writes to), with the controller's own bundle beside it
+// (appauth.ControllerCredential), which a controller's launch and its refresh both ask by owner,
+// and the directory set those directories are compared with (appauth.GitHubDirs), whose owner
+// directories the runtime reads a running pod's gh projection against — a pod lacking an owner's
+// directory holds no token of that owner, where one lacking a `<owner>/<repo>` directory reads
+// that repository through its owner's and is left where it is (sandbox's movedGhDirs) — the
+// three over one record of what the mints found GitHub refuses (appauth.NewLeftOut), so the set
+// a pod is compared against is the set a mint produces and an owner left out of every bundle of
+// the Apps that pod runs is named by no comparison of it — the roles the runtime asks for being
+// its pod's own, so the implement App's refusal of an owner costs the controller's pod, which
+// runs the review App alone, nothing — with
+// serving as the rule every provisioning token's repository is read through
+// (repositories.serving, the mapping's own, so a configured rename's mint follows the owner
+// whose installation holds the repository now), with the workflow's mapping as the repositories
+// its repository caches follow (mapped), with the store's own workspace bundles as what a
+// replacement pod's launcher is sent and what its restore drops, and registers its launcher
+// acceptor on the stream listener. A daemon with no GitHub Apps hands it neither tokens nor a
+// mapping, and sandbox.New's own refusal names what is missing. Boot has already run the cluster
+// check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this
+// one — per-claim pods, or issue pods on one tree volume — remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, repos func() []ghrepo.Repository,
+	serving func(ghrepo.Repository) ghrepo.Repository, renames ghrepo.Renames) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
 		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
@@ -499,9 +512,16 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 		// answered for that bundle again.
 		opts.SavedWorkspaceBundle, opts.WorkspaceBundleRestored = st.TakeWorkspaceBundleForRestore, st.DeleteRestoredWorkspaceBundle
 		if apps != nil {
-			opts.Tokens = implementTokens{apps: apps, serving: servingOwner(owners, renames)}
-			opts.GitHubCredential = appauth.GitHubCredential(apps, owners, renames)
-			opts.GitHubOwners = func() []string { return appauth.GitHubOwners(owners, renames) }
+			// One record per project, written by the two credentials and read by the directory
+			// set for the Apps of the pod it answers for, so no pod is replaced for a directory
+			// no mint of its own Apps can produce (appauth.LeftOut).
+			left := appauth.NewLeftOut()
+			opts.Tokens = newImplementTokens(apps, serving, opts.Log)
+			opts.GitHubCredential = appauth.GitHubCredential(apps, repos, renames, left, opts.Log)
+			opts.ControllerCredential = appauth.ControllerCredential(apps, repos, renames, left, opts.Log)
+			opts.GitHubDirs = func(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+				return appauth.GitHubDirs(repos, renames, left, roles, repo)
+			}
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {
@@ -512,29 +532,22 @@ func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []strin
 	}
 }
 
-// servingOwner is the owner whose installation holds the repositories of owner now: the owner a
-// configured rename moved them to, where the project owns that one and not owner itself
-// (ghrepo.Renames.OwnerAliases, the daemon's one rule for it), and owner unchanged otherwise,
-// which is every owner of a deployment that configures no rename. The owners it reads are the
-// mapping's, which changes as Dispatch's mapping does, so it is read per mint rather than once.
-func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner string) string {
-	return func(owner string) string {
-		aliases, _ := renames.OwnerAliases(func(name string) bool {
-			return slices.ContainsFunc(owners(), func(o string) bool { return strings.EqualFold(o, name) })
-		})
-		if to, alias := aliases[strings.ToLower(owner)]; alias {
-			return to
-		}
-		return owner
-	}
-}
-
 // implementTokens is the workflow's implement App as a sandbox's provisioning token source: every
-// pod's workspace-fetch clones with an installation token minted for the repository's owner. It
-// is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
-// provision, its gh credential refresh and its repository cache Secret), so the owner a
-// configured rename moved a repository away from is mapped here, once, to the owner whose
-// installation holds it now (serving): nothing under runtime/sandbox knows of a rename.
+// pod's workspace-fetch clones with an installation token minted for the repository it fetches
+// and narrowed to reading it (contents, pull requests, Actions and metadata at read,
+// appauth.Tokens.ReadToken), which is all a clone, a fetch and a repository cache do. An
+// installation that refuses that narrowing (appauth.ErrNarrowingRefused, GitHub's 422 to a
+// request naming a repository it does not reach, since the permissions it names are what the
+// installation was granted a moment before) is served the owner's own write token for that
+// repository instead, the one fallback there is, said once for that owner on the daemon's log.
+// Every other refusal — GitHub's trouble (appauth.TransientError, a 5xx or a rate-limited 422)
+// or an App with no installation on the owner (appauth.ErrNotInstalled) — is returned as it
+// came, with no second mint and nothing logged.
+//
+// It is the one token source the Sandbox runtime's three mint sites share (runtime/sandbox's
+// provision, its gh credential refresh and its repository cache Secret), so the repository a
+// configured rename moved to another owner is mapped here, once, to the name whose installation
+// holds it now (serving): nothing under runtime/sandbox knows of a rename.
 //
 // Only the token follows the rename. Every address those three sites build — the pod's feed, its
 // clone, and the repository cache's volume and Service — stays the repository the record names,
@@ -545,16 +558,56 @@ func servingOwner(owners func() []string, renames ghrepo.Renames) func(owner str
 // the record keeps reaches the repository GitHub holds today.
 type implementTokens struct {
 	apps    appauth.Tokens
-	serving func(owner string) string
+	serving func(ghrepo.Repository) ghrepo.Repository
+	// log receives the fallback's line; slog.Default() when nil, as the runtime's own Log is.
+	log *slog.Logger
+
+	// mu guards warned, the set of owners the fallback has already been said of.
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
-func (t implementTokens) Token(ctx context.Context, owner string) (string, error) {
+// newImplementTokens is the adapter over apps, with serving as the map a mint's repository goes
+// through and log as what the fallback's line is written to, slog.Default() when nil.
+func newImplementTokens(apps appauth.Tokens, serving func(ghrepo.Repository) ghrepo.Repository, log *slog.Logger) *implementTokens {
+	return &implementTokens{apps: apps, serving: serving, log: log, warned: map[string]bool{}}
+}
+
+func (t *implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (string, error) {
 	if t.serving != nil {
-		owner = t.serving(owner)
+		repo = t.serving(repo)
 	}
-	lease, err := t.apps.Token(ctx, appauth.Implement, owner)
+	lease, err := t.apps.ReadToken(ctx, appauth.Implement, repo.Owner(), []string{repo.Name()})
+	if err == nil {
+		return lease.Token, nil
+	}
+	if !appauth.NarrowingRefused(err) {
+		return "", err
+	}
+	lease, err = t.apps.Token(ctx, appauth.Implement, repo)
 	if err != nil {
 		return "", err
 	}
+	t.warnOwnToken(repo.Owner())
 	return lease.Token, nil
+}
+
+// warnOwnToken writes the fallback's line the first time owner's pods are provisioned with the
+// owner's own installation token, and nothing on every mint after it, for the life of the process
+// (appauth's sayShortfalls, the same rule for a grant the mint had to cut its request down to).
+func (t *implementTokens) warnOwnToken(owner string) {
+	key := strings.ToLower(owner)
+	t.mu.Lock()
+	warned := t.warned[key]
+	t.warned[key] = true
+	t.mu.Unlock()
+	if warned {
+		return
+	}
+	log := t.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("daemon: this owner's installation refuses a read-only provisioning token, "+
+		"so its pods clone with the owner's own installation token rather than a reading lease", "owner", owner)
 }

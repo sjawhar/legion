@@ -644,8 +644,9 @@ func TestAGateWaitIsDecidedOnceTheGateIsSwitchedOff(t *testing.T) {
 			if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval {
 				t.Fatalf("wait = %#v, want it answered", got.Awaiting)
 			}
-			task := resumeTask("LEGION-208", *got.Awaiting, &record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}, nil, false)
-			for _, want := range []string{"no approval of your spec version 3 is asked for", "closed at version 3", "register it at its current version, which opens the gate"} {
+			task := resumeTask("LEGION-208", *got.Awaiting, record.DesignStepSpec,
+				&record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3}, nil, false)
+			for _, want := range []string{"no approval of your primary document version 3 is asked for", "closed at version 3", "register it at its current version, which opens the gate"} {
 				if !strings.Contains(task, want) {
 					t.Errorf("resume task = %q, want it to name %q", task, want)
 				}
@@ -668,7 +669,7 @@ func reconcileGateOff(t *testing.T, pool *pgxpool.Pool) bool {
 	seedRecord(t, pool, func(tx pgx.Tx) error {
 		scoped, _ := intake.WithCommitHooks(context.Background())
 		var err error
-		_, changed, err = engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil, nil)
+		_, changed, err = engine.ReconcileAwaiting(scoped, tx, "LEGION", []record.Issue{recordedRoot(t, pool)}, nil)
 		return err
 	})
 	return changed
@@ -690,9 +691,9 @@ func TestAGateWaitTheGateOffAnsweredClaimsNoApprovalOnceTheGateIsOnAgain(t *test
 	if !got.Answered() || got.Awaiting.AnsweredBy != record.AnsweredByApproval {
 		t.Fatalf("wait = %#v, want it answered, as approved on the wire", got.Awaiting)
 	}
-	task := resumeTask("LEGION-208", *got.Awaiting, &gate, nil, true)
-	for _, want := range []string{"design gate on LEGION-208 was off", "no person approved your spec version 3 then;",
-		"Your spec is not approved at version 3", "register that version with register_gate"} {
+	task := resumeTask("LEGION-208", *got.Awaiting, record.DesignStepSpec, &gate, nil, true)
+	for _, want := range []string{"design gate on LEGION-208 was off", "no person approved your primary document version 3 then;",
+		"Your primary document is not approved at version 3", "register that version with register_gate"} {
 		if !strings.Contains(task, want) {
 			t.Errorf("resume task = %q, want it to name %q", task, want)
 		}

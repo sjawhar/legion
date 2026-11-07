@@ -11,6 +11,7 @@ import {
   patchIssue,
   putIssueState,
 } from "./api";
+import { inboxCountBadge, inboxCountText } from "./inbox-threads";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -130,13 +131,6 @@ async function eventBarrier(
   throw new Error(`no event reached the page for ${key} in 10 writes 2 s apart`);
 }
 
-async function openNavigation(page: Page, isPhone: boolean) {
-  if (isPhone) {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  }
-  return page.getByRole("navigation", { name: "Navigation" });
-}
-
 /** The GETs of one window grouped by path, most sent first, for an assertion's message. */
 function byPath(gets: readonly string[]): string {
   const counts = new Map<string, number>();
@@ -201,9 +195,13 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
     await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    await expect(turns.getByRole("link", { name: /^Budget reference \d\d$/ })).toHaveCount(50, {
-      timeout: 60_000,
-    });
+    // INFRA-869's R4: "A `dispatch://` reference reads as its target's title ... an issue as
+    // its key and title", so each of the 50 links reads `CORE-<n> Budget reference <nn>` where
+    // it read the title alone before.
+    await expect(turns.getByRole("link", { name: /^CORE-\d+ Budget reference \d\d$/ })).toHaveCount(
+      50,
+      { timeout: 60_000 }
+    );
     await eventBarrier(page, traffic, source.key, source.title);
     await settled(traffic);
     traffic.reset();
@@ -231,9 +229,9 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
     // A change the page shows still lands: a referenced issue's new title in its reference ...
     const renamed = `${targets[0]?.title ?? ""} renamed`;
     await patchIssue(targets[0]?.key ?? "", { title: renamed }, bob);
-    await expect(turns.getByRole("link", { exact: true, name: renamed })).toBeVisible({
-      timeout: 2_000,
-    });
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${targets[0]?.key ?? ""} ${renamed}` })
+    ).toBeVisible({ timeout: 2_000 });
 
     // ... and a child's new status in the open parent's Children tab, which reads the parent's
     // own detail: only the child's event can refresh it once the tab shows the old status.
@@ -250,10 +248,9 @@ test("budget: 20 title writes to issues the page does not show send at most 5 re
   }
 });
 
-test("sidebar: an issue event while the sidebar's first reads are in flight discards none of them @phone", async ({
+test("sidebar: an issue event while the sidebar's first reads are in flight discards none of them", async ({
   browser,
 }, testInfo) => {
-  const isPhone = testInfo.project.name === "iphone";
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OTHER", name: "Other" });
   const subject = await createIssue({ project: "OTHER", title: "Sidebar subject" });
@@ -304,7 +301,7 @@ test("sidebar: an issue event while the sidebar's first reads are in flight disc
 
     await page.clock.install();
     await page.goto(`/issues/${subject.key}`);
-    const navigation = await openNavigation(page, isPhone);
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
     await Promise.all(arrived.map(({ reached }) => reached));
     // A title change moves none of the three: the issue is in no pinned row, no Inbox row and
     // holds no open ask.
@@ -326,7 +323,7 @@ test("sidebar: an issue event while the sidebar's first reads are in flight disc
 
 // SLOW(>=2s): an event barrier - a real write the page has to show before the count starts - the
 // pin written from another tab, and two windows drained to half a second of quiet traffic.
-test("pin: a pin from another tab shows in this tab's sidebar within 2 s with one pinned-list read @phone", async ({
+test("pin: a pin from another tab shows in this tab's sidebar within 2 s with one pinned-list read", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -349,7 +346,7 @@ test("pin: a pin from another tab shows in this tab's sidebar within 2 s with on
     });
     await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
-    const navigation = await openNavigation(page, testInfo.project.name === "iphone");
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
     await expect(navigation.locator('a[href="/projects/CORE"]')).toBeVisible();
     const title = await eventBarrier(page, traffic, issue.key, issue.title);
     await settled(traffic);
@@ -370,10 +367,9 @@ test("pin: a pin from another tab shows in this tab's sidebar within 2 s with on
 
 // SLOW(>=2s): two seeded threads, two reply writes and three event barriers, each a real write
 // the page has to show.
-test("replies: a reply in a thread alice wrote in moves her Replies count, and one in a thread she never wrote in reads nothing @phone", async ({
+test("replies: a reply in a thread alice wrote in moves her Inbox count, and one in a thread she never wrote in reads nothing", async ({
   browser,
 }, testInfo) => {
-  const isPhone = testInfo.project.name === "iphone";
   await createProject({ key: "CORE", name: "Core" });
   const strangers = await createIssue({ project: "CORE", title: "Somebody else's thread" });
   const own = await createIssue({ project: "CORE", title: "Alice's thread" });
@@ -391,22 +387,14 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
         repliesReads += 1;
       }
     });
-    // From 1280 px the sidebar's Replies row carries the count; below, the compact header's
-    // `Replies N` link, absent at 0.
-    const repliesCount = isPhone
-      ? page.getByRole("link", { name: /^Replies \d+$/ })
-      : page
-          .getByRole("navigation", { name: "Navigation" })
-          .getByRole("link", { name: /^Replies/ });
+    // The shell's one Inbox number, wherever this width draws it: the sidebar's entry from
+    // 1280 px, the compact top bar's badge below. Nothing waits on alice yet, so it is bare.
+    const inboxCount = inboxCountBadge(page);
 
     await page.clock.install();
     await page.goto(`/issues/${strangers.key}/conversation`);
     const title = await eventBarrier(page, traffic, strangers.key, strangers.title);
-    if (isPhone) {
-      await expect(repliesCount).toHaveCount(0);
-    } else {
-      await expect(repliesCount).toHaveText("Replies");
-    }
+    await expect(inboxCount).toHaveText(inboxCountText(0));
     await settled(traffic);
     repliesReads = 0;
 
@@ -424,11 +412,7 @@ test("replies: a reply in a thread alice wrote in moves her Replies count, and o
     expect(repliesReads, "Replies reads after a reply in a thread alice never wrote in").toBe(0);
 
     await createComment(own.key, { body: "A reply to alice.", reply_to: ownRoot.id }, session);
-    if (isPhone) {
-      await expect(repliesCount).toHaveText("Replies 1", { timeout: 2_000 });
-    } else {
-      await expect(repliesCount).toHaveText(/^Replies\s*1$/, { timeout: 2_000 });
-    }
+    await expect(inboxCount).toHaveText(inboxCountText(1), { timeout: 2_000 });
     expect(repliesReads).toBeGreaterThan(0);
   } finally {
     await alice.close();

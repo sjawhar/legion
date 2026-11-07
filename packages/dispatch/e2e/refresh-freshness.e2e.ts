@@ -98,9 +98,9 @@ test("document panel: a new comment citing a project document shows in its open 
   }
 });
 
-test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back @phone", async ({
+test("reference: a title written while the reference's read is in flight shows after leaving the page and coming back", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const target = await createIssue({ project: "CORE", title: "Target v1" });
   const holder = await createIssue({ project: "CORE", title: "Holder" });
@@ -114,7 +114,13 @@ test("reference: a title written while the reference's read is in flight shows a
     await page.clock.install();
     await openLive(page, `/issues/${holder.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    await expect(turns.getByRole("link", { exact: true, name: "Target v1" })).toBeVisible();
+    // INFRA-869's R4: "A `dispatch://` reference reads as its target's title ... an issue as
+    // its key and title", so the link reads the key and the title where it read the title
+    // alone before. What this test holds - a title written while the read is in flight shows
+    // once the page is left and returned to - is unchanged.
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${target.key} Target v1` })
+    ).toBeVisible();
     // Past the first read's `MIN_REFETCH_INTERVAL_MS`, so the refresh v2 owes is fetched at once.
     await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS + 200);
 
@@ -129,24 +135,23 @@ test("reference: a title written while the reference's read is in flight shows a
     await page.clock.fastForward(150);
     await held.release();
     const navigation = page.getByRole("navigation", { name: "Navigation" });
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-    }
     await navigation.getByRole("link", { name: /^Inbox/ }).click();
     await expect(page).toHaveURL(/\/(\?.*)?$/);
     // Away from the page for longer than the second the scheduler waits.
     await page.clock.fastForward(1_500);
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/issues/${holder.key}/conversation`));
-    await expect(turns.getByRole("link", { exact: true, name: "Target v3" })).toBeVisible(live);
+    await expect(
+      turns.getByRole("link", { exact: true, name: `${target.key} Target v3` })
+    ).toBeVisible(live);
   } finally {
     await alice.close();
   }
 });
 
-test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox @phone", async ({
+test("inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const other = await createIssue({ project: "CORE", title: "Quarterly budget review" });
   const staying = await createAsk(other.key, { question: "An ask that stays" }, bob);
@@ -161,14 +166,6 @@ test("inbox: an issue closed while the Inbox read is in flight drops its ask fro
     // The question the Inbox keeps, read as the row it is: from 1280 px its text is also in the
     // reading pane, which draws the selected row's card (INFRA-575).
     await expect(inboxRow(page, staying.id)).toBeVisible();
-    // The sidebar's project list, whose refresh is the close's barrier below, is mounted on a
-    // phone only while its drawer is open.
-    if (testInfo.project.name === "iphone") {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      await expect(
-        page.getByRole("navigation", { name: "Navigation" }).locator('a[href="/projects/CORE"]')
-      ).toBeVisible();
-    }
 
     // The Inbox read the new ask owes is composed with the ask and held; the close lands while it
     // is in flight.
@@ -245,7 +242,7 @@ test("inbox: a snooze from alice's other tab moves the row to Later in this tab 
   }
 });
 
-test("replies: an issue's new title shows on the open Replies page within 2 s", async ({
+test("replies: an issue's new title shows on the open Inbox's Reply row within 2 s", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -256,8 +253,9 @@ test("replies: an issue's new title shows on the open Replies page within 2 s", 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await openLive(page, "/replies");
-    const row = page.locator(`[data-replies-row="${root.id}"]`);
+    // The Replies page is the Inbox narrowed to its Reply rows now (`/replies` lands here).
+    await openLive(page, "/?type=reply");
+    const row = page.locator(`[data-inbox-row="reply:${root.id}"]`);
     await expect(row).toContainText("Release train");
 
     await patchIssue(issue.key, { title: "Release train, renamed" }, bob);

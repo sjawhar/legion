@@ -101,9 +101,12 @@ func testSpec() runtime.SpawnSpec {
 // `<state_dir>/home` explicitly, the caller's own variables sorted, then one `<NAME>_FILE` pointer
 // per secret — the boot token's first. PATH is never a pair: tmux would discard it (LEGION-91); the
 // shell command exports it. No other tool path is a pair: a pane's git and jj are its PATH's. No
-// secret value is in any pair.
+// secret value is in any pair. This pane's repository is one the project names, so it carries
+// LEGION_ISSUE_TRAILER beside its issue, the key its commits are stamped with; the pane below,
+// whose repository the project does not name, carries no such pair rather than an empty one.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
+	spec.IssueTrailer = spec.Issue
 	in := PaneInputs{
 		StateDir:    "/state",
 		Workspace:   "/state/workspaces/LEGION-43",
@@ -120,6 +123,7 @@ func TestPanePairs(t *testing.T) {
 	want := []string{
 		"-e", "LEGION_TREE=LEGION-42",
 		"-e", "LEGION_ISSUE=LEGION-43",
+		"-e", "LEGION_ISSUE_TRAILER=LEGION-43",
 		"-e", "LEGION_ROLE=tester",
 		"-e", "LEGION_GENERATION=2",
 		"-e", "LEGION_PROJECT=omp",
@@ -156,6 +160,16 @@ func TestPanePairs(t *testing.T) {
 	for _, pair := range panePairs(spec, in, files) {
 		if strings.HasPrefix(pair, "ENVOY_NATS_URL=") {
 			t.Errorf("an unconfigured NATS still produced %q", pair)
+		}
+	}
+
+	// A pane whose repository the project does not name stamps nothing: no LEGION_ISSUE_TRAILER
+	// pair rather than an empty one.
+	unstamped := spec
+	unstamped.IssueTrailer = ""
+	for _, pair := range panePairs(unstamped, in, files) {
+		if strings.HasPrefix(pair, "LEGION_ISSUE_TRAILER=") {
+			t.Errorf("a pane that stamps no issue key still produced %q", pair)
 		}
 	}
 
@@ -356,7 +370,8 @@ func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				ControllerCredential: staticControllerCredential, GH: fakeGH, ClaimRepository: acmeWidgets,
 			})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("New = %v, want %q", err, tc.want)
@@ -390,7 +405,8 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				ControllerCredential: staticControllerCredential, GH: fakeGH, ClaimRepository: acmeWidgets,
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"
@@ -409,13 +425,15 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 }
 
 // runtimeOwned is exactly what a tree pane is told by the runtime itself: every name it sets with
-// Env empty and no secret but the boot token, every optional value configured. A name added to the
-// pairs and not to runtimeOwned is one a spec could override; a name left in runtimeOwned that the
-// pairs no longer set is one a spec is refused for nothing. A controller pane is told the same gh
-// pairs as any other, so the sets are equal.
+// Env empty and no secret but the boot token, every optional value configured — a repository the
+// project names among them, so the pane stamps its commits and is told the key. A name added to
+// the pairs and not to runtimeOwned is one a spec could override; a name left in runtimeOwned that
+// the pairs no longer set is one a spec is refused for nothing. A controller pane is told the same
+// gh pairs as any other, so the sets are equal.
 func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	spec := testSpec()
 	spec.Env, spec.Secrets = nil, nil
+	spec.IssueTrailer = spec.Issue
 	in := PaneInputs{
 		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
 		EnvoyURL: "http://127.0.0.1:9020", NATSURLs: []string{"nats://a:4222"},

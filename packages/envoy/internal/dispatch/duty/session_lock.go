@@ -21,9 +21,10 @@ var errLockNotHeld = errors.New("the unlock reports this session did not hold th
 // unlock is a statement that answers pg_advisory_unlock's boolean, run with args. conn goes back
 // to its pool once Postgres answers true. Every session-level advisory lock Dispatch takes on a
 // pooled connection is given back this way: a loop's lease (freeLeaseOn), a document room's lock
-// (internal/dispatch/docs, lockRoom) and the files backfill's lock (internal/dispatch/files).
+// (internal/dispatch/docs, lockRoom and a room's batch of browser updates, appendRoomTx) and the
+// files backfill's lock (internal/dispatch/files).
 //
-// The unlock runs under a leaseCall of its own, never the holder's context, for two reasons. A
+// The unlock runs under a LeaseCall of its own, never the holder's context, for two reasons. A
 // lock must be given back after its holder's context has ended too. And an unbounded unlock on a
 // half-open connection would hold its caller here, and everything queued behind that caller,
 // until TCP gives the connection up.
@@ -31,7 +32,7 @@ var errLockNotHeld = errors.New("the unlock reports this session did not hold th
 // An unlock that fails, reaches that bound or answers false leaves what the session holds
 // unknown. The pool would hand such a connection to its next caller, which could take a lock the
 // session already holds and unlock it twice over. So the connection is destroyed instead of
-// returned: it is hijacked out of the pool and closed under a leaseCall of its own. Closing ends
+// returned: it is hijacked out of the pool and closed under a LeaseCall of its own. Closing ends
 // the session, and Postgres drops every lock the session held.
 //
 // The answer is nil once the unlock answered true, ErrSessionClosed when conn was closed before
@@ -42,7 +43,7 @@ func FreeSessionLock(conn *pgxpool.Conn, unlock string, args ...any) error {
 		conn.Release()
 		return ErrSessionClosed
 	}
-	ctx, cancel := leaseCall()
+	ctx, cancel := LeaseCall()
 	defer cancel()
 	freed := false
 	err := conn.QueryRow(ctx, unlock, args...).Scan(&freed)
@@ -54,7 +55,7 @@ func FreeSessionLock(conn *pgxpool.Conn, unlock string, args ...any) error {
 		return nil
 	}
 	dead := conn.Hijack()
-	closeCtx, closeCancel := leaseCall()
+	closeCtx, closeCancel := LeaseCall()
 	defer closeCancel()
 	if closeErr := dead.Close(closeCtx); closeErr != nil {
 		return fmt.Errorf("%w; close its connection: %v", err, closeErr)

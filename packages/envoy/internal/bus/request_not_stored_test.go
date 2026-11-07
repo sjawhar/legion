@@ -3,7 +3,6 @@ package bus
 import (
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,17 +14,11 @@ import (
 // A role forward to a holder with a serving port is a window's Request to the holder's agent
 // subject, under the forward's ForwardMsgID and with AcceptStreamAck, which only the stream
 // answers. On a three-copy stream with a byte limit (in-process three-server cluster), a full
-// stream refuses such a forward with an error acknowledgement, which answers nothing, and the
-// forward retried once the stream has room is stored on the holder's subject and answers nil.
-//
-// A server below v2.15 records the refused forward's id at sequence 0 on the stream's leader, a
-// purge notwithstanding, and acknowledges every later forward under the id a duplicate with no
-// sequence though nothing is stored (ErrNotStored); the request is then sent once more without
-// its id, which that record does not match, where without that send the duplicate would answer
-// nothing and every retry would run out of time. The server this module links, v2.15.2, keeps no
-// such record, so that acknowledgement is published to the request's own inbox here. A window
-// whose deadline passes before it comes back sends nothing more: the forward answers ErrNotStored
-// and ErrWindowDeadline, and nothing of it reaches the holder's subject a second time.
+// stream refuses such a forward, which answers ErrNotAcknowledged and leaves the stream holding
+// nothing of it. Once the stream has room, the forward sent again under the same id is stored on
+// the holder's subject, exactly once: a further send under that id leaves that one copy and adds
+// no second. A window whose deadline has passed writes nothing at all: its forward answers
+// ErrWindowDeadline before anything is sent, and the stream holds nothing of it.
 func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(t *testing.T) {
 	const limit = 16 << 10
 	cluster := testnats.StartCluster(t, 3)
@@ -89,7 +82,7 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 	}
 	// refused fills the stream, forwards item to holder under opts, which the full stream refuses
 	// with an error acknowledgement that answers nothing, and purges the stream, leaving the
-	// leader holding the forward's id at sequence 0 and room to store the forward.
+	// stream with room to store the forward.
 	refused := func(round int, holder string, item contracts.Envelope, opts RequestOptions) {
 		t.Helper()
 		fill(round)
@@ -116,48 +109,24 @@ func TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom(
 		t.Fatalf("the retried forward answered nil and the stream holds %d copies on %s, want 1", n, holder)
 	}
 
+	// The same forward sent again is stored once: the stream answers under the id from the copy it
+	// already holds and stores no second one.
+	if err := answer(client.WindowUntil(nil).Request(holder, item, opts)); err != nil {
+		t.Fatalf("the forward sent again once the stream held it = %v, want nil", err)
+	}
+	if n := held(holder); n != 1 {
+		t.Fatalf("the forward sent again left %d copies on %s, want 1", n, holder)
+	}
+
 	fencedHolder := contracts.AgentSubject("ses_forward_fenced")
 	fenced := forward("fenced")
 	fencedOpts := RequestOptions{MsgID: ForwardMsgID(fenced.DedupeKey, fencedHolder), AcceptStreamAck: true, Timeout: 5 * time.Second}
-	// The stream is left full, so its own answer to the forward is the error acknowledgement that
-	// settles nothing, and the duplicate with no sequence is the test's to send, once the window's
-	// deadline has passed. The forwards themselves are read from the holder's subject, so a resend
-	// the window should not have made is seen whether the full stream stores it or not.
-	fill(2)
-	forwarded := make(chan *nats.Msg, 4)
-	forwards, err := client.Conn.Subscribe(fencedHolder, func(msg *nats.Msg) { forwarded <- msg })
-	if err != nil {
-		t.Fatalf("subscribe to %s: %v", fencedHolder, err)
+	fencedWindow := client.WindowUntil(func() time.Time { return time.Now().Add(-time.Second) })
+	if err := answer(fencedWindow.Request(fencedHolder, fenced, fencedOpts)); !errors.Is(err, ErrWindowDeadline) {
+		t.Fatalf("a forward through a window whose deadline has passed = %v, want ErrWindowDeadline", err)
 	}
-	t.Cleanup(func() { _ = forwards.Unsubscribe() })
-	if err := client.Conn.Flush(); err != nil {
-		t.Fatalf("flush the subscription to %s: %v", fencedHolder, err)
-	}
-	var deadline atomic.Int64
-	deadline.Store(time.Now().Add(time.Hour).UnixNano())
-	window := client.WindowUntil(func() time.Time { return time.Unix(0, deadline.Load()) })
-	outcome := window.Request(fencedHolder, fenced, fencedOpts)
-	var sent *nats.Msg
-	select {
-	case sent = <-forwarded:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the forward did not reach the holder's subject within 10 s")
-	}
-	// The request has left; the deadline passes before the duplicate's acknowledgement is in.
-	deadline.Store(time.Now().Add(-time.Second).UnixNano())
-	if err := client.Conn.Publish(sent.Reply, []byte(`{"stream":"`+Stream+`","duplicate":true}`)); err != nil {
-		t.Fatalf("answer the forward with a duplicate carrying no sequence: %v", err)
-	}
-	err = answer(outcome)
-	if !errors.Is(err, ErrNotStored) || !errors.Is(err, ErrWindowDeadline) {
-		t.Fatalf("a not-stored forward whose window's deadline passed = %v, want ErrNotStored and ErrWindowDeadline", err)
-	}
-	select {
-	case again := <-forwarded:
-		t.Fatalf("the window sent the forward to %s again past its deadline: %s", fencedHolder, again.Data)
-	case <-time.After(500 * time.Millisecond):
-	}
+	time.Sleep(500 * time.Millisecond)
 	if n := held(fencedHolder); n != 0 {
-		t.Fatalf("the stream holds %d copies on %s of the forward the window did not send again, want none", n, fencedHolder)
+		t.Fatalf("the stream holds %d copies on %s of the forward the window's deadline fenced, want none", n, fencedHolder)
 	}
 }

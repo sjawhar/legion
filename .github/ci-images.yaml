@@ -51,8 +51,9 @@ images:
     tag: pgvector-2358fcba
     digest: sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 
-  # NATS 2.10: the envoy-client job's pre-pull, nats-server.ts, scripts/e2e/lib/nats-stream.test.ts
-  # and packages/daemon's testnats.Image.
+  # NATS 2.10: the envoy-client job's pre-pull, nats-server.ts, scripts/e2e/lib/nats-stream.test.ts,
+  # packages/daemon's testnats.Image and packages/envoy's testnats.LegacyImage, the older server
+  # internal/bus's natslive rows read the consumer cap's two pre-2.15 cases on.
   - upstream: docker.io/library/nats:2.10
     tag: nats-2.10-5498ba57
     digest: sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f

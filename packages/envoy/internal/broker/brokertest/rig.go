@@ -190,8 +190,17 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
-	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
+	// BROKER_SERVICES: the account every pod MintPodToken mints a token for runs as, bound to the
+	// service DaemonAccount logs in as, which is what lets that login enrol those pods
+	// (enroll.Service.podUnderTokenLogin).
+	servicesByAccount := map[string]string{WorkerAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins, ServicesByAccount: servicesByAccount}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
+	// A session name belongs to one principal here as it does on the real broker: the binder is
+	// a store on the same pool the OAuth provider's own store uses (NewOAuthProvider, built
+	// below), so a name the token exchange binds and a name an enrollment binds are the one
+	// table's.
+	enr.Sessions = oauthstore.New(st.Pool)
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: policytest.Store(local), PendingTTL: 12 * time.Hour,
@@ -428,7 +437,7 @@ func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (crede
 // internal/broker/enroll/enroll_test.go's own mintPodToken helper.
 func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 	t.Helper()
-	claims := r.podIssuer.Claims("system:serviceaccount:legion:worker", podAudience)
+	claims := r.podIssuer.Claims(WorkerAccount, podAudience)
 	raw, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatalf("marshal claims: %v", err)
@@ -446,6 +455,11 @@ func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 // account does.
 const DaemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
 
+// WorkerAccount is the ServiceAccount the pods MintPodToken mints tokens for run as, which every
+// Rig's BROKER_SERVICES binds to the service DaemonAccount logs in as, as a Legion worker pod's
+// account is bound to legion-daemon.
+const WorkerAccount = "system:serviceaccount:legion:worker"
+
 // MintAccountToken mints a projected ServiceAccount token for account, expiring lifetime from now
 // (a negative lifetime mints one already expired), signed by this Rig's own local OIDC issuer for
 // its audience: what a daemon's token file holds. Bound to no pod, as `kubectl create token` mints.
@@ -455,6 +469,20 @@ func (r *Rig) MintAccountToken(t *testing.T, account string, lifetime time.Durat
 	now := time.Now()
 	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
 	claims["exp"] = now.Add(lifetime).Unix()
+	return r.podIssuer.Mint(t, r.podKey, claims)
+}
+
+// MintAccountPodToken is MintAccountToken bound to podUID: the projected ServiceAccount token a
+// pod's own kubelet mounts, which names both the account it runs as and the pod it is. A service
+// that logs in with one of these logs in as that pod rather than as the account at large, which
+// is what lets several pods of one account hold logins at the same time.
+func (r *Rig) MintAccountPodToken(t *testing.T, account, podUID string, lifetime time.Duration) string {
+	t.Helper()
+	claims := r.podIssuer.Claims(account, podAudience)
+	now := time.Now()
+	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
+	claims["exp"] = now.Add(lifetime).Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
 	return r.podIssuer.Mint(t, r.podKey, claims)
 }
 

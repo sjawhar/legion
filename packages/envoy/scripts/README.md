@@ -382,3 +382,55 @@ identity. The script writes 50 comments, 50 asks, 50 messages, 100 document vers
 edits for every run, which is what A9 measures: run it after the statement timings, and re-seed
 before anything reads a row count again. `--requests`, `--body-bytes`, `--artifact` and
 `--large-artifact` are the knobs; `--help` lists them.
+
+## going-smoke.sh
+
+Proves, on a booted server, that the real `envoy-dispatch` binary answers a question over HTTP and
+streams it. It builds `./cmd/dispatch`, starts the fake chat-completions model it serves itself,
+boots the binary against `DATABASE_URL` with `DISPATCH_ANSWERER=endpoint` pointed at that model,
+reads `GET /api/v1/going/capability` and refuses anything but `{"model_configured":true}`, seeds a
+project and an issue whose own text is worth citing through the API as the identity header's
+person, asks a question of that issue over `POST /api/v1/going/requests` and prints the run's id
+and `ends_at`, then prints every frame of `GET /api/v1/going/requests/{id}/stream` as
+`<elapsed ms> <event> <data>` as it arrives, so two builds' runs diff, with the first `text`
+frame's arrival on a line of its own. It ends `going-smoke: OK` only when the stream carried at
+least one `text` frame, exactly one `item` frame naming the seeded issue and exactly one terminal
+frame, and the first `text` frame arrived before the stream ended; any refusal names what was
+missing and prints the server's and the model's logs. It needs `curl`, `jq`, `python3`, `openssl`
+and `psql`, and names the one it cannot find.
+
+No cloud model is called: the model is a fake the script starts. It serves TLS, because
+`DISPATCH_CHAT_ENDPOINT` is an absolute https URL with a host and no query or fragment
+(`cmd/dispatch/answerer.go`, `chatEndpoint`), so the run makes a self-signed certificate for
+`127.0.0.1` with the IP in a subject alternative name, serves it from a small `python3` server and
+hands the binary `SSL_CERT_FILE`, which Go's `crypto/x509` reads — no setting of Dispatch's own is
+bent to admit a plain-http endpoint. The fake answers a streamed completion that links the seeded
+issue by the href the server gave it, in several frames with a pause between them, and refuses any
+call that does not present the bearer `DISPATCH_CHAT_TOKEN_FILE` holds, so a run that reports OK is
+one whose token file reached the call. The server runs with a throwaway `HOME`, a made-up agent
+token and a trusted identity header, so it reads no operator configuration and holds no credential,
+and with NATS off. `DATABASE_URL` names the Postgres server rather than one database: the run makes
+a database of its own on it, which the binary migrates as every start does, and drops it at the end.
+
+```bash
+legion-testpg ensure
+cd packages/envoy && DATABASE_URL="$LEGION_TEST_PG_DSN" bash scripts/going-smoke.sh
+```
+
+Options:
+
+- `--binary <envoy-dispatch>` — run this binary instead of building `./cmd/dispatch` from this
+  checkout.
+- `--model-status <code>` — answer every call to the fake model with that status instead of a
+  completion. `--model-status 401` is one negative control: the stream carries
+  `error ANSWER_FAILED` and nothing else, and the run exits 1 naming the frames it did not get.
+- `--no-model` — boot the server with `DISPATCH_ANSWERER` unset and no `DISPATCH_CHAT_*` setting.
+  That is the other negative control: the capability route answers `{"model_configured":false}`
+  and the run exits 1 naming it.
+
+No CI job runs this one, and none should: it builds the binary, boots a server, serves TLS and
+reads an answer as it streams, which takes a machine with a Postgres server and the better part of
+a minute, and what it proves is that a reader gets an answer on a real deployment's own path — a
+thing a person reads rather than a status a job reports. Run it by hand, or as the role proving a
+change to `going/`, to the answerer settings in `cmd/dispatch`, or to the three `going` routes, and
+paste its output: the frame lines are the evidence.

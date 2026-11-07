@@ -12,8 +12,6 @@ import {
   borderStrong,
   enabledCardHoverBorder,
   inputClasses,
-  linkHoverText,
-  linkText,
   surfaceMutedBg,
   textMutedOnSurfaceMuted,
   textPrimaryOnSurfaceMuted,
@@ -24,7 +22,12 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
 import type { DwellRef } from "../shell/useDwell";
+import { EarlierReplies } from "../threads/EarlierReplies";
+import { threadLayout } from "../threads/thread-layout";
+import type { ThreadOrder } from "../threads/thread-order";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
@@ -54,8 +57,9 @@ function AskReply({
       ref={markRef}
     >
       <div className={textPrimaryOnSurfaceMuted}>
-        <MarkdownBody markdown={comment.body} />
+        <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
       </div>
+      <Unfurl body={comment.body} source={textSourceOf("comment", comment.id)} />
       <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
       </p>
@@ -180,20 +184,28 @@ export interface AskThreadProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
-  /** The Replies page's mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the newest
-   *  reply's own element when that reply is the newest write the card shows. */
+  /** The shared thread read mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the
+   *  newest reply's own element when that reply is the newest write the card shows. */
   markNewest?: DwellRef;
   /** The reply a deep link named, which only the Conversation passes: that reply carries
    *  `aria-current`, and the fold over the older replies opens when it is one of them. */
   currentReplyId?: string;
+  /** The order the thread reads in: the reader's own choice, which the card holds
+   *  (`threads/thread-order.ts`). */
+  order: ThreadOrder;
+  /** The ids of the replies the reader has not read (`unreadWrites` in
+   *  `threads/thread-layout.ts`): an unread reply is never folded away. */
+  unread?: ReadonlySet<string>;
 }
 
 /**
- * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, newest first. The newest two replies stay
- * visible; a card-local control reveals the remaining older replies. Answered asks keep a plain
- * reply composer; open asks reserve their single composer for answering or asking back, and a
- * resolved ask keeps its history without a composer.
+ * The reply thread under a question: every comment that replies directly to the ask
+ * (Comment.ask_id) plus their own reply chains, in the reader's thread order, with the replies
+ * outside the newest two folded behind **Show N earlier replies** (`threads/thread-layout.ts`,
+ * drawn by `threads/EarlierReplies.tsx`, the fold control the Inbox's thread body shares).
+ * Answered asks keep a plain reply composer, at the end of that order; open asks reserve their
+ * single composer for answering or asking back, and a resolved ask keeps its history without a
+ * composer.
  */
 export function AskThread({
   ask,
@@ -204,19 +216,56 @@ export function AskThread({
   uploadOwner,
   markNewest,
   currentReplyId,
+  order,
+  unread,
 }: AskThreadProps): ReactNode {
-  const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState<boolean>();
-  const hiddenReplyCount = Math.max(replies.length - 2, 0);
-  const recentReplies = replies.slice(-2).reverse();
+  const { composerFirst, folded, shown } = threadLayout({
+    collapse: true,
+    order,
+    replies,
+    unread,
+  });
   const newestReply = replies.at(-1);
-  const older = replies.slice(0, -2);
-  // A link to a reply older than the two the card keeps visible seeds the control open, so the
-  // reply it names is on screen rather than behind a control the reader must find. Seeding, not
-  // overriding: once the reader uses the control, their choice wins.
-  const showAll = showAllReplies ?? older.some((comment) => comment.id === currentReplyId);
-  const olderReplies = showAll ? [...older].reverse() : [];
+  // A link to a reply the fold holds seeds the control open, so the reply it names is on screen
+  // rather than behind a control the reader must find. Seeding, not overriding: once the reader
+  // uses the control, their choice wins.
+  const showAll = showAllReplies ?? folded.some((comment) => comment.id === currentReplyId);
+
+  const replyList =
+    shown.length === 0 ? null : (
+      <ul className="space-y-2">
+        {shown.map((comment) => (
+          <AskReply
+            comment={comment}
+            current={comment.id === currentReplyId}
+            key={comment.id}
+            markRef={comment === newestReply ? markNewest : undefined}
+          />
+        ))}
+      </ul>
+    );
+  // The fold and what it holds are one block, drawn furthest from the newest message: under the
+  // question in Oldest first, at the foot of the thread in Newest first.
+  const fold = (
+    <EarlierReplies
+      count={folded.length}
+      onToggle={() => setShowAllReplies(!showAll)}
+      open={showAll}
+      replies={(id) => (
+        <ul className="space-y-2" id={id}>
+          {folded.map((comment) => (
+            <AskReply comment={comment} current={comment.id === currentReplyId} key={comment.id} />
+          ))}
+        </ul>
+      )}
+    />
+  );
+  const composer =
+    showComposer && ask.state === "answered" ? (
+      <AskReplyComposer ask={ask} createReply={reply} uploadOwner={uploadOwner} />
+    ) : null;
 
   return (
     <section
@@ -224,41 +273,12 @@ export function AskThread({
       className={embedded ? "space-y-3" : `mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
-      {recentReplies.length === 0 ? null : (
-        <ul className="space-y-2">
-          {recentReplies.map((comment) => (
-            <AskReply
-              comment={comment}
-              current={comment.id === currentReplyId}
-              key={comment.id}
-              markRef={comment === newestReply ? markNewest : undefined}
-            />
-          ))}
-        </ul>
-      )}
-      {hiddenReplyCount === 0 ? null : (
-        <button
-          aria-controls={olderRepliesId}
-          aria-expanded={showAll}
-          className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
-          onClick={() => setShowAllReplies(!showAll)}
-          type="button"
-        >
-          {showAll
-            ? "Show fewer replies"
-            : `Show ${hiddenReplyCount} more ${hiddenReplyCount === 1 ? "reply" : "replies"}`}
-        </button>
-      )}
-      {olderReplies.length === 0 ? null : (
-        <ul className="space-y-2" id={olderRepliesId}>
-          {olderReplies.map((comment) => (
-            <AskReply comment={comment} current={comment.id === currentReplyId} key={comment.id} />
-          ))}
-        </ul>
-      )}
-      {showComposer && ask.state === "answered" ? (
-        <AskReplyComposer ask={ask} createReply={reply} uploadOwner={uploadOwner} />
-      ) : null}
+      {/* Three slots, so a change of order moves the ends and leaves the replies where they
+          are: the box the reader writes in sits next to the newest message, the fold over the
+          earlier replies furthest from it. */}
+      {composerFirst ? composer : fold}
+      {replyList}
+      {composerFirst ? fold : composer}
     </section>
   );
 }

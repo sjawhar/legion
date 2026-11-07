@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
@@ -591,14 +592,14 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		if listed == nil {
 			listed = noGitRepository
 		}
-		owner, err := ghTargetOf(tc.argv, tc.env, help, listed)
+		target, err := ghTargetOf(tc.argv, tc.env, help, listed)
 		switch {
 		case tc.err != "":
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
-				t.Errorf("ghTargetOf(%q, %v) = %q, %v; want a refusal containing %q", tc.argv, tc.env, owner, err, tc.err)
+				t.Errorf("ghTargetOf(%q, %v) = %+v, %v; want a refusal containing %q", tc.argv, tc.env, target, err, tc.err)
 			}
-		case err != nil || owner != tc.owner:
-			t.Errorf("ghTargetOf(%q, %v) = %q, %v; want %q", tc.argv, tc.env, owner, err, tc.owner)
+		case err != nil || target.owner != tc.owner:
+			t.Errorf("ghTargetOf(%q, %v) = %+v, %v; want the owner %q", tc.argv, tc.env, target, err, tc.owner)
 		}
 	}
 }
@@ -622,6 +623,85 @@ func TestGhTargetOfRefusalsSayHowToNameTheRepository(t *testing.T) {
 	}
 }
 
+// Beside the owner, ghTargetOf reads the repository a command names, which is the directory
+// `legion gh` runs it with where the bundle holds one: a `<repository>` argument, -R, a pull
+// request's URL, OWNER/REPO#N where the leaf reads it, a search repo: qualifier, `gh api`'s
+// repos/<owner>/<repo>/… endpoint, GH_REPO and the working directory's remotes each name one.
+// The name is keyed as the directory holding its token is named for it, so `Legion` and
+// `widgets.git` are `legion` and `widgets`, and two spellings of one repository are one. They
+// must all name the one repository: a command naming none, one naming two of the one owner, and
+// one where a selector
+// named the owner alone — an `<owner>` argument, orgs/<owner>/ or users/<owner>/, an
+// owner:/org:/user: qualifier, a team, an owner option — name none, and the command runs as the
+// owner.
+func TestGhTargetOfNamesTheOneRepositoryEverySelectorNames(t *testing.T) {
+	remotes := func(listed ...ghRemote) func() ([]ghRemote, error) {
+		return func() ([]ghRemote, error) { return listed, nil }
+	}
+	acmeClone := ghRemote{name: "origin", url: "https://github.com/Acme/widgets.git"}
+	for _, tc := range []struct {
+		argv    []string
+		env     map[string]string
+		remotes func() ([]ghRemote, error) // a working directory that is no git repository when nil
+		owner   string
+		repo    string // "" where the selectors name no one repository
+	}{
+		// One repository, named by each selector that names one.
+		{argv: []string{"pr", "view", "1", "-R", "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"--repo=sjawhar/Legion", "pr", "view", "1"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"repo", "clone", "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"repo", "clone", "github.com/sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/pull/2/files"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"agent-task", "view", "sjawhar/legion#1"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"search", "issues", "repo:sjawhar/legion", "is:open"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"api", "repos/sjawhar/legion/pulls/1/files"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"api", "REPOS/sjawhar/Legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"api", "search/issues?q=repo:sjawhar/legion+is:open"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "sjawhar/Legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar", repo: "legion"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone), owner: "acme", repo: "widgets"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"}), owner: "acme", repo: "widgets"},
+		{argv: []string{"pr", "list"}, remotes: remotes(ghRemote{name: "origin", resolved: "acme/widgets"}), owner: "acme", repo: "widgets"},
+		// The same repository named twice is still the one: the leaf's own argument beside the
+		// working directory's remote, and an option's URL beside -R.
+		{argv: []string{"pr", "view", "1", "-R", "acme/widgets"}, remotes: remotes(acmeClone), owner: "acme", repo: "widgets"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/acme/widgets/pull/9", "-R", "acme/widgets"}, owner: "acme", repo: "widgets"},
+		// Two spellings of the one repository are one repository, not two: the pull request's
+		// URL spells it as GitHub shows it and -R as the bundle's directory is named, and a
+		// remote's clone URL carries the `.git` the directory's name has not.
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/Legion-Smoke/pull/7", "-R", "sjawhar/legion-smoke"}, owner: "sjawhar", repo: "legion-smoke"},
+		{argv: []string{"pr", "view", "1", "-R", "acme/Widgets"}, remotes: remotes(acmeClone), owner: "acme", repo: "widgets"},
+		// Two repositories of the one owner: the command reaches both, so it runs as the owner.
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion", "-R", "sjawhar/other"}, owner: "sjawhar"},
+		{argv: []string{"issue", "edit", "5", "--add-blocked-by", "https://github.com/acme/other/issues/9"}, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"pr", "view", "https://github.com/acme/other/tree/x"}, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"secret", "set", "TOKEN", "-o", "sjawhar", "-r", "legion,smoke", "--body", "dummy"}, owner: "sjawhar"},
+		// A selector naming the owner alone: whatever else of the owner's gh resolves is in
+		// reach, so the one repository another selector names is not the command's alone.
+		{argv: []string{"repo", "list", "Sjawhar"}, owner: "sjawhar"},
+		{argv: []string{"api", "orgs/acme/teams"}, owner: "acme"},
+		{argv: []string{"api", "users/sjawhar/repos"}, owner: "sjawhar"},
+		{argv: []string{"search", "issues", "--owner", "acme", "bug"}, owner: "acme"},
+		{argv: []string{"search", "issues", "org:sjawhar"}, owner: "sjawhar"},
+		{argv: []string{"project", "link", "1", "--team", "sjawhar/core"}, owner: "sjawhar"},
+		{argv: []string{"secret", "set", "TOKEN", "--org", "acme"}, owner: "acme"},
+		{argv: []string{"api", "graphql", "-f", "query=q", "-F", "owner=Sjawhar", "-F", "name=legion"}, owner: "sjawhar"},
+		{argv: []string{"api", "repos/sjawhar/{repo}/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
+		// A command naming no owner at all names no repository either.
+		{argv: []string{"pr", "list"}},
+		{argv: []string{"api", "user"}},
+	} {
+		listed := tc.remotes
+		if listed == nil {
+			listed = noGitRepository
+		}
+		target, err := ghTargetOf(tc.argv, tc.env, savedGhHelp, listed)
+		if err != nil || target.owner != tc.owner || target.repo != tc.repo {
+			t.Errorf("ghTargetOf(%q, %v) = %+v, %v; want the owner %q and the repository %q", tc.argv, tc.env, target, err, tc.owner, tc.repo)
+		}
+	}
+}
+
 // noGitRepository is the git remotes of a working directory that is no git repository: none.
 func noGitRepository() ([]ghRemote, error) { return nil, nil }
 
@@ -641,6 +721,9 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	if remotes, err := readGitRemotes(); err != nil || remotes != nil {
 		t.Errorf("readGitRemotes outside a git repository = %v, %v; want none", remotes, err)
 	}
+	// One home for every fixture of this test: each command reads the repository it is given and
+	// the identity Isolated supplies, and nothing of the home but that.
+	fixture := fixtureenv.Isolated(t.TempDir())
 	for _, args := range [][]string{
 		{"init", "-q"},
 		{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
@@ -653,8 +736,13 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	} {
 		command := exec.Command("git", args...)
 		// readGitRemotes reads the process's working directory, so the fixture runs in the same
-		// directory by name rather than inheriting whatever the process has.
+		// directory by name rather than inheriting whatever the process has, and it carries an
+		// environment of its own rather than the test process's. The two t.Setenv lines above are
+		// not for this git: readGitRemotes runs in-process, in the test binary, and reads them
+		// there, while fixtureenv.Isolated keeps this git off any repository, configuration or
+		// credential a GIT_ variable planted back after the guard could name.
 		command.Dir = repository
+		command.Env = fixture
 		if out, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -695,11 +783,14 @@ func TestReadGitRemotesRefusesALineGhReadsOtherwise(t *testing.T) {
 			if tc.filter != "" {
 				config = append(config, []string{"config", "remote.origin.promisor", "true"}, []string{"config", "remote.origin.partialclonefilter", tc.filter})
 			}
+			fixture := fixtureenv.Isolated(t.TempDir())
 			for _, args := range config {
 				command := exec.Command("git", args...)
 				// The fixture configures the repository readGitRemotes reads, which is the
-				// directory this case chdirs into, named here rather than inherited.
+				// directory this case chdirs into, named here rather than inherited, and its
+				// environment is its own too, for the reason the test above gives.
 				command.Dir = repository
+				command.Env = fixture
 				if out, err := command.CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v: %s", args, err, out)
 				}
@@ -753,15 +844,18 @@ func legionGhIn(t *testing.T, dir string, env map[string]string, stdin string, a
 }
 
 // `legion gh` execs the real gh (LEGION_GH_PATH) as `gh`, with its arguments untouched and
-// GH_CONFIG_DIR pointed at the directory of the owner the command names, and at the issue's
-// owner's (the GH_CONFIG_DIR it was given) when it names none, reading --help=false as no help. It
+// GH_CONFIG_DIR pointed at the directory of the repository the command names where the bundle
+// holds one — `<owner>/<repo>`, whose token reaches that repository alone — at the owner's
+// otherwise (a repository the bundle holds no directory for, two repositories of the one owner,
+// a selector naming the owner alone), and at the issue's owner's (the GH_CONFIG_DIR it was
+// given) when the command names no owner, reading --help=false as no help. It
 // reads each command from the real gh's own help. The real gh runs with GH_PATH naming the `gh`
 // wrapper first on PATH, so the git gh runs asks `legion gh auth git-credential`, which answers by
-// the path's owner as `legion git-credential` does; with useHttpPath on for github.com, and gh's
+// the path's repository as `legion git-credential` does; with useHttpPath on for github.com, and gh's
 // update check and prompts off. A command naming an owner the bundle holds no directory for is
 // refused, exit 2, naming the owner, and so are one it cannot read, a gh alias, and any command
 // when PATH's first gh is the real gh; the real gh never runs. In a clone of an owner's
-// repository, a command naming none runs as that owner's. Each of the three variables it needs is
+// repository, a command naming none runs as that repository's. Each of the three variables it needs is
 // required, and an unset one is named with exit 2; --help with no real gh to hand it to is
 // legion's usage.
 func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
@@ -795,6 +889,13 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		{[]string{"pr", "list"}, defaultDir},
 		{[]string{"pr", "view", "1", "-R", "acme/widgets", "--help=false"}, filepath.Join(root, "acme")},
 		{[]string{"api", "repos/sjawhar/legion-smoke", "--help=false", "-q", "."}, filepath.Join(root, "sjawhar")},
+		// The repository the bundle holds a directory of its own for, named by -R and by `gh
+		// api`'s endpoint; a repository it holds none for, two repositories of the one owner, and
+		// a selector naming the owner alone are the owner's directory's.
+		{[]string{"pr", "view", "1", "-R", "sjawhar/legion"}, filepath.Join(root, "sjawhar", "legion")},
+		{[]string{"api", "repos/sjawhar/legion/pulls/1", "--jq", ".title"}, filepath.Join(root, "sjawhar", "legion")},
+		{[]string{"issue", "transfer", "3", "sjawhar/legion", "-R", "sjawhar/legion-smoke"}, filepath.Join(root, "sjawhar")},
+		{[]string{"repo", "list", "sjawhar"}, filepath.Join(root, "sjawhar")},
 	} {
 		code, stdout, stderr := legionGh(t, env, tc.args...)
 		want := stub + "|" + tc.dir + "|" + strings.Join(tc.args, " ") + "\n" + wantEnv

@@ -10,6 +10,7 @@
     "cap": 2,
     "active": [],
     "waiting": [],
+    "trees": [],
     "blocked": []
   },
   "issues": {
@@ -38,6 +39,7 @@
   "pendingStatusWrites": [],
   "heldOutboxRows": [],
   "strandedClaims": [],
+  "wakesWaiting": [],
   "capabilities": [],
   "repositories": {
     "owners": [],
@@ -70,11 +72,15 @@
     "launch_failure_limit": 3,
     "prompt_failure_limit": 3,
     "prompt_retire_limit": 2,
+    "worker_wakes_per_minute": 8,
+    "worker_wake_burst": 1,
     "envoy_url": "http://127.0.0.1:9020",
     "nats_urls": [],
     "projects": {},
     "gates": {
-      "design": "root-issues"
+      "design": [
+        "spec"
+      ]
     },
     "linger_hours": 72,
     "production_check_hours": 336,

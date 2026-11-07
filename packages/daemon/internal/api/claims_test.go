@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -109,6 +110,7 @@ func TestRegisterRecordsThePluginContractAndTheOperatorViewShowsIt(t *testing.T)
 func TestRegisterAnswersAnEmptyPromptAgentsListWhenTheDaemonHasNone(t *testing.T) {
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store,
 	}).Handler
 	_, boot := h.launch("LEGION-208", claim.RoleArchitect)

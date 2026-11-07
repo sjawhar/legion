@@ -33,8 +33,11 @@ questions, approve the spec, and review the pull request. Everything happens in
    its status to **`todo`**, or approve its spec: your approval queues it the same way.
 
 When a slot is free the daemon admits the issue and the status changes to `in_progress`; when
-every slot is taken, the issue waits in `todo` and takes the next free slot in the board's order. A
-label an agent session set on an issue in `triage` goes to the controller instead: the controller
+every slot is taken, the issue waits in `todo` and takes the next free slot in the board's order.
+A slot is one issue with work, a root or a child, so a tree of four working issues holds four of
+them, and an issue that only waits — for its merge, on a blocker, on its own children or on you —
+holds none while its agents stay live.
+A label an agent session set on an issue in `triage` goes to the controller instead: the controller
 decides whether to admit it, park it, or leave it for you.
 
 The controller never takes an issue on its own, whatever slots are free: Legion works what a person
@@ -46,7 +49,9 @@ or depends on the code. Otherwise the controller gives it to the tree that owns 
 needs a decision, the agent asks you in a Dispatch ask whether to file one, rather than filing it.
 Answer with `File it for Legion` and the controller files it labelled `legion`.
 
-Do not label child issues: a child runs under its tree once the root is admitted.
+Do not label child issues: a child runs under its tree once the root is admitted. The children do
+the work first: an issue starts no phase of its own while Dispatch shows an open child under it,
+so a parent's own pull request is built and merged after its children's.
 
 ## Ask Legion in Slack
 
@@ -80,8 +85,10 @@ options and a recommendation, and it reaches your Inbox.
 
 No code is written until you approve. The approval is for that version of the spec: if the spec
 changes afterwards, you are asked again, and Legion will not send `READY` for the change until you
-approve the new version. (A deployment can turn the design gate off with `gates.design: off`; then
-the work starts as soon as the spec is written, and nobody is asked.)
+approve the new version. (`gates.design` says which documents of the root issue a person approves:
+by default the spec alone, and a deployment can add the issue's decisions document or its
+Verification document, each approved the same way. A deployment that sets `gates.design: []` turns
+the design gate off; then the work starts as soon as the spec is written, and nobody is asked.)
 
 If a phase gets stuck, or the architect hits something only a person can decide, it asks you the
 same way: a question in your Inbox that says what is blocked, the options, and what it recommends.
@@ -104,8 +111,9 @@ template, and the later phases fill in their own lines:
   commit it ran at and the role that ran it.
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
-- The `after_merge` check, recorded by the implementer after the merge closes the issue, once your
-  deploy carries the change; its line reads `not yet run` until then.
+- The `after_merge` check, recorded after the merge closes the issue by the role your project's
+  `production_check` names — the tester, unless the setting is `off`, where no production check
+  opens — once your deploy carries the change; its line reads `not yet run` until then.
 - Any line your repository's own instructions derive from the paths the change touches, such as a
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
   change, the way those instructions say.
@@ -138,18 +146,21 @@ The merge closes the issue: it moves to `done` the moment GitHub reports the pul
 A root with work still running beneath it is the exception: its merge is recorded and the issue
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
-it, with a comment on the issue summarizing the evidence; work still running beneath an issue does
-not hold that acceptance, since the root's close waits for it. After the close the
-implementer checks the change in production, once your deploy carries it, and records what it saw
+it, with a comment on the issue summarizing the evidence; the daemon refuses that acceptance while
+an issue beneath it is still being worked, so a parent is accepted after its children. After the
+close the role your project's `production_check` names — the tester, unless the setting is `off` —
+checks the change in production and records what it saw
 as the result of the issue's `after_merge` check, with that result's line on the pull request; a
 closed issue takes a result for such a check and no other write, so look in both places.
+Each look that finds the deploy missing says when it wants to look again, and nothing else brings
+it back.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
 resumes.
 
 ## Stop, park or rerun
 
 - **To stop Legion working an issue**, move it to `backlog` (or `icebox`) from the Dispatch
-  dashboard. A person's move takes the tree out at once and its slot goes to the next issue; its
+  dashboard. A person's move takes the tree out at once and the slots its issues held go to the next issues in line; its
   agents stop, each once the turn it is in ends, however long that takes, so a turn already under
   way finishes what it was doing. To keep Legion off it for good, also take the `legion` label off;
   taking the label off alone does not stop a tree that has started.
@@ -175,9 +186,9 @@ you stop the work.
 | `triage` | whoever files the issue | New. A person's `legion` label is queued by the daemon: the issue moves to `todo` itself. A label a session set goes to the controller, which decides whether to admit it now, park it, or leave it to you. |
 | `icebox` | a person or the controller | Parked for the long term. Legion does not run it. |
 | `backlog` | a person or the controller | Should not run now: it waits on a decision or a deploy. Legion does not run it. |
-| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child shows `todo` only until its first phase: the move into planning sets it to `in_progress`. |
+| `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` waits in the same line for a slot of its own, and shows `todo` only until its first phase: the move into planning sets it to `in_progress`. |
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
 | `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
-| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The implementer's production check follows on the pull request; the tree lingers, then closes. |
+| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The production check your project's `production_check` opens — the tester's, unless the setting is `off` — follows on the pull request; the tree lingers, then closes. |

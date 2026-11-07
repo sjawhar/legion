@@ -1,7 +1,10 @@
 import { expect, type Locator, type Page, type Response, test } from "@playwright/test";
 
 import type { ArtifactUploadResponse } from "../web/src/api/types";
-import { REF_PREVIEW_OPEN_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
+import {
+  REF_PREVIEW_CLOSE_DELAY_MS,
+  REF_PREVIEW_OPEN_DELAY_MS,
+} from "../web/src/features/refs/ref-preview-timing";
 import { agentRow, setLiveSessions } from "./agents";
 import {
   createAsk,
@@ -409,9 +412,9 @@ test("a picture line the browser cannot draw, at a version or not, shows a link;
 // version's bytes and opens its document's dashboard page. The same document's page URL or
 // `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
 // target) is text, which the server cites only within those bytes, so it stays the plain link it is.
-test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link @phone", async ({
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long names" });
   const alice = await asUser(browser, "alice");
@@ -455,10 +458,8 @@ test("a long-named picture in a comment draws, its link to a long-named document
     // page's own clock is what spends it.
     await page.clock.install();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
-    await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread =
-      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const thread = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await thread.getByRole("button", { name: "Expand thread" }).click();
 
     // The source is asserted before the picture is waited on: one the browser cannot fetch
     // (`dispatch://…`) would fail as an image that never loads rather than naming its source.
@@ -472,6 +473,10 @@ test("a long-named picture in a comment draws, its link to a long-named document
       .locator("p", { hasText: "See" })
       .locator(`a[data-dispatch-href="${designTarget}"]`);
     await expect(link).toHaveAttribute("href", path);
+    // The link's words are the document's name, which a portal fills in after the body painted.
+    // Waited for before the loop: that late growth slides the link under a pointer resting on a
+    // paragraph, which opens a card over the paragraph hovered next.
+    await expect(link).toContainText("design design");
     // Asserted once the author's link is drawn, in the same pass: the bare URL's words are the URL
     // and it keeps its href, never the document's name and route a reference link would show.
     const bare = thread.locator("p", { hasText: "Bare:" }).getByRole("link");
@@ -489,13 +494,18 @@ test("a long-named picture in a comment draws, its link to a long-named document
       await expect(paragraph).toHaveText(`${label} ${words}`);
       await expect(paragraph.getByRole("link")).toHaveCount(0);
       await expect(paragraph.locator("[data-dispatch-href],[data-dispatch-ref]")).toHaveCount(0);
-      if (testInfo.project.name !== "iphone") {
-        await paragraph.hover();
-        await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
-        await expect(page.getByRole("tooltip")).toHaveCount(0);
-      }
+      // `RefPreview` keeps an open card under a pointer that has not moved
+      // (`keptUnderAStillPointer`): it arms no close while the page moves beneath it, so only
+      // this park arms one, and the clock run after it is what spends the close delay. A clock
+      // run before the park spends nothing.
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(2 * REF_PREVIEW_CLOSE_DELAY_MS);
+      await paragraph.hover();
+      await page.clock.runFor(2 * REF_PREVIEW_OPEN_DELAY_MS);
+      await expect(page.getByRole("tooltip")).toHaveCount(0);
     }
     await page.mouse.move(0, 0);
+    await page.clock.runFor(2 * REF_PREVIEW_CLOSE_DELAY_MS);
     // The link reads as the document's name, so it wraps past the window's height; the click lands
     // on its last line, clear of the composer pinned above the conversation.
     const lastLine = await link.evaluate((anchor) => {

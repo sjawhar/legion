@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -133,9 +134,11 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
-	build          string
-	buildErr       error
-	buildAsked     int
+	// gatedSteps is each list a gated_steps_publish row published, gatedStepsOf the project each
+	// went to, and gatedStepsErr what the publish answers.
+	gatedSteps    [][]string
+	gatedStepsOf  []string
+	gatedStepsErr error
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -174,14 +177,15 @@ func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, e
 func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
 }
-func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
-	d.buildAsked++
-	return d.build, d.buildErr
-}
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
 func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
+func (d *outboxDispatch) PutGatedSteps(_ context.Context, project string, steps []string) error {
+	d.gatedStepsOf = append(d.gatedStepsOf, project)
+	d.gatedSteps = append(d.gatedSteps, append(make([]string, 0, len(steps)), steps...))
+	return d.gatedStepsErr
+}
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
@@ -283,7 +287,7 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed hand-over: %v", err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	reopen := func() error {
 		_, err := intake.ApplyFact(context.Background(), pool, "dispatch", "root-reopened", intake.DispatchIssue{
@@ -352,7 +356,7 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed hand-over: %v", err)
 	}
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "todo", HandedOver: true, Labels: []string{"legion"}}}
 	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
@@ -408,7 +412,7 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("seed hand-over: %v", err)
 			}
-			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 			client := &outboxDispatch{issue: tc.shown}
 			row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
@@ -1198,7 +1202,7 @@ func TestTheGateSeedResetsAGateAboveTheVersionDispatchHolds(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("seed the gate above Dispatch's version: %v", err)
 			}
-			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: &outboxDispatch{approval: tc.approval},
 				handlers: []intake.Handler{engine}, now: time.Now}
 			if err := runner.execute(ctx, mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 7, Generation: 1}, time.Now())); err != nil {
@@ -1206,8 +1210,8 @@ func TestTheGateSeedResetsAGateAboveTheVersionDispatchHolds(t *testing.T) {
 			}
 			var gate *record.DesignGate
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				var err error
-				gate, err = records.Gate(ctx, tx, "LEGION-208")
+				gates, err := records.GatesOf(ctx, tx, "LEGION-208")
+				gate = record.SpecGate(gates)
 				return err
 			}); err != nil || gate == nil {
 				t.Fatalf("read the gate: %#v, %v", gate, err)
@@ -1865,7 +1869,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 	conn := fake.NewConn()
 	sup.deps.Conns.(*fake.Conns).Register(token, conn)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	clock := time.Now().Add(time.Minute)
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -1878,9 +1882,13 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 
 	// The architect retries the held phase, and the outbox relaunches the implementer's session.
+	// The retry puts the issue back at work, so admission's own pass gives it the slot its worker
+	// needs (holdSlot); without it the start carrying the retry task would wait in the outbox for
+	// one and never be the row this test watches being retried.
 	if _, err := intake.ApplyFact(ctx, pool, "api", "retry:LEGION-208", intake.RetryOrEscalate{Issue: issue.Key, Decision: intake.RetryDecision}, engine); err != nil {
 		t.Fatalf("apply the retry: %v", err)
 	}
+	holdSlot(t, pool, issue.Key)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the retry's start: %v", err)
 	}
@@ -1976,6 +1984,10 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			ctx := context.Background()
 			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
 			putOutboxIssue(t, pool, records, issue)
+			// The issue is at work in every phase this drives — reviewing, implementing, testing,
+			// retro — so it holds its admission slot throughout and each start is delivered as
+			// soon as the drain reaches it.
+			holdSlot(t, pool, issue.Key)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
@@ -1986,7 +1998,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 			const reviewApp = "legion-reviewer[bot]"
-			engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, ReviewRoundCap: 10, ReviewAppLogin: reviewApp}, quietLogger())
+			engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 10, ReviewAppLogin: reviewApp}, quietLogger())
 			clock := time.Now()
 			runner := &outbox{
 				dispatchProject: "LEGION",
@@ -2159,7 +2171,7 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 		t.Fatalf("persisted claim state = %s, want failed before the terminal hook", persisted.State)
 	}
 
-	engine := workflow.New(records, workflow.Config{Project: issue.Project, Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: issue.Project, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	restarted := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
 	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}, bootTimeout); err != nil {
 		t.Fatalf("replay persisted failure: %v", err)
@@ -2207,7 +2219,7 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	}
 }
 
-// A production check has no later wake after its implementer exhausts a failed launch. The
+// A production check has no later wake after the role that works it exhausts a failed launch. The
 // architect receives the launch failure immediately instead of waiting for the look's bound.
 func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
@@ -2218,7 +2230,7 @@ func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Limits.LaunchFailures = 1
 	runtime.ScriptResume(fake.SpawnResult{Err: errors.New("workspace-init could not fetch the clone")})
-	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	active := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
 	sup.OnDurableState(active.claimDurableState)
 	_, _ = suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
@@ -2303,8 +2315,9 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	}{
 		{name: "the issue's own phase and run", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 2, want: true},
 		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, generation: 2, want: false},
-		// The implementer works implementing, retro and the production check: a task written for
-		// one of them is not the work of another, which the role alone cannot tell.
+		// One role works several phases — the implementer implementing and retro, and the role the
+		// check records each of its looks — and a task written for one of them is not the work of
+		// another, which the role alone cannot tell.
 		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, generation: 2, want: false},
 		// A re-admission restarts the issue in the phase it stood in: the run that is over's task
 		// of that phase is not the new run's work.
@@ -2345,6 +2358,58 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 	}); err != nil {
 		t.Fatalf("put workflow issue: %v", err)
 	}
+}
+
+// holdSlot gives each of issues the admission slot its promotion grants it (admit's promoteHolds).
+// A start of a phase worker now queues the row that carries the task with NeedsSlot set, and that
+// row stays unclaimable while no slots row names its issue (record.Store's outboxInOrder), so a
+// fixture whose issue has a worker at work grants it the slot that worker's task is delivered
+// under. Each slot takes the next free index, as the promotion does: the column is unique across
+// every project's slots.
+func holdSlot(t *testing.T, pool *pgxpool.Pool, issues ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		records := record.NewStore()
+		slots, err := records.Slots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for index, issue := range issues {
+			if err := records.PutSlot(ctx, tx, record.Slot{Issue: issue, Index: len(slots) + index, AdmittedAt: time.Now().UTC()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("give %v the admission slots their work holds: %v", issues, err)
+	}
+}
+
+// openTree opens tree's lifecycle under the workflow's authority, as admission's promotion of a
+// root does in the transaction that admits it. That row, and not a slot, is what says a tree runs
+// (record.TreeLive) now that a slot counts one issue at work rather than one tree, so every
+// fixture that seeds a running tree opens it as well as granting whatever slots its issues hold.
+// project is the Dispatch project key its issues are recorded under; the lifecycle is keyed by
+// the claim token of it, as every claim and runtime key is.
+func openTree(t *testing.T, pool *pgxpool.Pool, project, tree string) {
+	t.Helper()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return openTreeTx(context.Background(), tx, project, tree)
+	}); err != nil {
+		t.Fatalf("open the tree lifecycle of %s: %v", tree, err)
+	}
+}
+
+// openTreeTx is openTree inside a transaction the caller owns, for a fixture that seeds a tree's
+// record, its slots and its lifecycle in one write as the promotion does.
+func openTreeTx(ctx context.Context, tx pgx.Tx, project, tree string) error {
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return fmt.Errorf("project token of %s: %w", project, err)
+	}
+	_, err = record.NewStore().OpenTreeLifecycle(ctx, tx, token, tree, treelifecycle.AuthorityWorkflow)
+	return err
 }
 
 // outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it
@@ -2441,18 +2506,21 @@ func (h *outboxFactHandler) facts() []intake.Fact {
 
 type outboxTokens struct{}
 
-func (outboxTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (outboxTokens) Token(context.Context, appauth.AppRole, ghrepo.Repository) (appauth.Lease, error) {
 	return appauth.Lease{Token: "outbox-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t outboxTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
+func (t outboxTokens) ReadToken(context.Context, appauth.AppRole, string, []string) (appauth.Lease, error) {
+	return appauth.Lease{Token: "outbox-token-read", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-// legionOwner is a project whose one repository's owner is legion, as the sandbox rigs here name it.
-func legionOwner() []string { return []string{"legion"} }
+// legionRepos is a project whose one repository is legion/legion, as the sandbox rigs here name
+// it, and legionDirs the gh directories a bundle built over it holds.
+func legionRepos() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("legion/legion")} }
+
+func legionDirs(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+	return appauth.GitHubDirs(legionRepos, ghrepo.Renames{}, nil, roles, repo)
+}
 
 type outboxSpecs struct{}
 
@@ -2535,7 +2603,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	putOutboxIssue(t, pool, records, root)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned, removed := 0, 0
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -2611,7 +2679,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now().Add(time.Hour)
 	removals, busy := 0, true
@@ -2745,7 +2813,7 @@ func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
 	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",

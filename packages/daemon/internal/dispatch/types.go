@@ -12,9 +12,6 @@ import (
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
-// BuildCommit is the one read of Dispatch itself rather than of its issues: the build its server
-// fleet serves, as its /healthz reports it, which the boot compares against the open production
-// checks of the repository the daemon is built from.
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
@@ -27,8 +24,10 @@ type Client interface {
 	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	Handoff(ctx context.Context, id string) (Handoff, error)
-	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+	// PutGatedSteps publishes the design-gate steps the deployment gates onto project's Dispatch
+	// project row, in the order it gates them; an empty list is a deployment that gates none.
+	PutGatedSteps(ctx context.Context, project string, steps []string) error
 	// WebhookAppInstalled is whether Dispatch's GitHub App, the one GitHub sends a repository's
 	// webhook events through, is installed on repo (owner/name).
 	WebhookAppInstalled(ctx context.Context, repo string) (bool, error)
@@ -171,6 +170,11 @@ var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
 // zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
 // recorded before it kept the sequence, and from a Dispatch that predates it. By is who gave the
 // review State shows (an approval or a changes request), zero when Dispatch names nobody.
+//
+// Primary, Role and Slug are what the document is on its issue, which is how a design-gate step
+// finds the document it binds to (api's gateRegister): Primary is the issue's primary document,
+// Role the part it plays beside it (ArtifactRoleVerification, ArtifactRoleDecisions, or "" for
+// none) and Slug the name Dispatch filed it under.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -182,7 +186,22 @@ type Approval struct {
 	At            time.Time
 	Seq           int64
 	By            Actor
+	Primary       bool
+	Role          string
+	Slug          string
 }
+
+// ArtifactRoleVerification and ArtifactRoleDecisions are two of the parts Dispatch records a
+// document playing on its issue (model.Artifact.Role), and DecisionsSlug and VerificationSlug the
+// names it files those two documents under, which a reference to either names
+// (workflow's stepRef). No mechanism shares a value between this module and Dispatch's, so the
+// spellings change together.
+const (
+	ArtifactRoleVerification = "verification"
+	ArtifactRoleDecisions    = "decisions"
+	DecisionsSlug            = "decisions-md"
+	VerificationSlug         = "verification-md"
+)
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
 // version, and 0 otherwise.
@@ -219,23 +238,16 @@ func (a Approval) LatestReviewer() Actor {
 
 // Handoff is one phase handoff record Dispatch keeps on an issue, as a phase completion names it:
 // the issue carrying it, its phase word (plan, implement, test or review; phase.Handoff), its
-// version among that phase's records, and the actor that wrote it. Body, the record's exact text,
-// is read only by LatestHandoff, for `legion handoffs import` to compare with a branch's file: the
-// daemon holds a completion to who wrote which record, and what a handoff says is the next role's
-// to read with `dispatch handoff-read`.
+// version among that phase's records, and the actor that wrote it. The record's text is not read
+// here: the daemon holds a completion to who wrote which record, and what a handoff says is the
+// next role's to read with `dispatch handoff-read`.
 type Handoff struct {
 	ID       string
 	IssueKey string
 	Phase    string
 	Version  int
 	Author   HandoffAuthor
-	Body     string
 }
-
-// HandoffNotFound is the code Dispatch answers a handoff read with when it has no such record
-// (packages/envoy/internal/dispatch/api/handoffs.go, writeHandoff). No mechanism shares a value
-// between this module and Dispatch's, so the two spellings change together.
-const HandoffNotFound = "HANDOFF_NOT_FOUND"
 
 // HandoffAuthor is the actor that wrote a handoff record: Kind is `session` for a record a session
 // wrote with `dispatch handoff-write`, ID that session.

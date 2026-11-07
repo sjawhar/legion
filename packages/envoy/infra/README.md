@@ -560,7 +560,7 @@ those is, the sandbox in the paragraph under it.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. | Not built |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
-| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
+| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the component's own names and registered after the Tailscale Service), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key, and with `chatTokenSecret` a third, `<hostname>-chat-token`, for the answerer's bearer token). | Not built |
 | Tailscale Service `svc:<hostname>` | The name every reader reaches Dispatch at, which the component declares itself through the `tailscale` provider it is given: one port, `tcp:443`, no tags, and a comment naming `<hostname>.<tailnetDnsName>`, the tailnet name it serves. It requests no tags because the OAuth client that creates it may not be allowed to set any, and Tailscale refuses a Service whose requested tags that client may not set; the hosts' own `tags` are what auto-approve them as the Service's hosts, and a tailnet policy grants the Service by its name. It is a tailnet resource and no child of the cluster, so it is parented on the component alone, its `protect` follows `deletionProtection` rather than being fixed (a child's explicit `Protect` overrides what it would inherit, so a fixed one could be changed only by a resource transform on the component or a state edit), and it is registered after the Cloud SQL instance. The provider's create is an upsert, so one that already exists under that name is adopted, its comment and ports overwritten; the request carries no tags, and Tailscale's API reference does not say whether the live Service keeps its own ([Moving a stack that declares the Service itself](#moving-a-stack-that-declares-the-service-itself)). | Not built |
 | ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. The RoleBinding names the Role by an output that waits on the Role's ID, so a preview that creates the Role leaves the name unknown and pulumi-kubernetes sends no server-side dry run of the binding, which an account without the `bind` verb would see refused as "not found" while the Role does not exist. | Not built |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
@@ -1006,13 +1006,44 @@ service-account token for the audience `azureFederationAudience` (plain; unset,
 `api://AzureADTokenExchange`), valid for an hour and rotated before it runs out, into the volume
 `azure-federation` at `/var/run/secrets/azure-federation/token`, which
 `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` names, and Dispatch exchanges it with Microsoft Entra for an
-access token on every renewal. The endpoint, the deployment, the key secret's path and the two ids
+access token on every renewal. Those three variables are the Azure sign-in the embedder and the
+answerer share, read by whichever of them is on Azure, so either `azureEmbedEndpoint` or
+`azureChatEndpoint` (below) accepts `azureTenantId`, `azureClientId` and
+`azureFederationAudience`, and with neither endpoint each is refused. The endpoint, the
+deployment, the key secret's path and the two ids
 are Pulumi inputs and may be another resource's outputs (an Azure program's, for the endpoint and
 the identity). Every replica gets the same values, which Dispatch requires: one deployment runs
 one embedder configuration, and a model change on Azure takes a new `azureEmbedDeployment`, since
 the vectors' identity names the deployment, not the model (`packages/envoy/cmd/dispatch/README.md`,
-"Search"). Without `azureEmbedEndpoint`, Dispatch embeds on Bedrock as it always did, and nothing of
-this group renders.
+"Search"). Without `azureEmbedEndpoint`, Dispatch embeds on Bedrock as it always did, and nothing
+of the embedder's own inputs renders.
+
+The answerer's inputs are a fourth optional group, which names the model Dispatch generates text
+with and reaches the app's `envoy-dispatch` container alone. Either of its two endpoints turns it
+on, and the two are refused together, since one deployment names one answerer.
+`azureChatEndpoint` is a chat deployment of an Azure AI Foundry resource:
+`DISPATCH_ANSWERER=azure` and `DISPATCH_AZURE_CHAT_ENDPOINT`, the base URL `/chat/completions` is
+appended to. It comes with `azureChatTokensPerMinute` (plain, a positive integer, the deployment's
+quota, rendered as `DISPATCH_AZURE_CHAT_TOKENS_PER_MINUTE`) and `azureChatDeployment`
+(`DISPATCH_AZURE_CHAT_DEPLOYMENT`, the name each request sends as its model), and may come with
+`azureChatApiVersion` (`DISPATCH_AZURE_CHAT_API_VERSION`; unset, a request sends no `api-version`)
+and `azureChatScope` (`DISPATCH_AZURE_CHAT_SCOPE`; unset, the scope the embedder asks for), both
+plain, since one Foundry resource serves two inference families whose route, `api-version` and
+token scope differ and which of them a deployment serves is named by that deployment. Its one
+credential is the shared keyless sign-in, `azureTenantId` with `azureClientId`: the Azure chat
+form takes no API key, so the endpoint is refused without them, and a deployment that embeds on
+Bedrock and answers on Azure is what that sharing is for. `chatEndpoint` is the other form, any
+OpenAI-shaped chat completions service: `DISPATCH_ANSWERER=endpoint` and `DISPATCH_CHAT_ENDPOINT`,
+with `chatModel` (plain, `DISPATCH_CHAT_MODEL`, the model each request names) and
+`chatTokenSecret`, this group's one secret input: a Secret Manager secret's resource path whose
+value is the bearer token every call presents, read at run time as the Azure key is, through the
+SecretProviderClass `<hostname>-chat-token` and its own CSI volume, mounted read-only at
+`/var/run/secrets/chat-token`, whose file `token` `DISPATCH_CHAT_TOKEN_FILE` names, under a grant
+of its own (`<hostname>-chat-token-accessor`) the app Deployment waits for. Dispatch re-reads that
+file on every call, so a new token version needs no restart. The two endpoints, the Azure chat
+deployment and the token's secret path are Pulumi inputs and may be another resource's outputs.
+With neither endpoint nothing of this group renders: Dispatch then configures no model, and its
+server starts and says so.
 
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/cybermonklabs/legion/envoy` before pinning it, with the `gh attestation verify` command
@@ -1034,12 +1065,19 @@ refuses an `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is
 others (each missing input named), an `appId` that is not digits or is 0, an
 `appPrivateKeySecretName` that is not a DNS subdomain, an `appPrivateKeySecretKey` outside
 `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is not an absolute http(s) URL with no path; and,
-of the Azure group, any of its inputs without `azureEmbedEndpoint`, an endpoint without
-`azureEmbedTokensPerMinute` or with one below 1, both credential forms or neither, `azureTenantId`
-or `azureClientId` without the other, and an `azureFederationAudience` without them or empty.
+of the Azure embedder's group, any `azureEmbed` input without `azureEmbedEndpoint`, an endpoint
+without `azureEmbedTokensPerMinute` or with one below 1, both credential forms or neither,
+`azureTenantId` or `azureClientId` without the other, an `azureFederationAudience` without them or
+empty, and any of the three without `azureEmbedEndpoint` and `azureChatEndpoint` alike, since the
+sign-in is shared; and, of the answerer's group, any `azureChat` input without
+`azureChatEndpoint` and any `chat` input without `chatEndpoint`, the two endpoints together, an
+`azureChatEndpoint` without `azureChatTokensPerMinute` (or with one below 1), without
+`azureChatDeployment` or without the keyless sign-in, a `chatEndpoint` without `chatTokenSecret`
+or `chatModel`, and an empty `azureChatApiVersion`, `azureChatScope` or `chatModel`.
 Once each Pulumi input resolves, before any child takes it, it refuses a seed in
 `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `databaseWaitsFor`, `azureEmbedEndpoint`,
-`azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and `azureClientId`; a blank or
+`azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId`, `azureClientId`,
+`azureChatEndpoint`, `azureChatDeployment`, `chatEndpoint` and `chatTokenSecret`; a blank or
 whitespace-only `tailnetAuthKey` or `signInClientSecret`, neither of which can work blank (the
 front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at boot) — each a
 refusal naming the input and never echoing it; and a `natsUrl` that holds a seed, is local
@@ -1066,8 +1104,9 @@ unproven (`docs/plans/2026-10-14-dispatch-gcp-plan.md`, the hardening ledger); i
 the first apply stops at the app's readiness wait, and a grant made then lets the next apply
 finish. The component itself grants that
 principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and on the Azure key
-secret when `azureEmbedKeySecret` is set), and the app and the listener, which mount the seed,
-wait for that grant to be written, as the app waits for the Azure key's. IAM can take minutes to apply
+secret when `azureEmbedKeySecret` is set, and on the chat token's secret when `chatTokenSecret`
+is), and the app and the listener, which mount the seed,
+wait for that grant to be written, as the app waits for the Azure key's and the chat token's. IAM can take minutes to apply
 a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
 can mount. The app and the listener share that one Kubernetes service account, which holds no
 Role: no pod creates a Secret, since each front-door node keeps its tailnet state on its own pod's
@@ -1078,12 +1117,14 @@ The `serviceAccountIssuer` and `serviceAccountSubject` outputs are the issuer an
 app's and the listener's Kubernetes service-account tokens (the front door's pods run as an
 account the subject never names): the cluster's own issuer,
 `https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<cluster name>`,
-and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them: the
+and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them, for the
+embedder and the answerer alike: the
 managed identity `azureClientId` names holds a federated identity credential whose issuer is
 `serviceAccountIssuer`, whose subject is `serviceAccountSubject` and whose audience is
 `api://AzureADTokenExchange` (or the `azureFederationAudience` set), which admits these pods'
 projected tokens and no other, and the identity needs a role on the Azure AI Foundry resource that
-lets it call the deployment. The component writes nothing in Azure: the consumer's Azure program
+lets it call each deployment it is given, the embedding deployment's and the chat deployment's.
+The component writes nothing in Azure: the consumer's Azure program
 declares the credential and the role from these two outputs.
 
 ### The pods
@@ -1107,8 +1148,10 @@ sets `dispatchMachineId` to the component's `hostname`. Both Envoy containers mo
 at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. With
 `agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts its projected
 ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`; with
-`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; and with the keyless
-Azure form, the projected token at `/var/run/secrets/azure-federation/token`.
+`azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; with the keyless
+Azure form, which `azureChatEndpoint` takes too, the projected token at
+`/var/run/secrets/azure-federation/token`; and with `chatTokenSecret`, the answerer's bearer token
+at `/var/run/secrets/chat-token/token`.
 
 Each Deployment takes its update strategy from its own replica count. At one pod it is recreated,
 stopping the old pod before the new one starts: a roll would run the outgoing and the incoming
@@ -1225,7 +1268,10 @@ pods that have just come up.
 
 Every container reads its environment once, at start, and Dispatch reads the Azure key file and
 the NATS seed once, at boot, as the listener reads the seed, so a pod boots on a secret's new value
-only when it restarts. The component's own Secrets restart their readers by themselves: each pod
+only when it restarts. The answerer's bearer token is the exception among the mounted files:
+Dispatch reads `DISPATCH_CHAT_TOKEN_FILE` on every call, so a new version of `chatTokenSecret`
+reaches a running pod on its own, as the projected tokens do. The component's own Secrets restart
+their readers by themselves: each pod
 template carries a `checksum/<secret>` annotation holding the resourceVersion of every component
 Secret its environment reads, `<hostname>-dispatch` and `<hostname>-listener` on the app,
 `<hostname>-listener` on the listener and `<hostname>-tailnet-auth-key` on the front door. The
@@ -1279,15 +1325,16 @@ these are preconditions of that procedure, not guarantees the component makes.
   negative generation or a repeated one.
 
 The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
-reads the broker token on every call and the keyless Azure form's token on every exchange with
-Entra. The secrets the component does not own carry no checksum, so after rotating one, restart
+reads the broker token on every call, the keyless Azure form's token on every exchange with
+Entra — the answerer's sign-in as much as the embedder's — and the answerer's bearer token on
+every call. The secrets the component does not own carry no checksum, so after rotating one, restart
 the Deployments that read it, once the synced Kubernetes Secret or the mounted file holds the new
 value:
 
 - the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
   at start
   (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`);
-- the GitHub App key and the Azure key: the app alone reads them
+- the GitHub App key and the Azure key: the app alone reads them, each once at boot
   (`kubectl -n <namespace> rollout restart deployment/<hostname>`). Rotate the App key by adding a
   new key to the App and writing it to the Secret Manager secret SecretSync copies, restarting the
   app, and only then deleting the old key from the App: GitHub accepts every key the App holds,

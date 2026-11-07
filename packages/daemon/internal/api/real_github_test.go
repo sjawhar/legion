@@ -16,7 +16,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -38,21 +40,22 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	h := newHarness(t)
 	tokens := appauth.New(apps, appauth.Options{})
 	h.handler = NewServer("127.0.0.1", 0, Options{
-		Supervisor:   h.supervisor,
-		BootTokens:   h.tokens,
-		Project:      testProject,
-		Tokens:       tokens,
-		GitHubOwners: func() []string { return []string{"sjawhar"} },
-		Grants:       credential.New(nil),
-		Pool:         h.store.Pool(),
-		Record:       record.NewStore(),
+		Steps:              config.DesignGateRootIssues.Steps(),
+		Supervisor:         h.supervisor,
+		BootTokens:         h.tokens,
+		Project:            testProject,
+		Tokens:             tokens,
+		GitHubRepositories: func() []ghrepo.Repository { return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")} },
+		Grants:             credential.New(nil),
+		Pool:               h.store.Pool(),
+		Record:             record.NewStore(),
 	}).Handler
 	gh := realGh(t)
 
 	// Each App's lease, rendered as the role's gh files, is whose login the real gh reports.
 	dirs := map[appauth.AppRole]string{}
 	for _, role := range appauth.Roles {
-		lease, err := tokens.Token(h.ctx, role, "sjawhar")
+		lease, err := tokens.Token(h.ctx, role, ghrepo.MustParse("sjawhar/legion-smoke"))
 		if err != nil {
 			t.Fatalf("mint the %s App's lease: %v", role, err)
 		}
@@ -75,7 +78,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	clone := exec.Command("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
 		"clone", "https://github.com/sjawhar/legion-smoke", filepath.Join(scratch, "legion-smoke"))
 	clone.Dir = scratch
-	clone.Env = append(realCLIEnvironment(gh, dirs[appauth.Implement]), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0")
+	clone.Env = realCLIEnvironment(gh, dirs[appauth.Implement], t.TempDir())
 	output, err := clone.CombinedOutput()
 	if err != nil {
 		t.Fatalf("clone through gh auth git-credential: %v: %s", err, strings.TrimSpace(string(output)))
@@ -208,6 +211,10 @@ func realGitHubApps(t *testing.T) config.GitHubApps {
 			t.Fatalf("read the live proofs' App lib: %v", err)
 		}
 	}
+	// Both calls below hand the lib the process's own environment, not a fixtureenv.Isolated one:
+	// scripts/e2e/lib/github-apps.sh reads the four LEGION_E2E_*_APP_* inputs, which the package's
+	// guard keeps (main_test.go) and Isolated drops, so an Isolated environment here would
+	// silently fall the lib back to its default App pair and prove Apps no proof then acts as.
 	implement, review, err := liveProofApps(os.Environ())
 	if err != nil {
 		t.Fatal(err)
@@ -265,8 +272,8 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 			t.Errorf("with no input the %s App is %s/%s, want the lib's default %s/%s", check.role,
 				check.app.id, check.app.secret, defaults[check.role+"_app_id"], defaults[check.role+"_app_secret"])
 		}
-		if !strings.HasPrefix(check.app.tokenCommand, "agent-secrets "+check.app.secret+" --reason=legion-live-proof-github-app-token ") {
-			t.Errorf("the %s App's token command reads %q, want `agent-secrets %s --reason=… -- …`", check.role, check.app.tokenCommand, check.app.secret)
+		if !strings.HasPrefix(check.app.tokenCommand, "agent-secrets "+check.app.secret+" --ttl 12h --reason=legion-live-proof-github-app-token ") {
+			t.Errorf("the %s App's token command reads %q, want `agent-secrets %s --ttl 12h --reason=… -- …`", check.role, check.app.tokenCommand, check.app.secret)
 		}
 	}
 
@@ -281,10 +288,11 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 		t.Errorf("with every input set the Apps are %v, want the inputs", got)
 	}
 	// The token command is what the daemon runs, so it must ask the broker for the input's secret,
-	// narrowed to the owner and to read-only exactly when the daemon's environment asks for them
-	// (appauth.TokenCommandOwner, appauth.TokenCommandReadOnly), and print the release as the
-	// broker hands it over. A stand-in `agent-secrets` records its arguments and puts a release in
-	// the command's environment as the real one does.
+	// narrowed to the owner, to its repositories and to read-only exactly when the daemon's
+	// environment asks for each (appauth.TokenCommandOwner, appauth.TokenCommandRepos,
+	// appauth.TokenCommandReadOnly), and print the release as the broker hands it over. A stand-in
+	// `agent-secrets` records its arguments and puts a release in the command's environment as the
+	// real one does.
 	stub := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stub, "agent-secrets"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$STUB_ARGS\"\nname=$1\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexport \"$name=$STUB_VALUE\"\nexec \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -293,22 +301,24 @@ func TestLiveProofAppsReadTheLib(t *testing.T) {
 	for role, app := range map[string]liveProofApp{"implement": implement, "review": review} {
 		secret := "EXAMPLE_" + strings.ToUpper(role) + "_APP"
 		for _, ask := range []struct {
-			owner, readOnly, args string
+			owner, repos, readOnly, args string
 		}{
-			{"", "", secret + " --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "", secret + " --reason=legion-live-proof-github-app-token --github-owner acme -- sh -c printf %s \"$" + secret + "\""},
-			{"acme", "1", secret + " --reason=legion-live-proof-github-app-token --github-owner acme --github-read-only -- sh -c printf %s \"$" + secret + "\""},
+			{"", "", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "legion", "", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "legion nats-server", "1", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s \"$" + secret + "\""},
+			{"acme", "", "1", secret + " --ttl 12h --reason=legion-live-proof-github-app-token --github-owner acme --github-read-only -- sh -c printf %s \"$" + secret + "\""},
 		} {
 			args := filepath.Join(t.TempDir(), "args")
 			run := exec.Command("sh", "-c", app.tokenCommand)
 			run.Env = append(with(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_VALUE="+release, "STUB_ARGS="+args,
-				"LEGION_GITHUB_OWNER="+ask.owner, "LEGION_GITHUB_READ_ONLY="+ask.readOnly)
+				"LEGION_GITHUB_OWNER="+ask.owner, "LEGION_GITHUB_REPOS="+ask.repos, "LEGION_GITHUB_READ_ONLY="+ask.readOnly)
 			got, err := run.Output()
 			if err != nil || string(got) != release {
-				t.Errorf("the %s App's token command for owner %q read-only %q printed %q (err %v), want the release", role, ask.owner, ask.readOnly, got, err)
+				t.Errorf("the %s App's token command for owner %q repositories %q read-only %q printed %q (err %v), want the release", role, ask.owner, ask.repos, ask.readOnly, got, err)
 			}
 			if seen, _ := os.ReadFile(args); strings.TrimSpace(string(seen)) != ask.args {
-				t.Errorf("the %s App's token command for owner %q read-only %q ran agent-secrets %q, want %q", role, ask.owner, ask.readOnly, strings.TrimSpace(string(seen)), ask.args)
+				t.Errorf("the %s App's token command for owner %q repositories %q read-only %q ran agent-secrets %q, want %q", role, ask.owner, ask.repos, ask.readOnly, strings.TrimSpace(string(seen)), ask.args)
 			}
 		}
 	}
@@ -486,7 +496,7 @@ func realGh(t *testing.T) string {
 func runRealGh(t *testing.T, gh, configDir string, args ...string) realCommandResult {
 	t.Helper()
 	command := exec.Command(gh, args...)
-	command.Env = realCLIEnvironment(gh, configDir)
+	command.Env = realCLIEnvironment(gh, configDir, t.TempDir())
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -524,12 +534,73 @@ func writeRealGhFiles(t *testing.T, token string) string {
 	return dir
 }
 
-// realCLIEnvironment is a pane's environment as far as gh and git read it: the real gh's directory
-// first on PATH, so git's `gh auth git-credential` helper is that gh, the gh files configDir holds
-// as GH_CONFIG_DIR, and GH_TOKEN, GITHUB_TOKEN and GH_HOST empty so nothing inherited outranks the
-// files.
-func realCLIEnvironment(gh, configDir string) []string {
-	return append(os.Environ(),
+// realCLIEnvironment is a pane's environment as far as gh and git read it, built on
+// fixtureenv.Isolated of home so that nothing this test process was handed — a pod's workspace,
+// its GIT_CONFIG_* block, its credential helper, its token or its home's configuration — reaches
+// the real git and gh the proof runs. Isolated drops every GH_* and GITHUB_* name, so the gh
+// files configDir holds are the only credential left, and the two entries after it are what the
+// proof adds: the real gh's directory first on PATH, so git's `gh auth git-credential` helper is
+// that gh, and GH_CONFIG_DIR itself. GIT_ALLOW_PROTOCOL=https comes last of all because Isolated
+// appends GIT_ALLOW_PROTOCOL=file and a child takes the last value of a key: this proof clones
+// over https from real GitHub, which file would refuse.
+func realCLIEnvironment(gh, configDir, home string) []string {
+	return append(fixtureenv.Isolated(home),
 		"PATH="+filepath.Dir(gh)+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GH_CONFIG_DIR="+configDir, "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=")
+		"GH_CONFIG_DIR="+configDir,
+		"GIT_ALLOW_PROTOCOL=https")
+}
+
+// TestTheRealGitHubProofEnvironmentIsGuarded holds realCLIEnvironment to handing the real git and
+// gh none of the pod's own reach. It plants a pod's variables with t.Setenv, which is after
+// TestMain's guard already ran, and that is what makes it bite: an environment built from
+// os.Environ() carries whatever the process holds at the call, so only a variable planted after
+// the guard tells such an environment from one built for the test. It is ungated, so CI and a pod
+// both run it, and it names a gh path of its own rather than realGh's, since the environment is
+// all it proves and no gh need be on the machine.
+func TestTheRealGitHubProofEnvironmentIsGuarded(t *testing.T) {
+	planted := map[string]string{
+		"GIT_DIR":            "/legion/repos/acme/widgets/.git",
+		"GIT_WORK_TREE":      "/legion/workspaces/acme/widgets/widgets-42",
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "credential.helper",
+		"GIT_CONFIG_VALUE_0": "!legion git-credential",
+		"GH_TOKEN":           "a pod's token",
+		"LEGION_WORKSPACE":   "/legion/workspaces/acme/widgets/widgets-42",
+	}
+	for name, value := range planted {
+		t.Setenv(name, value)
+	}
+	gh := filepath.Join(t.TempDir(), "bin", "gh")
+	configDir, home := t.TempDir(), t.TempDir()
+	environment := realCLIEnvironment(gh, configDir, home)
+
+	// Every name the pod planted must be gone from the slice, values and all.
+	for _, entry := range environment {
+		key, value, _ := strings.Cut(entry, "=")
+		if want, pod := planted[key]; pod && value == want {
+			t.Errorf("the proof's environment holds %s, which the pod set", entry)
+		}
+	}
+	// A child takes the last value of a key, so each check reads the last entry of its own.
+	last := func(key string) string {
+		value := ""
+		for _, entry := range environment {
+			if found, ok := strings.CutPrefix(entry, key+"="); ok {
+				value = found
+			}
+		}
+		return value
+	}
+	if got := last("GIT_ALLOW_PROTOCOL"); got != "https" {
+		t.Errorf("GIT_ALLOW_PROTOCOL=%q last in the proof's environment, want https: it clones over https from real GitHub", got)
+	}
+	if got := last("GH_CONFIG_DIR"); got != configDir {
+		t.Errorf("GH_CONFIG_DIR=%q, want the proof's own gh files at %q", got, configDir)
+	}
+	if got, _, _ := strings.Cut(last("PATH"), string(os.PathListSeparator)); got != filepath.Dir(gh) {
+		t.Errorf("PATH starts at %q, want the real gh's directory %q, so git's helper is that gh", got, filepath.Dir(gh))
+	}
+	if got := last("HOME"); got != home {
+		t.Errorf("HOME=%q, want the test's own home %q", got, home)
+	}
 }

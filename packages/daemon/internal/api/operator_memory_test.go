@@ -29,6 +29,7 @@ func TestTheOperatorsSpawnDrawsTheMemoryGroupOfTheTreeItOpens(t *testing.T) {
 	records := record.NewStore()
 	drawnAt := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Pool: h.store.Pool(), Record: records, Releaser: h.runtime, Trees: h.store,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),

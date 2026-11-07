@@ -221,8 +221,8 @@ func TestTheRoleReaperDeletesAClaimItCannotReadAtItsRevision(t *testing.T) {
 			t.Fatalf("rewrite the claim between the reaper's scan and its delete: %v", err)
 		}
 	}}, registry.roleKV.WatchHandle(), registry.roleKV.Streams())
-	if reaped, err := registry.ReapRoleClaims(func(string) bool { return false }, 0); err != nil || reaped != 0 {
-		t.Fatalf("reap role claims = %d, %v; want none: the claim the scan saw was rewritten", reaped, err)
+	if sweep, err := registry.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0); err != nil || sweep.Reaped != 0 {
+		t.Fatalf("reap role claims = %+v, %v; want none reaped: the claim the scan saw was rewritten", sweep, err)
 	}
 	entry, err := rawRoles.Get(unreadable)
 	if err != nil {

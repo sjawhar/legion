@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -329,9 +330,16 @@ func TestACandidateThatCarriesARunIsAdmittedWhateverItsLinksSay(t *testing.T) {
 	// (startMidPhaseMembers), which mints a claim token.
 	const recorded, root, child = "LEGION-701", "LEGION-208", "LEGION-209"
 	seedRecorded := func(t *testing.T, pool *pgxpool.Pool, at phase.Phase) {
-		putIssue(t, pool, record.Issue{Key: recorded, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		carried := record.Issue{Key: recorded, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 			Project: testProject, Title: "a carried root", Tree: recorded, Phase: at, Generation: 2,
-			Status: "todo", Rank: "A", HandedOver: true})
+			Status: "todo", Rank: "A", HandedOver: true}
+		if at != phase.Admitted {
+			// A root that carries a phase into a tree of its own came out of another tree and
+			// records it (admit's readmit): that is what says the run is the old tree's and
+			// this tree has still to be opened.
+			carried.HandedOverFrom = "LEGION-700"
+		}
+		putIssue(t, pool, carried)
 		seedMirror(t, pool, recorded, "todo", "LEGION-UNKNOWN")
 	}
 	seedHandedOver := func(t *testing.T, pool *pgxpool.Pool, at phase.Phase) {
@@ -774,7 +782,7 @@ func (s *countingStore) DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project
 func TestPromotionReadsTheMirrorOnceWhateverTheNumberOfBlockedRoots(t *testing.T) {
 	pool := migratedPool(t)
 	store := &countingStore{Store: record.NewStore()}
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(),
 		Clock: func() time.Time { return fixedNow }}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission := New(store, engine, 1, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission.now = func() time.Time { return fixedNow }

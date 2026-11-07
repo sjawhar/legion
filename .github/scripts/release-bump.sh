@@ -11,14 +11,18 @@
 #
 # Both commit subjects and bodies are classified, and a "BREAKING CHANGE:"
 # footer in a body bumps the major version, per the conventional-commits spec.
-# A merge a person makes by hand through GitHub's UI takes the repository's
-# COMMIT_MESSAGES default, so its squash body carries the branch's own commit
-# messages as "* type: summary" bullet lines and a squash-merged PR with a
-# non-conventional title still releases from them. A merge the Legion daemon
-# submits writes the squash message itself (packages/daemon/internal/ghautomerge),
-# the PR title and number as the subject and an empty body, so there the title
-# is the only thing classified: a "type!:" title still bumps the major version,
-# and a "BREAKING CHANGE:" footer written only in a branch commit body does not.
+# This repository's own squash settings decide a squash merge's message:
+# {"squash_merge_commit_title":"PR_TITLE","squash_merge_commit_message":"BLANK"}
+# (gh api repos/cybermonklabs/legion, read 2026-11-06), so the subject is the
+# pull request's title with its number, and the body holds nothing but the
+# "Co-authored-by:" lines GitHub adds, one for each author of the branch's
+# commits, the squash commit's own author included (e00cfac3b, pull request
+# #2851, has one author and carries one line; eb69b0a75, #2823, carries two).
+# No release classifies such a line, so the title is the only text a release
+# reads from a squash merge: a "type!:" title still bumps the major version,
+# and a "BREAKING CHANGE:" footer written only in a branch commit body never
+# reaches main. This script also reads ranges of plain commits, whose subjects
+# and bodies are classified as above.
 #
 # --patch-path <path> (repeatable) names a path whose commits bump at least the
 # patch version whatever their type: a path the package ships as runtime rather

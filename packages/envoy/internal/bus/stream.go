@@ -10,6 +10,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -358,6 +359,121 @@ func subjectMatches(subject, topic string) bool {
 	}
 }
 
+// streamMaxConsumers is the consumer cap this binary compiles into the stream (streamCfg), the one
+// setting that bounds how many sessions can hold a session consumer of their own. What a stream
+// with no cap means to the server changed in nats-server 2.15. From that release the server caps
+// a stream with no cap, a deployed 0 and the -1 it answers for one alike, at a default of its
+// own, and that default is the server's own rather than an account's: the server-wide
+// JetStreamLimits.DefaultMaxConsumers, which a server whose configuration leaves it unset starts
+// at JSDefaultMaxConsumersPerStream, 1000 (server/opts.go:6255-6256 in v2.15.1, the constant at
+// server/jetstream_api.go:427). Such a stream fills at 1000 consumers, and every session after
+// that is refused its own (`maximum consumers limit reached`, code 10026) and falls back to core
+// delivery. Before 2.15 a stream with no cap has no limit at all: v2.10.29 normalises a deployed
+// 0 to -1 (server/stream.go:1227) and checks the cap only while it is positive
+// (server/consumer.go around 808). The hub runs 2.15.1, where the default of 1000 is the failure
+// this cap answers.
+//
+// That 1000 is what the version gate stands for: serverDefaultsAnUnsetCap reads "nats-server 2.15
+// or later" and this binary takes it to mean "a stream with no cap is capped at 1000". An
+// operator can break that link two ways, and the binary checks neither. A server started with
+// `jetstream { limits { default_max_consumers: <n> } }` runs with <n> in place of the 1000
+// (server/opts.go:390 and :2555 in v2.15.1); at -1, or at any number above this cap, a stream
+// with no cap allows more consumers than this binary compiles, and a start and the keeper then
+// lower what the server allows to 24000 rather than raise it. An account whose own JetStream
+// `max_consumers` is positive has that applied to every stream of the account
+// (server/consumer.go:1162-1171): above this cap, a start and the keeper lower an uncapped
+// stream's limit to 24000 the same way; below it, the server refuses a stream whose cap is above
+// the account's (server/jetstream.go:2560-2562), so the create and the raise are both refused. An
+// account limit of -1 counts as not set and changes nothing, since the server applies its default
+// over it (server/consumer.go:1166-1168). No deployment of this repository sets either: the hub's
+// rendered jetstream block carries max_file_store, max_memory_store and store_dir and nothing else
+// (infra/gcp/clusteredhub_live_test.go), and it renders no accounts block, so every client runs
+// in the global account with its JetStream limits unset.
+//
+// The population the cap must cover is not the live session count. Nothing deletes a session's
+// consumer when the session ends: the only delete is inside SessionConsumers.RestartAtFloor
+// (session_consumers.go), and the server removes a consumer SessionConsumerInactiveThreshold, 72
+// hours, after its last pull. The population is therefore every distinct session that pulled
+// inside those 72 hours. It was read twice on 2026-11-06, by sampling the listener's session list
+// every 20 seconds and counting each id that appeared in no earlier read, which needs no
+// assumption about how long a session lives: 238 reads from 01:53:37Z to 02:33:35Z gave 42 new
+// ids, 63.1 an hour, 36 of them stamped inside the window by their UUIDv7, 54.0 an hour, against
+// 663 live; 136 reads from 04:23:40Z to 05:09:16Z gave 61 new ids, 80.3 an hour, 57 of them
+// stamped inside it, 75.0 an hour, against 668 live. The population is live + 72 x rate: 4,551 to
+// 5,206 by the first reading and 6,068 to 6,447 by the second.
+//
+// dispatch://INFRA-514's capacity gate asks for at least twice the larger of the stream's consumer
+// count and that population, so the gate's own number is 9,102 to 12,894 across the two readings.
+// 24000 is 1.9 to 2.6 times the gate's number and 3.7 to 5.3 times the population. The second
+// reading sets it: at the fleet's growth between the two, a cap only 1.2 to 1.3 times the gate's
+// own number would need raising again within a release or two, and the cap costs nothing while it
+// is not reached, since the server allocates per live consumer. It costs what its consumers cost
+// when they do reach it, measured twice on nats-server 2.15.1, 2,000 consumers of the listener's
+// own shape (session_consumers.go) on a file-backed stream: 54.7 and 52.6 KiB resident and 0.56
+// KiB of store per consumer, so 24000 consumers are about 1.20 to 1.25 GiB of memory and about 13
+// MiB of store, against the hub's 16 GiB machine, where nats-server held 1.10 GiB resident on
+// 2026-10-30.
+const streamMaxConsumers = 24000
+
+// streamMaxConsumersFloor is the first nats-server that takes a change of MaxConsumers on a stream
+// that already exists. Every server before it refuses such an update with maxConsumersRefusal,
+// measured on v2.10.29, v2.11.0 and v2.12.0; v2.12.5 and later take it. A create carries the cap
+// on every version, so under an older server the stream holds the cap only from the create, and a
+// refused raise names the floor (refusedSettings).
+const streamMaxConsumersFloor = "v2.12.5"
+
+// streamMaxConsumersDefaultMajor and streamMaxConsumersDefaultMinor are the first nats-server that
+// applies a consumer cap of its own to a stream that sets none, 2.15.0: it reads such a stream as
+// asking for JSDefaultMaxConsumersPerStream, which is 1000, the limit streamMaxConsumers records.
+// Every server before it leaves such a stream with no limit, so there is nothing there for this
+// binary's cap to fix.
+const (
+	streamMaxConsumersDefaultMajor = 2
+	streamMaxConsumersDefaultMinor = 15
+)
+
+// serverDefaultsAnUnsetCap reports whether serverVersion is the version of a server that applies
+// its own default consumer cap to a stream that sets none: nats-server
+// streamMaxConsumersDefaultMajor.Minor or later. serverVersion is what the connected server
+// answers, read from (*nats.Conn).ConnectedServerVersion(), and the whole question this binary
+// asks of a deployed stream whose cap is -1 or 0: on such a server that stream is capped at 1000
+// and is raised to streamMaxConsumers, on every older one it is unlimited and is left as it is
+// (ownedStream).
+//
+// Only the major and the minor are read, since the first such server is a minor's own first
+// release, and each is the number its field begins with, so a pre-release (`2.15.0-RC.1`) counts
+// as the release it leads to and an optional leading `v` is taken as nats.go's own version parse
+// takes it (versionComponents). A string that carries no major and minor - the empty string a
+// client with no live connection answers among them - is no such server.
+func serverDefaultsAnUnsetCap(serverVersion string) bool {
+	major, rest, split := strings.Cut(strings.TrimPrefix(serverVersion, "v"), ".")
+	if !split {
+		return false
+	}
+	minor, _, _ := strings.Cut(rest, ".")
+	gotMajor, gotMinor := versionNumber(major), versionNumber(minor)
+	if gotMajor < 0 || gotMinor < 0 {
+		return false
+	}
+	return gotMajor > streamMaxConsumersDefaultMajor ||
+		(gotMajor == streamMaxConsumersDefaultMajor && gotMinor >= streamMaxConsumersDefaultMinor)
+}
+
+// versionNumber is the number a version's field begins with: 15 from `15` and from a
+// pre-release's `15-RC` alike, and -1 from a field that begins with no digit, the empty field
+// included, and from one carrying more digits than an int holds.
+func versionNumber(field string) int {
+	digits := 0
+	for digits < len(field) && field[digits] >= '0' && field[digits] <= '9' {
+		digits++
+	}
+	number, err := strconv.Atoi(field[:digits])
+	if err != nil {
+		return -1
+	}
+	return number
+}
+
 // streamCfg is the stream this binary creates, before ConnectOwningStream sets its replicas
 // (WithReplicas) and byte limit (WithStreamMaxBytes). Its age equals the duplicate window by
 // construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
@@ -365,17 +481,20 @@ func subjectMatches(subject, topic string) bool {
 // that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
 // stored message leaves only by age: the stream holds every message it took for the whole window,
 // byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
-// is not an ErrRefused: the same publish is taken once age has made room, on a clustered stream
-// too, where a retry under the refused message's MsgId is acknowledged a duplicate with no sequence
-// and the bus sends it once more without the id (ErrNotStored).
+// is not an ErrRefused: the same publish is taken once age has made room.
+//
+// It carries the consumer cap (streamMaxConsumers) as well, which a create takes on every
+// nats-server; an update that changes a deployed stream's cap needs streamMaxConsumersFloor or
+// later, and the reconcile owns the cap from there (ownedStream).
 var streamCfg = &nats.StreamConfig{
-	Name:       Stream,
-	Subjects:   streamCarriedSubjects,
-	Retention:  nats.LimitsPolicy,
-	MaxAge:     streamDuplicateWindow,
-	Duplicates: streamDuplicateWindow,
-	Discard:    nats.DiscardNew,
-	Storage:    nats.FileStorage,
+	Name:         Stream,
+	Subjects:     streamCarriedSubjects,
+	Retention:    nats.LimitsPolicy,
+	MaxConsumers: streamMaxConsumers,
+	MaxAge:       streamDuplicateWindow,
+	Duplicates:   streamDuplicateWindow,
+	Discard:      nats.DiscardNew,
+	Storage:      nats.FileStorage,
 }
 
 // roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
@@ -527,7 +646,9 @@ func (r streamReconciliation) log() {
 
 // ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
 // reconciles the deployed one towards cfg. cfg's Replicas is the deployment's replica count and its
-// MaxBytes the deployment's byte limit, 0 when it sets none.
+// MaxBytes the deployment's byte limit, 0 when it sets none. defaultsAnUnsetCap is what the
+// connected server is, read from the version it answers (serverDefaultsAnUnsetCap): whether a
+// deployed stream with no consumer cap is one the server caps at a default of its own.
 //
 // The update starts from the deployed configuration and sets only what this binary owns:
 //   - the subjects (reconcileSubjects);
@@ -541,13 +662,24 @@ func (r streamReconciliation) log() {
 //     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
 //     an operator's raise stands, and lowering or removing one is an operator step that needs
 //     every program's setting lowered or removed first;
+//   - the consumer cap, the deployed cap or cfg's (streamMaxConsumers) when that is more, and
+//     cfg's on a stream whose cap is unset, a deployed -1 or 0 alike, only where
+//     defaultsAnUnsetCap holds and that stream is therefore capped at the server's own default
+//     of 1000: a start never writes a lower cap than it read, so an operator's raise stands, and
+//     lowering one is an operator step that needs every program's binary lowered first;
 //   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
 //     without that key gets one (identifiedMetadata).
 //
 // Every other deployed setting (storage, placement, compression, the message count and size
 // limits, direct get and the rest) stays as it is. A stream that already holds all of that gets no
 // update, and one that lacks only the key gets its own configuration back with the key added.
-// A refused create or update names the settings it carried (refusedSettings).
+// A refused create or update names the settings it carried (refusedSettings). A create carries the
+// consumer cap on every nats-server, but a server before streamMaxConsumersFloor refuses an update
+// that changes the cap of a stream that already exists, so on such a server a start against a
+// deployed stream whose cap is positive and below cfg's is refused. A stream with no cap is sent
+// no cap change at all on a server before 2.15, where an unset cap is no limit rather than the
+// default of 1000, so such a server is handed no update it refuses for a stream that has nothing
+// this cap fixes.
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
 // has no compare-and-swap, so two starts can each read the stream before either writes, and the
@@ -568,7 +700,7 @@ func (r streamReconciliation) log() {
 // stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
 // id write the same one, derived from what both read.
-func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
+func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) error {
 	info, err := js.StreamInfo(Stream)
 	if errors.Is(err, nats.ErrStreamNotFound) {
 		created := *cfg
@@ -585,7 +717,7 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 	if err != nil {
 		return err
 	}
-	desired, reconciliation := reconciledStream(info, cfg)
+	desired, reconciliation := reconciledStream(info, cfg, defaultsAnUnsetCap)
 	if reflect.DeepEqual(desired, info.Config) {
 		reconciliation.log()
 		return nil
@@ -595,7 +727,7 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		return err
 	}
 	if err := updateStream(js, &desired, func(again *nats.StreamInfo) bool {
-		reconciled, _ := reconciledStream(again, cfg)
+		reconciled, _ := reconciledStream(again, cfg, defaultsAnUnsetCap)
 		return reflect.DeepEqual(reconciled, again.Config)
 	}); err != nil {
 		return refusedSettings(err, &info.Config, &desired)
@@ -609,19 +741,21 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 
 // reconciledStream is the configuration ensureStreamWithConfig writes over the deployed stream info
 // describes, and the subject reconciliation in it: the deployed configuration with what this binary
-// owns set from cfg (ownedStream) and the subjects reconciled (reconcileSubjects).
-func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig) (nats.StreamConfig, streamReconciliation) {
+// owns set from cfg (ownedStream, which defaultsAnUnsetCap reaches) and the subjects reconciled
+// (reconcileSubjects).
+func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) (nats.StreamConfig, streamReconciliation) {
 	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-	desired := ownedStream(info, cfg)
+	desired := ownedStream(info, cfg, defaultsAnUnsetCap)
 	desired.Subjects = reconciliation.subjects
 	return desired, reconciliation
 }
 
 // keptStream is the configuration the keeper (keepStream) writes over the deployed stream info
-// describes: the deployed configuration with what this binary owns set from cfg (ownedStream) and
-// the deployed subjects with this binary's own added where the keeper may (keptSubjects).
-func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
-	kept := ownedStream(info, cfg)
+// describes: the deployed configuration with what this binary owns set from cfg (ownedStream,
+// which defaultsAnUnsetCap reaches) and the deployed subjects with this binary's own added where
+// the keeper may (keptSubjects).
+func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) nats.StreamConfig {
+	kept := ownedStream(info, cfg, defaultsAnUnsetCap)
 	kept.Subjects = keptSubjects(info.Config.Subjects, cfg.Subjects)
 	return kept
 }
@@ -630,19 +764,34 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig
 // but the subjects set from cfg, as both a start (reconciledStream) and the keeper (keptStream)
 // write it: the replicas, the deployed count or cfg's when that is more; the byte limit, the
 // deployed limit or cfg's when that is more, cfg's on a stream with none and the deployed one when
-// cfg sets none; the age, the duplicate window and discard, cfg's; and the metadata with a
-// StreamIDMetadataKey (identifiedMetadata). Neither the copies nor the byte limit is ever lowered,
-// so an operator's raise of either stands; lowering one is an operator step once every program's
-// setting is lowered. The age, the window and discard are compiled into the binary, not deployment
-// settings (streamCfg), and every release that runs a keeper compiles the same three (72 hours, 72
-// hours, DiscardNew), so the keeper writing them puts back only what an operator changed. A release
-// that changed one would have its keeper and an older release's each put their own value back
-// every period while both run.
-func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+// cfg sets none; the consumer cap, the deployed cap or cfg's when that is more, and cfg's on a
+// stream whose cap is unset where defaultsAnUnsetCap holds; the age, the duplicate window and
+// discard, cfg's; and the metadata with a StreamIDMetadataKey (identifiedMetadata). Neither the
+// copies nor the byte limit nor the cap is ever lowered, so an operator's raise of any of them
+// stands; lowering one is an operator step once every program's setting is lowered. The age, the
+// window and discard are compiled into the binary, not deployment settings (streamCfg), and every
+// release that runs a keeper compiles the same three (72 hours, 72 hours, DiscardNew), so the
+// keeper writing them puts back only what an operator changed. A release that changed one would
+// have its keeper and an older release's each put their own value back every period while both
+// run.
+//
+// A deployed cap of -1 or 0 is a stream that sets no cap. What that means is the connected
+// server's, which defaultsAnUnsetCap carries here (serverDefaultsAnUnsetCap): from nats-server
+// 2.15 such a stream is capped at the server's own default of 1000
+// (JSDefaultMaxConsumersPerStream), so it is raised to streamMaxConsumers as a smaller cap is;
+// on every server before that it has no limit at all, so it is left exactly as it is and the
+// binary writes no cap where none was asked for. A stream that already carries a positive cap
+// below this binary's is raised on every server, since that cap bounds its consumers wherever it
+// runs. The update that carries either raise needs streamMaxConsumersFloor or later on a stream
+// that already exists (refusedSettings).
+func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig, defaultsAnUnsetCap bool) nats.StreamConfig {
 	owned := info.Config
 	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)
 	if cfg.MaxBytes > 0 {
 		owned.MaxBytes = max(info.Config.MaxBytes, cfg.MaxBytes)
+	}
+	if cfg.MaxConsumers > 0 && (info.Config.MaxConsumers > 0 || defaultsAnUnsetCap) {
+		owned.MaxConsumers = max(info.Config.MaxConsumers, cfg.MaxConsumers)
 	}
 	owned.MaxAge = cfg.MaxAge
 	owned.Duplicates = cfg.Duplicates
@@ -726,6 +875,24 @@ func overlapRefused(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.ErrorCode == jsStreamSubjectOverlap
 }
 
+// maxConsumersRefusal is what nats-server answers an update that changes a stream's MaxConsumers
+// with, word for word, on every server before streamMaxConsumersFloor: the text it hands
+// NewJSStreamInvalidConfigError (server/stream.go), measured on v2.10.29, v2.11.0 and v2.12.0,
+// which nats.go gives the caller as the whole description of an *nats.APIError, under its own
+// `nats: ` prefix.
+const maxConsumersRefusal = "stream configuration update can not change MaxConsumers"
+
+// maxConsumersRefused reports whether err is that refusal, read by the server's own words and not
+// by its code: the code is JSStreamInvalidConfigF, which nats.go names nats.JSStreamInvalidConfig
+// (10052) and which carries whatever the server has to say about a stream's configuration, the
+// storage type and the retention policy an update may not change among them, so a code test would
+// take any of those for this one. The words are read off the error's own string, so a refusal
+// still counts when something has wrapped it on its way here, and when it reaches the bus as
+// anything other than an *nats.APIError.
+func maxConsumersRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), maxConsumersRefusal)
+}
+
 // unanswered reports whether err is a JetStream request's wait running out with no answer, rather
 // than the server's refusal.
 func unanswered(err error) bool {
@@ -738,8 +905,20 @@ func unanswered(err error) bool {
 // StreamMaxBytesEnvVar when it sets a byte limit the stream does not have. The bus is handed the
 // numbers and not where they came from, so the names are those of the settings every deployed
 // program reads them from (WithReplicas, WithStreamMaxBytes). One copy is never named: a server
-// refuses no stream for having one. nil, and a refusal of a request that changes neither, are
+// refuses no stream for having one. nil, and a refusal of a request that changes none of them, are
 // returned as they are.
+//
+// An update that changes the deployed stream's consumer cap names the cap too, under the name
+// nats-server spells it (max_consumers), with the value this binary asks for; the cap is compiled
+// in rather than read from a variable (streamMaxConsumers), so it is named as the field and not
+// as a setting an operator can change. That name carries the first server which can take the
+// change (streamMaxConsumersFloor) only when the server's answer is its own refusal of the change
+// (maxConsumersRefused), a bare maxConsumersRefusal that says neither which field nor which
+// server takes it. Every other refusal of such an update - a raise of the copies the cluster has
+// no room for on a server that would have taken the cap, an overlap still refused after its
+// sends - names the cap alone, as the copies and the byte limit are named, since the server the
+// cap needs is nothing to an operator whose update was refused for another reason. A create is
+// never named: a create carries the cap on every nats-server.
 func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
 	if err == nil {
 		return nil
@@ -750,6 +929,13 @@ func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
 	}
 	if request.MaxBytes > 0 && (deployed == nil || request.MaxBytes != deployed.MaxBytes) {
 		settings = append(settings, fmt.Sprintf("%s=%d", StreamMaxBytesEnvVar, request.MaxBytes))
+	}
+	if deployed != nil && request.MaxConsumers != deployed.MaxConsumers {
+		named := fmt.Sprintf("max_consumers %d", request.MaxConsumers)
+		if maxConsumersRefused(err) {
+			named += fmt.Sprintf(" (only nats-server %s and later can change it on an existing stream)", streamMaxConsumersFloor)
+		}
+		settings = append(settings, named)
 	}
 	if len(settings) == 0 {
 		return err

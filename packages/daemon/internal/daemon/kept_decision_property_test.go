@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -27,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -877,7 +879,7 @@ func TestKeptDecisionsReachTheCurrentArchitectOnce(t *testing.T) {
 			})
 		}
 	})
-	t.Logf("%d seeds: %s", seeds, all)
+	t.Logf("%d seeds of %d steps: %s", seeds, steps, all)
 	t.Logf("%d of %d seeds reached a failed architect claim; seeds whose catch-ups met each listener mode: "+
 		"%d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
 		failedSeeds, seeds, modeSeeds[keptDelivers], modeSeeds[keptNoHolder], modeSeeds[keptRefuses],
@@ -924,7 +926,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 	base := record.NewStore()
 	records := &keptForgetStore{Store: base}
 	closeLog := &keptLog{}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories},
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()},
 		slog.New(slog.NewJSONHandler(closeLog, nil)))
 	trees := outboxTreeStore(t, pool, keptRoot)
 	run := &keptRun{
@@ -1365,7 +1367,7 @@ func (r *keptRun) decideOn(issue string) {
 		}
 		tree = root.Key
 		outcome, err = record.RelayParkedDecision(r.ctx, tx, r.records, issue, *root, true,
-			record.ParkedDecision{Ref: ref, Decision: kind, Actor: actor, At: r.at}, 0, "")
+			record.ParkedDecision{Ref: ref, Decision: kind, Actor: actor, At: r.at}, 0, "", nil)
 		return err
 	}); err != nil {
 		r.fatalf("keep the decision %s: %v", ref, err)
@@ -1397,9 +1399,12 @@ func keptOutcome(outcome record.RelayOutcome) string {
 }
 
 // park takes the root out of the workflow — set back to backlog, or left lingering after its
-// close — releases the slot its run held, as admission's own pass does for a root that left the
-// workflow (releaseInactiveSlots), and writes the architect's suspend as the workflow writes one
-// (workflow's suspend).
+// close — releases the slot its run held, as admission's own pass does for an issue that needs
+// none (releaseSlots), and writes the architect's suspend as the workflow writes one (workflow's
+// suspend). A park that leaves no linger is the tree once its close has run, so its lifecycle is
+// confirmed closed here: the lifecycle, and no longer the slot, is what says a tree runs
+// (record.TreeLive), and under one still open a labelled todo on a member would be a re-entry
+// into a running tree rather than the orphan's admission this park makes it.
 func (r *keptRun) park() {
 	lingers := r.rng.IntN(2) == 0
 	if lingers {
@@ -1410,6 +1415,9 @@ func (r *keptRun) park() {
 	}
 	r.putRoot()
 	r.releaseSlot(keptRoot)
+	if !lingers {
+		r.closeTreeLifecycle(keptRoot)
+	}
 	r.enqueue(keptRoot, record.SuperviseRequest{Op: "suspend", Tree: r.root.issue.Tree, Role: claim.RoleArchitect,
 		Generation: r.root.issue.Generation, Reason: "the tree left the workflow"})
 	r.tracef("park status=%s lingers=%t generation=%d suspend-row=%d", r.root.issue.Status, lingers, r.root.issue.Generation, r.lastRow())
@@ -1447,21 +1455,41 @@ func (r *keptRun) readmitRoot() error {
 	return r.enqueueStartRow()
 }
 
-// takeSlot gives key the admission slot its promotion gives a root it admits: a root that runs
-// holds one, which is what says its tree is live (record.TreeLive) and keeps admission's own pass
-// from taking it out of the workflow as a root no slot can reach (releaseUnslotted).
+// takeSlot gives key the admission slot and the open tree lifecycle its promotion gives a root it
+// admits (admit's promoteHolds writes both in one transaction): the lifecycle is what says the
+// tree runs (record.TreeLive) now that a slot counts one issue at work, and the slot is what keeps
+// admission's own pass from taking the root out of the workflow as one no slot can reach
+// (releaseUnslotted).
 func (r *keptRun) takeSlot(key string) error {
 	return pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		slots, err := r.records.Slots(r.ctx, tx)
 		if err != nil {
 			return err
 		}
-		return r.records.PutSlot(r.ctx, tx, record.Slot{Issue: key, Index: len(slots), AdmittedAt: time.Now().UTC()})
+		if err := r.records.PutSlot(r.ctx, tx, record.Slot{Issue: key, Index: len(slots), AdmittedAt: time.Now().UTC()}); err != nil {
+			return err
+		}
+		return openTreeTx(r.ctx, tx, "LEGION", key)
 	})
 }
 
+// closeTreeLifecycle confirms the cleanup of key's tree, as the tree_close rows of a tree that has
+// ended confirm it once every claim of the tree has retired (store.CleanupReservedTree). Those
+// rows are among the ones this run does not drive, so their one lasting mark is written here.
+func (r *keptRun) closeTreeLifecycle(key string) {
+	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		lifecycle, err := treelifecycle.ReserveCleanup(r.ctx, tx, "legion", key, treelifecycle.AuthorityWorkflow)
+		if err != nil {
+			return err
+		}
+		return treelifecycle.ConfirmCleanup(r.ctx, tx, "legion", key, lifecycle.Epoch)
+	}); err != nil {
+		r.fatalf("close the tree lifecycle of %s: %v", key, err)
+	}
+}
+
 // releaseSlot gives back the slot of a root that left the workflow, as admission's own pass does
-// (releaseInactiveSlots).
+// for every issue that no longer needs one (releaseSlots).
 func (r *keptRun) releaseSlot(key string) {
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		return r.records.ReleaseSlot(r.ctx, tx, key)
@@ -1504,7 +1532,7 @@ func keptCount(kept *record.KeptDecisions) int {
 
 // handOverEnabled is whether the root's linger has this member to hand over: it still stands in
 // the root's tree, in the workflow, and the root lingers after its close, which is where the
-// linger's expiry hands a member that is still working to Legion (workflow's settleUnfinished).
+// linger's expiry hands a member that is still working to Legion (workflow's unfinishedHandOvers).
 func (r *keptRun) handOverEnabled(member *keptTree) bool {
 	return !member.handed && r.root.issue.Lingers() && !record.OutOfWorkflow(member.issue.Status)
 }
@@ -1694,7 +1722,7 @@ func (r *keptRun) adoptionTarget() *keptTree {
 		live := false
 		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 			var err error
-			live, err = record.TreeLive(r.ctx, r.records, tx, *stored)
+			live, err = record.TreeLive(r.ctx, r.records, tx, *stored, nil)
 			return err
 		}); err != nil {
 			r.fatalf("read whether the tree of %s is live: %v", tree.key, err)
@@ -3167,7 +3195,7 @@ func (r *keptRun) architectToHear(key string) bool {
 		if err != nil || root == nil {
 			return err
 		}
-		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root)
+		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root, nil)
 		return err
 	}); err != nil {
 		r.fatalf("read whether %s has an architect to hear a decision: %v", key, err)
@@ -3493,7 +3521,7 @@ func (r *keptRun) waitsForItsSlot(tree *keptTree) bool {
 	var waits bool
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, *stored)
+		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, *stored, nil)
 		return err
 	}); err != nil {
 		r.fatalf("read whether %s waits for its slot: %v", tree.key, err)

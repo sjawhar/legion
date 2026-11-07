@@ -173,6 +173,11 @@ type Horizon struct {
 	stallAfter time.Duration
 	warnEvery  time.Duration
 	logger     *slog.Logger
+	// afterObservationParked runs, outside the lock, each time a caller finds an observation
+	// already in flight and parks on it rather than running one of its own. Nothing in
+	// production sets it; the package's own test of concurrent callers waits on it instead of
+	// sleeping for a share of them to arrive.
+	afterObservationParked func()
 
 	mu sync.Mutex
 	// generation counts Resets. An observation records only into the generation it started in,
@@ -528,6 +533,9 @@ func (h *Horizon) observe(ctx context.Context, after uint64) error {
 		if run {
 			h.run(ctx, flight)
 		} else {
+			if h.afterObservationParked != nil {
+				h.afterObservationParked()
+			}
 			select {
 			case <-flight.done:
 			case <-ctx.Done():

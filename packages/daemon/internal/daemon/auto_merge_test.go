@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -856,7 +857,7 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	clock := time.Now().UTC()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
 	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
-	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps()}, quietLogger())}
 	run := func(step string) {
 		t.Helper()
 		if err := runner.RunOnce(context.Background()); err != nil {
@@ -878,9 +879,12 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.Implementing) {
 		t.Fatalf("LEGION-208 in %q (%v), want implementing", at, err)
 	}
+	// A start of a phase worker is two rows (workflow.StartOrOwe): the relaunch, which carries no
+	// task and brings the implementer's session back at once, and the row that carries the task
+	// and waits for the issue's admission slot. The task is the one this asserts about.
 	var task string
 	if err := pool.QueryRow(context.Background(), `select payload->>'task' from outbox where kind = 'supervise'
-		and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
+		and payload->>'op' = 'start' and payload->>'role' = 'implementer' and coalesce(payload->>'task', '') <> ''`).Scan(&task); err != nil {
 		t.Fatalf("read the implementer's start: %v", err)
 	}
 	for _, want := range []string{failedMergeGroupRun, "integration", "failed_checks", "#42"} {
@@ -912,7 +916,7 @@ func TestAMergeFailureAlreadyAppliedIsNotLoggedAsSendingTheIssueBack(t *testing.
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
 	var logged bytes.Buffer
 	runner := mergeRunner(pool, records, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock })
-	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps()}, quietLogger())}
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce READY's submission: %v", err)
 	}

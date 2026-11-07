@@ -36,10 +36,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 )
 
 var (
@@ -48,12 +50,20 @@ var (
 	standinErr  error
 )
 
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if standinDir != "" {
-		os.RemoveAll(standinDir)
-	}
-	os.Exit(code)
+func TestMain(m *testing.M) { os.Exit(runRemovingTheStandins(m)) }
+
+// runRemovingTheStandins runs the package's tests and removes the stand-in binaries' directory
+// afterwards. standins makes that directory during a test, not here, so the deferred call reads
+// standinDir when it runs rather than taking its value now, when it is still empty. Being
+// deferred, the removal also runs when setup here panics. A run killed by a signal still keeps
+// the directory, which nothing here can help.
+func runRemovingTheStandins(m *testing.M) int {
+	defer func() {
+		if standinDir != "" {
+			os.RemoveAll(standinDir)
+		}
+	}()
+	return m.Run()
 }
 
 func requireTmux(t *testing.T) {
@@ -456,13 +466,11 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	requireTmux(t)
 	r := &rig{t: t}
 	r.legion, r.omp = standins(t)
+	r.project = "t" + randomHex(t, 4)
 	// The directory is the server's TMUX_TMPDIR itself, with no subdirectory: tmux binds
-	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, and a unix socket path holds at most 107 bytes,
-	// so every byte above that socket counts against a long TMPDIR.
-	dir, err := os.MkdirTemp("", "lgt")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, the longest path put under the directory and
+	// the one a unix socket path's 107 bytes have to hold, so that is the room asked for here.
+	dir := testtmp.Dir(t, filepath.Join("tmux-"+strconv.Itoa(os.Getuid()), "legion-"+r.project))
 	r.dir = dir
 	r.stateDir = filepath.Join(dir, "state")
 	for _, d := range []string{r.stateDir, filepath.Join(dir, "roles")} {
@@ -484,7 +492,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		}
 	}
 	r.environ = append(r.environ, "TMUX_TMPDIR="+dir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
-	r.project = "t" + randomHex(t, 4)
 	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
 	r.stream = newStreamStub(t, filepath.Join(dir, "stream.sock"), r.daemon)
@@ -494,7 +501,6 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 		_ = watchdog.Process.Kill()
 		r.stream.listener.Close()
 		r.daemon.server.Close()
-		os.RemoveAll(dir)
 	})
 	return r
 }
@@ -504,23 +510,24 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 	r.t.Helper()
 	opts := Options{
-		Project:          r.project,
-		StateDir:         r.stateDir,
-		StreamAddress:    "unix://" + filepath.Join(r.dir, "stream.sock"),
-		DaemonURL:        r.daemon.server.URL,
-		EnvoyURL:         "http://127.0.0.1:9020",
-		NatsURLs:         []string{"nats://127.0.0.1:4222"},
-		Launchers:        ompOnly(shellprefix.Word(r.omp)),
-		StopGrace:        5 * time.Second,
-		ProbeInterval:    100 * time.Millisecond,
-		AdoptTimeout:     5 * time.Second,
-		CommandTimeout:   10 * time.Second,
-		Conns:            r.stream,
-		Environ:          r.environ,
-		Executable:       func() (string, error) { return r.legion, nil },
-		GitHubCredential: staticCredential,
-		GH:               fakeGH,
-		RepositoryOwner:  acmeOwner,
+		Project:              r.project,
+		StateDir:             r.stateDir,
+		StreamAddress:        "unix://" + filepath.Join(r.dir, "stream.sock"),
+		DaemonURL:            r.daemon.server.URL,
+		EnvoyURL:             "http://127.0.0.1:9020",
+		NatsURLs:             []string{"nats://127.0.0.1:4222"},
+		Launchers:            ompOnly(shellprefix.Word(r.omp)),
+		StopGrace:            5 * time.Second,
+		ProbeInterval:        100 * time.Millisecond,
+		AdoptTimeout:         5 * time.Second,
+		CommandTimeout:       10 * time.Second,
+		Conns:                r.stream,
+		Environ:              r.environ,
+		Executable:           func() (string, error) { return r.legion, nil },
+		GitHubCredential:     staticCredential,
+		ControllerCredential: staticControllerCredential,
+		GH:                   fakeGH,
+		ClaimRepository:      acmeWidgets,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -1116,14 +1123,14 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	// wrote its credential would change the live pane's gh files.
 	var mintMu sync.Mutex
 	mints := 0
-	minting := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
-		bundle, err := staticCredential(ctx, role, owner)
+	minting := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, repo)
 		mintMu.Lock()
 		mints++
 		token := fmt.Sprintf("ghs_mint_%d", mints)
 		mintMu.Unlock()
-		written := bundle.Owners[bundle.Default]
-		bundle.Owners[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
+		written := bundle.Dirs[bundle.Default]
+		bundle.Dirs[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
 		return bundle, err
 	}
 	withMinting := func(o *Options) { o.GitHubCredential = minting }

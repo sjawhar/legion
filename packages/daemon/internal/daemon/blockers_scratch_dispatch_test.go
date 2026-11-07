@@ -2,14 +2,12 @@ package daemon
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
 	"slices"
@@ -27,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -78,15 +77,20 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	cfg.Project = "B" + randomSuffix(t)[:9]
 	cfg.Projects = map[string]config.Project{cfg.Project: {}}
 	cfg.PostgresDSN = blockersDatabase(t)
-	// Three slots for three roots, so the slot the blocked root does not take stands visibly free.
-	cfg.AdmissionCap = 3
+	// The cap counts the issues at work, not the trees (dispatch://INFRA-980), and this run puts
+	// ten issues of one project through the workflow, a tree's children among them. It is set
+	// above every count this run reaches so that no step here is ever the cap's doing: the slot
+	// the blocked root of step 1 does not take stands free because its link holds it, and the
+	// child of step 4 starts at its release because it reaches the front of a line nothing is
+	// waiting in. Each step that needs a free slot says so against the cap itself.
+	cfg.AdmissionCap = 16
 	// The controller tick admits a root whose blocker is done whatever the event did, so it must
 	// not be what step 6 sees: an hour before the runtime's first tick (o.controllerFirstWake,
 	// below) and an hour between ticks mean this run applies no tick at all.
 	cfg.ControllerWakeInterval = time.Hour
-	// With the design gate off, the architect's own registration opens its tree, which is what
-	// makes starting a released child possible at all.
-	cfg.Gates.Design = config.DesignGateOff
+	// Gating no step, the architect's own registration opens its tree, which is what makes
+	// starting a released child possible at all.
+	cfg.Gates.Design = config.DesignGateOff.Steps()
 	cfg.DispatchURL = baseURL
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatalf("write the scratch Dispatch bearer: %v", err)
@@ -118,8 +122,21 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 
 	// 1. The blocked root is passed over; the root behind it takes a slot, and one slot is left.
-	state, body := settled(t, d, "admit the roots nothing blocks", func(s api.State) bool {
-		return slices.Contains(s.Admission.Active, blocker) && slices.Contains(s.Admission.Active, free)
+	// The blocked root's own todo is waited for here beside the two admissions, because every
+	// judgement below reads it. Each root is recorded off its own Dispatch event, and one event
+	// is not another's: an event whose work the consumer could not finish is nacked and retried
+	// behind the events after it (intake's consumeMessage), so the two roots nothing blocks being
+	// in their slots says nothing about whether Legion has taken in the blocked root's todo yet.
+	// In CI run 41511158832 it had not, and the state judged here held both of them admitted and
+	// no record of the blocked root at all (INFRA-1022).
+	//
+	// The wait weakens no judgement below: admission records every root whose todo it has taken
+	// in, the ones it starts under `active` and the ones it passes over under `waiting`
+	// (api.Admission.Waiting), so a daemon that started this blocked root reaches this condition
+	// too — through `active`, which the first judgement fails on.
+	state, body := settled(t, d, "admit the roots nothing blocks and take in the blocked root's todo", func(s api.State) bool {
+		return slices.Contains(s.Admission.Active, blocker) && slices.Contains(s.Admission.Active, free) &&
+			(slices.Contains(s.Admission.Waiting, blocked) || slices.Contains(s.Admission.Active, blocked))
 	})
 	t.Logf("a blocked root passed over while a slot stood free:\n%s", body)
 	if slices.Contains(state.Admission.Active, blocked) {
@@ -617,7 +634,7 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 	notices = childStatusNotices(t, pool, unlinked)
 	t.Logf("the child-status notices the daemon queued on %s for its tree's architect: %q", unlinked, notices)
-	wantNotice = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", unlinked, free)
+	wantNotice = fmt.Sprintf("%s starts planning under %s: it reached the front of the waiting line and took an admission slot", unlinked, free)
 	if !slices.Equal(notices, []string{wantNotice}) {
 		t.Fatalf("Legion started the held child %s once a person took its links off and queued its tree's architect the child-status "+
 			"notices %q; want the one reading %q: a start nobody hears of is the silence the hold's report exists to remove\nstate %s",
@@ -900,30 +917,7 @@ func registerLaunch(t *testing.T, d *daemon, launch runtime.SpawnSpec) (string, 
 // them. The admission slot index, unique across the whole database, is a second reason.
 func blockersDatabase(t *testing.T) string {
 	t.Helper()
-	base, err := url.Parse(testDSN(t))
-	if err != nil {
-		t.Fatalf("parse the test DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect the test admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_blockers_test_" + outboxSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-	daemonURL := *base
-	daemonURL.Path = "/" + name
-	return daemonURL.String()
+	return testdb.Database(t, "legion_blockers_test")
 }
 
 // blockersGitHub is GitHub's REST API as this daemon's boot and its outbox call it: a repository's

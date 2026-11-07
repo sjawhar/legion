@@ -33,12 +33,20 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 	}
-	// The tests run real git and jj, in-process and as children (fixtureenv.Guard). LEGION_GH_PATH
-	// is kept: it names the real gh a capture test runs, a binary and no credential.
-	if err := fixtureenv.Guard("LEGION_GH_PATH"); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	// environment_test.go reads these variables again once every test before it has run, so the
+	// snapshot is taken here, ahead of MustGuard, the first thing that changes this binary's own
+	// environment.
+	snapshotStartupEnvironment()
+	// The tests run real git and jj, in-process and as children (fixtureenv.MustGuard).
+	// LEGION_GH_PATH is kept: it names the real gh a capture test runs, a binary and no credential.
+	fixtureenv.MustGuard("LEGION_GH_PATH")
+	os.Exit(runWithoutTheOperatorsJJConfig(m))
+}
+
+// runWithoutTheOperatorsJJConfig runs the package's tests with a jj configuration directory of
+// their own and removes it afterwards. The removal is deferred, so it also runs when the setup
+// below panics. A run killed by a signal still keeps the directory, which nothing here can help.
+func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
 	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
@@ -50,21 +58,14 @@ func TestMain(m *testing.M) {
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
+	defer os.RemoveAll(configDir)
 	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
-	code := m.Run()
-	os.RemoveAll(configDir)
-	os.Exit(code)
-}
-
-// TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
-// process that runs the tests.
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
+	return m.Run()
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or
@@ -455,7 +456,7 @@ func TestHelpListsEveryCommand(t *testing.T) {
 // LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
 // --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
-	unsetenv(t, "LEGION_GH_PATH")
+	fixtureenv.Unset(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -684,6 +685,121 @@ github_apps:
 const tmuxCapabilityGaps = "capability secrets is open: the tmux runtime enrolls no process with the secrets broker; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n" +
 	"capability resource-limits is open: the tmux runtime sets no requests or limits on a pane; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"
 
+// productionCheckTesterLine is the production-check line `legion start --check-config` prints
+// for a project that names no `production_check` and so gets the tester, and deploysIgnoredLine
+// the warning it prints, and boot logs, for one that still sets `deploys`.
+func productionCheckTesterLine(key string) string {
+	return "projects." + key + ".production_check: tester — a merge that closes one of its issues opens a production check the tester works\n"
+}
+
+func deploysIgnoredLine(key string) string {
+	return "projects." + key + ".deploys is set and ignored: the daemon no longer wakes a production check from a deploy run, so the workflows this key names configure nothing; remove it from the deployment's legion.yaml\n"
+}
+
+// demoProductionCheck is the production-check line of the one DEMO project workflowConfig and
+// kubernetesCheckConfig declare, which names no `production_check`
+// (TestStartCheckConfigPrintsEachProjectsProductionCheck); demoCheckConfigOK is it after the OK
+// line, which is what every check here prints before its first capability line.
+var demoProductionCheck = productionCheckTesterLine("DEMO")
+
+var demoCheckConfigOK = "Config OK: project=DEMO design-gate-steps=spec\n" + demoProductionCheck
+
+// projectsConfig is a tmux legion.yaml whose `projects` block is the given text: the Stage 1
+// keys, the operator bearer and the github_apps a file with projects must carry (with the keys
+// written out, so no command runs at boot), and a deliberately unreachable Postgres, as
+// legionConfig's is — every test of it stops before a store is opened.
+func projectsConfig(t *testing.T, projects string) string {
+	t.Helper()
+	omp, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_OMP_PATH", omp)
+	t.Setenv("LEGION_GH_PATH", omp)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legion.yaml")
+	body := fmt.Sprintf(`project: DEMO
+port: 13370
+postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
+state_dir: %s
+operator_token_file: ./operator-token
+%sgithub_apps:
+  implement: { app_id: "1", private_key: implement-test-key }
+  review: { app_id: "2", private_key: review-test-key }
+`, filepath.Join(dir, "state"), projects)
+	for name, contents := range map[string]string{path: body, filepath.Join(dir, "operator-token"): "operator-token\n"} {
+		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return path
+}
+
+// twoProjectsWithDeploys is a projects block whose two projects each still set
+// `projects.<KEY>.deploys`: one with an entry the deleted reader would have parsed, one with the
+// empty list it took for none. Nothing reads either.
+const twoProjectsWithDeploys = "projects:\n" +
+	"  DEMO:\n    deploys:\n      - {repo: acme/infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n" +
+	"  OTHER:\n    deploys: []\n"
+
+// A file another deployment still writes `deploys` into is accepted and warned about, never
+// refused: `--check-config` prints one warning per project that names the key, immediately after
+// Config OK and before every other line, and exits 0, so the deprecation is the first thing an
+// operator reads.
+func TestStartCheckConfigWarnsForEveryProjectThatStillSetsDeploys(t *testing.T) {
+	legionState(t)
+	config := projectsConfig(t, twoProjectsWithDeploys)
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--config", config, "--check-config"}, &out, &errb)
+
+	want := "Config OK: project=DEMO design-gate-steps=spec\n" + deploysIgnoredLine("DEMO") + deploysIgnoredLine("OTHER") +
+		demoProductionCheck + productionCheckTesterLine("OTHER") + tmuxCapabilityGaps
+	if code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+	}
+}
+
+// `legion start` logs each of the configuration's warnings once as it boots, before any other
+// work it does with the file: the start below is refused for a team another legion holds, which
+// is read after the lines are logged, so both are in its log.
+func TestStartLogsEachConfigurationWarningOnceAsItBoots(t *testing.T) {
+	legions := legionState(t)
+	config := projectsConfig(t, twoProjectsWithDeploys)
+	claim(t, legions, registry.Entry{
+		Team: "DEMO", ConfigPath: "/srv/legion.yaml", PID: runningLegion(t), Port: 13370,
+		Bind: "127.0.0.1", StartedAt: time.Now().UTC(),
+	})
+
+	var errb bytes.Buffer
+	if code := start(context.Background(), config, &errb); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (the team is held); stderr %q", code, errb.String())
+	}
+	for _, key := range []string{"DEMO", "OTHER"} {
+		line := strings.TrimSuffix(deploysIgnoredLine(key), "\n")
+		if count := strings.Count(errb.String(), line); count != 1 {
+			t.Errorf("the boot log carries %s's warning %d times, want once: %s", key, count, errb.String())
+		}
+	}
+}
+
+// --check-config prints one `production_check` line per project, in key order: the word the file
+// writes for the project that turns the check off, and the tester for the one that names no key.
+func TestStartCheckConfigPrintsEachProjectsProductionCheck(t *testing.T) {
+	legionState(t)
+	config := projectsConfig(t, "projects:\n  DEMO: {}\n  OTHER:\n    production_check: off\n")
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--config", config, "--check-config"}, &out, &errb)
+
+	want := "Config OK: project=DEMO design-gate-steps=spec\n" + demoProductionCheck +
+		"projects.OTHER.production_check: off — a merge that closes one of its issues opens no production check\n" +
+		tmuxCapabilityGaps
+	if code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+	}
+}
+
 // `legion start --check-config` validates the file the way boot does, says so, and exits: no App
 // key command runs, no store is opened (the configured Postgres is unreachable), and no team is
 // taken.
@@ -696,7 +812,7 @@ func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("legion start --check-config = %d, stderr %q", code, errb.String())
 	}
-	if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; out.String() != want {
+	if want := demoCheckConfigOK + tmuxCapabilityGaps; out.String() != want {
 		t.Fatalf("stdout = %q, want %q", out.String(), want)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -773,6 +889,11 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	for _, variant := range []struct{ extra, drop, says string }{
 		{extra: "worker_cap: 3\n", says: "worker_cap"},
 		{extra: "admission_cap: 0\n", says: "admission_cap"},
+		{extra: "worker_wakes_per_minute: -1\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wakes_per_minute: 2.5\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wake_burst: 0\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: -1\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: 2.5\n", says: "worker_wake_burst"},
 		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
@@ -846,7 +967,7 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			unsetenv(t, "LEGION_GH_PATH")
+			fixtureenv.Unset(t, "LEGION_GH_PATH")
 			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
 		},
 			func(dir string) string {
@@ -944,9 +1065,9 @@ func TestStartCheckConfigReadsTheLaunchSecretsAsBootDoes(t *testing.T) {
 			if strings.Contains(out.String()+errb.String(), seed) {
 				t.Fatalf("the check printed the seed: stdout %q stderr %q", out.String(), errb.String())
 			}
-			want := "Config OK: project=DEMO\n"
+			want := demoCheckConfigOK
 			if tc.key == seedKey {
-				want = "Config OK: project=DEMO nats-nkey-user=" + public + "\n"
+				want = "Config OK: project=DEMO design-gate-steps=spec nats-nkey-user=" + public + "\n" + demoProductionCheck
 			}
 			want += tmuxCapabilityGaps
 			if tc.refusal == nil {
@@ -1007,7 +1128,7 @@ func TestStartCheckConfigReadsTheDaemonNATSSeedAsBootDoes(t *testing.T) {
 				t.Fatalf("the check printed a seed: stdout %q stderr %q", out.String(), errb.String())
 			}
 			if tc.refusal == nil {
-				if want := "Config OK: project=DEMO nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+				if want := "Config OK: project=DEMO design-gate-steps=spec nats-nkey-user=" + paneUser + " nats-daemon-nkey-user=" + daemonUser + "\n" + demoProductionCheck + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
 					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 				}
 			} else if want := "legion start: " + tc.refusal(path); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
@@ -1183,7 +1304,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-			if want := "Config OK: project=DEMO\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			if want := demoCheckConfigOK + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
 		})
@@ -1246,7 +1367,7 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
 			secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
-			want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + tc.want
+			want := demoCheckConfigOK + secretsGap + defaultCacheLine + tc.want
 			if code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
@@ -1276,7 +1397,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		}
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := demoCheckConfigOK + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1285,7 +1406,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config := kubernetesCheckConfig(t, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := demoCheckConfigOK + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1294,7 +1415,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config, _ := workflowConfig(t, 13370, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := demoCheckConfigOK + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1315,7 +1436,7 @@ func TestStartCheckConfigNamesTheRepositoryCache(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi under 8Gi, ephemeral storage 1Gi under 2Gi\n"
-	if want := "Config OK: project=DEMO\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+	if want := demoCheckConfigOK + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 	}
 }
@@ -1480,31 +1601,36 @@ func TestPlainStateSummarizesTheHeldLifecycleRows(t *testing.T) {
 }
 
 // An operator reading plain `legion state` is told how many production checks are open and the
-// oldest: its issue, pull request and merge commit, the look it is on with what woke it and when,
-// and when the check is bound — read from each issue record's `check`, which the daemon serves for
-// an open check and leaves out once it closes. With none open the line says so.
+// oldest: its issue, pull request and merge commit, the role working it, the look it is on with
+// what woke it and when, and when its next look is due — read from each issue record's `check`,
+// which the daemon serves for an open check and leaves out once it closes. The role tells a check
+// opened before this release, which carries the implementer and a wake the daemon no longer reads
+// (LEGION-208's), from one the project's `production_check` opened for the tester (LEGION-209's).
+// `nextWakeAt` is whichever names that look, the time the checking agent asked for (LEGION-209's,
+// inside its bound) or the check's bound where no agent's time stands (LEGION-208's). With none
+// open the line says so.
 func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
 	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
 		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
 	closed := `"LEGION-207":{"key":"LEGION-207","generation":1,"phase":"done","status":"done"}`
 	oldest := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1301,` +
-		`"mergeCommit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","openedAt":"2026-10-19T09:00:00Z","looks":2,"lookOpen":false,` +
+		`"mergeCommit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","openedAt":"2026-10-19T09:00:00Z","role":"implementer","looks":2,"lookOpen":false,` +
 		`"lastWake":{"kind":"issue.deployed","detail":"run 77 completed 2026-10-19T10:00:00Z","at":"2026-10-19T10:00:05Z"},"nextWakeAt":"2026-11-02T09:00:00Z","last":false}}`
 	newer := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1302,` +
-		`"mergeCommit":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","openedAt":"2026-10-19T11:00:00Z","looks":1,"lookOpen":true,` +
-		`"lastWake":{"kind":"merge","detail":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","at":"2026-10-19T11:00:00Z"},"nextWakeAt":"2026-11-02T11:00:00Z","last":false}}`
+		`"mergeCommit":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","openedAt":"2026-10-19T11:00:00Z","role":"tester","looks":1,"lookOpen":true,` +
+		`"lastWake":{"kind":"merge","detail":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","at":"2026-10-19T11:00:00Z"},"nextWakeAt":"2026-10-20T11:00:00Z","last":false}}`
 	for _, tc := range []struct {
 		name, issues, want string
 	}{
 		{
 			name:   "two open, the oldest not the first listed",
 			issues: `{` + newer + `,` + closed + `,` + oldest + `}`,
-			want:   "open production checks: 2; the oldest, LEGION-208 #1301 at a1b2c3d, look 2 woken by issue.deployed at 2026-10-19T10:00:05Z, bound 2026-11-02T09:00:00Z\n",
+			want:   "open production checks: 2; the oldest, LEGION-208 #1301 at a1b2c3d, worked by the implementer, look 2 woken by issue.deployed at 2026-10-19T10:00:05Z, next look 2026-11-02T09:00:00Z\n",
 		},
 		{
 			name:   "one open",
 			issues: `{` + closed + `,` + newer + `}`,
-			want:   "open production checks: 1; the oldest, LEGION-209 #1302 at b2c3d4e, look 1 woken by merge at 2026-10-19T11:00:00Z, bound 2026-11-02T11:00:00Z\n",
+			want:   "open production checks: 1; the oldest, LEGION-209 #1302 at b2c3d4e, worked by the tester, look 1 woken by merge at 2026-10-19T11:00:00Z, next look 2026-10-20T11:00:00Z\n",
 		},
 		{name: "none open", issues: `{` + closed + `}`, want: "open production checks: none\n"},
 		{name: "no issues", issues: `{}`, want: "open production checks: none\n"},
@@ -1731,6 +1857,53 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told which wakes the daemon's pacing is holding,
+// each by claim with its kind and when it is due, on one line however many there are
+// (api.State.WakesWaiting). The line is there only while something waits: outside a restart or a
+// plugin wave the queue is empty, and a line saying so on every read would be noise.
+func TestPlainStateNamesTheWakesThePacingHolds(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, wakes, want string
+	}{
+		{
+			name: "a launch and an update task",
+			wakes: `[{"claim":"legion-legion-legion-208-implementer","issue":"LEGION-208","role":"implementer","kind":"launch","dueAt":"2026-09-23T00:00:08Z"},` +
+				`{"claim":"legion-legion-legion-210-reviewer","issue":"LEGION-210","role":"reviewer","kind":"plugin-task","dueAt":"2026-09-23T00:00:15Z"}]`,
+			want: "wakes waiting: 2 — legion-legion-legion-208-implementer launch due 2026-09-23T00:00:08Z; " +
+				"legion-legion-legion-210-reviewer plugin-task due 2026-09-23T00:00:15Z\n",
+		},
+		{name: "none", wakes: `[]`, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"wakesWaiting":` + tc.wakes + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if tc.want == "" {
+				if strings.Contains(out.String(), "wakes waiting") {
+					t.Fatalf("legion state printed %q, want no wakes-waiting line while nothing waits", out.String())
+				}
+				return
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told each served repository Dispatch's GitHub App is
 // not known to be installed on, one line each with why, as the daemon serves the state; with none
 // the one line says so.
@@ -1787,12 +1960,12 @@ func TestPlainStateGivesEachDurableConsumersLag(t *testing.T) {
 		{
 			name: "caught up, waiting, stalled since the last, stalled since the start",
 			consumers: `[{"name":"legion-go-LEGION-dispatch","waiting":0,"oldestAt":null,"oldestAgeSeconds":null,"lastHandledAt":"2026-10-28T09:20:01Z","stalled":false},` +
-				`{"name":"legion-go-LEGION-dispatch-server","waiting":2,"oldestAt":"2026-10-28T09:20:25Z","oldestAgeSeconds":5,"lastHandledAt":"2026-10-28T09:20:01Z","stalled":false},` +
+				`{"name":"legion-go-LEGION-wake","waiting":2,"oldestAt":"2026-10-28T09:20:25Z","oldestAgeSeconds":5,"lastHandledAt":"2026-10-28T09:20:01Z","stalled":false},` +
 				`{"name":"legion-go-LEGION-github","waiting":412,"oldestAt":"2026-10-28T09:08:00Z","oldestAgeSeconds":750,"lastHandledAt":"2026-10-28T09:10:00Z","stalled":true},` +
 				`{"name":"legion-go-LEGION-other","waiting":3,"oldestAt":"2026-10-28T09:01:00Z","oldestAgeSeconds":1170,"lastHandledAt":null,"stalled":true}]`,
 			want: []string{
 				"consumer legion-go-LEGION-dispatch: 0 waiting",
-				"consumer legion-go-LEGION-dispatch-server: 2 waiting, oldest 5s",
+				"consumer legion-go-LEGION-wake: 2 waiting, oldest 5s",
 				"consumer legion-go-LEGION-github: 412 waiting, oldest 12m30s; STALLED: none handled for 10m30s, the last at 2026-10-28T09:10:00Z",
 				"consumer legion-go-LEGION-other: 3 waiting, oldest 19m30s; STALLED: none handled for 20m30s, none since the daemon started at 2026-10-28T09:00:00Z",
 			},

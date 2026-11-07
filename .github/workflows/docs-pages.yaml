@@ -30,10 +30,11 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 15 patterns:
+      # ci.yaml's *bun_install, 16 patterns:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
+      - 'packages/broker-client/package.json'
       - 'packages/contracts/package.json'
       - 'packages/envoy-client/package.json'
       - 'packages/pi-envoy/package.json'
@@ -58,7 +59,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 72 patterns:
+      # ci.yaml's *legion_command, 73 patterns:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -82,7 +83,6 @@ on:
       - 'packages/daemon/internal/ghconfig/*'
       - 'packages/daemon/internal/ghrepo/*'
       - 'packages/daemon/internal/githubrest/*'
-      - 'packages/daemon/internal/handoffimport/*'
       - 'packages/daemon/internal/intake/*'
       - 'packages/daemon/internal/launcher/*'
       - 'packages/daemon/internal/lookpath/*'
@@ -118,6 +118,7 @@ on:
       - 'packages/daemon/internal/supervise/*'
       - 'packages/daemon/internal/treelifecycle/*'
       - 'packages/daemon/internal/wait/*'
+      - 'packages/daemon/internal/wakepace/*'
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/brokerclient/*'
@@ -131,8 +132,12 @@ on:
       - 'packages/envoy/internal/googleidentity/*'
       - 'packages/envoy/listenfd/*'
       - 'packages/envoy/migrationid/*'
-      # ci.yaml's *dispatch_server, 57 patterns:
+      - 'packages/envoy/roleholder/*'
+      - 'packages/envoy/sessiontiming/*'
+      # ci.yaml's *dispatch_server, 61 patterns:
       - 'packages/envoy/cmd/dispatch/*'
+      - 'packages/envoy/going/*'
+      - 'packages/envoy/going/goingtest/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/cistore/*'
       - 'packages/envoy/internal/contracts/*'
@@ -186,6 +191,7 @@ on:
       - 'packages/envoy/internal/pglisten/*'
       - 'packages/envoy/internal/pgmigrate/*'
       - 'packages/envoy/internal/redact/*'
+      - 'packages/envoy/internal/redirects/*'
       - 'packages/envoy/internal/roles/*'
       - 'packages/envoy/internal/routing/*'
       - 'packages/envoy/internal/session/*'

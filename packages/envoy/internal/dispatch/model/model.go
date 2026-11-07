@@ -102,7 +102,8 @@ type Actor struct {
 
 // Recorded is the actor as a write records it: the request's credential dropped. A stored actor
 // is decoded from JSON, which carries no credential, so the credential never reaches a row.
-// Dispatch decides "the same writer" by kind and id (SameAs); the one == left is the document
+// Dispatch decides "the same writer" by kind and id (SameAs) and "the same credential" by those
+// and the names a credential carries (SameCredential); the one == left is the document
 // rooms' lost-write notice (docs/lostedit.go), so an actor handed to the document service must
 // carry none. actorFrom drops it here, bearerSessionActor builds a session actor without it, and
 // actingPerson answers the person with its Act alone. The handlers that record optionalActor's
@@ -116,11 +117,35 @@ func (a Actor) Recorded() Actor {
 }
 
 // SameAs reports whether two actors are the same writer: one session id, or one human login.
-// Dispatch compares actors in exactly this way wherever it has to decide "is this the same
-// session" — a claim's holder against a caller, and an event's actor against the claimant it
-// names.
+// Dispatch compares actors in this way wherever it has to decide "is this the same session" — a
+// claim's holder against a caller, and an event's actor against the claimant it names. Where
+// the credential itself must be told apart rather than the writer, SameCredential compares the
+// names too.
 func (a Actor) SameAs(other Actor) bool {
 	return a.Kind == other.Kind && a.ID == other.ID
+}
+
+// SameCredential reports whether two actors are the one credential: the kind and the id SameAs
+// compares, and the person and the workload a credential names besides them. It is what a
+// caller compares by when SameAs cannot tell two credentials apart, because three of the
+// credentials Dispatch admits carry no id at all - a personal token is {Kind: "session", ID:
+// "", Owner: &owner} (api/agent_tokens.go), the deployment's shared token is {}, and a pod's
+// service-account token is {Service: &subject}. Under SameAs any two personal tokens are one
+// writer, whoever owns them, and the shared token is every pod's token.
+//
+// Origin, Project and Act are not compared: they say where a write came from and who it acted
+// for, which two requests of one credential differ in, so comparing them would call one
+// credential two.
+func (a Actor) SameCredential(other Actor) bool {
+	return a.SameAs(other) && sameActorName(a.Owner, other.Owner) && sameActorName(a.Service, other.Service)
+}
+
+// sameActorName compares one optional name of two actors: both unset, or both the same name.
+func sameActorName(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // CanonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the
@@ -213,19 +238,43 @@ type AnchorInput struct {
 
 // Project groups native issues under a short key.
 type Project struct {
-	Key       string    `json:"key"`
-	Name      string    `json:"name"`
-	OpenAsks  int       `json:"open_asks"`
-	CreatedAt time.Time `json:"created_at"`
+	Key      string `json:"key"`
+	Name     string `json:"name"`
+	OpenAsks int    `json:"open_asks"`
+	// GatedSteps are the design-gate steps the Legion deployment that serves this project
+	// gates, in the order it gates them, as its daemon last published them
+	// (PUT /api/v1/projects/{key}/gated-steps). Each one names a document of a root issue a
+	// person must approve before the tree's work runs. The empty list is a deployment that
+	// gates nothing and a deployment that has not published yet alike: neither holds a step
+	// waiting for a person, so a reader need not tell them apart.
+	GatedSteps []string  `json:"gated_steps"`
+	CreatedAt  time.Time `json:"created_at"`
 }
+
+// GatedStepDecisions, GatedStepCriteria and GatedStepSpec are the three design-gate steps
+// Project.GatedSteps names, each one a document of the root issue: the issue's decisions
+// document, its Verification document, and its primary document. GatedStepsKnown is the set in
+// the order the gate runs them, which the route checks a published list against and the
+// database's own check on projects.gated_steps repeats.
+const (
+	GatedStepDecisions = "decisions"
+	GatedStepCriteria  = "criteria"
+	GatedStepSpec      = "spec"
+)
+
+var GatedStepsKnown = []string{GatedStepDecisions, GatedStepCriteria, GatedStepSpec}
 
 // RepoProject assigns an external repository to a native Dispatch project. Default marks the one
 // mapping of the project an issue with no repository of its own, and none on its parent chain,
-// resolves to; at most one mapping of a project is its default.
+// resolves to; at most one mapping of a project is its default. RenamedTo is the full
+// `owner/name` this repository is called today, null for one that was never renamed: Dispatch
+// holds both names of one repository, and the canonical name is what this field reads, else the
+// repository's own (refs.CanonicalRepo).
 type RepoProject struct {
 	Repo      string    `json:"repo"`
 	Project   string    `json:"project"`
 	Default   bool      `json:"default"`
+	RenamedTo *string   `json:"renamed_to"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -352,11 +401,13 @@ type Issue struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at"`
 	PrimaryArtifactID string     `json:"primary_artifact_id"`
-	// VerificationArtifactID and PlanArtifactID are the issue's documents by role
-	// (Artifact.Role): the one created as verification.md and the one created as plan.md, each
-	// "" when the issue holds none. They are resolved on read, as PrimaryArtifactID is.
+	// VerificationArtifactID, PlanArtifactID and DecisionsArtifactID are the issue's documents
+	// by role (Artifact.Role): the one created as verification.md, the one created as plan.md
+	// and the one created as decisions.md, each "" when the issue holds none. They are resolved
+	// on read, as PrimaryArtifactID is.
 	VerificationArtifactID string `json:"verification_artifact_id"`
 	PlanArtifactID         string `json:"plan_artifact_id"`
+	DecisionsArtifactID    string `json:"decisions_artifact_id"`
 	LastSeq                int    `json:"last_seq"`
 }
 
@@ -811,8 +862,9 @@ type Artifact struct {
 	Primary   bool    `json:"primary"`
 	// Role is the part an issue's document plays beside its spec: ArtifactRoleVerification for
 	// the document created as verification.md, ArtifactRolePlan for the one created as plan.md,
-	// "" for every other document. It is set from the document's slug when the row is created
-	// and never changes, as Primary never changes, and no request field sets it.
+	// ArtifactRoleDecisions for the one created as decisions.md, "" for every other document.
+	// It is set from the document's slug when the row is created and never changes, as Primary
+	// never changes, and no request field sets it.
 	Role      string    `json:"role,omitempty"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
@@ -822,12 +874,13 @@ type Artifact struct {
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
 
-// ArtifactRoleVerification and ArtifactRolePlan are the two parts Artifact.Role names, the
-// values the contract's union declares (dispatch-api.ts). A document that plays neither holds
-// "".
+// ArtifactRoleVerification, ArtifactRolePlan and ArtifactRoleDecisions are the three parts
+// Artifact.Role names, the values the contract's union declares (dispatch-api.ts). A document
+// that plays none of them holds "".
 const (
 	ArtifactRoleVerification = "verification"
 	ArtifactRolePlan         = "plan"
+	ArtifactRoleDecisions    = "decisions"
 )
 
 // ArtifactReview is one human review of a document, pinned to the version it was
@@ -1349,8 +1402,8 @@ type AskEventPayload struct {
 	Restored bool `json:"restored,omitempty"`
 	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
 	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
-	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
-	// moved. Absent on every other ask event; [] when nobody has a row.
+	// transaction (events.ThreadLogins), so a viewer knows whether their Inbox can have moved.
+	// Absent on every other ask event; [] when nobody has a row.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
@@ -1389,10 +1442,12 @@ type AskAnsweredEventPayload struct {
 // for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
 // blocked_by, external_links; for issue.created every field the new issue holds a value in),
 // Ancestors the issue's parent chain,
-// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
-// whose Replies count the move can change: for a close or a reopen every login with a Replies row
-// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
-// Each is absent from an event written before them.
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status or the
+// assignee moved, whose Inbox rows the write can move (api.issueWriteThreadLogins): for a close
+// or a reopen every login with a Replies row on one of the issue's open asks
+// (events.IssueThreadLogins), for an assignee move the assignee the issue was taken from and the
+// one it was given to, for the two together the sorted union of both, and for any other status
+// move []. Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
@@ -1563,26 +1618,75 @@ type MyReplyReply struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// MyReplyRow is one thread the caller wrote in where someone else has written since the caller
-// last read it: an ask's thread, a comment thread by its root, or an issue message thread by its
-// root. Ref is the SPA route of the thread's root, never the reply's.
+// MyReplySession is the agent session an Agent row's thread was sent to: the session's id and the
+// name Dispatch knows it by (its newest stamped session title, or the id when it has stamped
+// none).
+type MyReplySession struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// MyReplyRow is one thread the caller is reading in the Inbox: a Reply row - an ask's thread, a
+// comment thread by its root, or an issue message thread by its root, which somebody else has
+// written in - or an Agent row, one of the caller's one-off messages to an agent session with a
+// reply from that session. Ref is the SPA route of the thread's root, never the reply's; for an
+// Agent row it is the session's live view.
 type MyReplyRow struct {
-	ThreadID string           `json:"thread_id"`
+	ThreadID string `json:"thread_id"`
+	// Kind is ask | comment | message for a Reply row, or agent for an Agent row.
 	Kind     string           `json:"kind"`
 	Ref      string           `json:"ref"`
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`
 	Document *OpenAskDocument `json:"document,omitempty"`
-	Subject  string           `json:"subject"`
-	Reply    MyReplyReply     `json:"reply"`
+	// Priority is the owning issue's coarse priority, absent on a row with no issue or none set.
+	Priority *int `json:"priority,omitempty"`
+	// Project is the thread owner's project key, absent on an Agent row, which has no owner.
+	Project *string      `json:"project,omitempty"`
+	Subject string       `json:"subject"`
+	Reply   MyReplyReply `json:"reply"`
+	// ReadThrough is the caller's read mark on the thread (user_threads.read_through), absent on
+	// an Agent row, whose replies are read by id rather than by a mark.
+	ReadThrough *time.Time `json:"read_through,omitempty"`
+	// Unread says whether the row still holds a write the caller has not read: always true under
+	// state=unread, either way under state=inbox and state=dismissed.
+	Unread bool `json:"unread"`
+	// UnreadCount is how many writes in the thread the caller has not read: for a Reply row the
+	// comments, messages and answers somebody else wrote after ReadThrough, for an Agent row the
+	// session replies in UnreadReplyIDs.
+	UnreadCount int `json:"unread_count"`
+	// UnreadReplyIDs are an Agent row's unread session replies, which the Inbox marks read by id.
+	UnreadReplyIDs []string `json:"unread_reply_ids,omitzero"`
+	// Anchor is the document mark the thread's root is anchored to, when it has one.
+	Anchor *Anchor `json:"anchor,omitempty"`
+	// Session is the agent session an Agent row's thread was sent to.
+	Session *MyReplySession `json:"session,omitempty"`
+	// DismissedAt is when the caller dismissed the thread out of their Inbox, absent on a thread
+	// that is in it. It is the order state=dismissed answers in and the cursor it resumes from.
+	DismissedAt *time.Time `json:"dismissed_at,omitempty"`
+	// Version is a Reply row's user_threads.version, which counts the writes somebody else has
+	// made in the thread: a dismissal of the row carries it back and the route writes the mark
+	// only while the row still holds it, so a press can bury no write the page never drew. Only
+	// the Reply scan sets it (readMyReplyRows, api/replies.go), so an Agent row - which has no
+	// user_threads row and no version at all - sends no version key, and a Reply row's own 0
+	// still goes out. What a dismissal of an Agent row carries instead is the reply it drew and
+	// the ids it drew as unread (api/inbox_dismiss.go).
+	Version *int64 `json:"version,omitempty"`
 }
 
-// MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
-// there are in all.
+// MyRepliesResponse is the caller's Inbox threads in one state's own order, and how many there are
+// in all - except under state=dismissed, where Total is the page it answers: that view reads 200
+// rows at a time from a cursor and nothing reads a total of it, and counting every thread a person
+// has ever dismissed is the most expensive read the Inbox has (INFRA-450's a14). AsOf is the
+// database time of the one snapshot every row was read in, which is what a mark-all passes back as
+// its read mark. NextCursor is where the next state=dismissed page resumes, empty when the page
+// that answered it was the last.
 type MyRepliesResponse struct {
-	Rows   []MyReplyRow `json:"rows"`
-	Total  int          `json:"total"`
-	Limit  int          `json:"limit"`
-	Offset int          `json:"offset"`
+	Rows       []MyReplyRow `json:"rows"`
+	Total      int          `json:"total"`
+	Limit      int          `json:"limit"`
+	Offset     int          `json:"offset"`
+	AsOf       time.Time    `json:"as_of"`
+	NextCursor string       `json:"next_cursor,omitzero"`
 }
 
 // SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.
@@ -2050,10 +2154,12 @@ type MessageEventPayload struct {
 	ThreadTarget string `json:"thread_target,omitempty"`
 	// ReferenceChangesPayload carries the same signal comment events do.
 	ReferenceChangesPayload
-	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
-	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
-	// Carried by an issue message's message.created and message.answered; absent on a direct
-	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	// ThreadLogins is every login whose Inbox the message can have moved, read in its own
+	// transaction. On an issue message it is every login with a Replies row on the message's
+	// thread (its root, up in_reply_to, events.ThreadLogins); on a direct (issue-less)
+	// conversation's, which keeps no Replies row, it is the thread root author's login, the one
+	// Inbox an Agent row of that thread sits in, and [] when no person opened the thread. Carried
+	// by message.created and message.answered; absent on a delivery frame.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
@@ -2066,12 +2172,15 @@ type UserAgentStateEventPayload struct {
 	SessionID string `json:"session_id"`
 }
 
-// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read mark on one thread
-// of the Replies page moved. It names the viewer so their other open tabs and devices drop the row;
-// it is owned by the thread's project, like `user_state.updated`, and never notifies.
+// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read of the Inbox's
+// threads moved. It names the viewer so their other open tabs and devices drop the row, and the
+// thread when one thread was marked (PUT /api/v1/me/threads/{id}/read); a mark-all
+// (POST /api/v1/me/inbox/read) names no thread, since one event stands for every thread it marked
+// in that project. It is owned by the thread's project, like `user_state.updated`, and never
+// notifies.
 type UserThreadStateEventPayload struct {
 	Login    string `json:"login"`
-	ThreadID string `json:"thread_id"`
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.

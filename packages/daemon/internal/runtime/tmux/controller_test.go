@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -32,10 +33,11 @@ func controllerSpec(t *testing.T, project string) runtime.SpawnSpec {
 	}
 }
 
-// A controller pane is told the controller's marker in place of a tree pane's tree and issue, and
-// the empty Slack channel list the plugin requires of a daemon-launched controller in place of the
-// workspace: exactly the runtime's own names for a tree pane, less those three, plus the
-// controller's two (controllerOwned), so a spec can override none of them.
+// A controller pane is told the controller's marker in place of a tree pane's tree, issue and the
+// issue key a tree pane stamps its commits with, and the empty Slack channel list the plugin
+// requires of a daemon-launched controller in place of the workspace: exactly the runtime's own
+// names for a tree pane, less those four, plus the controller's two (controllerOwned), so a spec
+// can override none of them.
 func TestAControllerPaneIsToldTheControllerMarkerInPlaceOfATree(t *testing.T) {
 	spec := controllerSpec(t, "omp")
 	spec.Env = nil
@@ -59,7 +61,7 @@ func TestAControllerPaneIsToldTheControllerMarkerInPlaceOfATree(t *testing.T) {
 	}
 	want := map[string]bool{}
 	for name := range runtimeOwned {
-		if name != "LEGION_TREE" && name != "LEGION_ISSUE" && name != "LEGION_WORKSPACE" {
+		if name != "LEGION_TREE" && name != "LEGION_ISSUE" && name != "LEGION_ISSUE_TRAILER" && name != "LEGION_WORKSPACE" {
 			want[name] = true
 		}
 	}
@@ -100,7 +102,7 @@ func TestTheControllerWorksInADirectoryAndAWindowOfItsOwn(t *testing.T) {
 		t.Errorf("the controller's pane command = %q, want it to start in %s", opened, dir)
 	}
 	pairs := f.pairs(t)
-	for _, name := range []string{"LEGION_TREE=", "LEGION_ISSUE=", "LEGION_WORKSPACE="} {
+	for _, name := range []string{"LEGION_TREE=", "LEGION_ISSUE=", "LEGION_ISSUE_TRAILER=", "LEGION_WORKSPACE="} {
 		if slices.ContainsFunc(pairs, func(pair string) bool { return strings.HasPrefix(pair, name) }) {
 			t.Errorf("the controller's pane was told %s…: %q", name, pairs)
 		}
@@ -115,17 +117,24 @@ func TestTheControllerWorksInADirectoryAndAWindowOfItsOwn(t *testing.T) {
 // controller start` and the sandbox runtime do there: the launch succeeds, the controller's gh
 // directory is an empty 0700 one — whatever an earlier launch left there removed — named by
 // GH_CONFIG_DIR with the tokens emptied, and the refresher leaves it be without logging a failure.
-// Any other role with no owner is still refused.
+// The controller's launch asks its own function (Options.ControllerCredential), as its refresh
+// does, so that is what refuses here; any other role with no owner is still refused through
+// Options.GitHubCredential.
 func TestAControllerWithNoGitHubOwnerRunsWithGhActingAsNobody(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
-	noOwner := func(_ context.Context, role claim.Role, _ string) (ghconfig.Bundle, error) {
+	noOwner := func(_ context.Context, role claim.Role, _ ghrepo.Repository) (ghconfig.Bundle, error) {
 		return ghconfig.Bundle{}, fmt.Errorf("the review App for %s: %w", role, runtime.ErrNoGitHubOwner)
 	}
-	f := newFakeServerRuntime(t, noOwner, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	f := newFakeServerRuntimeWith(t, noOwner, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		func(o *Options) {
+			o.ControllerCredential = func(context.Context, string) (ghconfig.Bundle, error) {
+				return noOwner(ctx, claim.RoleController, ghrepo.Repository{})
+			}
+		})
 	spec := controllerSpec(t, "omp")
 	root := runtime.GHConfigDir(f.stateDir, spec.Claim)
-	stale, _ := staticCredential(ctx, claim.RoleController, "acme")
+	stale, _ := staticCredential(ctx, claim.RoleController, ghrepo.MustParse("acme/widgets"))
 	if _, err := ghconfig.WriteBundle(root, stale); err != nil {
 		t.Fatal(err)
 	}

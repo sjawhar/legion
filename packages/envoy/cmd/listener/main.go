@@ -166,9 +166,9 @@ const defaultSessionReapInterval = time.Minute
 // sooner than the fixed pass this change replaces, which is the opposite of what this change is
 // for; the raise of that maximum age past the gone horizon is dispatch://INFRA-887's, and it
 // cannot land first. The grace a restored claim gets is measured from the listener's own start
-// against the live window (store.Registry.ReleaseExpiredRoleClaim), not counted in passes, so
-// the period does not move it; what the period decides is how long after a holder is gone its
-// role is free.
+// against the live window (store.Registry.releaseReadExpiredRoleClaim, which the reaper's pass
+// hands the claim it read), not counted in passes, so the period does not move it; what the
+// period decides is how long after a holder is gone its role is free.
 const defaultRoleClaimReapInterval = 5 * time.Minute
 
 // warnIgnoredEnv writes one WARN naming an environment variable this listener no longer reads,
@@ -1450,12 +1450,15 @@ func main() {
 	// store.InterestRefreshAge) of every row that reaper still lists.
 	//
 	// The windows every reader of the registry judges a record's age against. Each defaults to
-	// the compiled constant, which .github/scripts/check-heartbeat-margin.sh reads to prove that
-	// three registration refreshes fit inside the live window; a deployment that moves one moves
-	// what this listener runs with and nothing else. A value that is not a positive duration is
-	// refused by name here rather than taken. Dispatch reads the same two windows through the
-	// same helper and judges a role route's holder by them, so a deployment gives both processes
-	// the same values (envconf.SessionWindows, cmd/dispatch's roleHolderWindows).
+	// the compiled constant (session.LiveWindow, session.GoneHorizon). The live window's is the
+	// declaration contracts.SessionLiveWindow, which the Go test
+	// TestDAEMONTESTTheSessionTimingRuleHoldsAtTheValuesTheBuildUses (packages/daemon/internal/daemon)
+	// weighs to prove that three registration refreshes fit inside it; a deployment
+	// that moves one moves what this listener runs with and nothing else. A value that is not a
+	// positive duration is refused by name here rather than taken. Dispatch reads the same two
+	// windows through the same helper and judges a role route's holder by them, so a deployment
+	// gives both processes the same values (envconf.SessionWindows, cmd/dispatch's
+	// roleHolderWindows).
 	sessionLiveWindow, sessionGoneHorizon, err := envconf.SessionWindows(logger.Slog(), os.LookupEnv)
 	if err != nil {
 		log.Fatal(err)

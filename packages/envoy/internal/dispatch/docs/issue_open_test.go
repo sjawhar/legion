@@ -3,6 +3,9 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +17,8 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -401,6 +406,246 @@ func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.
 		t.Fatal("the refusal failed the room rather than closing it for its issue")
 	}
 	connectWithScope(t, server.URL, artifactID, "alice", "readonly", "before\n")
+}
+
+// newHeldAppendsService is newTestServiceInstance with the test hooks on, so a test can hold the
+// room's browser appends back (HoldRoomPersistence) and have the keystrokes it makes meanwhile
+// queue into one batch.
+func newHeldAppendsService(t *testing.T, database *store.Store) (*Service, *httptest.Server) {
+	t.Helper()
+	service := New(Deps{
+		Store:     database,
+		Events:    events.NewBroker(),
+		Identity:  headerIdentity(database),
+		ServerURL: "https://dispatch.example",
+		Settle:    time.Hour,
+		TestHooks: true,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	return service, newTestServer(t, service)
+}
+
+// One batch carries the keystrokes a room queued (roomBatchThrough), and an issue can close in
+// the middle of such a run. The gate cuts the run at the first update the room took later than
+// closeMargin after the close (observedBeforeClose, gateAppend): the prefix the room took in
+// time is stored, exactly as those updates would have been stored one transaction each, and the
+// rest stays queued and is refused ErrIssueClosed on its own call, which closes the room for its
+// issue. Refusing the whole batch would lose the edits made while the issue was open; storing it
+// whole would store the edits made after the close.
+func TestABatchStraddlingTheIssuesCloseStoresWhatTheRoomTookInTime(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newHeldAppendsService(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	var failed atomic.Bool
+	service.beforeFailedEviction = func(string) { failed.Store(true) }
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	head := storedHead(t, database, artifactID)
+
+	// The room's appends are held until well after both keystrokes, so the first one's call
+	// reads the queue with the second in it and runs one batch of the two.
+	queued := queueAKeystrokeEachSideOfTheClose(t, database, service, alice, artifactID, "before", 3*closeMargin)
+	// The batch of the first keystroke runs through the second: without that this would be two
+	// appends of one update each, not one run the close cuts.
+	if through, _, _ := service.roomBatchThrough(artifactID, queued[0], false); through != queued[1].seq {
+		t.Fatalf("the batch of the first keystroke runs through position %d, not the second keystroke's %d: the two are not one run", through, queued[1].seq)
+	}
+
+	requireEnds(t, alice, "the gate refused the keystroke alice made after the close and left her browser connected")
+	waitFor(t, roomWait(t), "the batch's admitted prefix to be stored", func() bool {
+		return storedHead(t, database, artifactID) > head
+	})
+	if moved := storedHead(t, database, artifactID); moved != head+1 {
+		t.Fatalf("the document moved from update %d to %d, want one stored update: the batch's admitted prefix", head, moved)
+	}
+	stored := storedMarkdown(t, database, artifactID)
+	if !strings.Contains(stored, "typed in time") {
+		t.Fatalf("the store reads %q, without the keystroke the room took while the issue was open: the batch was refused whole", stored)
+	}
+	if strings.Contains(stored, "typed after the close") {
+		t.Fatalf("the store reads %q, holding the keystroke the room took after the close margin was out", stored)
+	}
+	if failed.Load() {
+		t.Fatal("the refusal of the batch's rest failed the room rather than closing it for its issue")
+	}
+	connectWithScope(t, server.URL, artifactID, "alice", "readonly", stored)
+}
+
+// queueAKeystrokeEachSideOfTheClose closes issue DOC-1 and has alice type two keystrokes over
+// from: one the room takes while the close is still within closeMargin, which the gate admits,
+// and one it takes after the margin is out, which it refuses. The room's own appends are held for
+// hold, so both are still queued when it returns, one run of the two for a batch or a joined
+// flush to take, and it answers their classes in the room's commit order. No room sync runs in
+// these tests, so nothing tells the room its issue closed in between: the gate is what notices.
+func queueAKeystrokeEachSideOfTheClose(t *testing.T, database *store.Store, service *Service, alice *docstest.Peer, artifactID, from string, hold time.Duration) []*queuedClass {
+	t.Helper()
+	if err := service.HoldRoomPersistence(artifactID, hold); err != nil {
+		t.Fatalf("hold the room's appends: %v", err)
+	}
+	writeIssueClosed(t, database, "DOC-1", true)
+	typeOver(t, alice, from, "typed in time")
+	waitPastCloseMargin(t, database, "DOC-1")
+	// Half a margin past the margin: the gate judges the second keystroke's age on this process's
+	// clock against the close on the database's, so the two need only run at about the same rate.
+	time.Sleep(closeMargin / 2)
+	typeOver(t, alice, "typed in time", "typed after the close")
+	waitFor(t, roomWait(t), "both keystrokes to be queued on the room", func() bool {
+		state := service.lockExistingState(artifactID)
+		if state == nil {
+			return false
+		}
+		defer service.unlockState(artifactID, state)
+		return len(state.updateClasses) == 2
+	})
+	state := service.lockExistingState(artifactID)
+	queued := slices.Clone(state.updateClasses)
+	service.unlockState(artifactID, state)
+	return queued
+}
+
+// requireStillQueuedAndUnstored fails unless artifactID's room still holds queued, the classes a
+// flush read, in order, with none of them marked stored: a transaction whose flush failed and
+// rolled back has acknowledged no keystroke to its browser as saved and has dropped none from the
+// room's pending state, so each is still the room's own call's to store or refuse.
+func requireStillQueuedAndUnstored(t *testing.T, service *Service, artifactID string, queued []*queuedClass) {
+	t.Helper()
+	for index, class := range queued {
+		if class.stored.Load() {
+			t.Fatalf("keystroke %d is marked stored by a transaction that stored nothing of the run: the room drops it from its queue though no row holds it", index+1)
+		}
+	}
+	state := service.lockExistingState(artifactID)
+	if state == nil {
+		t.Fatal("the room keeps no state after the failed flush, so the keystrokes it queued are gone")
+	}
+	still := slices.Clone(state.updateClasses)
+	service.unlockState(artifactID, state)
+	if !slices.Equal(still, queued) {
+		t.Fatalf("the room's queue holds %d classes after the failed flush, want the %d it read: none of them is dropped", len(still), len(queued))
+	}
+}
+
+// A transaction that flushes the room's queue before its own write (Ledger.flushThrough: a
+// snapshot's or a named version's capture, a repair, the block-id backfill) meets the same gate
+// the room's own batch does, and the close can cut its run the same way. The flush then fails with
+// ErrIssueClosed and records nothing: its transaction rolls back and stores neither the prefix the
+// gate admitted nor the writer's own update, which the writer derives from a room state holding
+// the keystroke the gate refused. The run is left exactly as the flush found it - neither
+// keystroke marked stored, neither dropped from the room's queue - and the room's own batch
+// decides them under the prefix rule (appendRoomTx): the one taken in time is stored, the one
+// taken after the margin refused, which closes the room for its issue.
+func TestAJoinedFlushTheCloseCutsFailsAndMarksNothing(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newHeldAppendsService(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	head := storedHead(t, database, artifactID)
+
+	// The room's own appends are held, so both keystrokes are still queued when the joined
+	// transaction below flushes them, about two margins in; the hold ends two margins later.
+	queued := queueAKeystrokeEachSideOfTheClose(t, database, service, alice, artifactID, "before", 4*closeMargin)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the flushing transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if err := lockDocumentRoom(joined, tx, artifactID); err != nil {
+		t.Fatalf("lock the document: %v", err)
+	}
+	if err := ledger.flushThrough(joined, tx, artifactID, roomPoint{cursor: queued[1].cursor, seq: queued[1].seq}); !errors.Is(err, ErrIssueClosed) {
+		t.Fatalf("the flush of a run the close cuts = %v, want ErrIssueClosed", err)
+	}
+	if flush := ledger.flushFor(artifactID); flush != nil && len(flush.classes) != 0 {
+		t.Fatalf("the failed flush records %d classes at versions %v, want none: its transaction stores nothing of the run",
+			len(flush.classes), flush.versions)
+	}
+	// The caller's transaction rolls back, as the request that met the error does, and the prefix
+	// the gate admitted goes with it.
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("roll the flushing transaction back: %v", err)
+	}
+	ledger.Discard()
+	if moved := storedHead(t, database, artifactID); moved != head {
+		t.Fatalf("the document moved from update %d to %d, want neither keystroke stored: the failed flush left a row behind", head, moved)
+	}
+	requireStillQueuedAndUnstored(t, service, artifactID, queued)
+
+	// The room's own call stores what it took in time and refuses the rest, which closes the room
+	// for its issue and stores nothing more.
+	requireEnds(t, alice, "the room's own call refused the keystroke alice made after the close and left her browser connected")
+	if moved := storedHead(t, database, artifactID); moved != head+1 {
+		t.Fatalf("the document stands at update %d after the room's own call, want %d: the keystroke it took in time", moved, head+1)
+	}
+	stored := storedMarkdown(t, database, artifactID)
+	if !strings.Contains(stored, "typed in time") {
+		t.Fatalf("the store reads %q, without the keystroke the room took while the issue was open", stored)
+	}
+	if strings.Contains(stored, "typed after the close") {
+		t.Fatalf("the store reads %q, holding the keystroke the room took after the close margin was out", stored)
+	}
+}
+
+// A writer of a closed issue's documents flushes the room before its own write, and the close can
+// cut that run: WriteIssueAskStates writes each withdrawn ask's state into the document, on the
+// issue's row and owner-verified, through a live write whose Ledger.flushThrough stores the room's
+// queued keystrokes first. The gate admits the keystroke the room took in time and refuses the one
+// it took after the margin, and the write must fail there rather than carry on: its own update is
+// derived from a room that holds the refused keystroke, so stored on top of the admitted prefix it
+// would store a document the store refused the makings of. Nothing of the run is stored, no ask
+// state with it, and both keystrokes are left to the room's own call.
+func TestWritingIssueAskStatesOnARunTheCloseCutsStoresNothing(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newHeldAppendsService(t, database)
+	seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+	// Settlement indexes the ask the write withdraws below and writes its state into the block,
+	// so what the store holds from here on is what alice's browser connects on.
+	settleCurrentGeneration(t, service, artifactID)
+	region := blockAskOn(t, service, artifactID, "region")
+	waitForLandedAppends(t, service, artifactID)
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", storedMarkdown(t, database, artifactID))
+	head := storedHead(t, database, artifactID)
+
+	queued := queueAKeystrokeEachSideOfTheClose(t, database, service, alice, artifactID, "Context", 4*closeMargin)
+
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	err := joinedWrite(service, func(ctx context.Context) error {
+		tx, _ := txFromContext(ctx)
+		// The issue route holds the issue's row before it writes any document.
+		if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {
+			return fmt.Errorf("lock the issue: %w", err)
+		}
+		_, err := service.WriteIssueAskStates(ctx, "DOC-1", []model.Ask{withdrawnAsk(region, closer)}, closer, false)
+		return err
+	})
+	if !errors.Is(err, ErrIssueClosed) {
+		t.Fatalf("the ask-state write over a run the close cuts = %v, want ErrIssueClosed", err)
+	}
+	if moved := storedHead(t, database, artifactID); moved != head {
+		t.Fatalf("the document moved from update %d to %d, want nothing stored: the failed write stored the run's admitted prefix, its own update, or both", head, moved)
+	}
+	if stored := storedMarkdown(t, database, artifactID); strings.Contains(stored, `state="resolved"`) || strings.Contains(stored, "typed in time") {
+		t.Fatalf("the store reads %q, want the document as the write found it: a write over a run the close cuts stores nothing", stored)
+	}
+	requireStillQueuedAndUnstored(t, service, artifactID, queued)
+
+	// The room's own call decides the two under the batch path's prefix rule, as it would had no
+	// writer joined them at all.
+	requireEnds(t, alice, "the room's own call refused the keystroke alice made after the close and left her browser connected")
+	if moved := storedHead(t, database, artifactID); moved != head+1 {
+		t.Fatalf("the document stands at update %d after the room's own call, want %d: the keystroke it took in time", moved, head+1)
+	}
 }
 
 // A close notified while the listener has no connection reaches nobody and is never sent again:

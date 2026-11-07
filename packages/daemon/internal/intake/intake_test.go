@@ -3,13 +3,10 @@ package intake
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,13 +22,12 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -338,14 +334,6 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
 		},
 		{
-			// Shared with packages/envoy/internal/dispatch/startup, whose test requires the
-			// envelope Dispatch builds for this announcement to equal it field for field.
-			name:    "Dispatch server fleet build announced (shared with Dispatch)",
-			subject: "notifications.dispatch.server.started",
-			file:    "dispatch/server-started.json",
-			want:    ServerStarted{Commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"},
-		},
-		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
@@ -400,7 +388,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured envelope: %v", err)
 			}
-			got, err := decodeMessage(tc.subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data)
+			got, err := decodeMessage(tc.subject, "CAPTURE", capturedRepositories, data)
 			if err != nil {
 				t.Fatalf("decode captured envelope: %v", err)
 			}
@@ -413,7 +401,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 
 func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
-	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data); err != nil {
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
 	}
 }
@@ -433,11 +421,11 @@ func TestIssueEventIgnoresFieldsTheDaemonDoesNotConsume(t *testing.T) {
 		t.Fatal("captured issue.created fixture has no empty labels field to widen beside")
 	}
 	subject := "notifications.dispatch.issue.CAPTURE-4.issue.created"
-	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(original))
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
 	if err != nil {
 		t.Fatalf("decode captured issue.created: %v", err)
 	}
-	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(widened))
+	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(widened))
 	if err != nil {
 		t.Fatalf("decode issue.created with a priority and a field the fixture lacks: %v", err)
 	}
@@ -467,7 +455,7 @@ func TestASynchronizeFromAListenerWithoutBeforeNamesNoMove(t *testing.T) {
 		name, data string
 		before     string
 	}{{"neither", older, ""}, {"before alone", noSender, "head-before"}} {
-		got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(tc.data))
+		got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, []byte(tc.data))
 		if err != nil {
 			t.Fatalf("%s: decode: %v", tc.name, err)
 		}
@@ -484,7 +472,7 @@ func TestASynchronizeFromAListenerWithoutBeforeNamesNoMove(t *testing.T) {
 	if unsent == string(push) {
 		t.Fatal("captured push fixture carries no sender to take out")
 	}
-	got, err := decodeMessage("notifications.github.sjawhar.legion.push", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(unsent))
+	got, err := decodeMessage("notifications.github.sjawhar.legion.push", "CAPTURE", capturedRepositories, []byte(unsent))
 	if err != nil {
 		t.Fatalf("decode a push without sender: %v", err)
 	}
@@ -503,7 +491,7 @@ func TestADispatchIssueEventCarriesTheKeysItIsBlockedBy(t *testing.T) {
 	if blocked == original {
 		t.Fatal("captured issue.updated fixture has no empty labels field to widen")
 	}
-	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(blocked))
+	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(blocked))
 	if err != nil {
 		t.Fatalf("decode issue.updated with blocked_by: %v", err)
 	}
@@ -511,7 +499,7 @@ func TestADispatchIssueEventCarriesTheKeysItIsBlockedBy(t *testing.T) {
 	if blockers := got.Fact.(DispatchIssue).Blockers; !reflect.DeepEqual(blockers, want) {
 		t.Fatalf("blockers = %#v, want %#v in Dispatch's own order", blockers, want)
 	}
-	got, err = decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(original))
+	got, err = decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
 	if err != nil {
 		t.Fatalf("decode captured issue.updated: %v", err)
 	}
@@ -525,7 +513,7 @@ func TestADispatchIssueEventCarriesTheKeysItIsBlockedBy(t *testing.T) {
 // list itself.
 func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
 	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
-	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(data))
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
 	if err != nil {
 		t.Fatalf("decode labeled issue.updated envelope: %v", err)
 	}
@@ -546,7 +534,7 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 	if older == original {
 		t.Fatal("captured issue.updated fixture carries no resolved_repo to remove")
 	}
-	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(older))
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(older))
 	if err != nil {
 		t.Fatalf("decode of an event without resolved_repo = %v, want it decoded", err)
 	}
@@ -555,7 +543,7 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 		t.Fatalf("fact = %#v, want %#v", decoded.Fact, want)
 	}
 	none := strings.Replace(original, `\"resolved_repo\":\"sjawhar/legion\"`, `\"resolved_repo\":null`, 1)
-	decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, []byte(none))
+	decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(none))
 	if err != nil || decoded.Fact.(DispatchIssue).ResolvedRepoMissing || decoded.Fact.(DispatchIssue).ResolvedRepo != "" {
 		t.Fatalf("decode of an event resolving to none = %#v, %v; want an empty repository, not missing", decoded.Fact, err)
 	}
@@ -566,7 +554,7 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 // heard set case-insensitively, and the fact names the heard repository.
 func TestAGitHubEventOfAHeardRepositoryInAnotherCaseIsDecoded(t *testing.T) {
 	heard := []ghrepo.Repository{ghrepo.MustParse("SJawhar/Legion")}
-	decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", heard, nil, ghrepo.Renames{}, capturedGitHubEnvelope(t, "pr-opened.json"))
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", heard, capturedGitHubEnvelope(t, "pr-opened.json"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -587,7 +575,7 @@ func TestARepositoryMappingEventIsTheProjectsMappingChange(t *testing.T) {
 		{"another project", "OTHER", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := decodeMessage(repoMappingSubject(tc.project), "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, repoMappingEnvelope(t, tc.project, "acme/widgets"))
+			got, err := decodeMessage(repoMappingSubject(tc.project), "CAPTURE", capturedRepositories, repoMappingEnvelope(t, tc.project, "acme/widgets"))
 			if err != nil {
 				t.Fatalf("decode the mapping event: %v", err)
 			}
@@ -596,7 +584,7 @@ func TestARepositoryMappingEventIsTheProjectsMappingChange(t *testing.T) {
 			}
 		})
 	}
-	if _, err := decodeMessage(repoMappingSubject("CAPTURE"), "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, repoMappingEnvelope(t, "OTHER", "acme/widgets")); err == nil {
+	if _, err := decodeMessage(repoMappingSubject("CAPTURE"), "CAPTURE", capturedRepositories, repoMappingEnvelope(t, "OTHER", "acme/widgets")); err == nil {
 		t.Fatal("a mapping event whose payload names another project than its subject decoded")
 	}
 }
@@ -686,7 +674,7 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	if err := consumers.SetRepositories(context.Background(), capturedRepositories); err != nil {
 		t.Fatalf("SetRepositories: %v", err)
 	}
-	if decoded, err := decodeMessage("notifications.github.acme.widgets.pr.42", spec.Project, consumers.repositories(), nil, ghrepo.Renames{}, []byte(opened)); err != nil || decoded.Fact != nil {
+	if decoded, err := decodeMessage("notifications.github.acme.widgets.pr.42", spec.Project, consumers.repositories(), []byte(opened)); err != nil || decoded.Fact != nil {
 		t.Fatalf("decode of an unlisted repository's event = %#v, %v; want no fact", decoded.Fact, err)
 	}
 	// A daemon serving no repository hears none: the consumer filters on a subject no repository's
@@ -697,7 +685,7 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	if got := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects; !slices.Equal(got, []string{"notifications.github.-.-"}) {
 		t.Fatalf("GitHub consumer filters hearing none = %v, want the one no repository publishes on", got)
 	}
-	if decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", spec.Project, consumers.repositories(), nil, ghrepo.Renames{}, capturedGitHubEnvelope(t, "pr-opened.json")); err != nil || decoded.Fact != nil {
+	if decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", spec.Project, consumers.repositories(), capturedGitHubEnvelope(t, "pr-opened.json")); err != nil || decoded.Fact != nil {
 		t.Fatalf("decode while hearing none = %#v, %v; want no fact", decoded.Fact, err)
 	}
 }
@@ -820,7 +808,7 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, nil, ghrepo.Renames{}, envelope)
+				decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, envelope)
 				if err != nil {
 					t.Fatalf("decode %s: %v", golden.Topic, err)
 				}
@@ -876,12 +864,10 @@ func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
 }
 
 // A completed workflow run, as Envoy's own normalizer writes it from a real sjawhar/legion
-// release.yaml push run on main (the workflow-run-completed golden), is a WorkflowRunCompleted of
-// the repository heard, its run id and attempt read from Envoy's decimal strings, when the project
-// names release.yaml its deploy. Any other action, another repository, a workflow no deploy names,
-// a run id or attempt that is missing, not a positive decimal or not a string, and a missing path
-// or branch are no fact, and never poison: such a run can wake nothing.
-func TestDecodeWorkflowRunCompletedFromEnvoysGolden(t *testing.T) {
+// release.yaml push run on main (the workflow-run-completed golden), is no fact: no run of any
+// workflow wakes a production check, so the GitHub durable that carries the envelope
+// acknowledges it without a transaction, and it is never poison.
+func TestAWorkflowRunEnvelopeIsNoFact(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "workflow-run-completed.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -894,77 +880,24 @@ func TestDecodeWorkflowRunCompletedFromEnvoysGolden(t *testing.T) {
 	if err := json.Unmarshal(data, &golden); err != nil {
 		t.Fatalf("decode golden: %v", err)
 	}
-	deploys := []config.Deploy{{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/release.yaml", Step: "Release"}}
-	decode := func(t *testing.T, set map[string]any, unset ...string) decodedMessage {
-		t.Helper()
-		payload := make(map[string]any, len(golden.Payload))
-		for key, value := range golden.Payload {
-			payload[key] = value
-		}
-		for key, value := range set {
-			payload[key] = value
-		}
-		for _, key := range unset {
-			delete(payload, key)
-		}
-		text, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		envelope, err := json.Marshal(map[string]any{
-			"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
-			"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
-			"payload": string(text), "trace_id": "golden",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		decoded, err := decodeMessage(golden.Topic, "GOLDEN", capturedRepositories, deploys, ghrepo.Renames{}, envelope)
-		if err != nil {
-			t.Fatalf("decode %s: %v, want no poison", golden.Topic, err)
-		}
-		return decoded
+	text, err := json.Marshal(golden.Payload)
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := WorkflowRunCompleted{Repo: "sjawhar/legion", Path: ".github/workflows/release.yaml", RunID: 40203304600, Attempt: 1, HeadBranch: "main"}
-	if got := decode(t, nil).Fact; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the golden's fact = %#v, want %#v", got, want)
+	envelope, err := json.Marshal(map[string]any{
+		"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+		"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+		"payload": string(text), "trace_id": "golden",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := decode(t, map[string]any{"repo": "SJAWHAR/Legion", "run_attempt": "3"}).Fact; got != (WorkflowRunCompleted{Repo: "sjawhar/legion", Path: want.Path,
-		RunID: want.RunID, Attempt: 3, HeadBranch: "main"}) {
-		t.Fatalf("a re-run attempt spelled in another case = %#v, want attempt 3 of the heard repository", got)
+	decoded, err := decodeMessage(golden.Topic, "GOLDEN", capturedRepositories, envelope)
+	if err != nil {
+		t.Fatalf("decode %s: %v, want no poison", golden.Topic, err)
 	}
-	for _, tc := range []struct {
-		name  string
-		set   map[string]any
-		unset []string
-	}{
-		{name: "requested", set: map[string]any{"action": "requested", "status": "queued", "conclusion": ""}},
-		{name: "in progress", set: map[string]any{"action": "in_progress", "status": "in_progress", "conclusion": ""}},
-		{name: "no action", unset: []string{"action"}},
-		{name: "another repository", set: map[string]any{"repo": "acme/widgets"}},
-		{name: "a workflow no deploy names", set: map[string]any{"path": ".github/workflows/pr-and-main.yaml"}},
-		{name: "no run id", unset: []string{"run_id"}},
-		{name: "an empty run id", set: map[string]any{"run_id": ""}},
-		{name: "a run id that is not a number", set: map[string]any{"run_id": "run-40203304600"}},
-		{name: "a signed run id", set: map[string]any{"run_id": "+40203304600"}},
-		{name: "a zero run id", set: map[string]any{"run_id": "0"}},
-		{name: "a run id past int64", set: map[string]any{"run_id": "9223372036854775808"}},
-		{name: "a run id as a JSON number", set: map[string]any{"run_id": 40203304600}},
-		{name: "no attempt", unset: []string{"run_attempt"}},
-		{name: "an attempt that is not a number", set: map[string]any{"run_attempt": "first"}},
-		{name: "a negative attempt", set: map[string]any{"run_attempt": "-1"}},
-		{name: "a zero attempt", set: map[string]any{"run_attempt": "0"}},
-		{name: "an attempt as a JSON number", set: map[string]any{"run_attempt": 1}},
-		{name: "an empty path", set: map[string]any{"path": ""}},
-		{name: "no path", unset: []string{"path"}},
-		{name: "an empty branch", set: map[string]any{"head_branch": ""}},
-		{name: "no branch", unset: []string{"head_branch"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if decoded := decode(t, tc.set, tc.unset...); decoded.Fact != nil {
-				t.Fatalf("fact = %#v, want none", decoded.Fact)
-			}
-		})
+	if decoded.Fact != nil {
+		t.Fatalf("the golden's fact = %#v, want none", decoded.Fact)
 	}
 }
 
@@ -974,7 +907,7 @@ func TestDecodeChecksForADottedRepository(t *testing.T) {
 	data := capturedGitHubEnvelope(t, "checks.json")
 	data = bytes.ReplaceAll(data, []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
 	data = bytes.ReplaceAll(data, []byte("sjawhar.legion."), []byte("sjawhar.legion_x."))
-	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, nil, ghrepo.Renames{}, data)
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, data)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -988,7 +921,7 @@ func TestDecodeChecksForADottedRepository(t *testing.T) {
 func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
 	const subject = "notifications.github.sjawhar.legion.pr.42.checks"
 	captured := capturedGitHubEnvelope(t, "checks.json")
-	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, captured)
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, captured)
 	if err != nil || want.Fact == nil {
 		t.Fatalf("decode the captured settlement: fact %#v, err %v", want.Fact, err)
 	}
@@ -997,7 +930,7 @@ func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
 		if bytes.Equal(data, captured) {
 			t.Fatal("the captured settlement carries no settled_at to replace")
 		}
-		got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data)
+		got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, data)
 		if err != nil {
 			t.Fatalf("settled_at %s: decode: %v", settledAt, err)
 		}
@@ -1020,7 +953,7 @@ func TestAJobEnvelopeIsNoFact(t *testing.T) {
 	if filter := githubFilters(capturedRepositories)[0]; !strings.HasPrefix(subject, strings.TrimSuffix(filter, ">")) {
 		t.Fatalf("the repository's filter %s does not take the job subject %s, so this proves nothing", filter, subject)
 	}
-	decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, envelopeJSON(t, "job-1", "github", payload))
+	decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, envelopeJSON(t, "job-1", "github", payload))
 	if err != nil {
 		t.Fatalf("decode a job envelope: %v", err)
 	}
@@ -1029,41 +962,19 @@ func TestAJobEnvelopeIsNoFact(t *testing.T) {
 	}
 }
 
-// Dispatch's announcement that every server process serves a build (server.started) is not an
-// issue event: it arrives on its one subject, read before the issue subjects, and decodes to the
-// build commit it names. An announcement naming no commit — a Dispatch built without one stamped —
-// is no fact and no poison, since there is nothing to compare; an envelope from another source on
-// that subject, or a payload that is not the announcement's object, is poison.
-func TestDecodeServerStartedNamesTheBuildOrIsNoFact(t *testing.T) {
+// Dispatch's announcement that every server process serves a build (server.started) is no fact:
+// no build is compared against a production check, so the daemon has no decoder for the subject
+// and no durable that carries it (TestABootedDaemonOpensNoDispatchServerDurable). A message on it
+// is refused as a subject no durable of this daemon reads.
+func TestADispatchServerStartedMessageIsNoFact(t *testing.T) {
 	const build = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-	for _, tc := range []struct {
-		name    string
-		source  string
-		payload string
-		want    Fact
-		wantErr string
-	}{
-		{name: "a stamped build", source: "dispatch", payload: `{"commit":"` + build + `","started_at":"2026-10-19T06:00:00Z"}`, want: ServerStarted{Commit: build}},
-		{name: "an empty commit", source: "dispatch", payload: `{"commit":"","started_at":"2026-10-19T06:00:00Z"}`},
-		{name: "no commit", source: "dispatch", payload: `{"started_at":"2026-10-19T06:00:00Z"}`},
-		{name: "another source", source: "github", payload: `{"commit":"` + build + `"}`, wantErr: `Dispatch subject has envelope source "github"`},
-		{name: "a payload that is not the start", source: "dispatch", payload: `["` + build + `"]`, wantErr: "decode Dispatch server.started payload"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			decoded, err := decodeMessage(serverStartedSubject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, envelopeJSON(t, "dispatch-server-started-1", tc.source, tc.payload))
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("decode = %v, want poison naming %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("decode server.started: %v", err)
-			}
-			if !reflect.DeepEqual(decoded.Fact, tc.want) || decoded.Source != "dispatch" || decoded.EventID != "dispatch-server-started-1" {
-				t.Fatalf("decoded = %#v, want fact %#v from dispatch under its event id", decoded, tc.want)
-			}
-		})
+	decoded, err := decodeMessage("notifications.dispatch.server.started", "CAPTURE", capturedRepositories,
+		envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"`+build+`","started_at":"2026-10-19T06:00:00Z"}`))
+	if decoded.Fact != nil {
+		t.Fatalf("fact = %#v, want none", decoded.Fact)
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsupported durable subject") {
+		t.Fatalf("decode = %v, want the subject refused as one no durable reads", err)
 	}
 }
 
@@ -1073,70 +984,50 @@ func deployedEvent(issue, payload string) string {
 	return `{"id":31,"issue_key":"` + issue + `","seq":7,"type":"issue.deployed","actor":{"kind":"system","id":"delivery-timeline"},"notify":true,"payload":` + payload + `}`
 }
 
-// Dispatch's issue.deployed names the pull request the production run shipped and the run: it
-// decodes to the fact that wakes the issue's production check, with the completion read as RFC
-// 3339. A payload missing the repository, a positive number or the completion is poison, as a
-// malformed artifact event is; another project's event is skipped before its payload is read.
-func TestDecodeIssueDeployedCarriesTheRunAndRefusesAMalformedPayload(t *testing.T) {
-	completed := time.Date(2026, 10, 19, 6, 12, 0, 0, time.UTC)
-	const full = `{"repo":"sjawhar/legion","number":1300,"run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`
-	for _, tc := range []struct {
-		name    string
-		issue   string
-		payload string
-		want    Fact
-		wantErr string
-	}{
-		{name: "a shipped pull request", issue: "CAPTURE-4", payload: full,
-			want: IssueDeployed{Issue: "CAPTURE-4", Repo: "sjawhar/legion", Number: 1300, RunID: 38230245571, CompletedAt: completed}},
-		{name: "a completion in another zone", issue: "CAPTURE-4", payload: strings.Replace(full, "06:12:00Z", "08:12:00+02:00", 1),
-			want: IssueDeployed{Issue: "CAPTURE-4", Repo: "sjawhar/legion", Number: 1300, RunID: 38230245571, CompletedAt: completed}},
-		{name: "another project's", issue: "OTHER-4", payload: full},
-		{name: "no repo", issue: "CAPTURE-4", payload: `{"number":1300,"run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`, wantErr: "has no repo"},
-		{name: "no number", issue: "CAPTURE-4", payload: `{"repo":"sjawhar/legion","run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`, wantErr: "has no positive integer number"},
-		{name: "no completion", issue: "CAPTURE-4", payload: `{"repo":"sjawhar/legion","number":1300,"run_id":38230245571}`, wantErr: "has no RFC 3339 completed_at"},
-		{name: "a completion that is not a time", issue: "CAPTURE-4", payload: strings.Replace(full, "2026-10-19T06:12:00Z", "yesterday", 1), wantErr: "has no RFC 3339 completed_at"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			subject := "notifications.dispatch.issue." + tc.issue + ".issue.deployed"
-			decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, envelopeJSON(t, "dispatch-31", "dispatch", deployedEvent(tc.issue, tc.payload)))
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("decode = %v, want poison naming %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("decode issue.deployed: %v", err)
-			}
-			if !reflect.DeepEqual(decoded.Fact, tc.want) {
-				t.Fatalf("fact = %#v, want %#v", decoded.Fact, tc.want)
-			}
-		})
+// Dispatch's issue.deployed is no fact: its delivery timeline's first sight of the production run
+// that shipped a pull request woke the issue's production check once, and nothing reads it now.
+// The event still arrives on the Dispatch durable, so it is decoded to no fact rather than
+// refused, as every other event type the daemon does not know is.
+func TestADispatchIssueDeployedEventIsNoFact(t *testing.T) {
+	const payload = `{"repo":"sjawhar/legion","number":1300,"run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-4.issue.deployed", "CAPTURE", capturedRepositories,
+		envelopeJSON(t, "dispatch-31", "dispatch", deployedEvent("CAPTURE-4", payload)))
+	if err != nil {
+		t.Fatalf("decode issue.deployed: %v, want no poison", err)
+	}
+	if decoded.Fact != nil {
+		t.Fatalf("fact = %#v, want none", decoded.Fact)
 	}
 }
 
-// Dispatch's announcement that every server process serves a build reaches the daemon through a
-// durable of its own, on the announcement's one subject: one naming a build is applied and
-// acknowledged there, and one naming none is acknowledged without reaching a handler. The issue
-// durable's filter never matches the subject, so neither durable's position depends on the other's.
-func TestConsumeAppliesADispatchStartThroughItsOwnDurable(t *testing.T) {
+// The daemon opens no durable on Dispatch's announcement that every server process serves a build
+// (notifications.dispatch.server.started): no build wakes a production check any more, so the
+// subject is nobody's. A boot opens the Dispatch, GitHub and listener-wake durables and no
+// fourth; a durable an older daemon left on the stream is neither read nor deleted.
+func TestABootedDaemonOpensNoDispatchServerDurable(t *testing.T) {
 	pool := migratedPool(t)
-	createWrites(t, pool)
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	stop := startConsume(t, js, spec, pool, writeHandler("started", nil))
-	defer stop()
-
-	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-none", "dispatch", `{"commit":"","started_at":"2026-10-19T06:00:00Z"}`))
-	stamped := publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
-	testwait.Eventually(t, "the stamped start committed", func() bool { return writeCount(t, pool) == 1 })
-	assertAcknowledgedThrough(t, stream, dispatchServerConsumerName(spec.Project), stamped)
-	if delivered := consumerInfo(t, stream, dispatchConsumerName(spec.Project)).Delivered.Consumer; delivered != 0 {
-		t.Fatalf("the issue durable was delivered %d messages, want none: the start is not an issue event", delivered)
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
 	}
-	if got := writeCount(t, pool); got != 1 {
-		t.Fatalf("%d facts committed, want only the start that names a build", got)
+	want := []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project), wakeConsumerName(spec.Project)}
+	if got := lagNames(consumers.Lag(context.Background())); !slices.Equal(got, want) {
+		t.Fatalf("the boot's consumers = %q, want %q", got, want)
+	}
+	var opened []string
+	names := stream.ConsumerNames(context.Background())
+	for name := range names.Name() {
+		opened = append(opened, name)
+	}
+	if err := names.Err(); err != nil {
+		t.Fatalf("list the stream's durables: %v", err)
+	}
+	slices.Sort(opened)
+	slices.Sort(want)
+	if !slices.Equal(opened, want) {
+		t.Fatalf("the stream's durables = %q, want %q: none carries notifications.dispatch.server.started", opened, want)
 	}
 }
 
@@ -1256,7 +1147,7 @@ func TestDecodeAPushOnlyOnAnIssuesBranch(t *testing.T) {
 	} {
 		t.Run(tc.ref, func(t *testing.T) {
 			data := bytes.ReplaceAll(captured, []byte("refs/heads/legion/LEGION-208"), []byte(tc.ref))
-			decoded, err := decodeMessage("notifications.github.sjawhar.legion.push.branch.x", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data)
+			decoded, err := decodeMessage("notifications.github.sjawhar.legion.push.branch.x", "CAPTURE", capturedRepositories, data)
 			if err != nil {
 				t.Fatalf("decode: %v", err)
 			}
@@ -1342,7 +1233,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 0 {
 			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
 		}
@@ -1366,11 +1257,9 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
 	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
 	for _, config := range []jetstream.ConsumerConfig{
 		{Durable: dispatchConsumerName(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
-		{Durable: dispatchServerConsumerName(spec.Project), FilterSubject: serverStartedSubject, AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
 		{Durable: githubConsumerName(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
 	} {
 		if _, err := stream.CreateConsumer(context.Background(), config); err != nil {
@@ -1382,7 +1271,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	if _, err := OpenConsumers(context.Background(), js, pool, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 1 {
 			t.Errorf("%s has %d messages pending after the boot, want its backlog of 1", name, pending)
 		}
@@ -1394,7 +1283,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
 	defer stop()
 	testwait.Eventually(t, "every backlog delivered and acknowledged", func() bool {
-		for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
 				return false
 			}
@@ -1617,60 +1506,11 @@ func writeHandlers(t *testing.T, pool *pgxpool.Pool) []string {
 	return handlers
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test intake transactions")
-	}
-	base, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_intake_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := legionstore.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(b[:])
+	return testpg.ClonePool(t, "legion_intake_test")
 }
 
 type lockedBuffer struct {
@@ -1773,7 +1613,7 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, reopened)
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, reopened)
 	if err != nil {
 		t.Fatalf("decode reopened: %v", err)
 	}
@@ -1804,14 +1644,14 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, byAgent)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byAgent)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if issue, ok := got.Fact.(DispatchIssue); !ok || issue.ActorSession != "ses-impl" {
 		t.Fatalf("fact = %#v, want the session actor ses-impl", got.Fact)
 	}
-	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data)
+	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data)
 	if err != nil {
 		t.Fatalf("decode the captured event: %v", err)
 	}
@@ -1823,7 +1663,7 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	daemon, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, byDaemon)
+	daemon, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byDaemon)
 	if err != nil {
 		t.Fatalf("decode the daemon's own write: %v", err)
 	}
@@ -1860,7 +1700,7 @@ func TestDecodingCarriesTheReviewOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode %s: %v", name, err)
 		}
-		return decodeMessage(subject, "CAPTURE", capturedRepositories, nil, ghrepo.Renames{}, data)
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
 	}
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
@@ -2123,6 +1963,14 @@ func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
 			recordPullRequest(t, pool, "LEGION-208", 42)
 			js, _ := testJetStream(t)
 			spec := consumerSpec(&lockedBuffer{})
+			// The permission reads this test counts are the handler's own, so nothing but the
+			// failed read and its retry may read the permission. AckWait bounds each read the
+			// handler makes (resolveReviewPermission), and consumerSpec's 200 ms is the length of
+			// this handler's own work on a loaded runner - two pool reads and the fact's
+			// transaction - so this row sets it as a hang guard far above that work, leaving the
+			// failed read and its retry as the only two reads. The window decides no redelivery
+			// here: intake reports the message in progress while the handler works.
+			spec.AckWait = time.Minute
 			var mu sync.Mutex
 			var asks []time.Time
 			spec.ReviewPermission = func(context.Context, PullRequestReview) (bool, error) {

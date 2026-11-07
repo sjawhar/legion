@@ -2,11 +2,7 @@ package record
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"net/url"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -14,81 +10,40 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 var _ Store = NewStore()
 
-// testDSN is the Postgres connection CI and the devbox provide for this package. The record has
-// no in-memory implementation: its transaction and locking semantics are PostgreSQL's.
-func testDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test")
-	}
-	return dsn
-}
-
+// emptyStore is a store on an empty, unmigrated database of its own, dropped when the test ends.
+// The tests that apply part of the migration set by hand and count what Migrate then applies
+// need one. The record has no in-memory implementation — its transaction and locking semantics
+// are PostgreSQL's — so without LEGION_TEST_PG_DSN there is nothing to run against and the test
+// is skipped (testdb.Database).
 func emptyStore(t *testing.T) *store.Store {
 	t.Helper()
-	ctx := context.Background()
-	base, err := url.Parse(testDSN(t))
+	st, err := store.Open(context.Background(), testdb.Database(t, "legion_record_test"))
 	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("connect to the admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	name := "legion_record_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := store.Open(ctx, testURL.String())
-	if err != nil {
-		t.Fatalf("open %s: %v", name, err)
+		t.Fatalf("open the test database: %v", err)
 	}
 	t.Cleanup(st.Close)
 	return st
 }
 
+// migratedStore is a store on a database carrying every migration, cloned from the package's
+// template rather than migrated here. emptyStore stays an empty, unmigrated database: the tests
+// that apply part of the migration set by hand and count what Migrate then applies need one.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	st := emptyStore(t)
-	if _, err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return st
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(b[:])
+	return testpg.CloneStore(t, "legion_record_test")
 }
 
 func inTx(t *testing.T, st *store.Store, fn func(pgx.Tx)) {
@@ -110,23 +65,22 @@ func must(t *testing.T, err error) {
 
 func issueFixture(key string) Issue {
 	parent := "LEGION-200"
-	ready := 9
 	return Issue{
-		Key:                 key,
-		Tree:                key,
-		Project:             "LEGION",
-		Title:               "Persist every workflow fact",
-		Parent:              &parent,
-		Phase:               phase.Implementing,
-		Generation:          3,
-		Status:              "in_progress",
-		Rank:                "00042U",
-		HandedOver:          true,
-		LastDispatchSeq:     41,
-		ReadyPendingVersion: &ready,
-		Repo:                "acme/widgets",
-		DefaultBranch:       "release/v7.1",
-		GitHubRepo:          "Acme/Widgets",
+		Key:             key,
+		Tree:            key,
+		Project:         "LEGION",
+		Title:           "Persist every workflow fact",
+		Parent:          &parent,
+		Phase:           phase.Implementing,
+		Generation:      3,
+		Status:          "in_progress",
+		Rank:            "00042U",
+		HandedOver:      true,
+		LastDispatchSeq: 41,
+		ReadyPending:    &ReadyPending{Step: DesignStepSpec, Version: 9},
+		Repo:            "acme/widgets",
+		DefaultBranch:   "release/v7.1",
+		GitHubRepo:      "Acme/Widgets",
 	}
 }
 
@@ -198,7 +152,7 @@ func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testi
 	records := NewStore()
 	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
 		issue := issueFixture(key)
-		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
+		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPending, issue.Ancestry = tree, status, handed, nil, ancestry
 		if len(ancestry) != 0 {
 			issue.Parent = ParentOf(ancestry[0])
 		}
@@ -390,7 +344,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", HandoffRecord: "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b", HandoffVersion: 3, Rounds: 2, Verdict: "pass",
 		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
-	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
+	gate := DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
 
 	inTx(t, st, func(tx pgx.Tx) {
@@ -427,11 +381,16 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		if !samePullRequest(*byBranch, pr) {
 			t.Fatalf("pull request by branch = %#v, want %#v", byBranch, pr)
 		}
-		gotGate, err := records.Gate(ctx, tx, issue.Key)
+		gotGate, err := records.GatesOf(ctx, tx, issue.Key)
 		must(t, err)
-		if !reflect.DeepEqual(gotGate, &gate) {
-			t.Fatalf("gate = %#v, want %#v", gotGate, gate)
+		// The approval this gate carries is an opening, which PutGate lights on the row itself, so
+		// the gate reads back with EverOpened set whatever the written value held.
+		wantGate := gate
+		wantGate.Step, wantGate.EverOpened = DesignStepSpec, true
+		if !reflect.DeepEqual(gotGate, map[DesignStep]DesignGate{DesignStepSpec: wantGate}) {
+			t.Fatalf("gates = %#v, want %#v", gotGate, wantGate)
 		}
+
 		slots, err := records.Slots(ctx, tx)
 		must(t, err)
 		if len(slots) != 1 || slots[0].Issue != slot.Issue || slots[0].Index != slot.Index || !slots[0].AdmittedAt.Equal(slot.AdmittedAt) {
@@ -569,21 +528,21 @@ func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
 	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
 	told := 4
-	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
+	closed := DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 		ToldChangesMark: EventMark{Seq: 12, At: at}}
 	timeOnly := closed
 	timeOnly.ToldChangesMark = EventMark{At: at}
 	approved := 4
-	opened := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ApprovedVersion: &approved, ApprovedMark: EventMark{Seq: 14, At: at.Add(time.Minute)}}
-	stray := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5, ApprovedMark: EventMark{Seq: 15}, ToldChangesReason: "no version", ToldChangesMark: EventMark{Seq: 16}}
+	opened := DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-209", LatestVersion: 4, ApprovedVersion: &approved, ApprovedMark: EventMark{Seq: 14, At: at.Add(time.Minute)}}
+	stray := DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-209", LatestVersion: 5, ApprovedMark: EventMark{Seq: 15}, ToldChangesReason: "no version", ToldChangesMark: EventMark{Seq: 16}}
 
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
 		read := func() *DesignGate {
 			t.Helper()
-			got, err := records.Gate(ctx, tx, issue.Key)
+			got, err := records.GatesOf(ctx, tx, issue.Key)
 			must(t, err)
-			return got
+			return SpecGate(got)
 		}
 		must(t, records.PutGate(ctx, tx, closed))
 		if got := read(); !reflect.DeepEqual(got, &closed) {
@@ -598,12 +557,17 @@ func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
 		if got := read(); !reflect.DeepEqual(got, &timeOnly) {
 			t.Fatalf("gate told of a review with no sequence = %#v, want %#v", got, timeOnly)
 		}
+		// An approval of the current version lights EverOpened, and nothing puts it out again: the
+		// stray write below clears the approval, and the older daemon's clear further down nulls
+		// the version behind PutGate's back, and the gate still reads back as one that opened.
 		must(t, records.PutGate(ctx, tx, opened))
-		if got := read(); !reflect.DeepEqual(got, &opened) {
-			t.Fatalf("gate after an approval = %#v, want %#v with the changes request cleared", got, opened)
+		openedBack := opened
+		openedBack.EverOpened = true
+		if got := read(); !reflect.DeepEqual(got, &openedBack) {
+			t.Fatalf("gate after an approval = %#v, want %#v with the changes request cleared", got, openedBack)
 		}
 		must(t, records.PutGate(ctx, tx, stray))
-		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 5}); !reflect.DeepEqual(got, &want) {
+		if got, want := read(), (DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-209", LatestVersion: 5, EverOpened: true}); !reflect.DeepEqual(got, &want) {
 			t.Fatalf("gate written with marks and a reason but no versions = %#v, want %#v", got, want)
 		}
 		// What an older daemon writes: approved_version cleared, approved_seq and approved_at left.
@@ -611,7 +575,7 @@ func TestGateRoundTripsTheReviewsItRecords(t *testing.T) {
 		if _, err := tx.Exec(ctx, `update design_gates set approved_version = null where issue = $1`, issue.Key); err != nil {
 			t.Fatalf("clear the approval as an older daemon does: %v", err)
 		}
-		if got, want := read(), (DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4}); !reflect.DeepEqual(got, &want) {
+		if got, want := read(), (DesignGate{Issue: issue.Key, Step: DesignStepSpec, ArtifactID: "artifact-209", LatestVersion: 4, EverOpened: true}); !reflect.DeepEqual(got, &want) {
 			t.Fatalf("gate whose approval an older daemon cleared = %#v, want %#v with no mark", got, want)
 		}
 	})
@@ -727,30 +691,32 @@ func samePullRequest(got, want PullRequest) bool {
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead && got.MergeSHA == want.MergeSHA
 }
 
-// A production check is one record per closed issue, every field read back as written, with its
-// null columns (the wake times, the close and the outcome) absent until written; it is keyed by its
-// issue, so a second write of the same issue replaces the first. The open lists leave a closed
-// check out, OpenProductionChecksOfTree those of other trees too, and both order by the open.
+// A production check is one record per closed issue, every field read back as written — the role
+// that works it and the wake it named among them — with its null columns (the wake times, the
+// close and the outcome) absent until written; it is keyed by its issue, so a second write of the
+// same issue replaces the first. The open lists leave a closed check out,
+// OpenProductionChecksOfTree those of other trees too, and both order by the open.
 func TestStoreRoundTripsProductionChecksAndListsTheOpenOnesByTree(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
 	opened := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
-	woke, lastWoke, closed := opened.Add(time.Minute), opened.Add(2*time.Hour), opened.Add(3*time.Hour)
+	woke, lastWoke, wakeAt, closed := opened.Add(time.Minute), opened.Add(2*time.Hour), opened.Add(4*time.Hour), opened.Add(3*time.Hour)
 	root, child, other := issueFixture("LEGION-300"), issueFixture("LEGION-301"), issueFixture("LEGION-310")
 	child.Tree, other.Tree = root.Key, other.Key
+	// fresh carries no wake: nothing has named one and no look has gone unreported.
 	fresh := ProductionCheck{
-		Issue: child.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1301,
+		Issue: child.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1301, Role: claim.RoleImplementer,
 		OpenedAt: opened.Add(time.Hour), BoundAt: opened.Add(337 * time.Hour),
 	}
 	woken := ProductionCheck{
-		Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, MergeSHA: "d4e5f6",
+		Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, MergeSHA: "d4e5f6", Role: claim.RoleTester,
 		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 2, LookOpen: true, LookWakeAt: &woke,
-		LastWakeKind: "issue.deployed", LastWakeDetail: "run 77 completed 2026-10-19T09:00:00Z", LastWakeAt: &lastWoke,
-		PendingCauseKind: "daemon boot", PendingCauseDetail: "build b00f", Last: true,
+		LastWakeKind: "check wake", LastWakeDetail: "the tester's own wake", LastWakeAt: &lastWoke,
+		WakeAt: &wakeAt, Last: true,
 	}
 	done := ProductionCheck{
-		Issue: other.Key, Project: "LEGION", Tree: other.Key, Repo: "sjawhar/legion", Number: 1310, MergeSHA: "e5f6a7",
+		Issue: other.Key, Project: "LEGION", Tree: other.Key, Repo: "sjawhar/legion", Number: 1310, MergeSHA: "e5f6a7", Role: claim.RoleImplementer,
 		OpenedAt: opened.Add(-time.Hour), BoundAt: opened.Add(335 * time.Hour), Looks: 1,
 		LastWakeKind: "merge", LastWakeAt: &opened, ClosedAt: &closed, Outcome: CheckRecorded,
 	}
@@ -758,7 +724,7 @@ func TestStoreRoundTripsProductionChecksAndListsTheOpenOnesByTree(t *testing.T) 
 		for _, issue := range []Issue{root, child, other} {
 			must(t, records.PutIssue(ctx, tx, issue))
 		}
-		must(t, records.PutProductionCheck(ctx, tx, ProductionCheck{Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, OpenedAt: opened, BoundAt: opened}))
+		must(t, records.PutProductionCheck(ctx, tx, ProductionCheck{Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, Role: claim.RoleImplementer, OpenedAt: opened, BoundAt: opened}))
 		for _, check := range []ProductionCheck{fresh, woken, done} {
 			must(t, records.PutProductionCheck(ctx, tx, check))
 		}
@@ -805,9 +771,9 @@ func TestStoreRoundTripsProductionChecksAndListsTheOpenOnesByTree(t *testing.T) 
 func sameProductionCheck(got *ProductionCheck, want ProductionCheck) bool {
 	return got != nil && got.Issue == want.Issue && got.Project == want.Project && got.Tree == want.Tree && got.Repo == want.Repo &&
 		got.Number == want.Number && got.MergeSHA == want.MergeSHA && got.OpenedAt.Equal(want.OpenedAt) && got.BoundAt.Equal(want.BoundAt) &&
-		got.Looks == want.Looks && got.LookOpen == want.LookOpen && sameInstant(got.LookWakeAt, want.LookWakeAt) &&
+		got.Role == want.Role && got.Looks == want.Looks && got.LookOpen == want.LookOpen && sameInstant(got.LookWakeAt, want.LookWakeAt) &&
 		got.LastWakeKind == want.LastWakeKind && got.LastWakeDetail == want.LastWakeDetail && sameInstant(got.LastWakeAt, want.LastWakeAt) &&
-		got.PendingCauseKind == want.PendingCauseKind && got.PendingCauseDetail == want.PendingCauseDetail && got.Last == want.Last &&
+		sameInstant(got.WakeAt, want.WakeAt) && got.Last == want.Last &&
 		sameInstant(got.ClosedAt, want.ClosedAt) && got.Outcome == want.Outcome
 }
 
@@ -1814,7 +1780,7 @@ func TestDroppingCatchUpsWaitsOnNoRowAFinishIsDeleting(t *testing.T) {
 	txAdopt, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
 	defer func() { _ = txAdopt.Rollback(ctx) }()
-	if _, _, _, err := records.UnclaimedKept(ctx, txAdopt, "LEGION-1"); err != nil {
+	if _, _, err := records.UnclaimedKept(ctx, txAdopt, "LEGION-1"); err != nil {
 		t.Fatalf("lock the decisions owed to LEGION-1: %v", err)
 	}
 	// The lane's finish deletes the row and waits on those decisions.
@@ -2060,18 +2026,20 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	}
 }
 
-// The waiting line is the slotless todo roots and orphans handed to Legion, in rank order: a root
-// in todo without the label waits for nothing, however high it ranks.
+// The waiting line's second part is the slotless todo roots and orphans handed to Legion, in
+// rank order: a root in todo without the label waits for nothing, however high it ranks. A
+// root's own record says whether the generation it carries has already run, so each record here
+// carries the phase it stands at, as every record the store reads does.
 func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
-		{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
-		{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-		{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
-		{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
-		{Key: "LEGION-215", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
+		{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Phase: phase.Done, Status: "done", Rank: "00000", HandedOver: true},
+		{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Phase: phase.Admitted, Status: "backlog", Rank: "00001", HandedOver: true},
+		{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+		{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Phase: phase.Admitted, Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
+		{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Phase: phase.Admitted, Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-215", Phase: phase.Admitted, Status: "todo", Rank: "00000"},
 	}
-	got := Waiting(issues, nil)
+	got := WaitingIssues(Waiting(issues, nil, LineFacts{}))
 	want := []Issue{issues[3], issues[2]}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Waiting = %#v, want %#v", got, want)
@@ -2125,16 +2093,16 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues": {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "taken_back",
-			"linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch",
-			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
+			"linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "ready_pending_step", "hold_reason", "dispatch_status", "repo",
+			"default_branch", "github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
 			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
 			"ancestry", "handed_over_from", "memory_group", "memory_draw_mode", "memory_drawn_at", "memory_carried"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment", "handoff_record", "handoff_version"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
-		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
-		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
+		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "role", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "wake_at", "last", "closed_at", "outcome"},
+		"design_gates":      {"issue", "step", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at", "ever_opened"},
 		"root_asks":         {"issue", "ask", "kind", "artifact", "open", "seq", "waiting_on", "waiting_on_seq", "closed_by", "closed_seq", "by_tree", "person_seq", "person_answer_seq"},
-		"dispatch_issues":   {"key", "project", "status", "blockers", "dispatch_seq"},
+		"dispatch_issues":   {"key", "project", "status", "blockers", "dispatch_seq", "parent"},
 		"dispatch_claims":   {"key", "claimed_by", "claim_seq"},
 		"slots":             {"issue", "index", "admitted_at"},
 		"processed_events":  {"source", "event_id", "processed_at"},
@@ -2460,8 +2428,8 @@ func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing
 		if approved != 0 || latest != 0 {
 			t.Fatalf("a read with nothing kept = %d, %d, want zeros", approved, latest)
 		}
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 2, 3))
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 3, 4))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 2, Latest: 3}))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 3, Latest: 4}))
 	})
 	inTx(t, st, func(tx pgx.Tx) {
 		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
@@ -2477,14 +2445,14 @@ func TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered(t *testing
 	})
 	// A re-admission since the start named the pair kept a newer one, which the forget leaves.
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 4, 5))
-		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{Approved: 3, Latest: 4}, 0))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", KeptApproval{Step: DesignStepSpec, Approved: 4, Latest: 5}))
+		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{KeptApproval: KeptApproval{Approved: 3, Latest: 4}}, 0))
 		approved, latest, err := records.ReadmittedApproval(ctx, tx, "LEGION-211")
 		must(t, err)
 		if approved != 4 || latest != 5 {
 			t.Fatalf("after the forget = %d, %d, want the pair kept since, 4 and 5", approved, latest)
 		}
-		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{Approved: 4, Latest: 5}, 0))
+		must(t, records.ForgetKeptDecisions(ctx, tx, "LEGION-211", KeptDecisions{KeptApproval: KeptApproval{Approved: 4, Latest: 5}}, 0))
 		if approved, _, err := records.ReadmittedApproval(ctx, tx, "LEGION-211"); err != nil || approved != 0 {
 			t.Fatalf("after the forget of the pair it named = %d, %v, want zero", approved, err)
 		}

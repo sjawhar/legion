@@ -44,19 +44,23 @@ type ClassifiedPush struct {
 // session's write the daemon sets back (sessionStatusWrite), which leaves it. While a chain of
 // writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
-	Key                 string
-	Tree                string
-	Project             string
-	Title               string
-	Parent              *string
-	Phase               phase.Phase
-	Generation          uint64
-	Status              string
-	Rank                string
-	LingerUntil         *time.Time
-	Hold                *Hold
-	LastDispatchSeq     int64
-	ReadyPendingVersion *int
+	Key             string
+	Tree            string
+	Project         string
+	Title           string
+	Parent          *string
+	Phase           phase.Phase
+	Generation      uint64
+	Status          string
+	Rank            string
+	LingerUntil     *time.Time
+	Hold            *Hold
+	LastDispatchSeq int64
+	// ReadyPending is the READY the design gate refused, nil when no READY waits: one fact, so
+	// everything that writes the refusal writes the value and everything that voids it clears
+	// the value. PutIssue and scanIssue split it into the row's two columns, which hold both or
+	// neither.
+	ReadyPending *ReadyPending
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
@@ -116,13 +120,16 @@ type Issue struct {
 	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
 	// cleared when adoption takes the record into a tree.
 	Ancestry []string
-	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
-	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
-	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
-	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
-	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
-	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
-	// other record.
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own, while
+	// the tree of its own has still to be opened: re-admission (admit.Admission.readmit) writes it
+	// whenever it moves a member of another tree into a tree of its own, a child its finished tree
+	// handed over (carrying its run or not) or an orphan a person admitted, and the promotion that
+	// opens that tree clears it (admit's promoteHolds), because the run the record carries is this
+	// tree's own from then on and the waiting line reads the mark as a tree still to be opened
+	// (QueuedRoot, ran). Such a root stays its own tree whether or not the mark is still set
+	// (workflow's RanAsRoot, which reads the opened lifecycle too): no admission sweep or release
+	// of children adopts it, into the tree it left or any other, and no ancestry hold holds it.
+	// Empty for every other record.
 	HandedOverFrom string
 	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
 	// change together, as Hold and held do.
@@ -172,6 +179,14 @@ type RepoNote struct {
 	ResolvedRepo string
 	Note         string
 	PostedAt     time.Time
+}
+
+// ReadyPending is a READY the design gate refused: Step is the step whose document the merger
+// must wait on, and Version that document's version at the refusal, the version a person's
+// approval must reach for the READY to be posted.
+type ReadyPending struct {
+	Step    DesignStep
+	Version int
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
@@ -552,9 +567,10 @@ type PullRequest struct {
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
-	// MergeSHA is the merge commit GitHub reported for the pull request (the production check
-	// looks for it in a build): empty until the merge, and for a pull request merged before the
-	// column existed, whose check's first compare fills it from GitHub.
+	// MergeSHA is the merge commit GitHub reported for the pull request, which the production
+	// check's agent looks for in production: empty until the merge, and for a pull request merged
+	// before the column existed. Nothing fills it later — no compare is left to — so the check's
+	// task says the commit is unknown and the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 }
 
@@ -727,45 +743,52 @@ const (
 	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
-// ProductionCheck is an issue's production check: the work after the close in which the
-// implementer drives the merged change in production and reports what it saw. There is one record
+// ProductionCheck is an issue's production check: the work after the close in which the role the
+// project's `production_check` named at the open, which Role records, drives the merged change in
+// production and reports what it saw. There is one record
 // per issue, opened at the merge; a later merge of the same issue — a rerun's, after a re-entry or
 // a reopen inside the linger closed the first — replaces it (workflow.openCheck) and counts its
 // looks from one again, so OpenedAt is the check instance's identity (ID): what tells the two
 // checks' looks apart in the events their rows and reports are recorded under. It copies the
 // repository, the pull request's number and the merge commit, and is fenced on itself (the issue,
 // the check and the look number) rather than on the tree generation, so a re-admission that
-// clears the tree's merged pull requests leaves it as it is. Looks counts the implementer's
+// clears the tree's merged pull requests leaves it as it is. Looks counts the checking role's
 // looks, each a wake of its session that ends with a report (pass, pending or fail) or at its
-// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke.
-// LastWakeKind and LastWakeDetail are what woke the latest look (the merge, a deploy event, a
-// build compare, the bound) and LastWakeAt when; PendingCauseKind and PendingCauseDetail hold a
-// wake that arrived while a look was open, which the next look starts with. Last marks the
-// bound's look, after which no look starts. A closed check has ClosedAt and its Outcome.
+// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke. Role
+// is the role that works the check, written once when the check opens (the project's
+// production_check setting) and never read from the configuration again, so a setting changed
+// mid-check leaves the open check with the role it started under. LastWakeKind and
+// LastWakeDetail are what woke the latest look (the merge, the bound, the agent's own wake) and
+// LastWakeAt when; WakeAt is when the check is next looked at — the time the checking agent
+// named on a pending report, or the retry of a look nobody reported — and is nil when neither
+// stands. Last marks the bound's look, after which no look starts. A closed check has ClosedAt
+// and its Outcome.
 type ProductionCheck struct {
 	Issue   string
 	Project string
 	Tree    string
 	Repo    string
 	Number  int
-	// MergeSHA is the merge commit the check looks for in a build, empty until the first compare
-	// fills it for a pull request merged before the daemon recorded merge commits.
+	// MergeSHA is the merge commit the check's agent looks for in production, copied from the
+	// pull request's record. It is empty for a pull request merged before the daemon recorded
+	// merge commits, and nothing fills it later: the look's task says the commit is unknown and
+	// the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 	OpenedAt time.Time
 	// BoundAt is when the whole check is bound: the check's last look starts then
 	// (config.Config.ProductionCheckBound after OpenedAt).
-	BoundAt            time.Time
-	Looks              int
-	LookOpen           bool
-	LookWakeAt         *time.Time
-	LastWakeKind       string
-	LastWakeDetail     string
-	LastWakeAt         *time.Time
-	PendingCauseKind   string
-	PendingCauseDetail string
-	Last               bool
-	ClosedAt           *time.Time
-	Outcome            CheckOutcome
+	BoundAt        time.Time
+	Role           claim.Role
+	Looks          int
+	LookOpen       bool
+	LookWakeAt     *time.Time
+	LastWakeKind   string
+	LastWakeDetail string
+	LastWakeAt     *time.Time
+	WakeAt         *time.Time
+	Last           bool
+	ClosedAt       *time.Time
+	Outcome        CheckOutcome
 }
 
 // Open says whether the check is still open: no look has closed it.
@@ -791,7 +814,7 @@ func (c ProductionCheck) NamedBy(openedAt time.Time) bool {
 type CheckOutcome string
 
 const (
-	// CheckRecorded is a look's pass: the implementer drove the change in production and
+	// CheckRecorded is a look's pass: the check's own role drove the change in production and
 	// recorded it on the pull request.
 	CheckRecorded CheckOutcome = "recorded"
 	// CheckDefect is a look's fail: the change misbehaved in production, asked about in a Dispatch ask.
@@ -800,6 +823,73 @@ const (
 	// the last look reported pending, or a look could not run.
 	CheckNotRun CheckOutcome = "not_run"
 )
+
+// DesignStep names one document of the root issue, and a deployment's design gate is the list of
+// steps it holds the tree's work on. DesignStepDecisions names the issue's decisions document,
+// DesignStepCriteria its Verification document, and DesignStepSpec its primary document. The
+// record keeps one DesignGate for each step a deployment gates, keyed by the issue and the step.
+//
+// The type lives in this package rather than beside the `gates.design` list that declares it,
+// because internal/classify answers the questions the steps raise and may import no package of
+// this module but this one (TestProductionImportsArePure in internal/classify).
+type DesignStep string
+
+const (
+	// DesignStepDecisions is the root issue's decisions document.
+	DesignStepDecisions DesignStep = "decisions"
+	// DesignStepCriteria is the root issue's Verification document.
+	DesignStepCriteria DesignStep = "criteria"
+	// DesignStepSpec is the root issue's primary document, the one document the gate held before a
+	// deployment could name a list of steps.
+	DesignStepSpec DesignStep = "spec"
+)
+
+// DesignSteps is every step, in the order a deployment that gates all three takes them: the
+// decisions first, then the criteria they are judged by, then the spec built on both.
+var DesignSteps = []DesignStep{DesignStepDecisions, DesignStepCriteria, DesignStepSpec}
+
+// Valid says whether step is one of the three steps. The stored column admits those three names
+// alone, so a value this refuses is one no record can hold.
+func (step DesignStep) Valid() bool {
+	return slices.Contains(DesignSteps, step)
+}
+
+// Document is the document of its issue the step records, as a refusal or a task names it: the
+// words the architect's own guide uses for the three (skill://legion-architect/references/
+// design-gate.md, "The steps"). The caller supplies the possessive it needs - the issue's, or the
+// architect's own.
+func (step DesignStep) Document() string {
+	switch step {
+	case DesignStepCriteria:
+		return "Verification document"
+	case DesignStepDecisions:
+		return "decisions document"
+	}
+	return "primary document"
+}
+
+// StepNames is the names of steps, in their order, for a caller that joins them into a sentence or
+// hands them to Dispatch. It is never nil, so a hand-off that writes JSON writes an empty list
+// rather than null.
+func StepNames(steps []DesignStep) []string {
+	names := make([]string, len(steps))
+	for i, step := range steps {
+		names[i] = string(step)
+	}
+	return names
+}
+
+// StepWords is the three step names as a refusal spells them: each quoted, the last after "or".
+// Every refusal of a value that is not one of them - the `gates.design` list a config file names,
+// the step list a daemon answers the controller with - says this, so no refusal spells the three
+// names of its own.
+func StepWords() string {
+	quoted := StepNames(DesignSteps)
+	for i, name := range quoted {
+		quoted[i] = "'" + name + "'"
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
+}
 
 // DesignGate records the current document version, the version a human approved, if any, with
 // where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
@@ -811,7 +901,10 @@ const (
 // marks never stand together: the one that is set is the gate's newest applied review
 // (classify.LatestReview).
 type DesignGate struct {
-	Issue              string
+	Issue string
+	// Step is the document of Issue this gate holds, and the second half of the record's key: one
+	// issue holds one gate for each step its deployment gates.
+	Step               DesignStep
 	ArtifactID         string
 	LatestVersion      int
 	ApprovedVersion    *int
@@ -819,6 +912,28 @@ type DesignGate struct {
 	ToldChangesVersion *int
 	ToldChangesReason  string
 	ToldChangesMark    EventMark
+	// EverOpened records that a human approved the gate's document version at some point in this
+	// generation of the issue, whether or not the gate stands open now. Nothing else remembers it:
+	// classify.DesignGateOpen is point-in-time, reading the approval against LatestVersion as both
+	// stand, and a changes request clears ApprovedVersion, so a gate that opened and was sent back
+	// reads exactly like one that never opened. Under the children-first rule a root stays at
+	// admitted while its children run, which is the state the later rule must tell from a root
+	// still waiting for its first approval. It lives on the gate row rather than on the issue
+	// because ClearTreeGeneration deletes the gate when a root is re-admitted, and a re-admitted
+	// root's architect writes its spec again: the mark belongs to the generation whose approval it
+	// records.
+	EverOpened bool
+}
+
+// SpecGate is the DesignStepSpec row of gates, nil when the issue holds none. Every reader that
+// still asks one question of one gate takes this entry: a deployment resolves `root-issues` to the
+// single step spec, so that row is the gate those readers mean.
+func SpecGate(gates map[DesignStep]DesignGate) *DesignGate {
+	gate, ok := gates[DesignStepSpec]
+	if !ok {
+		return nil
+	}
+	return &gate
 }
 
 // RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, written from the ask's
@@ -877,20 +992,24 @@ const (
 // WithHuman says whether the ask is open and waits on the person.
 func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn != "agent" }
 
-// GateRequestOf says whether the ask is an approval request of gateArtifact, the document a design
-// gate of the root is registered on.
-func (a RootAsk) GateRequestOf(gateArtifact string) bool {
-	return a.Kind == AskApproval && a.Artifact != "" && a.Artifact == gateArtifact
+// GateRequestOf says whether the ask is an approval request of one of gateArtifacts, the
+// documents design gates of the root are registered on. A root holds one gate for each step its
+// deployment gates, so a caller that means one step passes that step's document alone.
+func (a RootAsk) GateRequestOf(gateArtifacts ...string) bool {
+	if a.Kind != AskApproval || a.Artifact == "" {
+		return false
+	}
+	return slices.Contains(gateArtifacts, a.Artifact)
 }
 
 // PersonActSeq is the newest act of a person on the ask that would answer a root waiting on that
 // person, 0 for none: every act PersonSeq records, and an answer of the ask unless it is an
-// approval request of gateArtifact, the document the root's design gate is registered on ("" for
-// none), whose answer is a review that answers through its own artifact.* event. It reads the row's
-// own facts and the gate's document as they stand, so it gives the same whatever order the ask's
-// events, the gate's registration and its reviews arrive in.
-func (a RootAsk) PersonActSeq(gateArtifact string) int64 {
-	if a.GateRequestOf(gateArtifact) {
+// approval request of one of gateArtifacts, the documents the root's design gates are registered
+// on (none for a root with no gate), whose answer is a review that answers through its own
+// artifact.* event. It reads the row's own facts and those documents as they stand, so it gives
+// the same whatever order the ask's events, the gates' registrations and their reviews arrive in.
+func (a RootAsk) PersonActSeq(gateArtifacts ...string) int64 {
+	if a.GateRequestOf(gateArtifacts...) {
 		return a.PersonSeq
 	}
 	return max(a.PersonSeq, a.PersonAnswerSeq)
@@ -910,8 +1029,12 @@ type Slot struct {
 // OutboxRow is one effect that has not yet been completed. A claimed row carries a non-empty
 // lease token and its expiry; callers must present that exact token to finish or retry it.
 type OutboxRow struct {
-	ID         int64
-	Kind       OutboxKind
+	ID   int64
+	Kind OutboxKind
+	// Issue is the issue the effect belongs to. A project-level row carries the bare project key
+	// instead — the deployment's gated-steps publish, which belongs to no issue — and the same
+	// split_part(issue, '-', 1) that scopes an issue's row to its own daemon answers that key
+	// itself, since a project key holds no hyphen.
 	Issue      string
 	Payload    json.RawMessage
 	Attempts   int
@@ -958,7 +1081,12 @@ type HandedOverRoot struct {
 // observation that showed it, 0 when none has. The claim is kept apart from the row, with a fence
 // of its own, since a claim event says nothing of the status or the blockers and may arrive before
 // the issue's first mirrored observation (PutDispatchClaim). A row written with ClaimSeq 0 leaves
-// the stored claim as it stands.
+// the stored claim as it stands. Parent is the key of the issue's Dispatch parent, "" for none; it
+// is the parent the observation saw, and "" is its observation that the issue has none, which
+// clears a stored one. It is written outside the sequence fence as well as inside it, since a
+// listing at the sequence the row already holds is the only thing that carries the parent of an
+// issue the daemon has never recorded; an observation older than the row writes no parent at all,
+// because the row's own saw it later (PutDispatchIssue).
 type DispatchIssueRow struct {
 	Key       string
 	Project   string
@@ -967,6 +1095,7 @@ type DispatchIssueRow struct {
 	Seq       int64
 	ClaimedBy string
 	ClaimSeq  int64
+	Parent    string
 }
 
 // Store contains only transactional operations. The caller owns each transaction so intake can
@@ -987,6 +1116,12 @@ type Store interface {
 	// IssuesOf is the record of each of keys that is an issue of project, by key, leaving out a key
 	// with no record; no keys read nothing.
 	IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error)
+	// AncestorsOf is the record of each of keys and of every issue above it on the chain of
+	// recorded parents, by key, for the issues of project; it walks the chain in one query
+	// whatever its depth. It is what the waiting line's pass reads of the issues its live read
+	// leaves out, so the one chain walk (Ancestors) crosses a parent already done. No keys read
+	// nothing.
+	AncestorsOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error)
 	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
 	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
 	// event of key reads again.
@@ -1024,8 +1159,14 @@ type Store interface {
 	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
 	// slower observation never overwrites a faster one. The claim is fenced apart, on ClaimSeq: a
 	// row carrying a claim (ClaimSeq above zero) writes it only over an older claim, and one
-	// carrying none leaves the stored claim as it stands. A row whose Seq is zero — a fact the
-	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	// carrying none leaves the stored claim as it stands. The parent is written outside the fence
+	// as well as inside it, and the parent the observation saw is what is written, "" included: an
+	// observation at or below the stored sequence writes the parent alone, leaving the status, the
+	// blockers and the sequence as they stand, so an issue whose live events are older than the
+	// listing that carried its parent still gets it, and a person who takes a parent off clears
+	// the stored one. An observation strictly older than the row writes no parent at all, since
+	// the row's own saw it later. A row whose Seq is zero — a fact the daemon minted from its own
+	// record, which Dispatch never said — writes nothing at all.
 	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
 	// PutDispatchClaim writes holder (`<kind>:<id>`, "" for nobody) as key's claim at seq, over an
 	// older claim only, and touches nothing of the status or the blockers. It is kept whether or not
@@ -1042,6 +1183,11 @@ type Store interface {
 	// (blockers.Load), whatever the number of rows the project's mirror holds. No keys read
 	// nothing.
 	DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]DispatchIssueRow, error)
+	// DispatchChildren is every mirrored issue of the Dispatch project key project whose parent is
+	// one of parents, grouped by parent and in key order within each group; a parent with no
+	// children has no entry, and no parents reads nothing. A later step reads it to decide whether
+	// a parent's own first phase waits for a child of its own that is still open.
+	DispatchChildren(ctx context.Context, tx pgx.Tx, project string, parents []string) (map[string][]DispatchIssueRow, error)
 	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
 	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
 	// or without a mirrored row of the issue: a claim event applied before the issue's first row is
@@ -1077,9 +1223,10 @@ type Store interface {
 	// UnclaimedKept is what a start or catch-up of tree may name: every row whose issue stands in
 	// tree now and that no counting claim or hold holds — a claim counts only while the claiming
 	// outbox row's issue stands in the same tree, and a hold only while the holding claim's tree
-	// is that tree — newest first, ties by ref, and tree's own readmitted approval pair on the
-	// same rule, zeros when there is none to name (workflow.Engine.ParkedDecisionTask).
-	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error)
+	// is that tree — newest first, ties by ref, and tree's own readmitted approval on the same
+	// rule, the zero KeptApproval when there is none to name
+	// (workflow.Engine.ParkedDecisionTask).
+	UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, KeptApproval, error)
 	// ClaimKeptDecisions claims for outbox row what kept names of what tree is owed and nothing
 	// counting claims or holds yet, in the transaction that enqueues row: from then on no other
 	// start or catch-up of that tree names it until that row settles what it named. A published
@@ -1112,15 +1259,24 @@ type Store interface {
 	// the trees that have one: what a catch-up queued to another tree's architect is written for
 	// (record.CatchUp.Launch), so a failed forward of an older one is not queued again behind it.
 	ArchitectLaunches(ctx context.Context, tx pgx.Tx, trees []string) (map[string]uint64, error)
-	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
-	// approved and the spec's latest version, which its re-admission found above the approved one
-	// before it cleared the old generation's gate; a later keep replaces it, KEPT again.
-	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// KeepReadmittedApproval keeps, for root's next architect start, the step whose document a
+	// person approved, the version they approved and that document's latest version, which its
+	// re-admission found above the approved one before it cleared the old generation's gate; a
+	// later keep replaces it, KEPT again. The step is what the start task names the document by,
+	// so an architect told to request approval again is sent to the document the person reviewed.
+	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approval KeptApproval) error
 	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission whose gate holds no
 	// stale approval, or under gates.design off, leaves nothing an earlier one kept.
 	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
 	// ReadmittedApproval is the pair root keeps, in any state, zeros when it keeps none.
 	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// TellChildrenFirst marks that issue's architect has been told, for the run generation of
+	// tree, that the issue's own first phase waits for the Dispatch children under it, and
+	// reports whether this call is the telling. The wait itself is never stored, so that a stale
+	// mirror row costs one pass; the telling is, so that the pass every fact, tick, hold release
+	// and boot runs does not tell it again. A re-admission opens a new generation of the tree and
+	// so tells it anew, and so does a hand-over, which gives the issue a tree of its own.
+	TellChildrenFirst(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64, at time.Time) (bool, error)
 	// ForgetKeptDecisions tells what outbox row's published catch-up named of what tree is owed
 	// (KeptDecisions), of the rows row claims or nothing claims: every parked decision still
 	// standing at the reference and time it named — a newer decision on the same reference, kept
@@ -1141,14 +1297,19 @@ type Store interface {
 	// commit an earlier generation reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
-	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
-	// Gates is the design gate of each of issues, by issue, in one read: the gates of the trees
-	// whose held children one look judges (workflow's StartUnblockedChildren), rather than a read
-	// per tree under the fact lock. An issue with no gate has no entry.
-	Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]DesignGate, error)
+	// GatesOf is every design gate issue holds, by step: one entry for each step the issue's
+	// architect has registered. An issue with no gate at all gives an empty map, and a step with
+	// no row has no entry.
+	GatesOf(ctx context.Context, tx pgx.Tx, issue string) (map[DesignStep]DesignGate, error)
+	// Gates is the design gates of each of issues, by issue and then step, in one read: the
+	// gates one look over many trees judges from (ReadLineFacts), rather than a read per tree
+	// under the fact lock. An issue with no gate has no entry.
+	Gates(ctx context.Context, tx pgx.Tx, issues []string) (map[string]map[DesignStep]DesignGate, error)
 	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
-	// gate and each copy a hand-over carried to a child of its tree.
+	// gate and each copy a hand-over carried to a child of its tree. Each row carries its own step.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
+	// PutGate writes one gate row, keyed by its issue and its step. A gate built with no step is
+	// written as DesignStepSpec (Postgres.PutGate).
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	// RootAsk is the mirror row of ask on issue, nil when it has none.
 	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)
@@ -1218,6 +1379,12 @@ type Store interface {
 	// TreeLifecycle is the tree's lifecycle under the project token, and whether it has one, read
 	// without opening anything (treelifecycle.Read).
 	TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string) (treelifecycle.Lifecycle, bool, error)
+	// TreeLifecycles is the lifecycle of each of trees, by tree, in one read, opening nothing: the
+	// lifecycles a single look over many trees needs, rather than a read per tree under the fact
+	// lock. A tree with no row has no entry, and no trees reads nothing. project is the claim
+	// project token the tree_lifecycles table is keyed by, the value OpenTreeLifecycle takes, not
+	// the Dispatch project key.
+	TreeLifecycles(ctx context.Context, tx pgx.Tx, project string, trees []string) (map[string]treelifecycle.Lifecycle, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.
@@ -1236,10 +1403,31 @@ type Store interface {
 	// triage wake, for the issue while one is pending; the issue's other status rows, a hand-over
 	// row among them, are not counted.
 	PersonHandoverPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
+	// EnqueueGatedSteps writes the one gated_steps_publish row of publish's Dispatch project, due
+	// at nextAt, with the project key as its issue. The boot publishes its configured list through
+	// the outbox and keeps no record of what it last published, so the row the outbox holds is
+	// replaced rather than left standing: a pending row can carry the list of the boot before this
+	// one, and that is the list Dispatch would be shown. The table holds one such row per project
+	// (20261106041346_gated_steps_publish), so a restart queues no second row, and a row that
+	// already says this boot's list is left as it is.
+	EnqueueGatedSteps(ctx context.Context, tx pgx.Tx, publish GatedStepsPublish, nextAt time.Time) error
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// EnqueueID enqueues row as Enqueue does and returns its id, for a row that claims what it names
 	// (ClaimKeptDecisions). It refuses a ready_merge row, whose insert may update another.
 	EnqueueID(ctx context.Context, tx pgx.Tx, row OutboxRow) (int64, error)
+	// ReplaceOwedStart writes row's payload over the issue's oldest supervise start that waits
+	// for the issue's admission slot (SuperviseRequest.NeedsSlot) and that no live lease holds,
+	// and says whether it found one, so two transitions before that slot leave exactly one
+	// start, the later one, in the place in the waiting line the first one took. A row a lane
+	// holds now is not touched, including one it takes while the call waits on its row lock; the
+	// caller then enqueues its own. A lapsed lease holds nothing and is replaced like any other.
+	ReplaceOwedStart(ctx context.Context, tx pgx.Tx, row OutboxRow) (bool, error)
+	// OwedStarts is every pending worker start of the Dispatch project key project that waits for
+	// its issue's admission slot and that no live lease holds, a row whose lease has lapsed among
+	// them, oldest first by creation time and then id — the waiting line's own ordering key for
+	// the issues whose work came back (Waiting). An issue holding two of them appears twice,
+	// oldest first.
+	OwedStarts(ctx context.Context, tx pgx.Tx, project string) ([]OwedStart, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
 	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue
@@ -1335,6 +1523,9 @@ type Store interface {
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest
 	// first: the notices a later one of the tree must not overtake for the architect they share.
+	// Each row comes whole, its next_at among it, so the holder can wait for the moment the row it
+	// waits behind is due rather than climb a backoff to it (the daemon's deliverNotice, whose
+	// fence waits with wait.Until for a catch-up the wake pacing holds).
 	EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error)
 	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
 	// with token.

@@ -97,6 +97,10 @@ type testServerOptions struct {
 	// embedder wires meaning search (LEGION-549); nil (every test but the meaning search tests'
 	// own) is the deployment with no embedder configured, where search answers keyword-only.
 	embedder embed.Embedder
+	// answerer answers a going request's question (INFRA-1279); nil (every test but the going
+	// routes' own) is the deployment with no model configured, where a run is recorded and its
+	// stream carries the no-model-configured error.
+	answerer Answerer
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
@@ -246,6 +250,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		BrokerTokens:           brokerTokens,
 		AgentStream:            options.agentStream,
 		Embedder:               options.embedder,
+		Answerer:               options.answerer,
 		Files:                  options.files,
 		DashboardEntry:         options.dashboardEntry,
 	})
@@ -1913,7 +1918,14 @@ type cookieRequest func(method, target string, body any) *httptest.ResponseRecor
 // and a request sent with it.
 func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.Cookie, cookieRequest) {
 	t.Helper()
-	database := storetest.Open(t)
+	handler, sessions, cookie, request, _ := newCookieServerOn(t, storetest.Open(t), 0)
+	return handler, sessions, cookie, request
+}
+
+// newCookieServerOn is newCookieServer on database, with heartbeat as the API's StreamHeartbeat
+// (zero leaves it unset), also returning the server's document service.
+func newCookieServerOn(t *testing.T, database *store.Store, heartbeat time.Duration) (http.Handler, *store.PgSessionStore, *http.Cookie, cookieRequest, *docs.Service) {
+	t.Helper()
 	sessions := store.NewPgSessionStore(database.Pool)
 	cookieIdentity := identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}
 	broker := events.NewBroker()
@@ -1923,7 +1935,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
-		Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker, StreamHeartbeat: heartbeat,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1961,7 +1973,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 		handler.ServeHTTP(response, req)
 		return response
 	}
-	return handler, sessions, cookie, request
+	return handler, sessions, cookie, request, documentService
 }
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {

@@ -9,14 +9,17 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -45,6 +48,14 @@ type State struct {
 	// role: the trees that will not move again until someone acts. Never null; empty while every
 	// claim is running or waits on something that will wake it.
 	StrandedClaims []StrandedClaim `json:"strandedClaims"`
+	// WakesWaiting is every wake the daemon's pacing holds until its turn
+	// (worker_wakes_per_minute), in claim order: the wave a restart, a re-admission or a plugin
+	// round raised, as far as it has not gone out. It is the two places a wake waits read as one
+	// list — the launches and plugin tasks the machines hold (supervise.ClaimView.WakeWaiting) and
+	// the catch-ups waiting on their outbox rows (WakesWaitingOf). Never null; empty while nothing
+	// waits, which is every moment outside a wave. With `daemon.startedAt` and each claim's
+	// `updateRound` it is what says whether a wave is still running.
+	WakesWaiting []WakeWaiting `json:"wakesWaiting"`
 	// ControllerLocator is the project's controller, absent until a session registers as it: with
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
@@ -69,10 +80,16 @@ type State struct {
 	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
 	// inside: every collection in it is emitted non-nil (contract 35).
 	Settings Settings `json:"settings"`
-	// Consumers is the lag of the daemon's three durable consumers (ConsumerLagView), read from
+	// Consumers is the lag of the daemon's durable consumers (ConsumerLagView), read from
 	// NATS at the request after the state's transaction commits, so no NATS read holds the
 	// snapshot open. Never null: a daemon with no workflow has none (contract 43).
 	Consumers []ConsumerLagView `json:"consumers"`
+	// wakesWaitingHidden is set on the copy the state route serves a caller whose plugin is older
+	// than the contract that added WakesWaiting (api's withoutWakesWaiting, below server.go's
+	// wakesWaitingContract): that reader knows no `wakesWaiting` and refuses the key as surely
+	// when it is empty as when it names a wake, so MarshalJSON leaves the key off that one body
+	// rather than writing it empty, as Admission.treesHidden does for `trees`.
+	wakesWaitingHidden bool
 }
 
 // ConsumerLagView is one durable consumer's lag as the state shows it (intake.ConsumerLag): its
@@ -247,8 +264,11 @@ type AgentSecretsLoginView struct {
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
-// `strandedClaims`, `capabilities` and `consumers` arrays on the wire: a nil Go map or slice is
-// `null`, which the plugin's reader refuses.
+// `strandedClaims`, `wakesWaiting`, `capabilities` and `consumers` arrays on the wire: a nil Go map
+// or slice is `null`, which the plugin's reader refuses. The one exception is a state whose
+// waiting wakes are hidden, which carries no `wakesWaiting` key at all; that body is marshaled
+// through a value whose own nil `wakesWaiting` field, being `omitempty`, shadows the embedded one
+// and so is written by nothing, which is how Admission.MarshalJSON leaves off `trees`.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -270,6 +290,16 @@ func (s State) MarshalJSON() ([]byte, error) {
 	if out.Consumers == nil {
 		out.Consumers = []ConsumerLagView{}
 	}
+	if s.wakesWaitingHidden {
+		out.WakesWaiting = nil
+		return json.Marshal(struct {
+			wire
+			WakesWaiting []WakeWaiting `json:"wakesWaiting,omitempty"`
+		}{wire: out})
+	}
+	if out.WakesWaiting == nil {
+		out.WakesWaiting = []WakeWaiting{}
+	}
 	return json.Marshal(out)
 }
 
@@ -286,15 +316,33 @@ type DaemonInfo struct {
 // Admission is the issue cap and the issues under it, in Dispatch rank order. Concurrency is
 // capped on issues, never on workers, so there is no worker queue here.
 type Admission struct {
-	Cap     int      `json:"cap"`
-	Active  []string `json:"active"`
+	Cap int `json:"cap"`
+	// Active is every issue holding an admission slot, a child as much as a root: the cap counts
+	// the issues at work rather than the trees (dispatch://INFRA-980), so one tree with three
+	// working children holds three of these and a tree whose every issue only waits holds none.
+	Active []string `json:"active"`
+	// Waiting is the admission line, in the line's own order: the issues whose work came back and
+	// wait for a slot before their worker is started again, oldest first, then the issues whose
+	// first phase can start, by their tree root's Dispatch rank. It carries children as well as
+	// roots, for the same reason `active` does.
 	Waiting []string `json:"waiting"`
+	// Trees is the root of every live tree the daemon judges (record.TreeLive), sorted by key: a
+	// tree whose lifecycle stands open under the workflow and does not linger, one whose root
+	// waits in the line, and one whose root waits on a person. A slot is no longer one per tree,
+	// so a running tree can hold no slot at all — its root accepting or awaiting its merge while
+	// its children work, or every issue of it waiting — and `active` alone no longer tells a
+	// reader such as the controller which trees run. Never null; empty when no tree is live.
+	Trees []string `json:"trees"`
 	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
 	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
-	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
-	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
-	// nothing waits on a link.
+	// holds at `admitted`, together in one list, each with what it still waits on. A blocked issue
+	// the line carries is in Waiting too. Never null; empty when nothing waits on a link.
 	Blocked []BlockedIssue `json:"blocked"`
+	// treesHidden is set on the copy the state route serves a caller whose plugin is older than
+	// the contract that added Trees (api's withoutTrees, below server.go's treeContract): that
+	// reader knows no `trees` and refuses the key as surely when it is empty as when it names a
+	// tree, so MarshalJSON leaves the key off that one body rather than writing it empty.
+	treesHidden bool
 }
 
 // BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
@@ -302,8 +350,11 @@ type Admission struct {
 // read two ways, and the row is declared once, under both.
 type BlockedIssue = record.BlockedIssue
 
-// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
-// `null`.
+// MarshalJSON keeps `active`, `waiting`, `trees` and `blocked` arrays on the wire, empty rather
+// than `null` — except on an admission whose trees are hidden, which carries no `trees` key at
+// all. That body is marshaled through a value whose own nil `trees` field, being `omitempty`,
+// shadows the embedded one and so is written by nothing; every other key of the block, including
+// one a later contract adds above, is still written from the one place that writes it.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -315,6 +366,16 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	}
 	if out.Blocked == nil {
 		out.Blocked = []BlockedIssue{}
+	}
+	if a.treesHidden {
+		out.Trees = nil
+		return json.Marshal(struct {
+			wire
+			Trees []string `json:"trees,omitempty"`
+		}{wire: out})
+	}
+	if out.Trees == nil {
+		out.Trees = []string{}
 	}
 	return json.Marshal(out)
 }
@@ -329,6 +390,12 @@ type Issue struct {
 	// write is queued, and go on differing where one was lost until the status repair puts it
 	// back, so a reader who wants the status Dispatch shows must read Dispatch.
 	Status string `json:"status"`
+	// Tree is the key of the root of the issue's tree, which equals Key on a root. Since a child
+	// holds a slot of its own, neither `admission.active` nor `admission.waiting` says any more
+	// which tree an issue belongs to, and a reader needs it to tell a child from a root and to
+	// find the members of a tree that lingers. Absent on an issue the workflow does not record
+	// (an operator's claim, Unrecorded), which stands in no tree.
+	Tree string `json:"tree,omitempty"`
 	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
 	// default branch, both taken when the daemon first recorded the issue and never changed after.
 	// Both are absent on an issue the workflow does not record (an operator's claim, Unrecorded).
@@ -345,7 +412,14 @@ type Issue struct {
 	Workers     map[claim.Role]PhaseView `json:"workers"`
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
-	Slot        *SlotView                `json:"slot,omitempty"`
+	// GatedSteps is the deployment's design gate as this issue stands in it: one entry for each
+	// step the deployment gates, in the order it gates them (contract 55). It is absent, as the
+	// gate itself is, for an issue that is not its tree's root, for a deployment that gates no
+	// step and for an issue the workflow does not record, so the wire never carries an empty
+	// list. DesignGate is unchanged beside it: it is the spec step's row, which every reader that
+	// asks one question of one gate still takes.
+	GatedSteps []GatedStepView `json:"gatedSteps,omitempty"`
+	Slot       *SlotView       `json:"slot,omitempty"`
 	// WaitingOn is present only while the root is in awaiting_person: what it waits on from a
 	// person, when the wait began and, once a person answered, when and by what act.
 	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
@@ -393,7 +467,8 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
 // it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
-// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// sent on a `claims/ready` of its own while it ran (LEGION-663, INFRA-927). The locator is the
+// runtime's own nested shape —
 // `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
 // member for a pod — marshalled by the standard library from `runtime.Locator`; the process
 // incarnation lives there and in the capability report's `incarnation`, which is the reporting
@@ -501,6 +576,76 @@ type GateView struct {
 	ApprovedVersion *int   `json:"approvedVersion"`
 }
 
+// GatedStepStatus is where one gated step of a deployment stands, as the issue's gate records say
+// it: the four answers a record can give.
+type GatedStepStatus string
+
+const (
+	// GatedStepUnregistered is a step the deployment gates that the issue holds no gate record
+	// for: its architect has registered no document for that step, and the step holds the tree's
+	// work until it does.
+	GatedStepUnregistered GatedStepStatus = "unregistered"
+	// GatedStepWaiting is a registered step whose current document version no person has reviewed:
+	// the approval or the changes request it records, if any, is of a version below the current
+	// one, which a newer version of the document left behind. It waits on a person.
+	GatedStepWaiting GatedStepStatus = "waiting"
+	// GatedStepApproved is a step a person approved at its current document version: the one
+	// status that lets the tree's work past the step (classify.DesignGateOpen).
+	GatedStepApproved GatedStepStatus = "approved"
+	// GatedStepChangesRequested is a step whose reviewer asked for changes at its current document
+	// version, which the architect was told of; ChangesReason carries the reason the reviewer gave.
+	GatedStepChangesRequested GatedStepStatus = "changes_requested"
+)
+
+// GatedStepView is one step of the deployment's design gate as one issue stands in it: the step,
+// the document its architect registered for the step, that document's current version, the
+// version a person approved, where the step stands and, for a step whose reviewer asked for
+// changes, the reason they gave. A step nobody has registered carries no document, no version and
+// no approval.
+type GatedStepView struct {
+	Step            record.DesignStep `json:"step"`
+	ArtifactID      string            `json:"artifactId,omitempty"`
+	CurrentVersion  int               `json:"currentVersion,omitempty"`
+	ApprovedVersion *int              `json:"approvedVersion"`
+	Status          GatedStepStatus   `json:"status"`
+	ChangesReason   string            `json:"changesReason,omitempty"`
+}
+
+// GatedStepViewsOf is steps, the design-gate steps a deployment gates, as one issue stands in
+// them: gates are that issue's gate rows by step (record.Store.GatesOf), and the answer is one
+// entry for each step, in the order the deployment gates them, never nil.
+//
+// The entries are the deployment's steps and not the issue's rows. A row of a step the deployment
+// no longer gates stays in the record — a deployment that gates that step again reads its true
+// state — and appears in no entry here, because it holds no work: every reader of the gate asks
+// the configured steps (classify.DesignGatesOpen). A configured step with no row is the other
+// direction, and is answered unregistered: it holds the tree's work, so a reader must see it.
+func GatedStepViewsOf(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) []GatedStepView {
+	views := make([]GatedStepView, 0, len(steps))
+	for _, step := range steps {
+		gate, registered := gates[step]
+		if !registered {
+			views = append(views, GatedStepView{Step: step, Status: GatedStepUnregistered})
+			continue
+		}
+		view := GatedStepView{
+			Step:            step,
+			ArtifactID:      gate.ArtifactID,
+			CurrentVersion:  gate.LatestVersion,
+			ApprovedVersion: gate.ApprovedVersion,
+			Status:          GatedStepWaiting,
+		}
+		switch {
+		case classify.DesignGateOpen(gate):
+			view.Status = GatedStepApproved
+		case gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == gate.LatestVersion:
+			view.Status, view.ChangesReason = GatedStepChangesRequested, gate.ToldChangesReason
+		}
+		views = append(views, view)
+	}
+	return views
+}
+
 // SlotView is the admission slot the issue occupies and when it took it.
 type SlotView struct {
 	Index      int       `json:"index"`
@@ -508,17 +653,24 @@ type SlotView struct {
 }
 
 // CheckView is an issue's open production check as the state shows it: the repository, pull
-// request and merge commit the check looks for in production (MergeCommit is empty until the first
-// build compare fills it for a pull request merged before the daemon recorded merge commits), when
-// it opened, how many looks the implementer has taken and whether the latest is still open, what
-// woke the latest look (LastWake, absent before the first look wakes), the check's bound
-// (NextWakeAt: the moment its last look starts, which is the one wake the record promises; the
-// deploy and build wakes before it are events, not timers), and whether the last look has started.
+// request and merge commit the check looks for in production (MergeCommit is empty for a pull
+// request merged before the daemon recorded merge commits), when it opened, the role that works
+// it (Role, the one the check recorded from the project's `production_check` when it opened), how
+// many looks that role has taken and whether the latest is still open, what woke the latest look
+// (LastWake, absent before the first look wakes), when the next look is due (NextWakeAt), and
+// whether the last look has started.
+//
+// NextWakeAt is the next look's time, whichever names it: the moment the checking agent named for
+// itself on a pending report, the retry of a look nobody reported, or — where neither stands —
+// the check's own bound, the moment its last look starts. The bound stays readable without a
+// field of its own: NextWakeAt is the bound whenever no agent's time is set, OpenedAt is here,
+// and `production_check_hours` is in the state's settings.
 type CheckView struct {
 	Repo        string         `json:"repo"`
 	PullRequest int            `json:"pullRequest"`
 	MergeCommit string         `json:"mergeCommit"`
 	OpenedAt    time.Time      `json:"openedAt"`
+	Role        string         `json:"role"`
 	Looks       int            `json:"looks"`
 	LookOpen    bool           `json:"lookOpen"`
 	LastWake    *CheckWakeView `json:"lastWake,omitempty"`
@@ -526,10 +678,12 @@ type CheckView struct {
 	Last        bool           `json:"last"`
 }
 
-// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
-// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
-// job and step success, or the build's commit), and At when.
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` for
+// the look the close opens, `check wake` for one the checking agent's own wake_at or the retry of
+// a look nobody reported starts, and `bound` for the last look; a check whose look was woken
+// before the daemon stopped reading production can hold one of the causes that are gone), Detail
+// the cause's own detail — for `check wake`, the summary the agent's report gave or the retry's
+// own words — and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`
@@ -697,11 +851,63 @@ func StrandedByMove(stranded []StrandedClaim, suspended Suspenders) map[Stranded
 	return grouped
 }
 
+// WakeWaiting is one wake the daemon's pacing holds until its turn, as the state names it
+// (State.WakesWaiting): the claim it will wake, that claim's issue and role, what kind of wake it
+// is, and the moment the pacing gave it, which is when it runs. The kinds are the three lanes the
+// daemon paces, declared once where the machines reserve them (supervise.WakeKind) and each named
+// on the wire as the line that wake writes names it (supervise's wakeRan, the outbox's):
+//
+//   - `launch`, a role process the daemon is about to start, held by the claim's machine;
+//   - `plugin-task`, the update task a stale-plugin round queues to a session already running,
+//     held by the claim's machine too;
+//   - `catch-up`, the notice a start writes to an architect already running in place of a launch,
+//     which waits on its own outbox row rather than in a machine.
+//
+// The project controller's own claim is exempt from the pacing and never waits, so it never
+// appears. A wake over a claim whose process still runs appears like any other: it is a wake the
+// queue holds, whatever the claim does meanwhile.
+type WakeWaiting struct {
+	Claim claim.Token        `json:"claim"`
+	Issue string             `json:"issue"`
+	Role  claim.Role         `json:"role"`
+	Kind  supervise.WakeKind `json:"kind"`
+	DueAt time.Time          `json:"dueAt"`
+}
+
+// WakesWaitingOf is every wake still waiting, from both of the places one can wait, in claim order:
+// held are the wakes the daemon's machines hold in memory, each as its machine last published it
+// (supervise.Machine.WaitingWake) — the launches and the plugin tasks — and queued are the wakes
+// that wait on a durable row, which the caller composes from the store — today the paced catch-ups
+// (daemon's pacedCatchUps). The two are merged here rather than at either source so that one read
+// of the state is one ordered list, whichever lane is holding a wave back: an operator or a
+// controller asking whether a wave is still running must not have to know which lane each wake of
+// it is in.
+//
+// The machines are read as the operator's claim listing and the capability report read theirs: a
+// reader of every claim never waits on the decision in flight, and reading the wake from the
+// published view rather than from a claim's stored state leaves what every other reader of that
+// state makes of it untouched. Outside a wave nothing waits, so nothing is allocated while both
+// sides are empty; the state's own marshalling is what keeps the empty list an array on the wire
+// (State.MarshalJSON). The sort is stable, so two wakes of one claim — a row and a machine's, or
+// two rows — keep the order their sources gave them.
+func WakesWaitingOf(held []supervise.WaitingWake, queued []WakeWaiting) []WakeWaiting {
+	var wakes []WakeWaiting
+	for _, w := range held {
+		wakes = append(wakes, WakeWaiting{Claim: w.Claim, Issue: w.Issue, Role: w.Role, Kind: w.Kind, DueAt: w.At})
+	}
+	wakes = append(wakes, queued...)
+	slices.SortStableFunc(wakes, func(a, b WakeWaiting) int { return cmp.Compare(a.Claim, b.Claim) })
+	return wakes
+}
+
 // StateSource maps the daemon's durable and live facts through the transaction the state route
 // owns. It does not commit it: the route can refuse one failed projection without publishing a
-// partial snapshot.
+// partial snapshot. It answers the project's claims beside the state, the ones it read through
+// that transaction to build the claim views, so the route decides what the caller's plugin reads
+// (server's stateFor) from the claims of the snapshot it serves, rather than reading the table a
+// second time at another moment.
 type StateSource interface {
-	State(ctx context.Context, tx pgx.Tx) (State, error)
+	State(ctx context.Context, tx pgx.Tx) (State, []supervise.Claim, error)
 }
 
 // StateTransactions begins the one snapshot transaction every state response reads through.

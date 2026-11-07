@@ -39,8 +39,11 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { useMarkThreadRead } from "../replies/useMarkThreadRead";
+import { textSourceOf } from "../refs/text-references";
+import { Unfurl } from "../refs/Unfurl";
+import { threadLayout } from "../threads/thread-layout";
+import { useThreadOrder } from "../threads/thread-order";
+import { useMarkThreadRead } from "../threads/useMarkThreadRead";
 import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -193,18 +196,20 @@ function CommentBody({
         </blockquote>
       )}
       {orphanNotice}
-      {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
+      {suggestion === null ? (
+        <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
+      ) : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
-              <MarkdownBody markdown={comment.body} />
+              <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
             </div>
           )}
         </div>
       ) : null}
-      {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
+      <Unfurl body={comment.body} source={textSourceOf("comment", comment.id)} />
       <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
         <span>
           <AgentName actor={comment.author} inline /> · <Timestamp at={comment.created_at} />
@@ -263,13 +268,21 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
-  // The Replies page's read mark: an open thread is read once its newest reply has been on screen.
+  // The shared thread read mark: an open thread is read once its newest reply has been on screen.
   const newestReply = thread.replies.at(-1);
   const markRead = useMarkThreadRead({
     enabled: expanded,
     newestShownAt: newestReply?.created_at,
     owner: owner.kind === "issue" ? { issue: owner.key } : { artifact: owner.artifactId },
     threadId: root.id,
+  }).ref;
+  // A margin thread folds nothing - it is the thread's own page - so the order alone places its
+  // replies and the reply box (`features/threads/thread-layout.ts`).
+  const [threadOrder] = useThreadOrder();
+  const { composerFirst, shown } = threadLayout({
+    collapse: false,
+    order: threadOrder,
+    replies: thread.replies,
   });
   // An edit whose save is out, or was refused, is the held-send store's: its editor stays open on
   // its comment until the save lands or the reader drops it, whatever closed the card meanwhile.
@@ -300,6 +313,31 @@ export function ThreadCard({
         Edit
       </button>
     ) : null;
+  /* Mounted while the card is expanded, under the thread's reply send name, so a reply still
+     out or refused - which the held-send store keeps for the thread - is there each time the
+     card expands. Mounted on a closed issue too, where the composer shows only a reply of its
+     own still out or its refusal (`closed`), and otherwise renders nothing, its frame with it;
+     and on a decided suggestion's thread, which offers no reply, where it shows the same and
+     still sends (`finishing`). `contents`, so the composer's own box is the one laid out. It
+     sits next to the newest message: under the root in Newest first, at the foot of the thread
+     in Oldest first. */
+  const replyComposer = expanded ? (
+    <div className="contents" hidden={hideReplyComposer}>
+      <MentionComposer
+        closed={isClosed}
+        finishing={terminalSuggestion}
+        frame={composerClassName}
+        inline
+        kind="comment"
+        mutationKey={replyMutationKey}
+        onCancelReply={onToggle}
+        onClose={onToggle}
+        onSent={() => {}}
+        owner={composerOwner(owner)}
+        replyTo={{ actor: root.author, excerpt: "", id: root.id, parentKind: "comment" }}
+      />
+    </div>
+  ) : null;
 
   return (
     <>
@@ -426,9 +464,10 @@ export function ThreadCard({
                 <Timestamp at={root.resolved_at} />
               </p>
             ) : null}
-            {thread.replies.length === 0 ? null : (
+            {composerFirst ? replyComposer : null}
+            {shown.length === 0 ? null : (
               <ol aria-label="Replies" className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}>
-                {thread.replies.map((reply) => (
+                {shown.map((reply) => (
                   <li
                     aria-current={reply.id === currentReplyId ? "true" : undefined}
                     className={`rounded-lg p-2 ${card}`}
@@ -502,6 +541,7 @@ export function ThreadCard({
                       lines={1}
                       links="live"
                       markdown={root.body}
+                      source={textSourceOf("comment", root.id)}
                     />
                   )}
                 </>
@@ -514,8 +554,13 @@ export function ThreadCard({
                       {root.anchor.quote}
                     </blockquote>
                   )}
-                  <MarkdownPreview lines={2} links="live" markdown={root.body} />
-                  {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
+                  <MarkdownPreview
+                    lines={2}
+                    links="live"
+                    markdown={root.body}
+                    source={textSourceOf("comment", root.id)}
+                  />
+                  <Unfurl body={root.body} source={textSourceOf("comment", root.id)} />
                 </>
               )}
               {thread.replies.length === 0 ? null : (
@@ -528,30 +573,7 @@ export function ThreadCard({
             </span>
           </button>
         )}
-        {/* Mounted while the card is expanded, under the thread's reply send name, so a reply
-            still out or refused - which the held-send store keeps for the thread - is there each
-            time the card expands. Mounted on a closed issue too, where the composer shows only a
-            reply of its own still out or its refusal (`closed`), and otherwise renders nothing,
-            its frame with it; and on a decided suggestion's thread, which offers no reply, where
-            it shows the same and still sends (`finishing`). `contents`, so the composer's own box
-            is the one laid out. */}
-        {expanded ? (
-          <div className="contents" hidden={hideReplyComposer}>
-            <MentionComposer
-              closed={isClosed}
-              finishing={terminalSuggestion}
-              frame={composerClassName}
-              inline
-              kind="comment"
-              mutationKey={replyMutationKey}
-              onCancelReply={onToggle}
-              onClose={onToggle}
-              onSent={() => {}}
-              owner={composerOwner(owner)}
-              replyTo={{ actor: root.author, excerpt: "", id: root.id, parentKind: "comment" }}
-            />
-          </div>
-        ) : null}
+        {composerFirst ? null : replyComposer}
         {expanded ? null : renderDeliveries?.(root)}
         {actionFailure === undefined ? null : (
           <div className="mt-2">

@@ -138,11 +138,38 @@ func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 // where the two render alike, which its caller compares markdown for.
 func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdoc.WrittenReadBack, error) {
 	parsed, read, err := pmdoc.ParseWritten(markdown, live)
+	// The ask rule reads the parse's own refusal, before uploadedInput names it the caller's
+	// (ErrInvalidMarkdown), since that naming does not carry the refusal it wraps.
+	if ask := askRefusalInstead(markdown, err); ask != err {
+		return nil, pmdoc.WrittenReadBack{}, ask
+	}
 	tree, err := uploadedInput(parsed, err)
 	if err != nil {
 		return nil, pmdoc.WrittenReadBack{}, err
 	}
 	return tree, read, nil
+}
+
+// askRefusalInstead is err, or the refusal of an ask written with its options and no question
+// where err is the refusal of the rendering this document would be stored as: one that reads back
+// as another document (pmdoc.ErrMisreadRendering) or that no reader reads at all
+// (pmdoc.ErrRenderingRefused). The renderer writes such an ask's empty paragraphs as nothing
+// (both parsers read one back), so markdown writing two of them renders to one the read-back
+// cannot match, and the write is refused for the rendering rather than for the ask. The author's
+// fault is the ask, so it is named: this reads the markdown again without the read-back check and
+// returns the ask rule's own refusal when it has one.
+func askRefusalInstead(markdown string, err error) error {
+	if !errors.Is(err, pmdoc.ErrMisreadRendering) && !errors.Is(err, pmdoc.ErrRenderingRefused) {
+		return err
+	}
+	tree, parseErr := pmdoc.Parse(markdown)
+	if parseErr != nil {
+		return err
+	}
+	if ask := pmdoc.AskWrittenContentError(tree); ask != nil {
+		return &ErrInvalidAskBlock{Reason: ask}
+	}
+	return err
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A
@@ -290,6 +317,18 @@ func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 	return markdown, offsets, layout, documentSchemaError(err)
 }
 
+// replicaRenderingOf is tree's rendering as a room's replica keeps one (replicaRendering): the
+// markdown and the layout recorded with it, rendered once (documentRenderingWithLayout). A tree
+// that does not render has none, and the rendering's error, a document outside the schema among
+// them.
+func replicaRenderingOf(tree *pmdoc.Node) (*replicaRendering, error) {
+	markdown, _, layout, err := documentRenderingWithLayout(tree)
+	if err != nil {
+		return nil, err
+	}
+	return &replicaRendering{markdown: markdown, layout: layout}, nil
+}
+
 // documentRenderingValidWithLayout is documentRenderingWithLayout of a tree readForkTree already
 // validated, which the render then does not validate again (pmdoc.ValidDocument.RenderWithLayout).
 func documentRenderingValidWithLayout(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
@@ -428,9 +467,21 @@ type forkTreeCounts struct {
 
 // listResident lists value under live, a room's resident document, in listing until live is
 // collected: the key holds live weakly, so the listing never keeps an evicted room's document
-// alive, and the entry goes once that document is collected.
+// alive, and the entry goes once that document is collected, unless the listing went first.
 func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 	key := weak.Make(live)
 	listing.Store(key, value)
-	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) { listing.Delete(key) }, key)
+	// The cleanup holds the listing weakly because runtime.AddCleanup keeps a cleanup's closure
+	// alive for as long as the object it is attached to, and every listing here is a field of the
+	// service (Service.instances, Service.replicas), which reaches every resident room document
+	// through ygo's room table: a closure holding the listing strongly would be a cycle through
+	// live, which would then never be collected, and nor would anything it holds. The nil check
+	// skips the delete only where the listing went first, and a listing that is gone has no entry
+	// left to drop (dispatch://INFRA-1085).
+	owner := weak.Make(listing)
+	runtime.AddCleanup(live, func(key weak.Pointer[crdt.Doc]) {
+		if listing := owner.Value(); listing != nil {
+			listing.Delete(key)
+		}
+	}, key)
 }

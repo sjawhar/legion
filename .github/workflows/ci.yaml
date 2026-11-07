@@ -31,18 +31,19 @@ name: CI
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
 # build the same listener and natsd, listener-server-change, which builds the listener, and
-# dispatch, dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-test
-# (envoy-go alone, which saves it: it builds the test binary of every package of the envoy module,
-# a set no other job builds), go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step).
-# Each family keeps one entry, keyed on the Go version its job's setup-go installed, so it is
-# refreshed only when Go is bumped. A go.sum change downloads only the changed modules, and Go's
-# build cache is content-addressed, so a stale entry costs a run only what changed; a key on the
-# go.sum files left a whole entry, up to a gigabyte, per change for seven days. Only a run off main
-# falls back, when the exact key misses, to the family's newest entry by its prefix; a run on main
-# restores by the exact key only, so the entry it saves after a Go bump holds nothing the older Go
-# built. Each family is saved with actions/cache/save as the last step before the ci-ok report of a
-# job that runs on main, and only on a push to main whose job succeeded and whose restore missed
-# the exact key. setup-bun reads and writes its cache only on main (.github/actions/setup-bun).
+# dispatch, dispatch-browser-multiprocess, envoy-go-race-docs and envoy-go-docs-finalizers,
+# which save none), go-envoy-test (envoy-go alone, which saves it: it builds the test binary of
+# every package of the envoy module, a set no other job builds), go-envoy-infra (envoy-infra-go)
+# and go-notices (lint's notices step). Each family keeps one entry, keyed on the Go version its
+# job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum change downloads
+# only the changed modules, and Go's build cache is content-addressed, so a stale entry costs a
+# run only what changed; a key on the go.sum files left a whole entry, up to a gigabyte, per
+# change for seven days. Only a run off main falls back, when the exact key misses, to the
+# family's newest entry by its prefix; a run on main restores by the exact key only, so the entry
+# it saves after a Go bump holds nothing the older Go built. Each family is saved with
+# actions/cache/save as the last step before the ci-ok report of a job that runs on main, and
+# only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
+# reads and writes its cache only on main (.github/actions/setup-bun).
 
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
@@ -113,9 +114,9 @@ env:
       "envoy-go": "envoy_go",
       "envoy-infra-go": "envoy_infra_go",
       "envoy-go-race": "envoy_go_race",
-      "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
       "envoy-go-race-api": "envoy_go_race_api",
       "envoy-go-race-docs": "envoy_go_race_docs",
+      "envoy-go-docs-finalizers": "envoy_go_race_docs",
       "dispatch-memory": "dispatch_memory",
       "dispatch-multiprocess": "dispatch_multiprocess",
       "listener-multiprocess": "listener_multiprocess",
@@ -156,7 +157,6 @@ jobs:
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
-      envoy_go_race_pmdoc: ${{ steps.filter.outputs.envoy_go_race_pmdoc }}
       envoy_go_race_api: ${{ steps.filter.outputs.envoy_go_race_api }}
       envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
@@ -203,13 +203,14 @@ jobs:
           # flattens into the list that names it.
           filters: |
             # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
-            # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
+            # root manifest, the lockfile, the patches package.json:50-59 applies, and the manifest
             # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
             # Bun .bun-version pins.
             bun_install: &bun_install
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'
+              - 'packages/broker-client/package.json'
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
@@ -285,12 +286,23 @@ jobs:
               - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testnats/testdata/**'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              # The reasons the listener refuses a publish to a role no session holds, which the
+              # daemon's notify path reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
+              # The daemon reads the Envoy session timings (heartbeat, live window, claim
+              # staleness and the listener call's attempts) through this one public package: it
+              # is a module of its own, so Go's internal rule bars it from internal/contracts,
+              # where the generated values are.
+              - 'packages/envoy/sessiontiming/*'
               - 'packages/envoy/testnatsimages/*'
             # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
             # migrations and pmdoc schema included): what the daemon's outbox test builds
-            # (internal/dispatch/outbox_scratch_dispatch_test.go:187), the browser tests' and the
+            # (internal/testbuild/testbuild.go:112, called from
+            # internal/daemon/outbox_scratch_dispatch_test.go:353), the browser tests' and the
             # docs screenshots' run-server.sh builds (packages/dispatch/e2e/run-server.sh:135), and
             # envoy-infra's permissions live test builds (infra/core/permissions_live_test.go:298).
             # packages/envoy/listenfd serves on the socket a test or harness holds (#2229).
@@ -300,6 +312,8 @@ jobs:
             # the outbox's role forward resolves a role's holder with roles.ResolveHolder (#2395).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -358,11 +372,14 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -391,7 +408,6 @@ jobs:
               - 'packages/daemon/internal/ghconfig/*'
               - 'packages/daemon/internal/ghrepo/*'
               - 'packages/daemon/internal/githubrest/*'
-              - 'packages/daemon/internal/handoffimport/*'
               - 'packages/daemon/internal/intake/*'
               - 'packages/daemon/internal/launcher/*'
               - 'packages/daemon/internal/lookpath/*'
@@ -427,6 +443,7 @@ jobs:
               - 'packages/daemon/internal/supervise/*'
               - 'packages/daemon/internal/treelifecycle/*'
               - 'packages/daemon/internal/wait/*'
+              - 'packages/daemon/internal/wakepace/*'
               - 'packages/daemon/internal/workflow/*'
               - 'packages/daemon/internal/workspace/*'
               - 'packages/envoy/brokerclient/*'
@@ -446,9 +463,20 @@ jobs:
               # packages/envoy/migrationid is the identifier rule the daemon's embedded
               # migrations are held to, in the envoy module so both sets keep one rule.
               - 'packages/envoy/migrationid/*'
+              # packages/envoy/roleholder names the reasons the listener refuses a role publish
+              # with, which internal/notify reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
+              # The one public door onto the generated Envoy session timings the daemon's
+              # liveness and notice rules read: it sits in the envoy module because the
+              # daemon, a module of its own, cannot reach internal/contracts, where they are.
+              - 'packages/envoy/sessiontiming/*'
             # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
             listener_command: &listener_command
               - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/bus/*'
@@ -465,6 +493,7 @@ jobs:
               - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/ratelimit/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
@@ -472,6 +501,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
@@ -482,6 +512,10 @@ jobs:
             # ledger's records.
             dispatch_command_tests: &dispatch_command_tests
               - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/going/*'
+              - 'packages/envoy/going/goingtest/*'
+              # going's own golden, which a test run of that package reads.
+              - 'packages/envoy/going/testdata/**'
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/brokertoken/*'
               - 'packages/envoy/internal/dispatch/**'
@@ -506,12 +540,15 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              - 'packages/envoy/internal/redirects/*'
               - 'packages/envoy/internal/roles/*'
               - 'packages/envoy/internal/routing/*'
               - 'packages/envoy/internal/session/*'
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -522,10 +559,10 @@ jobs:
               # install-jj reads the mise version and checksum it installs from here.
               - 'packages/daemon/docker/worker.Dockerfile'
             # What the test job's two Go steps read together — the plain step, which tests every
-            # package of packages/daemon but the four concurrent ones, and the race step, which
-            # tests those four — so the filter still covers the whole module's closure. The
-            # packages they compile, the Dispatch server
-            # internal/daemon/outbox_scratch_dispatch_test.go:187 builds, and what their tests read
+            # package of packages/daemon but the three concurrent ones, and the race step, which
+            # tests those three — so the filter still covers the whole module's closure. The
+            # packages they compile, the Dispatch server internal/testbuild/testbuild.go:112 builds
+            # for internal/daemon/outbox_scratch_dispatch_test.go:353, and what their tests read
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
@@ -562,8 +599,10 @@ jobs:
               - *go_workspace
               - 'packages/daemon/**'
               - *daemon_envoy_deps
-            # The claude-envoy job, and the test job's verify-build step, which runs the same
-            # command (packages/claude-envoy/scripts/verify-build.sh).
+            # The claude-envoy job, and two steps of the test job: its verify-build step, which
+            # runs the same command (packages/claude-envoy/scripts/verify-build.sh), as
+            # release.yaml's claude_envoy_build does, and its build-input-list step, which runs
+            # packages/claude-envoy/tests/build-inputs.test.ts.
             claude_envoy: &claude_envoy
               - '.github/workflows/ci.yaml'
               # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
@@ -583,6 +622,9 @@ jobs:
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
               - 'packages/envoy-client/src/**'
+              # tests/envoy-channel-stall.test.ts:5-11 imports test/envoy-stack, stall-proxy and
+              # stall-scenario.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/pi-shared/src/**'
               # scripts/build.ts:115-128 generates legion/ from pi-legion's agents and the skills
@@ -591,12 +633,11 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - 'skills/**'
               - 'scripts/third-party-notices.ts'
-              # tests/envoy-channel-server.test.ts:7 holds the marketplace entry to no version.
+              # tests/envoy-channel-server.test.ts holds the marketplace entry to this package's
+              # own name, to no `version` of its own, and to a source range that leaves out the
+              # 0.0.0 placeholder and admits the first release.
               - '.claude-plugin/marketplace.json'
-              # tests/build-inputs.test.ts holds the rebuild's on.push.paths to the files
-              # scripts/build-inputs.txt matches.
-              - '.github/workflows/claude-envoy-rebuild.yaml'
-            # The daemon's tests (every package once: the four concurrent packages under the race
+            # The daemon's tests (every package once: the three concurrent packages under the race
             # detector, the rest in the plain step, and the daemon
             # scripts/e2e/stage1-skeleton.sh builds) and every file the job's other steps read.
             test:
@@ -604,13 +645,15 @@ jobs:
               - *bun_install
               - *biome
               - *daemon_go_tests
-              # Its verify-build step builds and checks the Claude Code plugin as main's rebuild does.
+              # Two of its steps read this list: verify-build builds and checks the Claude Code
+              # plugin as the release does, and the build-input-list step runs
+              # packages/claude-envoy/tests/build-inputs.test.ts.
               - *claude_envoy
               # scripts/e2e/lib/held-port.test.ts:45 builds the real envoy-listener.
               - *listener_command
               # Each .github/scripts/*.test.sh runs its checker, through test-lib.sh (and
               # workflow_paths.py, check-pr-text.sh, release-bump.sh, ci_filter_coverage.py where a
-              # checker sources them).
+              # checker sources them); workflow_paths.test.sh runs that path model itself.
               - '.github/scripts/*'
               # select-e2e-proofs.test.sh runs the selector over this list and over scripts/e2e/.
               - '.github/e2e-scripts.json'
@@ -632,9 +675,13 @@ jobs:
               - '.github/actions/install-uv/**'
               - '.github/actions/install-changie/**'
               - '.github/actions/pull-test-images/**'
-              # changelog-fold.test.sh copies pi-legion's changie config and changelog (its line 53).
-              - 'packages/pi-legion/.changie.yaml'
-              - 'packages/pi-legion/CHANGELOG.md'
+              # The fold-check step renders every fragment of every package
+              # .github/changelog-packages lists, each with its own changie configuration;
+              # release-push.test.sh's "Case: fold-notes renders a package with the shipped
+              # packages/pi-legion/.changie.yaml" copies that configuration and renders it.
+              - '.github/changelog-packages'
+              - 'packages/*/.changie.yaml'
+              - 'packages/*/.changes/unreleased/**'
             # docs/site's lint, typecheck, screenshots and build, with the sources its reference
             # generators and its screenshot harness read. docs-site.yaml holds those steps, and
             # both the docs job here and docs-pages.yaml's build job call it. docs-pages.yaml
@@ -757,6 +804,8 @@ jobs:
               - *biome
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/src/**'
+              # src/handoff-record.test.ts:7 imports @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/contracts/src/**'
               # src/daemon-client.test.ts:15 and its neighbours read the daemon API fixtures.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -782,6 +831,9 @@ jobs:
               # src/skills-guard.test.ts:23, scripts/prepack.test.ts:6).
               - 'packages/pi-shared/test/**'
               - 'packages/envoy-client/src/**'
+              # extensions/envoy.test.ts:45-51 imports test/envoy-stack, stall-proxy and
+              # stall-scenario; extensions/askgate/decision-record.test.ts:9 its fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               - 'packages/envoy-client/scripts/build-dispatch-cli.sh'
               - 'packages/contracts/src/**'
@@ -828,7 +880,8 @@ jobs:
               # daemon-pane.go inside the daemon module in workspace mode.
               - 'packages/daemon/internal/**'
               # daemon-pane.go compiles the daemon module, which reaches these envoy packages:
-              # the migration identifier rule, and the Dispatch body check the close route and
+              # the migration identifier rule, the generated session timings the daemon reads
+              # through their one public package, and the Dispatch body check the close route and
               # the merger's READY completion make with the server's own splitter
               # (packages/envoy/dispatchbody, and the parser and contracts under it).
               - 'packages/envoy/dispatchbody/*'
@@ -838,6 +891,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
+              - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
               - 'AGENTS.md'
@@ -850,6 +905,8 @@ jobs:
               - *omp_install
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
+              # The install step runs it, so a change to it must re-run this job.
+              - '.github/scripts/playwright-deps-current.sh'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'
@@ -859,8 +916,16 @@ jobs:
               # web/src/features/doc/decision-blocks.test.ts:10.
               - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              # The answers packages/envoy/going's filter emitted for every probe of its own
+              # suite, which packages/proof-editor/tests/going-answer-no-link.test.ts:111-112
+              # reads and parses with the app's own remark pipeline: a filter change that moves
+              # them must run this job.
+              - 'packages/envoy/going/testdata/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
+              # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
+              # import @legion/envoy-client/test/fake-dispatch.
+              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -905,6 +970,8 @@ jobs:
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
@@ -944,6 +1011,8 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
             # packages/envoy), the envoy packages its tests compile, and the Dispatch server and
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
@@ -961,50 +1030,30 @@ jobs:
               # internal/dispatch/text, so the natslive run compiles that package and the check
               # counts its testdata among what this job reads.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testnats/testdata/**'
               - 'packages/envoy/internal/testpg/*'
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
+              # Its natslive step takes that tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The shared race job: the closure of `go test -race` over delivery, the Dispatch
             # store, the bus, the listener, the registry store, the session cache and kvwatch (`go
             # list -deps -test -race` in packages/envoy). internal/dispatch/store's
             # search_text_test.go:102-120 walks every .md file under packages/envoy, so this
             # filter keeps the wide root rather than the package list that closure would give. No
-            # bun_install anchor: no test of these packages runs bun, so the Bun install sits on
-            # the pmdoc race job with the package that needs it.
+            # bun_install anchor: no test of these packages runs bun.
             envoy_go_race:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
+              # listener-server-change takes its -run from this script, and this is the job that
+              # runs cmd/listener's untagged tests, so it must run whenever the script changes.
+              - '.github/scripts/go-tagged-tests.sh'
               # The fixture cmd/listener/api_test.go:191,436,480 reads.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
-            # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
-            # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
-            # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
-            # render_readback_test.go:32), so the editor's package is here too, and
-            # heavy_bodies_test.go:36 reads the bound one block of a body stands inside
-            # (contracts.DispatchBlockUnits), so the contracts package is too.
-            envoy_go_race_pmdoc:
-              - '.github/workflows/ci.yaml'
-              - *bun_install
-              - *go_workspace
-              - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/cputest/*'
-              - 'packages/envoy/internal/dispatch/docs/crafted/*'
-              - 'packages/envoy/internal/dispatch/docs/docstest/*'
-              - 'packages/envoy/internal/dispatch/pmdoc/**'
-              - 'packages/envoy/internal/stacktest/*'
-              - 'packages/proof-editor/**'
-              # The editor's src/block-pointers.ts (through src/block-schema.ts) imports
-              # @legion/contracts.
-              - 'packages/contracts/src/**'
-              # pmdoc's schema.go and pointers.go import internal/dispatch/model and
-              # internal/dispatch/text, whose tests' testdata the race run reads too.
-              - 'packages/envoy/internal/dispatch/model/*'
-              - 'packages/envoy/internal/dispatch/text/*'
-              - 'packages/envoy/internal/dispatch/text/testdata/**'
             # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
             # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
             # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
@@ -1022,6 +1071,8 @@ jobs:
             # one and what those packages embed.
             envoy_go_race_docs:
               - '.github/workflows/ci.yaml'
+              # The race step runs the package under this sampler (the step's comment says why).
+              - '.github/scripts/race_memory.py'
               - *go_workspace
               - 'packages/envoy/internal/contracts/*'
               - 'packages/envoy/internal/contracts/testdata/**'
@@ -1055,11 +1106,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/explaintest/*'
               - 'packages/envoy/internal/githubappjwt/*'
+              # room_recovery_test.go reads the goroutine dump through it.
+              - 'packages/envoy/internal/goroutinetest/*'
               - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/stacktest/*'
+              - 'packages/envoy/migrationid/*'
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/decision-blocks/**'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
@@ -1072,6 +1126,8 @@ jobs:
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testnats/testdata/**'
+              # The step takes the memory tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
@@ -1079,6 +1135,8 @@ jobs:
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testnats/testdata/**'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # The two-process and two-build tests (listener-multiprocess): `go test -tags
             # multiprocess ./cmd/listener`, whose rows build real listener binaries, one of them
             # under the envoy_twobuild tag, which adds only a file of internal/bus. The listener's
@@ -1198,6 +1256,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
+              - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/pglisten/*'
@@ -1208,8 +1267,11 @@ jobs:
               - 'packages/envoy/internal/testnats/testdata/**'
               - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/internal/webhook/testdata/**'
+              - 'packages/envoy/migrationid/*'
               # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+              # The soak step takes the serverchange tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
@@ -1252,6 +1314,11 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
+              - 'packages/envoy/migrationid/*'
+              # The step takes the multiprocess tag's test list from this script at run time.
+              - '.github/scripts/go-tagged-tests.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so envoy-smoke runs whenever
             # the image it smokes changes, every file the held-port image built on top of it reads
             # (packages/envoy/infra/host/heldportwrapper/Dockerfile and its .dockerignore), and what
@@ -1289,8 +1356,11 @@ jobs:
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'packages/envoy/cmd/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
+              - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -1319,6 +1389,8 @@ jobs:
               - '.github/actions/pull-test-images/**'
               # The download URL the schema step stamps into the plugin and asserts on.
               - '.github/scripts/repo-paths.sh'
+              # The disk the live tests leave: the two steps around them run this sampler.
+              - '.github/scripts/disk_watch.py'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, runs it.
@@ -1388,6 +1460,7 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/*'
+              - 'packages/envoy/agentloop/**'
               - 'packages/envoy/brokerclient/**'
               - 'packages/envoy/brokertest/**'
               - 'packages/envoy/cmd/**'
@@ -1396,11 +1469,14 @@ jobs:
               - 'packages/envoy/dispatchbody/**'
               - 'packages/envoy/docker/**'
               - 'packages/envoy/docs/**'
+              - 'packages/envoy/going/**'
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/scripts/**'
+              - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'
               - '.bun-version'
@@ -1422,8 +1498,8 @@ jobs:
               - '!packages/envoy/infra/**'
               # Changelog fragments, which the packages above match and no build reads: .dockerignore
               # leaves them out of the context, so a pull request that only writes a changelog entry
-              # builds no worker image, and the fold that removes a package's last fragment leaves
-              # no pattern here matching nothing.
+              # builds no worker image, and a fragment stays where it was written, so no pattern
+              # here matches nothing.
               - '!packages/*/.changes/**'
             # lint's notices step: the Go packages it loads for every release target (`legion`,
             # the listener, the agent-secrets binaries and client, every envoy-infra command), the
@@ -1481,6 +1557,8 @@ jobs:
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
               - '.github/envoy-infra-targets.json'
+              # ci_job_reads.py reads the workspace list from the root manifest.
+              - 'package.json'
               # The check holds docs-pages.yaml's on.push.paths equal to the docs filter, and it
               # reads docs-site.yaml to find the steps the docs gate cites.
               - '.github/workflows/docs-pages.yaml'
@@ -1526,11 +1604,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this job checks them, and that the title is a conventional commit subject, at
-      # every push to a pull request that is not a draft and when a draft is marked ready, and
-      # posts the verdict on the head as pr-title, the check main's ruleset requires.
+      # A pull request's title becomes main's squash subject and shows in the generated release
+      # notes; its body, its branch name and each commit's message, author and committer stay
+      # public on its page, where its comments and reviews are public once posted. So this job
+      # checks them, and that the title is a conventional commit subject, at every push to a pull
+      # request that is not a draft and when a draft is marked ready, and posts the verdict on the
+      # head as pr-title, the check main's ruleset requires.
       # pr-title.yaml checks them and posts pr-title when the pull request is opened, reopened or
       # edited, a review is submitted or edited, or the merge queue runs its group. A push to main
       # or a merge-queue run of this workflow carries no pull request. These run first, so a failed
@@ -1573,9 +1652,6 @@ jobs:
       - name: Check every manifest names the one exact zod
         run: .github/scripts/check-zod-version.sh
 
-      - name: Check the registration heartbeat leaves a margin inside the session record lifetime
-        run: .github/scripts/check-heartbeat-margin.sh
-
       - name: Check the saved gh help is the worker image's gh
         run: .github/scripts/check-gh-version.sh
 
@@ -1597,12 +1673,12 @@ jobs:
       - name: Check the release workflows keep credentials out of jobs that run dependency code
         run: .github/scripts/check-release-credentials.sh
 
-      # Every package the fold folds is a line of .github/changelog-packages, which the fold reads
-      # too: a fragment of any other package would stay on main unfolded, so it is refused here,
-      # on every pull request, rather than only warned about by the fold on main.
-      - name: Check every changelog fragment belongs to a package the fold folds
+      # Every package whose fragments a release renders is a line of .github/changelog-packages,
+      # which this check reads: a fragment of any other package is rendered nowhere and nothing
+      # would report it, so it is refused here, on every pull request.
+      - name: Check every changelog fragment belongs to a listed package
         run: |
-          # shellcheck disable=SC2046 # the file is the spec list, split on purpose
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
           .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
 
       # No setup-go cache: gofmt needs none, and the notices step below keeps its own (go-notices),
@@ -1629,6 +1705,17 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # The frozen install above does not refuse a workspace `version` the lockfile does not hold.
+      # --lockfile-only writes the lockfile the manifests imply and installs nothing, so a
+      # difference here is what a reader's own `bun install` would write.
+      - name: Check bun.lock agrees with the workspace manifests
+        run: |
+          bun install --lockfile-only
+          if ! git diff --exit-code bun.lock; then
+            echo "::error file=bun.lock::bun.lock disagrees with the workspace manifests; run bun install and commit bun.lock, and after a forward merge of main take one side's bun.lock whole before installing"
+            exit 1
+          fi
 
       # A package's `bun run lint` checks only the paths its recipe names. This is the command
       # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome
@@ -1858,6 +1945,15 @@ jobs:
       # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
       # pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
+      # below; every other lane — a merge group, a push to main — takes the empty string, which
+      # every reader treats as unset (classify's run_fuzz_test.go and sender_fuzz_test.go, the
+      # daemon's keptPropertyEnv), so the full counts live in the Go source alone and the queue
+      # still runs them. sender_fuzz_test.go's own count is 2,000 histories of each order already,
+      # so the pull-request value leaves it as it is. The number of seeds falls rather than each
+      # seed's depth: a seed that stops early stops reaching the states the property is about.
+      LEGION_RUN_FUZZ_ITERS: ${{ github.event_name == 'pull_request' && '2000' || '' }}
+      LEGION_KEPT_PROPERTY_RUNS: ${{ github.event_name == 'pull_request' && '8' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1870,26 +1966,37 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The very command main's Rebuild Claude Envoy plugin workflow runs in its build job, so a pull
-      # request whose source main's push job would refuse fails this job, and with it the required
-      # ci-ok, instead of merging and then failing every rebuild on main. What it builds and checks:
+      # The very command release.yaml's claude_envoy_build runs, so a pull request whose source
+      # that job would refuse fails this job, and with it the required ci-ok, instead of merging
+      # and then failing every release. What it builds and checks:
       # packages/claude-envoy/scripts/verify-build.sh.
-      - name: Build, check and pack the Claude Code plugin as main's rebuild does
+      - name: Build, check and pack the Claude Code plugin as the release does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
 
-      # Main's push job decides from scripts/build-inputs.txt whether a moved main changed the build.
+      # release.yaml's $CLAUDE_ENVOY_VERSION_ARGS covers scripts/build-inputs.txt, so a build input
+      # missing from it is one no release bumps a version for.
       - name: Check the Claude Code plugin's build input list covers what the build reads
         run: bun test tests/build-inputs.test.ts
         working-directory: packages/claude-envoy
 
-      - name: Test release scripts
-        run: .github/scripts/release-push.test.sh
-
+      # release-push.test.sh renders its fold-notes cases with the real changie, and the step
+      # below renders this checkout's own fragments with it; where changie is absent, as on a
+      # developer's machine, those cases print a SKIP line and count nothing.
       - uses: ./.github/actions/install-changie
 
-      - name: Test the changelog fold with changie
-        run: .github/scripts/changelog-fold.test.sh
+      # Nothing renders a changelog fragment between the merge and the release that first ships
+      # it, so a fragment changie refuses would fail that release's build job, and every run
+      # after it, until a fix merges. This renders every fragment of every listed package here
+      # instead, inside a required check. It runs in this job rather than beside fold-orphans in
+      # lint because this is the job that installs changie.
+      - name: Check every changelog fragment renders
+        run: |
+          # shellcheck disable=SC2046 # the file is the package list, split on purpose
+          .github/scripts/release-push.sh fold-check $(<.github/changelog-packages)
+
+      - name: Test release scripts
+        run: .github/scripts/release-push.test.sh
 
       - name: Test the release version bump
         run: .github/scripts/release-bump.test.sh
@@ -1911,11 +2018,11 @@ jobs:
       - name: Test the zod version check
         run: .github/scripts/check-zod-version.test.sh
 
-      - name: Test the heartbeat margin check
-        run: .github/scripts/check-heartbeat-margin.test.sh
-
       - name: Test the gh version check
         run: .github/scripts/check-gh-version.test.sh
+
+      - name: Test the workflow path model the path checks import
+        run: .github/scripts/workflow_paths.test.sh
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
@@ -1941,16 +2048,30 @@ jobs:
       - name: Test the repository path derivation
         run: .github/scripts/repo-paths.test.sh
 
+      - name: Test the Playwright dependency list check
+        run: .github/scripts/playwright-deps-current.test.sh
+
       # The proof selector e2e.yaml's select job runs, over fixture trees and over this
       # repository's own .github/e2e-scripts.json and scripts/e2e/.
       - name: Test the e2e proof selector
         run: .github/scripts/select-e2e-proofs.test.sh
+
+      # The lister the build-tag steps take their `-run` from, over fixture packages and over
+      # this repository's own tagged test files.
+      - name: Test the build-tag test lister
+        run: .github/scripts/go-tagged-tests.test.sh
 
       - name: Test ci-ok's verdict
         run: .github/scripts/ci-ok.test.sh
 
       - name: Test ci-ok's report and the check-run post (a stand-in gh)
         run: .github/scripts/ci-ok-report.test.sh
+
+      - name: Test the race memory sampler
+        run: .github/scripts/race_memory.test.sh
+
+      - name: Test the disk watch
+        run: .github/scripts/disk_watch.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
@@ -1978,6 +2099,9 @@ jobs:
       # scripts/sessions is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the session message-wait script
         run: bunx tsc --noEmit -p scripts/sessions
+
+      - name: Test the session message-wait script
+        run: bun test scripts/sessions
 
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -2044,31 +2168,35 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare --user --map-root-user true
 
-      # The step runs every package of the module except the four the race step below tests, so
+      # The step runs every package of the module except the three the race step below tests, so
       # each of those runs once per job, under the detector. `set -o pipefail` is what makes a
       # failed go list, or a pattern that matches every package, fail the step rather than pass it
       # with nothing tested.
       - name: Test the Go daemon
         run: |
           set -o pipefail
-          go list ./... | grep -Ev '/(internal/daemon|internal/record|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
+          go list ./... | grep -Ev '/(internal/daemon|internal/sessionproxy|internal/launcher)$' | xargs go test -count=1 -timeout 15m
         working-directory: packages/daemon
 
       # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
-      # that share state with the intake's commit hooks and the API, so the packages the lanes and
-      # their store live in run under the race detector once per job, the plain step above leaving
-      # them out; so do the session proxy and the launcher that wires it, whose accept loop, copy
-      # pairs, pair tracking and bounded drain share state across goroutines. The detector needs
-      # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
-      # deterministic under it.
+      # that share state with the intake's commit hooks and the API, so the packages the lanes
+      # live in run under the race detector once per job, the plain step above leaving them out;
+      # so do the session proxy and the launcher that wires it, whose accept loop, copy pairs,
+      # pair tracking and bounded drain share state across goroutines. internal/record is not
+      # here: the lanes' store is the package's subject, but its product code starts no goroutine
+      # and uses no sync, so the detector had only the package's own test goroutines to watch,
+      # and that cover is what leaving it out gives up. It runs in the plain step instead. The
+      # detector needs cgo, which the runners have gcc for. The lane tests hold a fake clock, so
+      # they are deterministic under it.
       #
-      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
-      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
-      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
-      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go
+      # test's ten-minute default, internal/daemon, by far the slowest of the three packages, took
+      # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
+      # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
+      # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
+      # slowest run.
       - name: Test the concurrent packages under the race detector
-        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+        run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - name: Stage 1 live proof
@@ -2191,11 +2319,26 @@ jobs:
         # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
         # it.
         run: docker pull ghcr.io/cybermonklabs/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+      # TMPDIR is a directory of this step's own, read by the step below: a test file that leaves
+      # its temporary directory behind is how 7,063 of them gathered on a shared machine
+      # (`packages/envoy-client/test/temp-dir.ts`). It is exported on the command line rather than
+      # set in `env:` so the reading step can name the same path.
       - name: Test Envoy client
-        run: bun run test
+        run: |
+          mkdir -p "$RUNNER_TEMP/envoy-client-tmp"
+          TMPDIR="$RUNNER_TEMP/envoy-client-tmp" bun run test
         working-directory: packages/envoy-client
         env:
           LEGION_E2E: "1"
+      - name: Check the Envoy client suite left no temporary directory behind
+        run: |
+          left=$(ls -A "$RUNNER_TEMP/envoy-client-tmp")
+          if [ -n "$left" ]; then
+            echo "the suite left these in its temporary directory:" >&2
+            printf '%s\n' "$left" >&2
+            exit 1
+          fi
+          echo "the suite left nothing in its temporary directory"
       - name: Build Envoy client
         run: bun run build
         working-directory: packages/envoy-client
@@ -2425,13 +2568,46 @@ jobs:
     # `env:`: a name outside ci_filter_coverage.py's ENV_ALLOWED in this job's or any of its
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
-    # 40, against the 28 the issue's own acceptance sets. Six executions of this job at four lanes
-    # have measured 19:26, 20:46, 21:31, 28:17, 29:29 and 26:46, on one tree whose browser step
-    # alone read 1,050 s on one runner and 1,464 s on another, so the spread is the fleet's rather
-    # than the suite's. A job the timeout kills reports as cancelled and writes no Playwright
-    # report, so a timeout tight against the measurement costs the run that would say why it was
-    # slow - which is the one run anyone investigating a slow execution needs.
-    timeout-minutes: 40
+    #
+    # The job budget below and the browser step's are measured: GitHub's jobs API over the
+    # 397 of the newest 400 ci.yaml runs that could be read, created between 2026-11-05T04:52:45Z
+    # and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12 push), over the 217 jobs of
+    # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
+    # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
+    # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
+    # run is left out for being older than it. Those 217 jobs ran a smaller package list than the
+    # install step's below, so the install step is out of the table below, and its budget is its
+    # own retry arithmetic rather than a reading of that window.
+    #
+    #   step                               median    95th     max
+    #   Browser-test dispatch dashboard    1475 s  1582 s  1671 s
+    #   every other step summed             199 s   221 s   232 s
+    #   the whole job                      1715 s  1875 s  2348 s
+    #
+    # The install step has one reading at its present package set, not a distribution: 30 s, in
+    # job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. A distribution at that set can
+    # be read from main's jobs of this name. The apt archive cache's three steps came after that
+    # window too, so the "every other step summed" row holds none of them. In that job the restore
+    # missed, and the key and restore steps took under a second each. A restore that hits reads
+    # about 114 MB from the Actions cache, and the save, which runs only on a push to main whose
+    # restore missed, has no reading yet.
+    #
+    # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
+    # next whole minute, with a floor of two minutes; an install step's budget comes from its own
+    # retry arithmetic instead. So 1671 s x 1.15 = 1922 s -> 33 min for the browser step, and
+    # 22 min for the install step, for the reason its own comment gives. The job budget is the
+    # sum of its step budgets plus the measured maximum of every step without one, rounded up:
+    # 1320 + 1980 + 232 s = 3532 s -> 59 min. The spread is the fleet's rather than the suite's,
+    # which is why each budget is that measured maximum plus a margin rather than a figure near
+    # the median.
+    #
+    # Budgets on the steps and not on the job alone, because a step the runner cancels at its own
+    # budget fails that step and names it (`The action '<step name>' has timed out after <N>
+    # minutes.`), where a job budget cancels the job. So the `if: always()` and `if: failure()`
+    # upload steps below still run and the Playwright report, the memory samples and the CPU
+    # samples still reach the run, which a cancelled job loses. The job budget is the backstop
+    # above the sum of the step budgets, so it never fires first.
+    timeout-minutes: 59
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2533,15 +2709,344 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
+      # This step installs the system packages itself instead of through `playwright install
+      # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
+      # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
+      # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
+      # lib/coreBundle.js. Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456:
+      # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
+      # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
+      # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
+      # them fetched 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left
+      # out of the list, so there is no reduced set beside it and no split to measure.
+      #
+      # `step_tools` below is the one package this step installs that Playwright's list does not
+      # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
+      # variable of its own because `packages` is what the check at the end of the step holds
+      # against Playwright's own list, name for name.
+      #
+      # WebKit plays video and audio through GStreamer, so without gstreamer1.0-plugins-good,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-libav and libavcodec60 it loads a page and plays
+      # nothing: the first three hold the plugins that demux Matroska and decode VP8 and h.264,
+      # and libavcodec60 is the codec library gstreamer1.0-libav's plugin links for h.264.
+      # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
+      # the library required for playing h.264. The decoder guard after the install asks the
+      # GStreamer registry for one element out of each of those three plugin packages and out of
+      # the already-pinned gstreamer1.0-plugins-base; avdec_h264 loads only where libavcodec60 is
+      # installed, so it answers for that library too. It runs before the browsers are
+      # downloaded, and it is the one check that catches a package that installs without its
+      # element reaching the GStreamer registry. That the browsers launch at all is what the
+      # suite's six WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone,
+      # firefox, firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) -
+      # which the "Browser-test dispatch dashboard" step below runs.
+      #
+      # On a Playwright upgrade, re-derive the list as that union again, with nothing taken out
+      # of it. Deriving it at run time by subtracting one apt closure from another does not work
+      # and must not be written: the closure of the four that carry playback and the closure of
+      # the rest share 35 packages Playwright's own list names or needs, and the subtraction
+      # leaves WebKit unable to launch. This paragraph is a standing refusal, not a record of a
+      # design that was taken out: nobody is to re-derive a reduced list.
+      #
+      # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
+      # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
+      # download at 300 s, then, where both of those time out, one 90 s read of the fallback
+      # origin's indexes and a third 300 s download attempt, then the unpack, the keeping of the
+      # archives for the cache, the decoder guard, the browser download and the one apt
+      # simulation of the list check, none of which touch the Ubuntu mirror. So the arithmetic is
+      # 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, 13.6 s of unpack, 1.1 s of keeping,
+      # 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the list check:
+      # 1170 + 13.6 + 1.1 + 0.4 + 90 + 1.6 = 1276.7 s, rounded up to 22 min. The budget has to
+      # carry the fallback's own update, because the path that needs every one of those bounds is
+      # the path on which the step still succeeds.
+      #
+      # The five readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
+      # at 5ff42456, at its 182 packages. The unpack is the 13.6 s from `Download complete and in
+      # download only mode` at 23:14:13.884 to the last line of the unbounded install at
+      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping 182`
+      # at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above. The
+      # decoder guard is the 0.4 s to `the decoders WebKit plays through are in the registry: ...`
+      # at 23:14:28.984. The browsers and the list check together are the 1.6 s to `The pinned list
+      # is current: ...` at 23:14:30.540 - but that job restored its browsers from the Actions cache
+      # (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54), so that 1.6 s is no
+      # reading of the cold browser download and the budget has to carry the cold case. That is what
+      # the 90 s term is: the step's estimate for the cold browsers, not a reading, which the
+      # package set does not reach. The list check is measured inside that 1.6 s, so 1.6 s is the
+      # term the reading supports for it. The whole step took 30 s in that job, 23:14:00 to
+      # 23:14:30: one reading at this package set, not a distribution. Each is one reading, so each
+      # moves a little from run to run; the margin the sum leaves under 22 min is what carries that.
+      #
+      # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
+      # scaled onto the step's fetch of 13.0 MB of indexes and the list's 114 MB of packages. The
+      # population is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
+      # to 23:07:42Z, a different window from the table above, which is why its count differs),
+      # read in full for the 26 whose install step ran over 73 s.
+      #
+      # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the list's 114 MB need
+      # 613 s there, which the two 300 s attempts on the primary do not reach. Job 127357441704
+      # binds the update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get
+      # update`, so the step's 13.0 MB of indexes need 55.8 s there, and 90 s leaves 61 per cent
+      # over that need. Neither the index figure nor its 90 s bound moves with the package set.
+      #
+      # So at 186 kB/s, the slowest mirror a green job of that window met, the list's 114 MB
+      # need more than the 600 s of the two attempts on the primary, and the origin switch
+      # fires. That is the trade Playwright's whole list costs: a download phase that reaches the
+      # fallback origin on that mirror.
+      #
+      # One blended rate per job is the wrong model, as job 127238648049's own log shows:
+      # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
+      # packages. One rate over both phases mixes a fast update into a slow download and
+      # understates the download. The model assumes a retry meets the same mirror rate, and
+      # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
+      # Both bounds come from the slowest mirror a green job of that window met, and are read
+      # again when a green job meets a slower one. Under 13.0 MB / 90 s = 144 kB/s the indexes
+      # do not arrive inside one bound, and under 114 MB / 300 s = 380 kB/s the packages do not:
+      # job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it. The
+      # list's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
+      # reaches, so the step fails by its own name there.
+      #
+      # What the attempts complete is the threshold the step carries, and it is three bands
+      # rather than one number, because the third attempt is on another origin and the partial
+      # may not be reused across that switch. With B the 114 MB the list fetches:
+      #   above B / 600 s = 190 kB/s the two attempts on the primary complete the download;
+      #   between B / 900 s = 127 kB/s and 190 kB/s the origin switch fires on every run and
+      #     completion rests on the fallback resuming the partial; where it does not, that one
+      #     attempt carries all 114 MB and needs B / 300 s = 380 kB/s, which nothing in this
+      #     band meets, so that class fails by its own name;
+      #   below 127 kB/s the step fails by its own name whatever the fallback does - in about
+      #     900 s where both `apt-get update` phases were fast, and in at most 1170 s where each
+      #     was retried to its bound.
+      #
+      # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
+      # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
+      # after it asks only for the rest. Job 128209099649 measured that at 5ff42456: after the
+      # download phase had fetched all 114 MB, the install call after it asked for
+      # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
+      # not fetch again. Measured separately, the partial is resumed across the origin switch
+      # too, since the two mirrors serve the same file and the server answers a byte-range
+      # request. Where the fallback's snapshot holds a different version the filename differs,
+      # the partial is not reused and that attempt carries the full 114 MB, which that job
+      # fetched in 8 s at 14.7 MB/s.
+      #
+      # Why the third attempt changes origin rather than the bound being raised: a longer bound
+      # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
+      # host it met served, 9977 kB/s for the indexes and 31 kB/s for the pool files, so the
+      # slowness was in the pool path rather than in the host, and another origin is the lever
+      # that answers that. A single bad pool member is the case no attempt count on one origin
+      # reaches.
+      #
+      # The slowest reading this repository holds is that 31 kB/s: the list's 114 MB need 3677 s
+      # at it, which no attempt count worth having completes, so the step fails by its own name
+      # there, which is the intended outcome.
+      #
+      # The worst case the step carries: if both `apt-get update` attempts fail, the step
+      # stops after about 180 s, so the longest the bounded apt phases can run is one update
+      # attempt stopped at 90 s, a second ending just inside 90 s, two download attempts stopped
+      # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
+      # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
+      # 40-minute job cancel it replaces.
+      #
+      # The .deb files of that list are cached between runs. The restore step above reads them
+      # into ~/apt-archives, and the step below copies them into apt's archive directory before
+      # its first call. apt takes a file there whose name and size match the index without
+      # fetching it and without hashing it (the pkgAcqArchive constructor in
+      # apt-pkg/acquire-item.cc, lines 3499-3507 of apt 2.7.14, compares the size alone), so a
+      # restored file is trusted as the push to main that wrote the entry left it. The key names
+      # the Playwright version bun.lock pins, because that version decides Playwright's list, and
+      # the runner image, because the image decides which versions apt resolves, so an image roll
+      # misses the entry rather than restoring files the new image's indexes no longer name. It
+      # names neither `step_tools` nor the versions apt resolves from updates published after the
+      # image was built, and an entry is written once and never replaced, so a package that changes
+      # under one key is fetched on every run until the key moves. Only a push to main writes an
+      # entry. A pull-request or merge-queue run restores main's entry where one exists under its
+      # key and otherwise fetches the whole set, and every bound and budget above is that cold case.
       - name: Install Playwright Chromium, WebKit and Firefox
-        # The runner image preconfigures Google's chrome-stable apt source, whose
-        # index intermittently fails `apt-get update` with a hash-sum mismatch and
-        # takes `--with-deps` down with it. Chrome is already installed there; the
-        # source only serves upgrades, so drop it before installing our deps.
+        # The runner image preconfigures Google's chrome-stable apt source, whose index
+        # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
+        # down with it. Chrome is already installed there; the source only serves upgrades, so
+        # drop it before installing our deps.
+        timeout-minutes: 22
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium webkit firefox
+          packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
+          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
+          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
+          libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
+          libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
+          libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
+          libgstreamer-plugins-base1.0-0 libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0
+          libharfbuzz0b libhyphen0 libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4
+          libnss3 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9
+          libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7 libwebpdemux2 libwoff1
+          libx11-6 libx11-xcb1 libx264-164 libxcb-shm0 libxcb1 libxcomposite1 libxcursor1
+          libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxml2 libxrandr2 libxrender1
+          libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # gstreamer1.0-tools holds the gst-inspect-1.0 the decoder guard below runs, and is no
+          # name of Playwright's list. It is out of `packages` because `packages` is the list the
+          # check at the end of the step holds against Playwright's own.
+          step_tools="gstreamer1.0-tools"
+          # What apt is given in every phase: the pinned list and the step's own tool.
+          apt_list="$packages $step_tools"
+          # A bounded attempt, retried: the attempt count, then what the log calls the phase,
+          # then the command. Each failed attempt prints the phase, that attempt's exit status
+          # and how many attempts are left; `timeout` exits 124 when it killed the command, so
+          # the status separates a mirror that stalled from one that refused. What an exhausted
+          # phase means is the caller's: the update below ends the step, and the download moves
+          # to another origin and takes its last attempt there.
+          attempts() {
+            local left=$1 what=$2 status
+            shift 2
+            while :; do
+              "$@" && return 0
+              status=$?
+              left=$((left - 1))
+              echo "::warning::$what failed with exit $status (124 is the timeout); attempts left: $left"
+              [ "$left" -gt 0 ] || return 1
+            done
+          }
+          # What the restore above found, handed to apt before it reads any index. A file whose
+          # version the index no longer names has another file name, and one whose size differs is
+          # deleted (acquire-item.cc:3508-3511), so apt fetches both again. nullglob makes an empty
+          # or absent directory an empty list instead of a failed copy.
+          shopt -s nullglob
+          seeded=("$HOME"/apt-archives/*.deb)
+          shopt -u nullglob
+          [ "${#seeded[@]}" -eq 0 ] || sudo cp "${seeded[@]}" /var/cache/apt/archives/
+          # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
+          # sudo holding it.
+          attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
+            echo "::error::apt-get update failed twice, so no package list was read;" \
+              "the apt mirror is the suspect"
+            exit 1
+          }
+          # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
+          # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
+          # after it and the unbounded install below start from a clean package state. It prints
+          # what it fetched, which is this step's own byte record. $apt_list is left unquoted on
+          # purpose, to split into words.
+          if ! attempts 2 "the package download" sudo timeout 300 \
+            apt-get install -y --no-install-recommends -d $apt_list; then
+            # The last attempt fetches from another origin, which is the one thing more attempts
+            # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
+            # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
+            # of that file. The copy beside it is what was there; nothing puts it back, and
+            # nothing has to, the runner being ephemeral and going with the job.
+            mirrorlist=/etc/apt/apt-mirrors.txt
+            # Where the image stops shipping it, the copy below ends on `cp: cannot stat` and the
+            # log names no cause, so the file is tested here and the error is the step's own.
+            [ -f "$mirrorlist" ] || {
+              echo "::error::there is no $mirrorlist, so the fallback origin cannot be set;" \
+                "the package download ends here"
+              exit 1
+            }
+            sudo cp "$mirrorlist" "$mirrorlist.orig"
+            sudo sed -i 's,^\(https\?://\)[^/]*,\1archive.ubuntu.com,' "$mirrorlist"
+            cat "$mirrorlist"
+            # The new origin's indexes are not the old one's, so they are read before the
+            # attempt that uses them. Where that read fails the attempt still runs: the lists on
+            # disk may still name files this origin serves, and an attempt is worth more here
+            # than a tidy exit.
+            attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
+              echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
+            attempts 1 "the package download from the fallback origin" sudo timeout 300 \
+              apt-get install -y --no-install-recommends -d $apt_list || {
+              echo "::error::the package download failed three times, the last of them on another origin;" \
+                "the step ends here rather than leaving the job's budget to cancel the browser step after it"
+              exit 1
+            }
+          fi
+          # Unbounded and unretried: the archive is on disk now, so this takes no network.
+          sudo apt-get install -y --no-install-recommends $apt_list
+          # What apt has now, kept for the save below. The save runs only on a push to main whose
+          # restore missed, since an entry is never replaced, so on a hit or a branch run this
+          # copy goes unused. apt's archive directory is root's and the cache action runs as the
+          # runner user, so the copies change hands.
+          shopt -s nullglob
+          kept=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          mkdir -p "$HOME/apt-archives"
+          [ "${#kept[@]}" -eq 0 ] || {
+            sudo cp "${kept[@]}" "$HOME/apt-archives/"
+            sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          }
+          echo "apt archives: seeded ${#seeded[@]} .deb files, keeping ${#kept[@]}"
+          # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
+          # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
+          # single call with five names would report on the first alone. Each element is written
+          # with the package that carries it, and this is what fails the step by its own name
+          # where one of those packages has gone missing from the list above.
+          probed=()
+          for probe in matroskademux:gstreamer1.0-plugins-good vp8dec:gstreamer1.0-plugins-good \
+            h264parse:gstreamer1.0-plugins-bad avdec_h264:gstreamer1.0-libav \
+            vorbisdec:gstreamer1.0-plugins-base; do
+            element=${probe%%:*}
+            gst-inspect-1.0 --exists "$element" || {
+              echo "::error::GStreamer has no $element, which WebKit plays media through;" \
+                "${probe#*:} carries it: packages= above must hold it, and if it does, the plugin" \
+                "did not load: gst-inspect-1.0 -b lists the files GStreamer could not load"
+              exit 1
+            }
+            probed+=("$element")
+          done
+          echo "the decoders WebKit plays through are in the registry: ${probed[*]}"
+          # The browsers alone. Named, because with no argument Playwright resolves its own
+          # default set rather than this job's three.
+          bunx playwright install chromium webkit firefox
+          # Has the pinned list fallen behind Playwright? The check is the repository's
+          # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
+          # given on this line: $packages, unquoted so it splits into words, as apt takes it
+          # above. It holds the two lists against each other both ways: every name Playwright
+          # asks for is one the pinned list holds, and every pinned name is one Playwright asks
+          # for. It runs after the install, so it expects nothing left missing. The step's
+          # working-directory is packages/dispatch, so the script is reached through
+          # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves
+          # this suite's Playwright.
+          "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
         working-directory: packages/dispatch
+      # Beside the install, not at the end of the job: it keeps what the install just downloaded,
+      # so a job that installs the browsers and then fails a row does not throw the install away.
+      # Only on a push to main whose steps have succeeded so far: no other run writes an Actions
+      # cache entry.
+      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+      # The .deb files the install step kept, under the same rule as the save before it.
+      - if: github.event_name == 'push' && success() && steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
@@ -2589,6 +3094,7 @@ jobs:
         # (/proc/stat) less the named groups, so a reader sees the whole step without
         # downloading the samples: it holds that loss, the runner's own work, the file-store
         # container and the sampler itself.
+        timeout-minutes: 33
         run: |
           # $RUNNER_TEMP holds everything this step writes, the run directory of e2e/run.ts
           # (mkdtempSync in os.tmpdir(), :183) among it, which is what the upload steps below
@@ -2669,13 +3175,6 @@ jobs:
           path: |
             packages/dispatch/e2e/test-results
             ${{ runner.temp }}/dispatch-e2e-run-*/lane-*/log/*.log
-      # The browsers above. Last, and only on a push to main whose job succeeded: no other run
-      # writes an Actions cache entry.
-      - if: github.event_name == 'push' && success() && steps.playwright-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
 
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -2693,7 +3192,27 @@ jobs:
     needs: changes
     if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The budgets below, this one and the three on steps, are measured: GitHub's jobs API over
+    # the 397 of the newest 400 ci.yaml runs that could be read, created between
+    # 2026-11-05T04:52:45Z and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12
+    # push), over the 335 jobs of this name that concluded success.
+    #
+    #   step                                                          median   95th    max
+    #   Install Playwright Chromium                                     20 s   34 s  339 s
+    #   Browser-test dispatch dashboard against two server processes   102 s  188 s  202 s
+    #   Browser-test a sign-in across two server processes              11 s   12 s   13 s
+    #   every other step summed                                         68 s   94 s  135 s
+    #   the whole job                                                  207 s  305 s  516 s
+    #
+    # The rule, and the reason the budgets sit on the steps rather than on the job alone, are in
+    # the dispatch job's comment above its `timeout-minutes`; this job states only what it
+    # measured and what that rule gives here. 202 s x 1.15 = 232 s -> 4 min for the dashboard
+    # step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 4 min for the
+    # install step, for the reason its own comment gives. The job budget is the sum of its step
+    # budgets plus the measured maximum of every step without one, rounded up: 4 + 4 + 2 min
+    # plus 135 s = 13 min. With budgets on the steps, the `if: failure()` upload below still
+    # runs, which a cancelled job skips.
+    timeout-minutes: 13
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2742,21 +3261,47 @@ jobs:
         run: go build -o ./dispatch-e2e ./cmd/dispatch
         working-directory: packages/envoy
       - name: Install Playwright Chromium
-        # The runner image's chrome-stable apt source intermittently fails `apt-get update`; the
-        # dispatch job's install step says why dropping it is safe.
-        run: |
-          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
+        # No apt in this step at all. Playwright's `chromium` entry in its ubuntu24.04-x64 table
+        # adds no package this GitHub ubuntu-24.04 image lacks, so `--with-deps` installed only
+        # Playwright's `tools` list: the CJK, Thai and Cyrillic font packages and xvfb. Measured
+        # at the merge base in job 127214381394, that was `0 upgraded, 9 newly installed`, `Need
+        # to get 21.1 MB of archives`, plus 12.8 MB of package indexes in `apt-get update`. All
+        # of that is gone, and with it this step's removal of the runner image's chrome-stable
+        # apt source, which it carried only because that source's index intermittently failed
+        # `apt-get update`.
+        #
+        # The fonts are not needed: this job's two specs, signin.multiprocess.e2e.ts and
+        # two-builds.multiprocess.e2e.ts, run headless Chromium and compare no screenshot
+        # (neither holds `toHaveScreenshot` or `toMatchSnapshot`), and fonts-liberation and
+        # fonts-noto-color-emoji are on the image already. A row that later needs CJK or Thai
+        # glyphs would fail visibly.
+        #
+        # The 4-minute budget: this step downloads browsers only, and Playwright makes up to
+        # five attempts, across its download hosts, inside it. Of the 339 s maximum above,
+        # measured in job 127214381394, 317 s were the Ubuntu mirror serving 21.1 MB at
+        # 66.4 kB/s, which this step no longer asks for; Chromium, its headless shell and
+        # ffmpeg downloaded in 6 s there. Healthy today is a 20 s median and a 34 s 95th
+        # percentile for the whole step.
+        #
+        # No browser cache here: it would save about 4 s, since the three archives - Chrome for
+        # Testing, its headless shell and ffmpeg - download in 8 to 9 s, and it would add about
+        # 250 MiB to a cache store already holding 18.6 GB in 162 entries, where each existing
+        # playwright-Linux- entry is 481 MiB. The dispatch job's cache stays and is worth its
+        # place; this job's would not be.
+        timeout-minutes: 4
+        run: bunx playwright install chromium
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard against two server processes
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
         # multiprocess specs through the round-robin proxy.
+        timeout-minutes: 4
         run: bun run e2e:multiprocess
         working-directory: packages/dispatch
       - name: Browser-test a sign-in across two server processes
         # Both processes sign people in through the dev OIDC issuer (DISPATCH_E2E_SIGNIN=oidc,
         # e2e/harness-signin.ts), and its one spec starts a sign-in on A and completes it on B. The
         # step before built the dashboard; B serves A's build, which this spec does not tell apart.
+        timeout-minutes: 2
         run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -2793,10 +3338,10 @@ jobs:
       - name: Typecheck Claude Envoy plugin
         run: bun run typecheck
         working-directory: packages/claude-envoy
-      # A pull request never commits dist/ or legion/ (main's Rebuild Claude Envoy plugin workflow
-      # does), so this builds and checks them from the head's source as that workflow's build job
-      # does: packages/claude-envoy/scripts/verify-build.sh.
-      - name: Build, check and pack the plugin as main's rebuild does
+      # Nothing commits dist/ or legion/: release.yaml's claude_envoy_build builds them and packs
+      # them into the tarball it publishes to npm. So this builds and checks them from the head's
+      # source as that job does: packages/claude-envoy/scripts/verify-build.sh.
+      - name: Build, check and pack the plugin as the release does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
       # The pack step packs the package's own dist/ and legion/ (release-push.sh extract-built).
@@ -2826,9 +3371,12 @@ jobs:
     runs-on: ubuntu-24.04
     # Each go test step's -timeout must fire before the runner cancels the job, so a hung test
     # prints the dump that names it. A timed-out step fails the job, so the bound is the steps
-    # before it at their measured times plus its own limit: about 1 minute of setup, then the unit
-    # step's two 20-minute runs, which is 41; after the unit step's measured 35 minutes, natslive's
-    # default 10 is 46, and the shell tests' 7 plus the integration step's 5 is 48.
+    # before it at their measured times plus its own limit: about 1 minute of setup, then the
+    # plain race-impossible step's three 10-minute runs, which is 31; after that step's measured
+    # 2 minutes the unit step's own 20 is 23; after the unit step, which runs strictly fewer
+    # packages than the 35 minutes it measured before the race lane's left it and so cannot
+    # exceed that, natslive's default 10 and the bus matrix's own 5 are 53, and the shell tests'
+    # 7 and the integration step's 5 are less.
     timeout-minutes: 60
     services:
       postgres:
@@ -2891,33 +3439,81 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
       # Every image the tests here start: testnats.Image and testnats.HubImage, which the
-      # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
-      # reason the action gives.
+      # natslive step below runs the two-image matrix on, testnats.LegacyImage, the copy of
+      # nats:2.10 that step's two older-server rows of internal/bus run, and tests3.Image, pulled
+      # first for the reason the action gives.
       - name: Pull test container images
         uses: ./.github/actions/pull-test-images
         with:
           consts: |
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
+            packages/envoy/internal/testnats/nats.go LegacyImage
             packages/envoy/internal/tests3/seaweedfs.go Image
-      # The API package owns the largest set of Postgres-backed tests. Running it with the other
-      # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
-      # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
-      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
-      # delays.
+      # The tests the race detector makes impossible, which the race job of each of these packages
+      # therefore cannot make, so envoy-go keeps a plain run of exactly them: internal/bus counts
+      # HoldsSeed's allocations, which the race runtime's own allocations would be counted into;
+      # the API's two guards read the module's source, to which the detector adds nothing; and the
+      # documents package measures the heap a room keeps, which the detector's shadow memory and
+      # instrumentation move. Those are out of the race build altogether (//go:build !race), and
+      # the two render-reuse storms run fewer seeds and fewer edits under it (raceEnabled), so this
+      # is their full-size run. It comes before the unit step for the reason the API package's own
+      # run did: run beside the other package binaries, its Postgres-backed tests and the
+      # room-memory measurements queue their per-test database cleanup on the service's one
+      # checkpointer, and the API's live-feed and delivery-hub tests wait for the event log's safe
+      # horizon, which any open transaction on this job's Postgres delays. The three -run lists are
+      # derived in .github/scripts/ci_job_reads.py from the race lane's own packages and those
+      # files' //go:build !race and raceEnabled, so a test added to either and missing here fails
+      # the ci-filters job naming this step. Measured over three runs on a two-vCPU pod: the bus
+      # under a tenth of a second, the API 8 to 10 s, the documents package 92 to 127 s, so 10
+      # minutes each is ample.
+      - name: Test what the race build cannot run at all or at full size
+        run: |
+          go test -count=1 -timeout 10m -run '^(TestHoldsSeedAllocatesAtMostOneCopyPerDecoding)$' ./internal/bus
+          go test -count=1 -timeout 10m -run '^(TestCopyLockComesBeforeEveryPendingRowAndEvent|TestCopyLockOrderGuardFollowsTheLockTakers|TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks|TestTheKeyedWriteGuardSeesWhatItGuards)$' ./internal/dispatch/api
+          go test -count=1 -timeout 10m -run '^(TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound|TestRenderReuseARandomisedEditStorm|TestRenderReuseAReplicaReplaysTheRoomsFormattingExactly|TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound|TestUploadsToARoomInUseKeepMemoryWithinTheBound)$' ./internal/dispatch/docs
+        working-directory: packages/envoy
+      # Everything the three race jobs run is left out here, since they run it under the detector,
+      # and so is internal/integration, which the integration step below tests. The pattern is
+      # built in .github/scripts/ci_job_reads.py from the same list those jobs' own steps are built
+      # from, so what this step leaves out and what the lane runs cannot drift apart. What is left
+      # is the rest of the module, the two longest packages of it (the API's and the documents
+      # service's) now among the ones the lane runs, so its 20 minutes are ample.
       - name: Unit test envoy Go package
         run: |
-          go test -count=1 -timeout 20m ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -count=1 -timeout 20m
+          go list ./... | grep -Ev '/integration|/internal/dispatch/delivery($|/)|/internal/dispatch/store($|/)|/internal/bus$|/cmd/listener$|/internal/store$|/internal/session$|/internal/kvwatch($|/)|/internal/dispatch/api$|/internal/dispatch/docs$' | xargs go test -count=1 -timeout 20m
+        working-directory: packages/envoy
+      # agentloop's live proof makes a real model call, so it sits behind a build tag and CI
+      # never runs it. Vetting it keeps it compiling as the package changes.
+      - name: Vet agentloop's live proof (no model call)
+        run: go vet -tags modellive ./agentloop/
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.15.1
       # and on the image the hub runs, is the one thing an in-process server cannot reproduce: it
-      # sits behind the natslive tag, and this step is where it runs (INFRA-250).
+      # sits behind the natslive tag, and this step is where it runs (INFRA-250). internal/bus has
+      # one test of its own on that matrix: the module links nats-server v2.15.2 in process, which
+      # caps a stream that sets no cap at a default of its own and takes a change of MaxConsumers
+      # on a stream that already exists, so the raise of an uncapped ENVOY_NOTIFICATIONS to the
+      # consumer cap this binary compiles and the keeper's restore of a cap an operator lowered or
+      # unset are proved in process. What is left for a real image is the pair of 2.10 cases - the
+      # stream with no cap the binary must leave alone, and the refusal of the raise of a lower
+      # cap, naming the field, the cap and the first server taking the change, each on the copy of
+      # nats:2.10 (testnats.LegacyImage) - and the hub's own reconcile on the nats:2.15.1-alpine
+      # image the deployment runs (INFRA-1384). Each
+      # package runs only the tests its tag adds: `-tags natslive ./pkg` would re-run the
+      # package's untagged tests, which already run elsewhere - internal/testnats in the unit step
+      # above, and internal/bus in envoy-go-race, which the unit step's grep -Ev leaves out - so
+      # the -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the
+      # source at run time, and no test name is spelled here. Each assignment is a line of its
+      # own: under bash -e it carries the script's exit status, so an empty or refused list fails
+      # the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
-        run: go test -count=1 -tags natslive ./internal/testnats/
+        run: |
+          rig=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
+          go test -count=1 -tags natslive -run "$rig" ./internal/testnats/
+          cap=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/bus)
+          go test -count=1 -timeout 5m -tags natslive -run "$cap" -v ./internal/bus/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -2992,7 +3588,10 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # for the reason .github/actions/pull-test-images gives. That step runs only the tests the tag
+  # adds, one call per package: the unit step above already ran every untagged test of core, seed
+  # and gcp, so each call takes its -run from .github/scripts/go-tagged-tests.sh, which reads the
+  # names off the source at run time. The gcp natslive tests pull no image:
   # they install helm, nats-server, the config reloader and the exporter with go install, at the
   # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
   # compile runs in the lint job's notices step.
@@ -3041,12 +3640,20 @@ jobs:
         run: go vet -tags pulumilive,natslive ./...
         working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
-        run: go test ./...
+        run: go test -count=1 ./...
         working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra against nats-server (natslive)
         # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
         # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
-        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
+        # One call per package, never one union -run over the three: a name an untagged test of
+        # one package shares with a natslive test of another would then run a second time with
+        # nothing to say so. Each assignment is a line of its own, so under bash -e an empty or
+        # refused list fails the step instead of running -run "", which matches every test.
+        run: |
+          for pkg in ./core ./seed ./gcp; do
+            pattern=$(../../../.github/scripts/go-tagged-tests.sh natslive "$pkg")
+            go test -count=1 -timeout 30m -tags natslive -run "$pattern" "$pkg"
+          done
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3072,32 +3679,42 @@ jobs:
   # lock and its epoch in the registry store and the watchers' completeness and rescans in kvwatch
   # (INFRA-141), the session cache, whose reads take its shared lock beside watcher writes and the
   # expiry timer's callback as kvwatch's resume point is read while a replaced watcher still
-  # applies, pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
-  # code, cost three review rounds because nothing ran this package under -race before a PR
-  # claimed it), the Dispatch API and the document service - all under the race detector. A read
+  # applies, the Dispatch API and the document service - all under the race detector. A read
   # that walks a live document without its lock races the room's peers, which no ordinary run
   # shows: envoy-go's unit-test step runs without -race (LEGION-499). The lane sits beside
   # envoy-go because -race runs these packages several times slower, and each job carries a
   # package deadline of its own, since go test's ten-minute default is a whole package's.
+  # envoy-go runs none of these packages plain any more (INFRA-1408): its unit step leaves out
+  # exactly what the lane runs, and the one plain run it keeps of them is the step named "Test
+  # what the race build cannot run at all or at full size", which runs the handful of
+  # assertions the detector makes impossible or shrinks and nothing else.
   #
-  # The lane is four jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener, the
-  # registry store, the session cache and kvwatch), envoy-go-race-pmdoc, envoy-go-race-api and
-  # envoy-go-race-docs, whose own comment below says why the document service runs alone.
+  # The lane is three jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener,
+  # the registry store, the session cache and kvwatch), envoy-go-race-api and envoy-go-race-docs,
+  # whose own comment below says why the document service runs alone.
   #
-  # pmdoc and api sit apart because isolation is what made them fast: sharing a runner, the race
-  # binaries contended for the four vCPUs, and alone pmdoc fell from 1563.552 s to 1023.519 s and
-  # api from 1099.487 s to 746.718 s. The packages left in envoy-go-race are cheap enough to share
-  # one: the two heaviest of those measured there, the bus at 286.931 s and the listener at
-  # 365.787 s (run 40926978371), are a quarter and a third of the lane's bar of 1080 s, which is
-  # 60 % of a 30-minute step's own timeout, so a runner each would buy nothing and cost about
-  # 8,000 replayed runner minutes. Running the heavy packages apart also reads each one's seconds
-  # as its own job's, and leaves the others' numbers standing when one is red.
+  # api sits apart because isolation is what made it fast: sharing a runner, the race binaries
+  # contended for the four vCPUs, and alone api fell from 1099.487 s to 746.718 s. The packages
+  # left in envoy-go-race are cheap enough to share one: the two heaviest of those measured
+  # there, the bus at 286.931 s and the listener at 365.787 s (run 40926978371), are a quarter
+  # and a third of the lane's bar of 1080 s, which is 60 % of a 30-minute step's own timeout, so
+  # a runner each would buy nothing and cost about 8,000 replayed runner minutes. Running a heavy
+  # package apart also reads its seconds as its own job's, and leaves the others' numbers
+  # standing when one is red.
   #
-  # Only pmdoc installs Bun: its tests shell out to the generated TypeScript fixtures under
-  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), and
-  # render_readback_test.go refuses to run without bun in CI. Not that freshness check itself - a
-  # stale fixture is envoy-go's failure to catch, not a race. delivery's and the bus's NATS runs in
-  # the test process (internal/testnats), so no job here needs a container runtime of its own.
+  # pmdoc is not in this lane: its tests run plain only, in envoy-go's unit-test step
+  # (INFRA-1408). It sat here because LEGION-571's flakes - pmdoc's own under -race and load, not
+  # a race in production code - cost three review rounds when nothing ran the package under -race
+  # before a PR claimed it. Its product code is still race-instrumented wherever a race job
+  # compiles it, since envoy-go-race-docs imports pmdoc; what went is the second, race-built run
+  # of pmdoc's own tests.
+  #
+  # No job of this lane installs Bun: pmdoc's tests, which shell out to the generated TypeScript
+  # fixtures under internal/dispatch/pmdoc/gen and refuse to run without bun in CI
+  # (render_readback_test.go), were the only ones here that needed it, and they run in envoy-go
+  # now, beside its own "Check pmdoc fixtures are up to date" step. delivery's and the bus's NATS
+  # runs in the test process (internal/testnats), so no job here needs a container runtime of its
+  # own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
   # kvwatch share this runner. The Dispatch store's tests (store_test.go:28, storetest.go:44) and
@@ -3136,42 +3753,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
-        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
-        working-directory: packages/envoy
-
-      - name: Report ci-ok when this is the run's last job
-        if: always()
-        uses: ./.github/actions/ci-ok-report
-        with:
-          changes: ${{ toJSON(needs.changes) }}
-          job-status: ${{ job.status }}
-
-  # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The
-  # one race job that installs Bun: its tests run pmdoc/gen's TypeScript through it. No Postgres:
-  # the package talks to no database. Its step is the one in the lane whose deadline is 40 minutes
-  # and not 30: the package measured 1023.519 s isolated, 94.8 % of the lane's bar of 1080 s,
-  # which is 60 % of a 30-minute step's timeout, and 1210 s under contention, so at 30 minutes it
-  # has no headroom at all; at 40 minutes its bar is 1440 s and it uses 71 % of it.
-  envoy-go-race-pmdoc:
-    needs: changes
-    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
-    runs-on: ubuntu-24.04
-    # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
-    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
-    # binaries, then the step's own 40 minutes, which is 46.
-    timeout-minutes: 50
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/envoy/go.mod
-          cache: false
-      - name: Race-test pmdoc
-        run: go test -race -timeout 40m ./internal/dispatch/pmdoc/...
+        run: go test -count=1 -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3218,7 +3800,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Race-test the Dispatch API
-        run: go test -race -timeout 30m ./internal/dispatch/api/
+        run: go test -count=1 -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3233,8 +3815,8 @@ jobs:
   # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
   # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
   # Its own filter is the closure of this one package, not packages/envoy/**, so a change
-  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
-  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
+  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and no
+  # job of this lane installs it. It runs under -race because a read that walks a live document
   # without its lock races the room's peers, which no ordinary run shows
   # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
   # LEGION-499).
@@ -3285,8 +3867,99 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
+      # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
+      # which has no swap. The kernel killed this step three times with no output at all, which
+      # names no test (dispatch://INFRA-1085). .github/scripts/race_memory.py samples the largest
+      # process beside the run, writing a line every 5 s that names that process and the tests
+      # running at that moment, so a step the kernel does take still says what it reached. After
+      # the run it writes the peak, and fails this step when the peak passed RACE_MEM_LIMIT_KB,
+      # 8388608 kB, half the runner, naming the tests that were running at the highest sample.
+      # -json is the stream the sampler reads to know them; it writes every Output field back
+      # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
+      # because the job restores the Go build cache above, and a cached pass must not stand in
+      # for a run.
       - name: Race-test the document service
-        run: go test -race -timeout 60m ./internal/dispatch/docs/
+        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
+        working-directory: packages/envoy
+
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          changes: ${{ toJSON(needs.changes) }}
+          job-status: ${{ job.status }}
+
+  # The same package under Go's cleanup detector, which names what the memory above went to:
+  # GODEBUG=checkfinalizers=1 makes the runtime report a cleanup or a finalizer whose closure or
+  # argument reaches the object it is attached to, a cycle that keeps that object alive for the
+  # life of the process, and that is the defect that held this package's memory
+  # (dispatch://INFRA-1085). This is the only package of the repository that registers a cleanup,
+  # so no other job needs it. It runs without -race: the detector is the runtime's own
+  # bookkeeping, and a plain binary leaves the runner room the race binary does not. It reads the
+  # same closure as envoy-go-race-docs, so it reuses that filter and that `changes` output rather
+  # than taking one of its own.
+  envoy-go-docs-finalizers:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 29m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it. Both numbers come from this job's own green runs, the slowest of
+    # them 128148376484: 1022 s in the package, against 950 s in 127770782204 and 927 s in
+    # 127053239518, and 55 s of checkout, setup and compile before any of them. The package has
+    # grown twice under this pull request, first when main took in #2414's tests (953 services
+    # built to 1068) and again on the merge of #2870, which moved work into this lane. The step's
+    # deadline is the smallest whole minute at which the slowest package time is at most 60 % of
+    # it, and this limit is six minutes above that. Measure again before changing either, and
+    # from the slowest run rather than the newest: a package that has grown past 60 % of its
+    # deadline is a deadline to raise, not a flake to re-run.
+    timeout-minutes: 35
+    services:
+      postgres:
+        # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/cybermonklabs/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
+    # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
+    # opens the store when DISPATCH_TEST_DATABASE_URL is unset
+    # (internal/dispatch/store/storetest/storetest.go:67-71). A skip is a pass, so without the
+    # service this job would be green having run almost nothing.
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's test binary, not the listener and natsd the family's saving jobs build,
+      # so it saves none.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # -v, because the package's leak check prints its line from TestMain after the tests have
+      # run: go test in package-list mode buffers the test binary's own output and drops it when
+      # the package passes, so without -v a green run would carry the `ok` line and nothing else,
+      # and the count of services the tests left alive is the half of this job that no detector
+      # of Go's reports.
+      - name: Test the document service under the cleanup detector
+        run: GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3300,7 +3973,12 @@ jobs:
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
   # resident memory from /proc, and together they run past go test's default ten-minute deadline,
   # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own. It runs
+  # only the tests the tag adds: `-tags memory ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-memory:
     needs: changes
     if: needs.changes.outputs.dispatch_memory == 'true'
@@ -3329,7 +4007,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Memory tests of the Dispatch server
-        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh memory ./cmd/dispatch)
+          go test -tags memory -count=1 -timeout 60m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3347,7 +4027,12 @@ jobs:
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
   # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
-  # process (internal/testnats), so the job needs no container runtime of its own.
+  # process (internal/testnats), so the job needs no container runtime of its own. It runs only
+  # the tests the tag adds: `-tags multiprocess ./cmd/dispatch` would run the package's untagged
+  # tests a second time, envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.dispatch_multiprocess == 'true'
@@ -3376,7 +4061,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the Dispatch server
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/dispatch)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/dispatch
         working-directory: packages/envoy
       - name: Report ci-ok when this is the run's last job
         if: always()
@@ -3449,13 +4136,19 @@ jobs:
   # drives two real envoy-listener binaries over a three-server NATS cluster, with a session
   # stand-in moved between the servers by lame-duck shutdowns and forced kills and three senders
   # publishing through the listener, and holds every message to reaching its session or failing
-  # its sender. It builds only under the `serverchange` tag, so envoy-go's unit run leaves it
-  # out, and it is a job of its own because it outlives that step: it sends for at least a minute
-  # and waits out each server's restart and the JetStream catch-up after it, which, beside the
-  # listener's other tests, is past what envoy-go's unit step holds under go test's default
-  # ten-minute package deadline. It runs the soak alone (-run TestServerChange), since envoy-go
-  # runs the package's untagged tests already; the cluster runs in the test process
-  # (internal/testnats), so it needs no container runtime and no database.
+  # its sender. It builds only under the `serverchange` tag, so no untagged run of the package
+  # builds it, and it is a job of its own because it is slow and serial: it sends for at least a
+  # minute and waits out each server's restart and the JetStream catch-up after it, which, beside
+  # the listener's other tests, would hold up the job that runs them - envoy-go-race, which runs
+  # cmd/listener under the race detector, where it would be slower still. It runs only the tests
+  # the serverchange tag adds, since envoy-go-race runs the package's untagged tests already
+  # (envoy-go's unit step leaves /cmd/listener$ out, for the lane to run under the detector): the
+  # -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the source at
+  # run time, so a second serverchange test added later runs here instead of being left out of a
+  # hand-written list. The assignment is a line of its own: under bash -e it carries the script's
+  # exit status, so an empty or refused list fails the step instead of running -run "", which
+  # matches every test. The cluster runs in the test process (internal/testnats), so the job needs
+  # no container runtime and no database.
   listener-server-change:
     needs: changes
     if: needs.changes.outputs.listener_server_change == 'true'
@@ -3480,7 +4173,9 @@ jobs:
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
       - name: Server-change soak of the listener
-        run: go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh serverchange ./cmd/listener)
+          go test -tags serverchange -count=1 -timeout 15m -v -run "$pattern" ./cmd/listener
         working-directory: packages/envoy
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -3513,7 +4208,12 @@ jobs:
   # Postgres service and shape this copies, so that each runs only on what it reads: the broker's
   # closure (broker_multiprocess) shares little with the Dispatch server's
   # (dispatch_multiprocess). They need no NATS and no test-container pull - the broker starts
-  # nothing in a container - so neither step is here.
+  # nothing in a container - so neither step is here. The step runs only the tests the tag adds:
+  # `-tags multiprocess ./cmd/broker` would run the package's untagged tests a second time,
+  # envoy-go's unit step having run them already, so the -run comes from
+  # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
+  # assignment is a line of its own: under bash -e it carries the script's exit status, so an
+  # empty or refused list fails the step instead of running -run "", which matches every test.
   broker-multiprocess:
     needs: changes
     if: needs.changes.outputs.broker_multiprocess == 'true'
@@ -3542,7 +4242,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Two-process tests of the secrets broker
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
+        run: |
+          pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/broker)
+          go test -tags multiprocess -count=1 -timeout 20m -v -run "$pattern" ./cmd/broker
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3689,11 +4391,25 @@ jobs:
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy/infra
+      # The live tests build container images on this runner's disk, and a job that runs out of
+      # space says only that it did. The pair around the step measures it: `start` prints what
+      # each file system the job writes to has free and leaves a sampler watching the one that
+      # holds /tmp, `report` stops the sampler and prints the free space the step began with,
+      # the least it ever had and the difference, with `margin short` when the step used more
+      # than half of what it started with (dispatch://INFRA-1085). The report prints and never
+      # fails the job: this is the measurement, not a new gate. The two steps share their state
+      # through a file under $RUNNER_TEMP rather than $GITHUB_ENV, which every later step of the
+      # job would inherit and check-ci-filters.sh treats as reaching the job's go commands.
+      - name: Start the disk watch over the live tests
+        run: .github/scripts/disk_watch.py start --path /tmp --state "$RUNNER_TEMP/disk-watch.json"
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
         env:
           ENVOY_INFRA_DOCKER_PLUGIN: ${{ steps.docker-plugin.outputs.tarball }}
+      - name: Report the disk the live tests used
+        if: always()
+        run: .github/scripts/disk_watch.py report --state "$RUNNER_TEMP/disk-watch.json"
       # The schema carries both of the things the release build stamps into the plugin: the
       # version, and the download URL .github/scripts/repo-paths.sh derives from the repository
       # the run is in (release-envoy-infra.yaml's "Derive the plugin's download URL" and its

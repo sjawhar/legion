@@ -3260,6 +3260,16 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 // a redelivery with the same key cannot emit another refusal.
 func TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery(t *testing.T) {
 	harness := newListenerDeliveryHarness(t)
+	// Both copies refill from their buckets on a goroutine the harness's registries start
+	// (kvwatch.Watcher.Start), and a write that lands while that first read runs carries no mark
+	// of it, so the sweep ending the read takes it back out of the copy
+	// (kvwatch.Copy.CompleteRead) until the watcher delivers the write's own record. The fan-out
+	// reads both copies for the message below, and a session whose record it cannot read is one
+	// it reports dead and sends no exception for ("listener delivery failed ... no session record
+	// for session ses_incapable", merge-queue job 127694167470), so both reads are waited out
+	// here, before registerFanoutTarget's two writes.
+	waitForRegistry(t, harness.registry)
+	waitForSessions(t, harness.sessions)
 	const (
 		topic     = "notifications.github.owner.repo.issue.4"
 		incapable = "ses_incapable"
@@ -3305,6 +3315,21 @@ func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
 	)
 	harness.registerFanoutTarget(t, firstTarget, topic, nil)
 	harness.registerFanoutTarget(t, nextTarget, topic, nil)
+	// The fan-out reaches only what these two registries answer for, so they are read here: a
+	// registration either cache lost would otherwise show up below as a missing dedupe entry,
+	// which says nothing about where it went.
+	var matched []string
+	for _, interest := range harness.registry.Match("test-machine", topic) {
+		matched = append(matched, interest.SessionID)
+	}
+	for _, target := range []string{firstTarget, nextTarget} {
+		if !slices.Contains(matched, target) {
+			t.Fatalf("the registry matches %q on %s, want %s among them", matched, topic, target)
+		}
+		if _, state := harness.sessions.Lookup(target); state != session.Live {
+			t.Fatalf("session %s reads %s before the delivery, want live", target, state)
+		}
+	}
 	item := listenerTestEnvelope(topic, "fanout-untagged")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"}}`
 
@@ -3517,10 +3542,16 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
+	// Both caches are waited for here, as the listener's own start waits for them: a Put that
+	// lands after a watch fixed its initial snapshot and before the read that turns its marks on
+	// is unmarked, and the sweep that completes the read drops it, so an interest or a session
+	// registered in that window would be missing from what Match and Lookup answer.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
+	waitForSessions(t, sessions)
 	met := metrics.New()
 	logs := &cmdtest.LockedBuffer{}
 	t.Cleanup(func() {

@@ -408,11 +408,14 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 }
 
 // IssueStatus is one issue of the daemon's project as Dispatch shows it now: its key, its status,
-// the keys it says it is blocked by, and the Dispatch sequence that view stands at. The periodic
-// turn's re-read carries them on its ControllerTick, and blockers.Mirror writes each through the
-// same sequence-fenced write an event's own row takes, so a view older than an event already
-// applied changes nothing. ClaimedBy and ClaimKnown are DispatchIssue's: the issue read behind
-// this view shows the claim unless it names no actor.
+// the keys it says it is blocked by, its Dispatch parent, and the Dispatch sequence that view
+// stands at. The periodic turn's re-read carries them on its ControllerTick, and blockers.Mirror
+// writes each through the same sequence-fenced write an event's own row takes, so a view older
+// than an event already applied changes nothing — except the parent, which record.PutDispatchIssue
+// also writes for a view at the row's own sequence, the listing that is the only thing to carry
+// the parent of an issue the daemon has never recorded. ClaimedBy and
+// ClaimKnown are DispatchIssue's: the issue read behind this view shows the claim unless it names
+// no actor.
 type IssueStatus struct {
 	Key        string
 	Status     string
@@ -420,6 +423,12 @@ type IssueStatus struct {
 	Seq        int64
 	ClaimedBy  string
 	ClaimKnown bool
+	// Parent is the key of the issue's Dispatch parent, empty for an issue Dispatch shows under
+	// none. The children-first rule reads the mirror's parent column to find what hangs under an
+	// issue (record.ChildWaits), so every observation carries the parent it saw, and empty is
+	// the observation that the issue has no parent: it clears the one the mirror holds
+	// (record.PutDispatchIssue).
+	Parent string
 }
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
@@ -698,24 +707,6 @@ type Push struct {
 
 func (Push) isFact() {}
 
-// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope of a run of one of the
-// project's deploy workflows (ConsumerSpec.Deploys; the decoder makes no fact of any other run):
-// attempt Attempt of GitHub Actions run RunID of the workflow file Path (GitHub's
-// `workflow_run.path`, the run's top-level `.github/workflows/` file) in Repo finished on
-// HeadBranch, whatever its conclusion. Envoy publishes none for a run of a pull request. The
-// workflow takes the deploy's step from the project's deploy workflows (config.Project.Deploys) and
-// queues a GitHub read of the run for each open production check it may wake; the envelope is
-// anyone's who holds an Envoy bearer, so nothing in it is trusted beyond choosing what to read.
-type WorkflowRunCompleted struct {
-	Repo       string
-	Path       string
-	RunID      int64
-	Attempt    int
-	HeadBranch string
-}
-
-func (WorkflowRunCompleted) isFact() {}
-
 // HandoffComplete is an API-originated phase-completion fact.
 type HandoffComplete struct {
 	Issue string
@@ -813,7 +804,11 @@ func (SignOff) isFact() {}
 // that person, since it goes to the controller when nobody in the tree can hear it (the daemon's
 // parkDecision).
 type GateRegistered struct {
-	Issue                   string
+	Issue string
+	// Step is the design-gate step this registration records, which register_gate resolved
+	// against the deployment's list and bound to ArtifactID (api's gateRegister). The zero value
+	// is the step spec, as it is in the row the registration writes (record.Store.PutGate).
+	Step                    record.DesignStep
 	ArtifactID              string
 	Version                 int
 	ApprovedVersion         int
@@ -864,6 +859,13 @@ type ClaimReady struct {
 	Issue  string
 	Role   claim.Role
 	Launch uint64
+	// Paced is the second source alone saying that the catch-up this ready writes stands in place
+	// of a launch, and so is a wake the daemon's pacing holds to its turn like the launch it
+	// replaces (workflow.Config.Reserve). The launch's own ready sets none: that launch took its
+	// turn at the machine's gate (supervise's reserveWake) and the catch-up it leads to is part of
+	// the same wake. A fact applies once for the row that wrote it (ApplyFact's id), so the turn
+	// is taken once per start row however often the row runs.
+	Paced bool
 }
 
 func (ClaimReady) isFact() {}
@@ -920,78 +922,47 @@ func (LingerExpired) isFact() {}
 
 // DaemonBooted records a boot of the daemon: every stored claim has its machine again, and the
 // boot replayed what its claims' terminal states owe the workflow. Boot is the boot's record id
-// (daemon_boot), which makes each boot's fact its own. Revision is the daemon's own build commit,
-// stamped into a release build and empty outside one, where the boot wakes no production check;
-// DispatchBuild is the build Dispatch's /healthz reported to the boot as its server fleet's
-// (dispatch.Client.BuildCommit), empty when it reported none. The workflow compares each against
-// the open checks of the repository the daemon is built from (workflow.Config.BuiltFrom), one
-// check_compare row per check.
+// (daemon_boot), which makes each boot's fact its own.
 type DaemonBooted struct {
-	Boot          int64
-	Revision      string
-	DispatchBuild string
+	Boot int64
 }
 
 func (DaemonBooted) isFact() {}
 
-// CheckReport is the implementer's report on one look of its closed issue's production check: the
-// `legion` tool's `handoff_complete` on an issue whose check is open (api/handoff.go), carrying no
-// commit. Verdict is pass, pending or fail; Summary is what the implementer saw. Look is the look
-// the route read as the check's current one, so a report of a look its bound or a hold already
-// ended is refused rather than recorded against the look after it.
+// CheckReport is the checking role's report on one look of its closed issue's production check:
+// the `legion` tool's `handoff_complete` on an issue whose check is open (api/handoff.go),
+// carrying no commit. Verdict is pass, pending or fail; Summary is what the agent saw. Look is
+// the look the route read as the check's current one, so a report of a look its bound or a hold
+// already ended is refused rather than recorded against the look after it. WakeAt is when the
+// agent asks for its next look, which a pending on a look that is not the check's last carries
+// and no other report does (the route holds it to that: CHECK_WAKE_REQUIRED,
+// CHECK_WAKE_UNEXPECTED); the engine clamps it and writes the check's one wake row for it.
 type CheckReport struct {
 	Issue   string
 	Claim   claim.Token
 	Look    int
 	Verdict string
 	Summary string
+	WakeAt  *time.Time
 }
 
 func (CheckReport) isFact() {}
 
-// IssueDeployed is Dispatch's `issue.deployed`: its delivery timeline first knew the production
-// run that shipped the pull request Repo#Number of issue Issue, RunID, which completed at
-// CompletedAt. It wakes the issue's open production check once.
-type IssueDeployed struct {
-	Issue       string
-	Repo        string
-	Number      int
-	RunID       int64
-	CompletedAt time.Time
-}
-
-func (IssueDeployed) isFact() {}
-
-// ServerStarted is Dispatch's `server.started`: every live Dispatch server process serves the
-// build Commit names, announced once each time that fleet-wide build changes, so a rolling update
-// is announced once it has replaced the last process of the build before, and a restart on the
-// announced build is not announced. The workflow compares the build against the open checks of
-// the repository the daemon is built from, as it compares the daemon's own revision at boot; an
-// event with no commit is decoded to none.
-type ServerStarted struct {
-	Commit string
-}
-
-func (ServerStarted) isFact() {}
-
-// CheckWake is a compare that found a reason to wake issue Issue's production check (the
-// check_compare outbox row's GitHub read): a build that carries the check's merge, or a deploy
-// workflow's job whose named step succeeded after the pull request merged. Look is the look the
-// compare was queued for, Cause what asked for it (`daemon boot`, `dispatch start`, `dispatch
-// build` or `deploy run`) and Detail the build's commit or the deploy run and its job. OpenedAt is
-// the check the executor read the merge from (its OpenedAt, the check instance's identity): the
-// workflow ignores a wake of a check a later merge has replaced, and a zero OpenedAt names none.
-// The workflow wakes the check by the one wake rule, or keeps the cause for the next look while
-// one is open.
-type CheckWake struct {
+// CheckWakeDue is the wake of issue Issue's production check coming due (the check_wake row at
+// ProductionCheck.WakeAt): the next look starts, woken by Reason — what the checking agent named
+// its own next look for on a pending report, or the retry of a look nobody reported. Look is the
+// look the check stood at when the wake was named, so a row of a look the check has since left
+// starts nothing, and OpenedAt the check instance it was named for, so a row of a check a later
+// merge of the same issue replaced — whose looks count from one again — starts nothing either; a
+// zero OpenedAt names none.
+type CheckWakeDue struct {
 	Issue    string
 	Look     int
-	Cause    string
-	Detail   string
 	OpenedAt time.Time
+	Reason   string
 }
 
-func (CheckWake) isFact() {}
+func (CheckWakeDue) isFact() {}
 
 // CheckLookEnded is a look of issue Issue's production check ending with no report: Cause is
 // `look bound` (the check_look row due at the look's bound), `operator hold` (a check start the
