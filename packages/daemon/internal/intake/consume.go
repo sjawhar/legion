@@ -22,8 +22,9 @@ import (
 const notificationStream = "ENVOY_NOTIFICATIONS"
 
 const (
-	defaultAckWait  = 30 * time.Second
-	defaultNakDelay = 30 * time.Second
+	defaultAckWait      = 30 * time.Second
+	defaultNakDelay     = 30 * time.Second
+	defaultHandlerLimit = 10 * time.Minute
 )
 
 // ConsumerSpec is the caller-supplied durable-consumer configuration. The daemon owns its project
@@ -43,7 +44,18 @@ type ConsumerSpec struct {
 	Renames  ghrepo.Renames
 	AckWait  time.Duration
 	NakDelay time.Duration
-	Logger   *slog.Logger
+	// HandlerLimit is how long one message's handling may run before it is cut. The bounded part
+	// of a handler is at most five reads of AckWait each — recordedPullRequest, prepareRepository
+	// (the repository preparation, the slowest of them: a Dispatch read and the daemon's own
+	// GitHub work), prepareArtifact, resolveReviewPermission and resolveReviewBody — so 25 s at
+	// the daemon's 5 s window, while readMapping is on the mapping path a fact never takes. On top
+	// of those comes ApplyFact's wait on the one advisory lock every fact of all four consumers
+	// queues on. Ten minutes is about twenty-four times that bounded part, and short enough that a
+	// wedged handler's message returns to the stream within one operator's look. Production sets
+	// nothing, so defaultHandlerLimit applies; tests set a short one. There is no legion.yaml key
+	// for it.
+	HandlerLimit time.Duration
+	Logger       *slog.Logger
 	// Now is the clock Consumers reads when it records a consumer opened or a message handled,
 	// and when Lag measures a stall and the oldest waiting message's age; nil is time.Now.
 	Now func() time.Time
@@ -841,6 +853,9 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	}
 	if spec.NakDelay <= 0 {
 		spec.NakDelay = defaultNakDelay
+	}
+	if spec.HandlerLimit <= 0 {
+		spec.HandlerLimit = defaultHandlerLimit
 	}
 	if spec.Logger == nil {
 		spec.Logger = slog.Default()
