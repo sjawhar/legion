@@ -158,7 +158,7 @@ func newHeldTaskRig(t *testing.T) *heldTaskRig {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: heldTaskProject, Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: heldTaskProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	trees := outboxTreeStore(t, pool, heldTaskRoot)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Store = keptClaimStore{Store: trees}
@@ -246,7 +246,7 @@ func (r *heldTaskRig) decide(issue string) string {
 			return err
 		}
 		outcome, err = record.RelayParkedDecision(r.ctx, tx, r.records, issue, *stored, true,
-			record.ParkedDecision{Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: r.at}, 0, "")
+			record.ParkedDecision{Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: r.at}, 0, "", nil)
 		return err
 	}); err != nil {
 		r.t.Fatalf("keep the decision %s: %v", ref, err)

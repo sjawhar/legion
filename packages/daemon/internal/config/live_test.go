@@ -210,7 +210,9 @@ func TestAChangeCarriesItsClassHolderAndOutcome(t *testing.T) {
 		t.Fatalf("refused %+v, want none", refused)
 	}
 	want := []Change{
-		{Path: "gates.design", Old: "root-issues", New: "off", Class: ClassDecision, Outcome: OutcomeAtOnce, Holder: HolderAPIServer, Source: SourceRoute, By: "sami@theorem.dev"},
+		// `gates.design` holds the steps it gates, so a change of it is reported as that list
+		// (Render): `root-issues` is the one step spec, `off` the empty list.
+		{Path: "gates.design", Old: `["spec"]`, New: "[]", Class: ClassDecision, Outcome: OutcomeAtOnce, Holder: HolderAPIServer, Source: SourceRoute, By: "sami@theorem.dev"},
 		{Path: "omp_launch_prefix", Old: "null", New: `["mise","x","--"]`, Class: ClassLaunch, Outcome: OutcomeNextLaunch, Holder: HolderRuntime, Source: SourceRoute, By: "sami@theorem.dev"},
 		{Path: "worker_rpc_timeout_seconds", Old: "5s", New: "9s", Class: ClassRebuild, Outcome: OutcomeRebuilt, Holder: HolderWorkerStream, Source: SourceRoute, By: "sami@theorem.dev"},
 	}
@@ -323,21 +325,21 @@ func TestAnApplyThatChangesNothingReportsNothing(t *testing.T) {
 // reads the two layers as one file.
 func TestTheOverlayFillsAndReplacesNestedKeys(t *testing.T) {
 	live, _ := newLive(t, strings.Replace(minimalFile, "gates:\n  design: root-issues\n", "", 1), nil)
-	if gate := live.Snapshot().Gates.Design; gate != DesignGateRootIssues {
-		t.Fatalf("Gates.Design = %q, want the default", gate)
+	if steps := live.Snapshot().Gates.Steps(); !slices.Equal(steps, DesignGateRootIssues.Steps()) {
+		t.Fatalf("Gates.Design = %v, want the default", steps)
 	}
 
 	if _, _, err := live.Apply(SourceRoute, "sami@theorem.dev", map[string]any{"gates.design": "off"}); err != nil {
 		t.Fatalf("Apply into a block the file omits: %v", err)
 	}
-	if gate := live.Snapshot().Gates.Design; gate != DesignGateOff {
-		t.Errorf("Gates.Design = %q, want off", gate)
+	if steps := live.Snapshot().Gates.Steps(); !slices.Equal(steps, DesignGateOff.Steps()) {
+		t.Errorf("Gates.Design = %v, want off", steps)
 	}
 	if _, _, err := live.Apply(SourceRoute, "sami@theorem.dev", map[string]any{"gates.design": "root-issues"}); err != nil {
 		t.Fatalf("Apply over the overlay's own value: %v", err)
 	}
-	if gate := live.Snapshot().Gates.Design; gate != DesignGateRootIssues {
-		t.Errorf("Gates.Design = %q, want root-issues", gate)
+	if steps := live.Snapshot().Gates.Steps(); !slices.Equal(steps, DesignGateRootIssues.Steps()) {
+		t.Errorf("Gates.Design = %v, want root-issues", steps)
 	}
 }
 

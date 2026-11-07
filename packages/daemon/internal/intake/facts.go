@@ -804,7 +804,11 @@ func (SignOff) isFact() {}
 // that person, since it goes to the controller when nobody in the tree can hear it (the daemon's
 // parkDecision).
 type GateRegistered struct {
-	Issue                   string
+	Issue string
+	// Step is the design-gate step this registration records, which register_gate resolved
+	// against the deployment's list and bound to ArtifactID (api's gateRegister). The zero value
+	// is the step spec, as it is in the row the registration writes (record.Store.PutGate).
+	Step                    record.DesignStep
 	ArtifactID              string
 	Version                 int
 	ApprovedVersion         int

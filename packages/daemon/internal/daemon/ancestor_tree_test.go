@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -216,7 +217,7 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 			child:  {Key: child, ResolvedRepo: "sjawhar/legion", Title: child, Status: "todo", Parent: under(parent), Rank: "C", HandedOver: true},
 		},
 	}
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, 2, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
@@ -241,7 +242,7 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 		if err != nil {
 			return err
 		}
-		facts, err := record.ReadLineFacts(ctx, tx, records, "CAPTURE", issues)
+		facts, err := record.ReadLineFacts(ctx, tx, records, "CAPTURE", issues, nil)
 		if err != nil {
 			return err
 		}
@@ -300,7 +301,7 @@ func TestATodoHeldUnderAnUnreleasedChildQueuesOnceItsParentLeavesTheLiveTree(t *
 		child:  shownUnder(child, "todo", parent, true),
 	}}
 	log := quietLogger()
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, log)
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, 2, "LEGION", log)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos, defaultBranches: branches, log: log}
 	// deliver is the consumer's handling of one Dispatch event: its preparation, then its fact.
@@ -374,7 +375,7 @@ func newAncestryLine(t *testing.T, tree string, recorded ...record.Issue) *ances
 	branches.read["acme/widgets"] = defaultBranchRead{repository: ghbranch.Repository{Name: ghrepo.MustParse("acme/widgets"), DefaultBranch: "main"}, at: time.Now()}
 	client := &chainDispatch{issues: map[string]dispatch.Issue{tree: shownUnder(tree, "in_progress", "", true)}}
 	log := quietLogger()
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, log)
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	return &ancestryLine{t: t, pool: pool, records: records, client: client, engine: engine, admit: admit.New(records, engine, 2, "LEGION", log),
 		w: &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos, defaultBranches: branches, log: log}}
 }
@@ -430,7 +431,7 @@ func (l *ancestryLine) waiting(key string) bool {
 		if err != nil {
 			return err
 		}
-		facts, err := record.ReadLineFacts(context.Background(), tx, l.records, "LEGION", issues)
+		facts, err := record.ReadLineFacts(context.Background(), tx, l.records, "LEGION", issues, nil)
 		waiting = slices.ContainsFunc(record.Waiting(issues, slots, facts), func(entry record.LineEntry) bool { return entry.Issue.Key == key })
 		return err
 	}); err != nil {

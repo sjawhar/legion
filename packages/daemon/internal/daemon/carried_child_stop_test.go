@@ -133,7 +133,7 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	})
 	sup.deps.Settings = liveBudgets{live: live}
 	sup.deps.Clock, sup.deps.Store = machineClock, trees
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	var logs bytes.Buffer
 	clock := start

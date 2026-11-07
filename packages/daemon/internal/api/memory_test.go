@@ -75,57 +75,73 @@ var contract46Issue = []string{
 
 // The route authenticates nobody, so it knows a plugin by the pod the request came from: a pod
 // whose claims record a contract below memoryContract is served issues with only the keys
-// the last strict reader before it knows, and the rest of the body as it is. The five downgrades
+// the last strict reader before it knows, and the rest of the body as it is. The six downgrades
 // compose, band by band: a pod at 46 to 48 is served the update rounds it reads and none of the
-// memory draws, the trees, the wakes the pacing holds and the setting sources; a pod at 49 or 50
-// the memory draws as well; a pod at 51 or 52 the trees too; a pod at 53 the wakes too; a pod
-// below 46 none of the five; and a pod at this contract, a pod whose claims record none and a
-// caller in no pod — the operator's `legion state`, whose memory line reads the draws and whose
-// queue line reads the wakes — are served all of them.
+// memory draws, the trees, the wakes the pacing holds, the gated steps and the setting sources;
+// a pod at 49 or 50 the memory draws as well; a pod at 51 or 52 the trees too; a pod at 53 or 54
+// the wakes too; a pod at 55 the gated steps too; a pod below 46 none of the six; and a pod at
+// this contract, a pod whose claims record none and a caller in no pod — the operator's `legion
+// state`, whose memory line reads the draws and whose queue line reads the wakes — are served
+// all of them.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
 	fullWakes, fullCarried := wakesServed(t, full)
-	if !strings.Contains(string(full), `"memoryGroup"`) || !strings.Contains(string(full), `"updateRound"`) || !fullCarried || len(fullWakes) == 0 {
-		t.Fatalf("the fixture's state %s carries no memory draw, no update round or no waiting wake; this test proves nothing", full)
+	for _, field := range []string{`"memoryGroup"`, `"updateRound"`, `"gatedSteps"`} {
+		if !strings.Contains(string(full), field) {
+			t.Fatalf("the fixture's state %s carries no %s; this test proves nothing", full, field)
+		}
 	}
-
+	if !fullCarried || len(fullWakes) == 0 {
+		t.Fatalf("the fixture's state %s carries no waiting wake; this test proves nothing", full)
+	}
 	for _, tc := range []struct {
 		name    string
 		remote  string
-		sup     Supervisor
+		claims  []supervise.Claim
 		memory  bool
 		trees   bool
 		rounds  bool
 		wakes   bool
+		steps   bool
 		sources bool
 	}{
-		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 1), rounds: true},
-		{name: "a pod below PodUpdateContract, below all five", remote: statePodAddr + ":41000", sup: podClaims(supervise.PodUpdateContract - 1)},
-		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(memoryContract - 1), rounds: true},
+		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", claims: podClaims(memoryContract - 1), rounds: true},
+		{name: "a pod below PodUpdateContract, below all six", remote: statePodAddr + ":41000", claims: podClaims(supervise.PodUpdateContract - 1)},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(memoryContract - 1), rounds: true},
 		// The band at 49 and 50, above memoryContract and below treeContract: the memory group
-		// is served, and the two tree keys, `wakesWaiting` and the setting sources are not.
-		{name: "a pod at memoryContract", remote: statePodAddr + ":41000", sup: podClaims(memoryContract), memory: true, rounds: true},
-		// The band at 51 and 52, from treeContract to below wakesWaitingContract: everything but
-		// `wakesWaiting` and the setting sources is served. This row is at treeContract, its
-		// lower edge.
-		{name: "a pod at treeContract", remote: statePodAddr + ":41000", sup: podClaims(treeContract), memory: true, trees: true, rounds: true},
-		// The band at 53, from wakesWaitingContract to below settingSourcesContract: everything
+		// is served, and the two tree keys, `wakesWaiting`, the gated steps and the setting
+		// sources are not.
+		{name: "a pod at memoryContract", remote: statePodAddr + ":41000", claims: podClaims(memoryContract), memory: true, rounds: true},
+		// The band at 51 and 52, from treeContract to below wakesWaitingContract: the trees are
+		// served too, and neither `wakesWaiting`, the gated steps nor the setting sources are.
+		// This row is at treeContract, its lower edge.
+		{name: "a pod at treeContract", remote: statePodAddr + ":41000", claims: podClaims(treeContract), memory: true, trees: true, rounds: true},
+		// The band at 53 and 54, from wakesWaitingContract to below gatedStepsContract:
+		// everything but the gated steps and the setting sources is served.
+		{name: "a pod at wakesWaitingContract", remote: statePodAddr + ":41000", claims: podClaims(wakesWaitingContract), memory: true, trees: true, rounds: true, wakes: true},
+		// The band at 55, from gatedStepsContract to below settingSourcesContract: everything
 		// but the three fields that contract added is served.
-		{name: "a pod at wakesWaitingContract", remote: statePodAddr + ":41000", sup: podClaims(wakesWaitingContract), memory: true, trees: true, rounds: true, wakes: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, sources: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, sources: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, sources: true},
+		{name: "a pod at gatedStepsContract", remote: statePodAddr + ":41000", claims: podClaims(gatedStepsContract), memory: true, trees: true, rounds: true, wakes: true, steps: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(memoryContract - 1), memory: true, trees: true, rounds: true, wakes: true, steps: true, sources: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
 
 			// Only LEGION-208's tree was drawn: its root and its child carry the draw when the
-			// caller is served it, and no other issue carries one whoever asks.
+			// caller is served it, and no other issue carries one whoever asks. Every root of the
+			// fixture carries the one step `root-issues` gates; LEGION-209, a child of
+			// LEGION-208's tree, carries none whoever asks.
 			drawn := map[string]bool{"LEGION-208": true, "LEGION-209": true}
+			gated := map[string]bool{"LEGION-207": true, "LEGION-208": true, "LEGION-210": true, "LEGION-212": true}
 			for key, view := range issueViews(t, body) {
 				carries := view["memoryGroup"] != nil || view["memoryDrawMode"] != nil || view["memoryDrawnAt"] != nil
 				if want := tc.memory && drawn[key]; carries != want {
 					t.Errorf("issue %s of %s carries a memory draw = %v, want %v", key, body, carries, want)
+				}
+				if carries, want := view["gatedSteps"] != nil, tc.steps && gated[key]; carries != want {
+					t.Errorf("issue %s of %s carries gated steps = %v, want %v", key, body, carries, want)
 				}
 				if tc.memory {
 					continue
@@ -167,6 +183,9 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 			}
 			if !tc.sources {
 				want = withoutSettingSources(want)
+			}
+			if !tc.steps {
+				want = withoutGatedSteps(want)
 			}
 			if !tc.rounds {
 				want = withoutUpdateRounds(want)

@@ -713,7 +713,7 @@ func TestACatchUpDroppedUnderItsLeaseIsNotPublished(t *testing.T) {
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
 	catchUp := func(generation uint64) record.Notice {
 		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("generation %d", generation),
-			CatchUp: &record.CatchUp{Generation: generation, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+			CatchUp: &record.CatchUp{Generation: generation, Gates: []record.CatchUpGate{{Step: record.DesignStepSpec, Gated: true, Unregistered: true}}, Issues: []record.CatchUpIssue{}}}
 	}
 	clock := time.Now()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(1), clock))

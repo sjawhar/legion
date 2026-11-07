@@ -214,7 +214,7 @@ decision: it stays on the ask for the person who asked, and nothing wakes.
 
 ## The design gate
 
-By default (`gates.design: root-issues`), no phase starts until a person approves the root issue's
+By default (`gates.design: [spec]`), no phase starts until a person approves the root issue's
 spec. The architect settles the spec's decision blocks with you first, then asks for approval with a
 summary of what the tree will do. You approve from the document's header or from the approval
 question in your Dispatch Inbox; **Request changes** sends it back with your reason.
@@ -226,9 +226,14 @@ your approval at the new version and the gate reopens, so the architect asks you
 the answer means the spec's text changes too, the architect rewrites it and asks you to approve
 again, naming what changed since your approval. Work already in flight carries on, but the merger's
 `READY` waits for that approval. The daemon only reads approvals; nothing in Legion approves a spec
-on a person's behalf, and the approval Dispatch records at your answer is yours, in your name. A
-deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
-architect has written its spec.
+on a person's behalf, and the approval Dispatch records at your answer is yours, in your name.
+
+`gates.design` is a list, so a deployment can ask for more than one document of the root issue:
+`decisions` is the issue's decisions document, `criteria` its Verification document, and `spec`
+its primary document. The daemon keeps one gate record for each step listed, and the tree starts
+only once a person has approved every one of them; each closes on its own document's next
+version. A deployment that does not want the gate sets `gates.design: []`, and the tree starts as
+soon as the architect has written its spec.
 
 ## Handoffs on the Dispatch issue
 

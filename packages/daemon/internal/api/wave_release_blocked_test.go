@@ -83,7 +83,7 @@ func releaseHarness(t *testing.T, open bool) (*harness, *statusRecorder) {
 func releaseHandlers() []intake.Handler {
 	records := record.NewStore()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, log)
+	engine := workflow.New(records, workflow.Config{Project: testDispatchProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	return []intake.Handler{blockers.NewMirror(records, testDispatchProject), engine, admit.New(records, engine, 8, testDispatchProject, log)}
 }
 

@@ -52,6 +52,7 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 0, Options{
+		Settings:   unauthenticatedSettings(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, Grants: credential.New(nil),
 		Pool: h.store.Pool(), Record: record.NewStore(), Handlers: []intake.Handler{&factRecorder{}}, Dispatch: &statusRecorder{},
 		Tokens: tokens, GitHubRepositories: func() []ghrepo.Repository { return []ghrepo.Repository{repository} },

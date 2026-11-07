@@ -70,7 +70,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return e.openCheckIfMerged(ctx, tx, issue, false)
 	}
 	if issue.Phase != phase.Done {
-		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.Phase, issue.Hold, issue.ReadyPending = phase.Done, nil, nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
+	root.Phase, root.Hold, root.Awaiting, root.ReadyPending = phase.Done, nil, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 

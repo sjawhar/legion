@@ -17,18 +17,20 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 type fakeSource struct {
-	state State
-	err   error
+	state  State
+	claims []supervise.Claim
+	err    error
 }
 
-func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, error) {
+func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, []supervise.Claim, error) {
 	if f.err != nil {
-		return State{}, f.err
+		return State{}, nil, f.err
 	}
-	return f.state, nil
+	return f.state, f.claims, nil
 }
 
 func serve(t *testing.T, src StateSource, method, target string) *httptest.ResponseRecorder {
@@ -38,7 +40,7 @@ func serve(t *testing.T, src StateSource, method, target string) *httptest.Respo
 
 func serveWithTransactions(t *testing.T, src StateSource, txs *fakeStateTransactions, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
-	server := NewServer("127.0.0.1", 8437, Options{State: src, StateTransactions: txs})
+	server := NewServer("127.0.0.1", 8437, Options{State: src, StateTransactions: txs, Settings: unauthenticatedSettings()})
 	recorder := httptest.NewRecorder()
 	server.Handler.ServeHTTP(recorder, httptest.NewRequest(method, target, nil))
 	return recorder
@@ -86,7 +88,7 @@ func (*fakeTx) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
 func (*fakeTx) Conn() *pgx.Conn                                  { return nil }
 
 func TestServerBindsTheConfiguredAddressOnly(t *testing.T) {
-	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}})
+	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}, Settings: unauthenticatedSettings()})
 	if server.Addr != "127.0.0.1:8437" {
 		t.Fatalf("addr = %q, want 127.0.0.1:8437", server.Addr)
 	}
@@ -154,7 +156,8 @@ func TestStateRouteServesTheConsumersLagReadAfterTheCommit(t *testing.T) {
 	oldest := time.Date(2026, 10, 28, 9, 2, 26, 0, time.UTC)
 	committedAtRead := false
 	server := NewServer("127.0.0.1", 8437, Options{
-		State: fakeSource{}, StateTransactions: &fakeStateTransactions{tx: tx},
+		Settings: unauthenticatedSettings(),
+		State:    fakeSource{}, StateTransactions: &fakeStateTransactions{tx: tx},
 		ConsumerLag: func(context.Context) []intake.ConsumerLag {
 			committedAtRead = tx.committed
 			return []intake.ConsumerLag{

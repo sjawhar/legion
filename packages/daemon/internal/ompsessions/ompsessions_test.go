@@ -11,7 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 const sessionPath = "/home/legion/.omp/profiles/legion/agent/sessions/--legion-workspaces--/2026-10-08T12-00-00-000Z_0001.jsonl"
@@ -24,7 +24,7 @@ const session = `{"type":"session","version":3,"id":"0001","cwd":"/legion/worksp
 
 func connect(t *testing.T) *pgx.Conn {
 	t.Helper()
-	_, file := testpg.DSNFile(t, "legion_ompsessions_test")
+	_, file := testdb.DSNFile(t, "legion_ompsessions_test")
 	conn, err := Connect(context.Background(), file)
 	if err != nil {
 		t.Fatal(err)

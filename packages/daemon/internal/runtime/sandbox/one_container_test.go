@@ -167,8 +167,18 @@ func TestAnIssuePodServesItsOwnTestPostgres(t *testing.T) {
 	if cluster == nil || cluster.EmptyDir == nil || cluster.EmptyDir.Medium != corev1.StorageMediumDefault {
 		t.Errorf("the test database's volume is %+v, want an emptyDir on the node's disk", cluster)
 	}
-	if value := envValue(r.mainEnvironment(l), launcher.TestPGVariable); value != launcher.TestPGDSN {
-		t.Errorf("an issue pod's role is told %s=%q, want %q", launcher.TestPGVariable, value, launcher.TestPGDSN)
+	// The start command names `postgres`, the one database the server of every worker image
+	// serves, rather than the database this daemon's own build creates: the deployment pins the
+	// daemon and the worker image apart, so a pod whose image predates a change of the served
+	// database would otherwise be told of a database nothing in that pod creates. A pod whose
+	// launcher serves another database replaces this value in every generation it starts (the
+	// launcher package's testPGEnv), so each daemon and image pairing tells a role a DSN its own
+	// pod's server holds. The DSN is written out here rather than read from testPGStartDSN, so
+	// that a change of that constant to the launcher's own `legion_test` DSN fails this test.
+	const served = "postgres://legion_test@127.0.0.1:5433/postgres?sslmode=disable"
+	if value := envValue(r.mainEnvironment(l), launcher.TestPGVariable); value != served {
+		t.Errorf("an issue pod's role is told %s=%q, want %q, the database an older image's server serves",
+			launcher.TestPGVariable, value, served)
 	}
 	// The controller's pod runs no tests and is told nothing: its launcher serves no server.
 	controller := r.mainEnvironment(launchOf(t, r, controllerSpec(t)))

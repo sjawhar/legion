@@ -69,7 +69,7 @@ func TestOperatorRoutesRefuseAnythingButTheOperatorBearer(t *testing.T) {
 // included: nothing compares equal to a token that is not there.
 func TestOperatorRoutesAreClosedWithoutAnOperatorToken(t *testing.T) {
 	h := newHarness(t)
-	h.handler = NewServer("127.0.0.1", 8437, Options{Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject}).Handler
+	h.handler = NewServer("127.0.0.1", 8437, Options{Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: unauthenticatedSettings()}).Handler
 
 	for _, header := range []http.Header{nil, {"Authorization": {"Bearer "}}} {
 		wantRefusal(t, h.request(http.MethodGet, "/legion/v1/operator/claims", nil, header), http.StatusForbidden,

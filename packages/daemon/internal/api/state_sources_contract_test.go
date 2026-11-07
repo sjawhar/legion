@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // The three fields settingSourcesContract added — `settingSources`, the `daemon` block's
@@ -22,7 +24,7 @@ func TestTheStateRouteWithholdsWhatTheSettingSourcesContractAddedFromAnOlderPlug
 	for _, tc := range []struct {
 		name    string
 		remote  string
-		sup     Supervisor
+		claims  []supervise.Claim
 		carries bool
 		// whole is whether the rest of the body is compared with the full one: a pod at
 		// settingSourcesContract - 1 is above both other contracts, so the three fields are the
@@ -30,15 +32,15 @@ func TestTheStateRouteWithholdsWhatTheSettingSourcesContractAddedFromAnOlderPlug
 		// round either (TestTheStateRouteServesAPodItsPluginContractsIssues covers those two).
 		whole bool
 	}{
-		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", sup: podClaims(settingSourcesContract - 1), whole: true},
-		{name: "a pod whose plugin is three contracts behind", remote: statePodAddr + ":41000", sup: podClaims(memoryContract - 2)},
-		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", sup: podClaims(settingSourcesContract - 1), whole: true},
-		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), carries: true},
-		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), carries: true},
-		{name: "a caller in no pod", remote: "192.0.2.1:41000", sup: podClaims(settingSourcesContract - 1), carries: true},
+		{name: "a pod whose plugin is a contract behind", remote: statePodAddr + ":41000", claims: podClaims(settingSourcesContract - 1), whole: true},
+		{name: "a pod whose plugin is four contracts behind", remote: statePodAddr + ":41000", claims: podClaims(memoryContract - 2)},
+		{name: "the same pod asking over IPv6", remote: "[::ffff:" + statePodAddr + "]:41000", claims: podClaims(settingSourcesContract - 1), whole: true},
+		{name: "a pod at this contract", remote: statePodAddr + ":41000", claims: podClaims(DaemonAPIVersion), carries: true},
+		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", claims: podClaims(0), carries: true},
+		{name: "a caller in no pod", remote: "192.0.2.1:41000", claims: podClaims(settingSourcesContract - 1), carries: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := stateFrom(t, populatedState(t), tc.remote, tc.sup)
+			body := stateFrom(t, populatedState(t), tc.remote, tc.claims)
 
 			if got := carriesSettingSources(t, body); got != tc.carries {
 				t.Errorf("the state carries settingSources = %v, want %v: %s", got, tc.carries, body)
@@ -51,7 +53,8 @@ func TestTheStateRouteWithholdsWhatTheSettingSourcesContractAddedFromAnOlderPlug
 			}
 			if tc.whole {
 				// Nothing else of the body moves: the withheld state is the full one with the
-				// three fields cleared, which is what the contract before 53 describes.
+				// three fields cleared, which is what the contract below settingSourcesContract
+				// describes.
 				if want := bodyWithout(t, populatedState(t)); want != string(normalized(t, body)) {
 					t.Errorf("the withheld state differs from the full one with the three fields cleared:\n got %s\nwant %s", body, want)
 				}

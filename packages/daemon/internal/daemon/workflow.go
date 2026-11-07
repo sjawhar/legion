@@ -194,6 +194,21 @@ type workflowRuntime struct {
 	readyWake chan struct{}
 }
 
+// gatedSteps are the design-gate steps the project gates (`gates.design`), read from the
+// settings holder as the decision that needs them is made: the send-time narrowing of a held
+// architect task reads them, and a catch-up it writes to another tree's architect is composed
+// under them (rootTask, workflow.CatchUpTheTreesOwed). The empty list gates no step
+// (config.Gates.Steps), so a change of the gate reaches the next decision with nothing rebuilt.
+//
+// A runtime a test built by hand holds no settings at all; it reads as the shipped list, the
+// one step spec, which is what an unset `gates.design` resolves to.
+func (w *workflowRuntime) gatedSteps() []record.DesignStep {
+	if w.live == nil {
+		return config.Gates{}.Steps()
+	}
+	return w.live.Snapshot().Gates.Steps()
+}
+
 // readyReleaseTimeout bounds one release of ready architects' waiting notices
 // (outbox.releaseWaiting): a read of a project's waiting notices and their trees, then one update,
 // each well under a second. A release that runs this long holds a database that stopped answering;
@@ -290,8 +305,9 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Reposito
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
 // checked for both GitHub Apps) into repos, the served repositories every role's gh bundle reads
-// its directories from, the Apps' logins, the App tokens minted for every served repository, then
-// the fill of any record written before the record carried its repository.
+// its directories from, the Apps' logins, the App tokens minted for every served repository, the
+// fill of any record written before the record carried its repository, then the deployment's
+// design-gate steps queued for the project's Dispatch row (queueGatedStepsPublish).
 //
 // reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
 // and before supervision, which reserves its launches from the same one): the moment the one
@@ -417,7 +433,30 @@ func openWorkflow(ctx context.Context, cfg config.Config, live *config.Live, reb
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, cfg.RepositoryRenames, log); err != nil {
 		return nil, err
 	}
+	if err := w.queueGatedStepsPublish(ctx); err != nil {
+		return nil, err
+	}
 	return w, nil
+}
+
+// queueGatedStepsPublish queues the deployment's design-gate steps for the project's Dispatch
+// row. The boot queues it rather than writing it, so a Dispatch that is down or has not got the
+// route refuses no boot; the outbox's first sweep after attach runs the row.
+//
+// It queues at every boot, because the daemon stores no list it last published: the route writes
+// only a difference (`gated_steps is distinct from`), so a boot on an unchanged list touches no
+// row and appends no event. A row of the kind still in the outbox is replaced rather than left
+// standing (EnqueueGatedSteps), so the queued row always carries this boot's list: the row can
+// have waited there since a boot on a list the operator has changed since, and a restart loop
+// still queues no second row.
+func (w *workflowRuntime) queueGatedStepsPublish(ctx context.Context) error {
+	publish := record.GatedStepsPublish{Project: w.dispatchProject, Steps: w.gatedSteps()}
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		return w.records.EnqueueGatedSteps(ctx, tx, publish, time.Now().UTC())
+	}); err != nil {
+		return fmt.Errorf("queue the gated-steps publish of %s: %w", w.dispatchProject, err)
+	}
+	return nil
 }
 
 // wakeOutbox is the records' wake (projectRecords.wake): it reaches the outbox attach stored, and
@@ -435,7 +474,7 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 func engineConfig(cfg *config.Config, reviewAppLogin string) workflow.Config {
 	project := cfg.Projects[cfg.Project]
 	return workflow.Config{
-		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
+		Project: cfg.Project, Steps: cfg.Gates.Steps(), ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
 		ProductionCheckRole: project.ProductionCheck,
 		ReviewAppLogin:      reviewAppLogin, MergeQueueRole: project.MergeQueueRole,
@@ -561,8 +600,9 @@ func (w *workflowRuntime) serializeFacts(ctx context.Context, held func(ctx cont
 // and the run (generation) it was queued for, so once the issue is in another phase, or on another
 // run, a delivery still queued for that one is finished work and is dropped rather than sent. The
 // phase is compared, not the role that works it: one role runs several phases — the implementer
-// runs implementing, retro and the production check — and a task written for the first is not the
-// work of the third. The run is compared because a re-admission can restart the issue in the phase
+// runs implementing and retro, and the role the project's `production_check` named at the open
+// (record.ProductionCheck.Role) runs each look of the check — and a task written for the first is
+// not the work of the third. The run is compared because a re-admission can restart the issue in the phase
 // it stood in: an operator suspension keeps a claim's queued task (supervise's settle), so without
 // it the operator's resume would send the run that is over's task into the new run, ahead of the
 // new run's own. A task of no run (generation 0) is held to its phase alone.
@@ -613,7 +653,7 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 			hears = err == nil
 			return err
 		}
-		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root)
+		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root, w.gatedSteps())
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)
@@ -653,7 +693,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 	if err := json.Unmarshal(d.Kept, &named); err != nil {
 		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
 	}
-	stays := record.KeptDecisions{Approved: named.Approved, Latest: named.Latest}
+	stays := record.KeptDecisions{KeptApproval: named.KeptApproval}
 	var left []record.DecisionMark
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
@@ -696,7 +736,7 @@ func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d sup
 		if err != nil {
 			return err
 		}
-		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.live.Snapshot().Gates.Design, trees, time.Now().UTC())
+		return workflow.CatchUpTheTreesOwed(scoped, tx, w.records, w.gatedSteps(), trees, time.Now().UTC())
 	}); err != nil {
 		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
 	}

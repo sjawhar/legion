@@ -404,6 +404,10 @@ func (h *dispatchHolder) WebhookAppInstalled(ctx context.Context, repo string) (
 	return h.get().WebhookAppInstalled(ctx, repo)
 }
 
+func (h *dispatchHolder) PutGatedSteps(ctx context.Context, project string, steps []string) error {
+	return h.get().PutGatedSteps(ctx, project, steps)
+}
+
 // publisherHolder is the Envoy notify publisher (config.HolderEnvoyPublisher), which the outbox
 // publishes every notice through. It is a notify.Publisher itself. A rebuild reads the Envoy
 // bearer again (readEnvoyToken) and swaps; the publisher it replaces is an HTTP client with
@@ -565,7 +569,7 @@ func newAPIHolder(cfg config.Config, operatorToken string) *apiHolder {
 	h := &apiHolder{}
 	h.settings = api.NewLiveSettings(api.HeldSettings{
 		OperatorToken:     operatorToken,
-		DesignGate:        cfg.Gates.Design,
+		Steps:             cfg.Gates.Steps(),
 		RepositoryRenames: cfg.RepositoryRenames,
 		MergeRules:        projectMergeRules(cfg),
 		SettingsRoute:     h.settingsRoute(cfg),
@@ -588,7 +592,7 @@ func (h *apiHolder) rebuild(cfg *config.Config) error {
 	}
 	h.settings.Store(api.HeldSettings{
 		OperatorToken:     token,
-		DesignGate:        cfg.Gates.Design,
+		Steps:             cfg.Gates.Steps(),
 		RepositoryRenames: cfg.RepositoryRenames,
 		MergeRules:        projectMergeRules(*cfg),
 		SettingsRoute:     h.settingsRoute(*cfg),

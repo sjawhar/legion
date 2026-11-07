@@ -11,7 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/store"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 // testProject is the project every row these tests write is filed under.
@@ -47,7 +47,7 @@ func rewrite(t *testing.T, path, body string) {
 // records, through the daemon's own schema.
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := store.Open(context.Background(), testpg.Database(t, "legion_settings_test"))
+	st, err := store.Open(context.Background(), testdb.Database(t, "legion_settings_test"))
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestARouteWithdrawalGivesTheKeyBackToTheFile(t *testing.T) {
 // the key until it restarts, and on the kept row after it.
 func TestAWithdrawalWhoseStoreWriteFailedIsLaidBackAtTheNextBoot(t *testing.T) {
 	ctx := context.Background()
-	dsn := testpg.Database(t, "legion_settings_withdrawal")
+	dsn := testdb.Database(t, "legion_settings_withdrawal")
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
@@ -437,7 +437,7 @@ func TestAFixedPathIsRefusedAndStoredNowhere(t *testing.T) {
 // rows before it migrates, which is the one moment that table can be missing.
 func TestABootBeforeTheMigrationReadsNoStoredChange(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_settings_unmigrated"))
+	st, err := store.Open(ctx, testdb.Database(t, "legion_settings_unmigrated"))
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}

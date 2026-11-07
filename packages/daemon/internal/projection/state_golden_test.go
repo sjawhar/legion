@@ -92,7 +92,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 			},
 		},
 	}
-	state, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
+	state, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{
 		{
 			Token: architect, Project: "legion", Tree: issue, Issue: issue, Role: claim.RoleArchitect,
 			State: supervise.StateReady, Session: "ses_architect_208", Locator: architectLocator,

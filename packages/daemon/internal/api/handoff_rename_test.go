@@ -42,6 +42,7 @@ func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghre
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject,
 		Settings: NewLiveSettings(HeldSettings{
 			OperatorToken: testOperatorToken, RepositoryRenames: renames,
+			Steps:      config.DesignGateRootIssues.Steps(),
 			MergeRules: func(string) config.MergeRules { return config.MergeRules{} },
 		}),
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),

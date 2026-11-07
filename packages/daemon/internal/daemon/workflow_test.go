@@ -70,7 +70,7 @@ func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, _ stri
 // with no login, before anything else opens.
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !servedMapping(t, w, r, "demo") {
+		if !servedBootCall(t, w, r, "demo") {
 			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
 		}
 	}))

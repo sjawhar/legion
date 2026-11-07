@@ -977,13 +977,15 @@ func TestADesignGateChangedThroughTheRouteReachesTheNextArchitectsLaunch(t *test
 	logs := &syncBuffer{}
 	d := startDaemonOn(t, live, fakeRuntime(rt, &built{}), slog.New(slog.NewJSONHandler(logs, nil)), 10*time.Second)
 	booted := lastLaunch(t, rt, d.spawn(architect()))
-	if want := DesignGateFragment(config.DesignGateRootIssues); !strings.Contains(booted.Prompt.Addressing, want) {
+	if want := DesignGateFragment(config.DesignGateRootIssues.Steps()); !strings.Contains(booted.Prompt.Addressing, want) {
 		t.Fatalf("the first architect is addressed %q, want it to carry %q", booted.Prompt.Addressing, want)
 	}
 
 	applied := apply(t, live, map[string]any{"gates.design": "off"})
 
-	if len(applied) != 1 || applied[0].Path != "gates.design" || applied[0].New != string(config.DesignGateOff) {
+	// `gates.design` is a list of steps now, and a change of it is reported as that list: `off`
+	// is the empty one (config.Render).
+	if len(applied) != 1 || applied[0].Path != "gates.design" || applied[0].New != "[]" {
 		t.Fatalf("the apply reported %+v, want one gates.design change to off", applied)
 	}
 	if applied[0].Outcome != config.OutcomeAtOnce || applied[0].Holder != config.HolderAPIServer {
@@ -993,7 +995,7 @@ func TestADesignGateChangedThroughTheRouteReachesTheNextArchitectsLaunch(t *test
 	next := lastLaunch(t, rt, d.spawn(api.SpawnRequest{
 		Tree: "LEGION-2", Issue: "LEGION-2", Role: claim.RoleArchitect, Prompt: "Reply ready and wait.",
 	}))
-	if want := DesignGateFragment(config.DesignGateOff); !strings.Contains(next.Prompt.Addressing, want) {
+	if want := DesignGateFragment(config.DesignGateOff.Steps()); !strings.Contains(next.Prompt.Addressing, want) {
 		t.Fatalf("the architect started after the change is addressed %q, want it to carry %q", next.Prompt.Addressing, want)
 	}
 }

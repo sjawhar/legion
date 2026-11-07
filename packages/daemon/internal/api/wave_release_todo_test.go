@@ -36,7 +36,7 @@ import (
 func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T) {
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
@@ -107,7 +107,7 @@ func TestWaveReleaseNamesTheRepositoryReadThatFailed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			records := record.NewStore()
-			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateOff.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			statuses := &statusRecorder{}
 			h.handler = NewServer("127.0.0.1", 8437, Options{
 				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
@@ -179,9 +179,9 @@ func newUnreadRelease(t *testing.T, issues ...dispatch.Issue) *unreadRelease {
 	t.Helper()
 	u := &unreadRelease{h: newHarness(t), records: record.NewStore(), statuses: &statusRecorder{}, unread: &atomic.Bool{}}
 	u.unread.Store(true)
-	u.engine = workflow.New(u.records, workflow.Config{Project: testProject, Repositories: unreadRepositories{u.unread}, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	u.engine = workflow.New(u.records, workflow.Config{Project: testProject, Repositories: unreadRepositories{u.unread}, Steps: config.DesignGateOff.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	u.h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: u.h.supervisor, BootTokens: u.h.tokens, Project: testProject, Settings: operatorSettings(),
+		Supervisor: u.h.supervisor, BootTokens: u.h.tokens, Project: testProject, Settings: settingsGating(config.DesignGateOff.Steps()),
 		Controller: u.h.store, Grants: credential.New(nil), Pool: u.h.store.Pool(), Record: u.records,
 		Handlers: []intake.Handler{u.engine, admit.New(u.records, u.engine, 8, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))}, Dispatch: u.statuses,
 		RepositoryUnread: func(resolved string) bool { return resolved == "zeta/tools" && u.unread.Load() },
@@ -410,7 +410,7 @@ func TestWaveReleaseRecordsATodoChildOfAChildTheSameWaveReleases(t *testing.T) {
 		t.Run(strings.Join(wave, ","), func(t *testing.T) {
 			h := newHarness(t)
 			records := record.NewStore()
-			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			statuses := &statusRecorder{}
 			h.handler = NewServer("127.0.0.1", 8437, Options{
 				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),
@@ -454,7 +454,7 @@ func TestWaveReleaseRecordsATodoChildOfAChildTheSameWaveReleases(t *testing.T) {
 func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testing.T) {
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Settings: operatorSettings(),

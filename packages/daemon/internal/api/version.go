@@ -651,7 +651,36 @@ package api
 // forward merge that renumbered this entry, d43e0fe9bbb1; read main's own number again at the
 // next merge rather than from this line.)
 //
-// 55: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
+// 55: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
+// gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
+// `spec`), the document its architect registered for that step and that document's
+// `currentVersion` (both absent until one is registered), the `approvedVersion` a person
+// approved (null until one does), the `status` — `unregistered`, `waiting`, `approved` or
+// `changes_requested` — and `changesReason`, what the reviewer asked for, on that last status
+// alone. It is absent, as `designGate` is, from an issue that is not its tree's root, from every
+// issue of a deployment that gates no step and from an issue the workflow does not record, so the
+// wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
+// always been, so a reader that asks one question of one gate reads what it read before.
+// `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
+// contract below 55 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// as a caller below 53 is served a body with no wakes waiting, one below 51 the issues without
+// the admission's trees and each issue's tree, one below 49 without the memory draw and one
+// below 46 without the claim views' update rounds; the five compose, and every reader from 55 on
+// takes the field as optional.
+// `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
+// one word `designGate`, which 55 drops: `legion controller start` is built from this daemon's
+// own tree, so the two always ship together, and a `legion` of this release refuses an answer
+// that names no list at all.
+// (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, then
+// 53 when main landed the issue-key trailer as 52, then 54 when main landed the wake pacing as
+// 53, and main has since landed the optional production check as 54, so this change takes the
+// number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 54 at the forward merge that renumbered this entry, b5482068c554; read main's
+// own number again at the next merge rather than from this line.)
+//
+// 56: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
 // commit ships (`packages/contracts/src/legion-api.ts` mirrors all three), so a plugin built
 // from here refuses a state an older daemon sends. The `daemon` block names the commit the
 // daemon was built from (`commit`, the release build's own revision, empty in a build that is
@@ -664,17 +693,19 @@ package api
 // ones `settings` withholds among them, so a rotated credential is visible without the
 // credential. `settings` itself is untouched, and stays the loose object it was. `GET
 // /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a contract
-// below 55 is served the state without all three (api's stateFor, withoutSettingSources), as a
-// caller below 53 is served it without the waiting wakes, one below 51 without the admission
-// trees, one below 49 without the memory group and one below 46 without the claim views' update
-// rounds: every schema of `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so
-// such a plugin refuses a whole state for one key it does not know. (This branch took 47 while
-// main's idle release and memory group were unmerged; main landed them as 48 and 49, so this
-// branch took 50; main then landed INFRA-980's admission cap at 51, without these shapes, so
-// this branch took 52; main then landed INFRA-1307's commit trailer at 52, again without these
-// shapes, so this branch took 53; main then landed INFRA-976's wake pacing at 53, again without
-// these shapes, so this branch took 54; main then landed INFRA-809's production checks at 54,
-// again without these shapes, so this branch takes the number above it, as the collision note
-// says. main held 54 at the forward merge that renumbered this entry, fe85b8289aab; read main's
-// own number again at the next merge rather than from this line.)
-const DaemonAPIVersion = 55
+// below 56 is served the state without all three (api's stateFor, withoutSettingSources), as a
+// caller below 55 is served it without the issues' gated steps, one below 53 without the waiting
+// wakes, one below 51 without the admission trees, one below 49 without the memory group and one
+// below 46 without the claim views' update rounds: every schema of
+// `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so such a plugin refuses a
+// whole state for one key it does not know. (This branch took 47 while main's idle release and
+// memory group were unmerged; main landed them as 48 and 49, so this branch took 50; main then
+// landed INFRA-980's admission cap at 51, without these shapes, so this branch took 52; main then
+// landed INFRA-1307's commit trailer at 52, again without these shapes, so this branch took 53;
+// main then landed INFRA-976's wake pacing at 53, again without these shapes, so this branch took
+// 54; main then landed INFRA-809's production checks at 54, again without these shapes, so this
+// branch took 55; main then landed INFRA-1272's design-gate steps at 55, again without these
+// shapes, so this branch takes the number above it, as the collision note says. main held 55 at
+// the forward merge that renumbered this entry, b7866f96d7fe; read main's own number again at
+// the next merge rather than from this line.)
+const DaemonAPIVersion = 56

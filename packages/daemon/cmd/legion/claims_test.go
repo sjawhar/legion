@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -201,7 +202,9 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, Log: quiet,
-		Settings: api.NewLiveSettings(api.HeldSettings{OperatorToken: claimsOperatorToken}),
+		Settings: api.NewLiveSettings(api.HeldSettings{
+			OperatorToken: claimsOperatorToken, Steps: config.DesignGateRootIssues.Steps(),
+		}),
 	}).Handler
 
 	d := &operatorDaemon{t: t, runtime: rt, claimSupervisor: claims, tokenFile: writeFile(t, "operator-token", claimsOperatorToken+"\n")}

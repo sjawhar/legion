@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,7 +81,7 @@ func keptCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root st
 		if err != nil || stored == nil {
 			return fmt.Errorf("read %s: %w", root, err)
 		}
-		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, launch, now, time.Time{})
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, launch, now, time.Time{})
 	}); err != nil {
 		t.Fatalf("queue the catch-up of %s for launch %d: %v", root, launch, err)
 	}
@@ -214,7 +215,7 @@ func TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, 2, now, time.Time{})
+			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, 2, now, time.Time{})
 		})
 	}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
@@ -416,10 +417,10 @@ func TestALateReportOfASpentCatchUpNamesWhatItsRowReleased(t *testing.T) {
 }
 
 // The design gate a catch-up states is read from the settings holder as that catch-up is
-// written (outbox.designGate), never from the value the daemon booted on: a tree whose
-// architect is caught up after an operator moved the gate is told the policy the daemon is
+// written (outbox.gatedSteps), never from the value the daemon booted on: a tree whose
+// architect is caught up after an operator moved the gate is told the steps the daemon is
 // deciding by. Holding the boot's copy, every catch-up and every start task of the daemon's
-// life would state the old policy, and the architect would work the tree under a gate nobody
+// life would state the old steps, and the architect would work the tree under a gate nobody
 // runs any more.
 func TestADesignGateChangedUnderTheRunningOutboxIsStatedByTheNextCatchUp(t *testing.T) {
 	ctx := context.Background()
@@ -438,8 +439,8 @@ func TestADesignGateChangedUnderTheRunningOutboxIsStatedByTheNextCatchUp(t *test
 		t.Fatalf("name what the tree is owed: %v", err)
 	}
 
-	if got, want := newestCatchUpGate(t, pool, "LEGION-1"), string(config.DesignGateRootIssues); got != want {
-		t.Fatalf("the catch-up states the gate policy %q, want the file's own %q", got, want)
+	if got, want := catchUpApproved(t, pool, "LEGION-1"), config.DesignGateRootIssues.Steps(); !slices.Equal(got, want) {
+		t.Fatalf("the catch-up states the gated steps %v, want the file's own %v", got, want)
 	}
 
 	apply(t, live, map[string]any{"gates.design": "off"})
@@ -448,14 +449,16 @@ func TestADesignGateChangedUnderTheRunningOutboxIsStatedByTheNextCatchUp(t *test
 		t.Fatalf("name what the tree is owed after the gate moved: %v", err)
 	}
 
-	if got, want := newestCatchUpGate(t, pool, "LEGION-1"), string(config.DesignGateOff); got != want {
-		t.Fatalf("the catch-up written after the operator's change states %q, want the gate the daemon decides by, %q", got, want)
+	if got, want := catchUpApproved(t, pool, "LEGION-1"), config.DesignGateOff.Steps(); !slices.Equal(got, want) {
+		t.Fatalf("the catch-up written after the operator's change states %v, want the gate the daemon decides by, %v", got, want)
 	}
 }
 
-// newestCatchUpGate is the design gate policy the newest catch-up of root in the outbox states
-// (record.CatchUpGate.Policy), which is the policy its architect is told.
-func newestCatchUpGate(t *testing.T, pool *pgxpool.Pool, root string) string {
+// catchUpApproved is the design-gate steps a person must approve as the newest catch-up of root
+// in the outbox states them (record.CatchUp.Gates, the entries whose Gated is set), which is
+// what its architect is told it must hold open. A catch-up carries one entry per required step
+// whether or not a person approves it, so the gated ones are what the deployment's gate says.
+func catchUpApproved(t *testing.T, pool *pgxpool.Pool, root string) []record.DesignStep {
 	t.Helper()
 	rows := catchUpRows(t, pool, root)
 	if len(rows) == 0 {
@@ -470,5 +473,11 @@ func newestCatchUpGate(t *testing.T, pool *pgxpool.Pool, root string) string {
 	if !ok || notice.CatchUp == nil {
 		t.Fatalf("outbox row %d is %T, want a catch-up notice", newest.ID, payload)
 	}
-	return notice.CatchUp.Gate.Policy
+	steps := []record.DesignStep{}
+	for _, gate := range notice.CatchUp.Gates {
+		if gate.Gated {
+			steps = append(steps, gate.Step)
+		}
+	}
+	return steps
 }
