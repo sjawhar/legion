@@ -380,7 +380,9 @@ func (s *Store) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d su
 // ran: a delete that committed without it would leave a daemon crashed in between with a claim
 // that has forgotten the run its worker is still working. What the delivery held is left KEPT in
 // that same transaction: a retired task tells nothing, so each row waits for the next start or
-// catch-up of its own issue's tree to name it.
+// catch-up of its own issue's tree to name it. The refusal of a delivery the row does not hold
+// carries supervise.ErrNoSuchDelivery, so that a caller making a write again can read it as the
+// retirement this one already committed rather than as a fresh failure.
 func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
 		if err := putClaim(ctx, tx, c); err != nil {
@@ -394,7 +396,7 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 			return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, err)
 		}
 		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+			return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, supervise.ErrNoSuchDelivery)
 		}
 		return releaseKeptDecisions(ctx, tx, c.Token, deliveryID)
 	})

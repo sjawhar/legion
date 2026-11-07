@@ -644,6 +644,15 @@ var ErrRetryArchitectOnly = errors.New("the operator's retry relaunches only an 
 // for the outbox log.
 var ErrHeldByOperator = wait.New("the suspension holds until the operator resumes the claim")
 
+// ErrNoSuchDelivery is the store's refusal of a retirement of a delivery the claim's row no
+// longer holds. It is named here, rather than matched as a string where the refusal is read,
+// because internal/store imports this package and so cannot be imported back: the store's
+// refusals can only carry an identity this package owns. It is a sentinel so that a caller can
+// tell a retirement the store has already made — a commit whose answer a broken connection lost,
+// made again and finding nothing left to delete — apart from any other failure of that write,
+// which is the difference between a claim that is settled and one whose write is still owed.
+var ErrNoSuchDelivery = errors.New("the claim holds no such delivery")
+
 // Machine is one claim's decision owner.
 type Machine struct {
 	mu             sync.Mutex

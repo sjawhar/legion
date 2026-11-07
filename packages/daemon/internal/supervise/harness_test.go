@@ -221,7 +221,7 @@ func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID strin
 	held, ok := s.deliveries[c.Token]
 	if !ok || held.ID != deliveryID {
 		s.mu.Unlock()
-		return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+		return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, ErrNoSuchDelivery)
 	}
 	s.mu.Unlock()
 	// The store writes the claim and the delete together; a failure injected on either leaves
