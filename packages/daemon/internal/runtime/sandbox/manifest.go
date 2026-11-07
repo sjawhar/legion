@@ -244,11 +244,12 @@ type launch struct {
 	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
 	// issuePod.provision), which its fetch container is told (fetchEnvironment).
 	cacheURL string
-	// gitHubOwners are the owners of the pod's gh bundle, sorted, whose files each role's gh volume
-	// projects, and gitHubDefault the one whose directory is every agent's GH_CONFIG_DIR: the
+	// gitHubDirs are the directories of the pod's gh bundle, sorted, whose files each role's gh
+	// volume projects — a GitHub owner, or one of its repositories as `<owner>/<repo>` — and
+	// gitHubDefault the owner whose directory is every agent's GH_CONFIG_DIR: the
 	// bundle writeLauncherSecrets mints for a new pod, or, for a pod a launch keeps, the default its
 	// role Secret records (GitHubDefaultKey, launcherBound), the projection being the pod's own.
-	gitHubOwners  []string
+	gitHubDirs    []string
 	gitHubDefault string
 	// gh is the image's real gh (Tools.GH), every agent's LEGION_GH_PATH.
 	gh string
@@ -727,12 +728,14 @@ func kubeletEscape(text string) string {
 // claim, which the kubelet creates with the pod and deletes with it, or the claim the controller's
 // Sandbox owns) and jj config home with, between them, the volumes only its kind's init
 // containers mount (podKind.initVolumes), then each launcher role's token projection, private
-// credential directory, state and gh volume: each owner's two gh files of its role Secret
-// (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
-// the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
-// launcher token, so the refresher's one Update reaches the role's gh directory. A projection's
-// items are fixed for the pod's life, so a pod holds the owners of its creation. A launch with no
-// owners — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
+// credential directory, state and gh volume: each bundle directory's two gh files of its role
+// Secret (GitHubHostsKey(dir) as <dir>/hosts.yml, GitHubConfigKey(dir) as <dir>/config.yml) for
+// the launch's directories (gitHubDirs), read-only to the pod's user, from the same Secret as the
+// launcher token, so the refresher's one Update reaches the role's gh directory. A directory
+// names a GitHub owner or one of its repositories, `<owner>/<repo>`, which projects as a
+// directory under the owner's own. A projection's items are fixed for the pod's life, so a pod
+// holds the directories of its creation. A launch with no
+// directory — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
 // template (sandboxManifest), which never runs — gets an empty directory instead: a Secret
 // projection with no items would project every key of the Secret, the launcher token among them.
 // Then the volumes its kind's one container alone mounts (podKind.mainVolumes), the agent-secrets
@@ -741,11 +744,11 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
 	roleVolumes := make([]corev1.Volume, 0, len(l.roles)*4)
-	ghItems := make([]corev1.KeyToPath, 0, 2*len(l.gitHubOwners))
-	for _, owner := range l.gitHubOwners {
+	ghItems := make([]corev1.KeyToPath, 0, 2*len(l.gitHubDirs))
+	for _, dir := range l.gitHubDirs {
 		ghItems = append(ghItems,
-			corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
-			corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile},
+			corev1.KeyToPath{Key: GitHubHostsKey(dir), Path: dir + "/" + ghconfig.HostsFile},
+			corev1.KeyToPath{Key: GitHubConfigKey(dir), Path: dir + "/" + ghconfig.ConfigFile},
 		)
 	}
 	for _, role := range l.roles {
