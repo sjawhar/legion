@@ -982,8 +982,11 @@ notice comes once per handoff commit, from whichever pass finds it first.
   acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
   database, the fact lock above all: every fact of every consumer is applied under one Postgres
   advisory lock held for its transaction (`pg_advisory_xact_lock(hashtext('legion.apply_fact'))`),
-  so one transaction that does not finish holds every other fact behind it. The next delivery of
-  the same event takes the same path and is cut the same way.
+  so one transaction that does not finish holds every other fact behind it. Facts are not its
+  only holders, so a wait here is not always another fact: the daemon's own boot reconcile and
+  its narrowing of a tree take it, as do the settlement of a parked tree's decision and the
+  publication of the repository mapping, each for the length of its own transaction. The next
+  delivery of the same event takes the same path and is cut the same way.
 - **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
   (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
   than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
