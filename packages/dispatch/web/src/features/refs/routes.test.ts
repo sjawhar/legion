@@ -512,6 +512,9 @@ test("issue routes select Spec and artifact routes select Artifacts unless prima
   expect(issueTabForRoute({ key: "CORE-1", kind: "activity" }, undefined)).toBe("activity");
   expect(issueTabForRoute({ key: "CORE-1", kind: "verification" }, undefined)).toBe("verification");
   expect(issueTabForRoute({ key: "CORE-1", kind: "plan" }, undefined)).toBe("plan");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "collaborators" }, undefined)).toBe(
+    "collaborators"
+  );
   expect(
     issueTabForRoute(
       { key: "CORE-1", kind: "artifact", slug: "diagram", version: 2 },
@@ -619,6 +622,22 @@ test("the activity tab owns its path, its reference and its short form", () => {
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/activity"));
   expect(
     referenceRouteFromHref("https://dispatch.test/issues/CORE-1/activity", "https://dispatch.test")
+  ).toEqual(route);
+});
+
+test("the collaborators tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "collaborators" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/collaborators")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/collaborators");
+  expect(shortForm(route)).toBe("CORE-1 collaborators");
+  expect(parseIssuePath("/issues/CORE-1/collaborators")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/collaborators"));
+  expect(
+    referenceRouteFromHref(
+      "https://dispatch.test/issues/CORE-1/collaborators",
+      "https://dispatch.test"
+    )
   ).toEqual(route);
 });
 

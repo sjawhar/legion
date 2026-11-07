@@ -31,6 +31,7 @@ export type IssueRoute =
   | { key: string; kind: "decisions" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
+  | { key: string; kind: "collaborators" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
   | ({ key: string; kind: "ask"; id: string } & BlockTarget)
   | ({ key: string; kind: "comment"; id: string } & BlockTarget)
@@ -89,19 +90,27 @@ export type IssueTab =
   | "children"
   | "artifacts"
   | "activity"
-  | "decisions";
+  | "decisions"
+  | "collaborators";
 
 /** The slug of an issue's `decisions.md`, the document its Decisions tab is a view of. */
 export const DECISIONS_DOCUMENT_SLUG = "decisions-md";
 
 /** The issue tabs whose whole route is the tab itself: no block, no slug, no id. Each one is
  *  parsed from the segment of its own name, built as `<issue>/<kind>`, shown as `<KEY> <kind>`
- *  and is the tab of its own name, so the chains below hold the five in one arm rather than one
- *  apiece and a sixth tab is this list. The spec, the conversation and the decisions stay out of
- *  it: a spec route carries a block, the conversation is written `log` in a reference and
+ *  and is the tab of its own name, so the chains below hold the six in one arm rather than one
+ *  apiece and a seventh tab is this list. The spec, the conversation and the decisions stay out
+ *  of it: a spec route carries a block, the conversation is written `log` in a reference and
  *  `conversation` in a path, and the Decisions tab is a view of the issue's `decisions.md`, which
  *  a reference names as that document. */
-const PLAIN_ISSUE_TABS = ["verification", "plan", "activity", "children", "artifacts"] as const;
+const PLAIN_ISSUE_TABS = [
+  "verification",
+  "plan",
+  "activity",
+  "children",
+  "artifacts",
+  "collaborators",
+] as const;
 
 type PlainIssueTab = (typeof PLAIN_ISSUE_TABS)[number];
 
