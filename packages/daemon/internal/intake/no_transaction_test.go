@@ -54,8 +54,12 @@ func TestAnEventTheDaemonCannotActOnIsAcknowledgedWithNoTransaction(t *testing.T
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
 	// A hang guard, not the subject: this row asserts exact counts of the fact lock's statements
-	// and of the permission reads, and JetStream delivers a message again once AckWait passes
-	// unacknowledged, which would take the lock and read the permission again and inflate them.
+	// and of the permission reads, so nothing of its own may be cut short and tried again.
+	// AckWait bounds each read the handler makes - whether the pull request is recorded
+	// (recordedPullRequest) and the review author's permission (resolveReviewPermission) - and
+	// consumerSpec's 200 ms is about the length of this handler's own work on a loaded runner, so
+	// the row sets a minute as a guard far above it. The window decides no redelivery here:
+	// intake reports the message in progress while the handler works (keepInProgress).
 	spec.AckWait = time.Minute
 	var mu sync.Mutex
 	var asked []string

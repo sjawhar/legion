@@ -33,16 +33,16 @@ import (
 // event of the backlog is prepared exactly once, and the consumer's delivered count equals the
 // backlog, so a redelivered copy shows even when the daemon dropped it as a duplicate and no
 // second preparation did. Neither of them fails reliably when the keeper is gone, and the reason
-// is the daemon's own client. It asks for one message at a time (jetstream.PullMaxMessages(1) in
-// consumeConsumer) and nats.go calls the handler inline, sending the next pull request only after
-// the handler returns (nats.go v1.53.1's (*pullConsumer).Consume, whose internal handler calls the
-// handler and only then checkPending, which sends the next pull request), so no request of the
-// daemon's is open while the fact is held. A redelivery can only reach the daemon through the
-// request that follows the handler, which races the acknowledgement the handler's end sent — the
-// server works the two on separate queues, o.ackMsgs and o.nextMsgReqs —
-// and the acknowledgement usually wins. A backlog does not settle that race for the held message:
-// measured with the keeper removed, the two of them caught it in 12 runs of 20, and the signal
-// assertion caught it in 20.
+// is the daemon's own client. It asks for one message at a time (jetstream.PullMaxMessages with
+// consumerFetchBatch in consumeConsumer) and nats.go calls the handler inline, sending the next
+// pull request only after the handler returns (nats.go v1.53.1's (*pullConsumer).Consume, whose
+// internal handler calls the handler and only then checkPending, which sends the next pull
+// request), so no request of the daemon's is open while the fact is held. A redelivery can only
+// reach the daemon through the request that follows the handler, which races the acknowledgement
+// the handler's end sent — the server works the two on separate queues, o.ackMsgs and
+// o.nextMsgReqs — and the acknowledgement usually wins. A backlog does not settle that race for
+// the held message: measured with the keeper removed, the two of them caught it in 12 runs of 20,
+// and the signal assertion caught it in 20.
 //
 // The second row is the control, and it is what says the hold is long enough for the server to
 // redeliver at all: the same backlog, the same window and the same hold, on a consumer that

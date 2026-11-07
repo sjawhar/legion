@@ -103,7 +103,8 @@ type Options struct {
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
 	// (logFailure), since the stop is what cut it short. A route reading on the request's own
 	// context reports through logRequestFailure instead, which answers to the request's own ending
-	// first and reaches this only while the request is still live. Nil is never.
+	// first and reaches this for every other failure: while the request is live, and once it has
+	// ended when the call failed with something that is not that ending. Nil is never.
 	Stopping context.Context
 	// Drained is done once the daemon's stop has drained the API, or the drain ran out, and ends
 	// every decision a route asked of a machine (decision). A decision in flight at the stop's
@@ -507,11 +508,11 @@ func (s *server) logFailure(msg string, args ...any) {
 // logRequestFailure logs the failure of a call a route made on the request's own context: at Error
 // while the request is live, and at Warn once the request's own context has ended and the call
 // failed with that very error. Warn, because the daemon cannot tell a client that merely went away
-// from its own sickness surfacing as that same cancellation - a full connection pool, a hung
-// connect and a held fact lock all reach a route as the request's context ending - so the failure
-// is neither an operator's error nor something to hide at the quietest level. Error is wrong here
-// because the boot row counts ERROR lines, and a client that hangs up would spend that count. The
-// daemon's own stop is the other way such a call is cut short, and logFailure owns that branch.
+// from its own sickness arriving as that same cancellation - a full connection pool, a hung
+// connect and a held fact lock all reach a route as the request's context ending - so the line is
+// not an error for an operator to act on, and not something to hide at the quietest level either:
+// Warn leaves it where a reader can filter it on their own terms. The daemon's own stop is the
+// other way such a call is cut short, and logFailure owns that branch.
 func (s *server) logRequestFailure(r *http.Request, err error, msg string, args ...any) {
 	args = append(args, "error", err)
 	// The request's own error, not any context error: an inner deadline that passes as the client

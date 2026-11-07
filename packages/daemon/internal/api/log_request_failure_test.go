@@ -40,6 +40,12 @@ func TestLogRequestFailureLogsWarnOnceTheRequestItselfHasEnded(t *testing.T) {
 			wantLevel:     "ERROR",
 		},
 		{
+			name:          "a request whose client went away, whose call failed with an inner deadline that passed as it did",
+			err:           context.DeadlineExceeded,
+			cancelRequest: true,
+			wantLevel:     "ERROR",
+		},
+		{
 			name:      "a live request whose call failed with something else's cancellation, on a running daemon",
 			err:       context.Canceled,
 			wantLevel: "ERROR",

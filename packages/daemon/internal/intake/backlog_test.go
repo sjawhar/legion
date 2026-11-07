@@ -3,38 +3,11 @@ package intake
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
-
-// heldFacts is a handler whose fact costs work, as every fact does — it takes the one fact lock
-// and writes records — but whose work the test ends rather than the clock: every Apply reports
-// that it has a fact in hand and then waits for release, so the test can read what the consumer
-// owes while a fact is still in hand instead of racing a sleep against the acknowledgement window.
-type heldFacts struct {
-	// started carries the name of the first fact the handler is handed, which the failure message
-	// below names. It is buffered for that one fact, and every later Apply leaves it as it is.
-	started chan string
-	release chan struct{}
-}
-
-func (h *heldFacts) Apply(_ context.Context, _ pgx.Tx, fact Fact) (Result, error) {
-	name := fmt.Sprintf("%T", fact)
-	if issue, ok := fact.(DispatchIssue); ok {
-		name = issue.Key
-	}
-	select {
-	case h.started <- name:
-	default:
-	}
-	<-h.release
-	return Result{}, nil
-}
 
 // A consumer working a backlog takes each message's acknowledgement window for that message's own
 // work. JetStream starts that window when it delivers a message, not when the consumer's loop
@@ -44,29 +17,26 @@ func (h *heldFacts) Apply(_ context.Context, _ pgx.Tx, fact Fact) (Result, error
 // the Dispatch read an unrecorded issue's event makes — and takes the fact lock again before it is
 // found already processed. That is work a consumer that is already behind pays instead of draining.
 //
-// So this holds the fact handler on the first event of a backlog of twelve and, while it is held,
-// reads what JetStream says the consumer owes an acknowledgement for: a consumer that fetches
-// consumerFetchBatch messages owes no more than that however long a fact takes, and nothing it
-// holds can outlive its window behind another message's work. That held read is what guards the
-// fetch batch; the preparation count is not the same statement counted at the other end, since
-// once the handler is released the facts finish in milliseconds and a larger batch would pass it.
-// Every event prepared exactly once says only that nothing was redelivered or applied twice over
-// the run.
+// What this row guards, and the only thing it guards, is consumerFetchBatch: it holds the fact
+// handler on the first event of a backlog of twelve and, while that fact is in hand, reads what
+// JetStream says the consumer owes an acknowledgement for. A consumer that fetches
+// consumerFetchBatch messages owes no more than that however long a fact takes, so nothing it
+// holds can spend its window behind another message's work.
+//
+// What becomes of a held backlog afterwards — every event delivered once and prepared once — is
+// TestAFactHeldPastItsAcknowledgementWindowIsDeliveredOnceAndPreparedOnce's claim, and counting it
+// here as well would say nothing about the fetch batch: once the handler is released the facts
+// finish in milliseconds, and a larger batch would pass such a count.
 func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *testing.T) {
 	pool := migratedPool(t)
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	// A hang guard, not the subject: a hold longer than this window has the held fact delivered
-	// again and prepared twice, which is what the preparation count below reads as a fault.
+	// A hang guard, not the subject: AckWait bounds each read a handling of these events makes
+	// (prepareRepository), and consumerSpec's 200 ms is about the length of such work on a loaded
+	// runner, so a minute is far above it and cuts nothing this row does. The window decides no
+	// redelivery either way: intake reports a message in progress for as long as its handler runs
+	// (keepInProgress), so the held fact below stays this consumer's however long it is held.
 	spec.AckWait = time.Minute
-	var mu sync.Mutex
-	prepared := map[string]int{}
-	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) (DispatchIssue, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		prepared[issue.Key]++
-		return issue, nil
-	}
 	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
@@ -79,22 +49,16 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 				`"payload":{"key":%q,"status":"backlog","title":"a backlog event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, i+1, key, key)))
 	}
 
-	facts := &heldFacts{started: make(chan string, 1), release: make(chan struct{})}
-	defer runConsumers(t, consumers, facts)()
-	// The handler is released before the consumers are stopped, whatever ends the test: a stop
-	// waits for Run to return, and Run cannot return while a handler of its own holds a fact.
-	release := sync.OnceFunc(func() { close(facts.release) })
-	defer release()
+	held := newHeldOnce()
+	defer runConsumers(t, consumers, handlerFunc(func(ctx context.Context, _ pgx.Tx, _ Fact) (Result, error) {
+		held.hold(ctx)
+		return Result{}, nil
+	}))()
+	// releaseAfter returns once the backlog's first fact is in hand, which is when the read below
+	// is the read this row is for. Its timer is only a backstop: the stop deferred above ends the
+	// handling, and with it the hold, as soon as the read has been made.
+	held.releaseAfter(t, spec.AckWait)
 
-	var held string
-	testwait.Eventually(t, "the handler holding the backlog's first fact", func() bool {
-		select {
-		case held = <-facts.started:
-			return true
-		default:
-			return false
-		}
-	})
 	item, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
 	if err != nil {
 		t.Fatalf("read the Dispatch consumer: %v", err)
@@ -107,23 +71,7 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 	// written in terms of the constant it guards - raising the constant would raise this bar with
 	// it and the row would pass whatever the library then holds.
 	if info.NumAckPending > 1 {
-		t.Fatalf("the Dispatch consumer owes an acknowledgement for %d messages while the handler holds %s, want at most the one it fetches: the rest spend their window queued",
-			info.NumAckPending, held)
-	}
-
-	release()
-	testwait.Eventually(t, "every event of the backlog prepared", func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(prepared) == backlog
-	})
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
-
-	mu.Lock()
-	defer mu.Unlock()
-	for key, count := range prepared {
-		if count != 1 {
-			t.Errorf("%s prepared %d times, want once: a redelivery prepared it again, so the consumer held it past its acknowledgement window", key, count)
-		}
+		t.Fatalf("the Dispatch consumer owes an acknowledgement for %d messages while the handler holds the backlog's first fact, want at most the one it fetches: the rest spend their window queued behind that work",
+			info.NumAckPending)
 	}
 }
