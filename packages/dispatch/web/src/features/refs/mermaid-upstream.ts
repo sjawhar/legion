@@ -66,9 +66,10 @@ const COLOR_SLOTS = 12;
  *  white, where `LINE_ON_PAGE` reads at 4.76:1. */
 const MARK_FILL_LAST = "#ffffff";
 
-/** The seven keys mermaid takes a CSS custom property in, bound to Dispatch's own properties. The
- *  page defines each one per colour scheme (`styles.css`), and a custom property inherits into the
- *  open shadow root the diagram is mounted in, which is how it reaches the drawing. */
+/** The keys mermaid takes a CSS custom property in, bound to Dispatch's own properties: seven of
+ *  its own and wardley's nested one. The page defines each property per colour scheme
+ *  (`styles.css`), and a custom property inherits into the open shadow root the diagram is
+ *  mounted in, which is how it reaches the drawing. */
 const PAGE_PALETTE = {
   // Text with the page behind it: a diagram's labels outside any mark, the pie's title and
   // legend. `slate-900` light, `slate-100` dark, the page's own text colours.
@@ -88,6 +89,14 @@ const PAGE_PALETTE = {
   // page's custom properties do not resolve in the worker), so the boxes mermaid lays out hold
   // the text the page paints.
   fontSize: "var(--mermaid-font-size)",
+  // wardley paints its axis labels, its stage labels, its title and its notes with
+  // `themeVariables.wardley?.axisTextColor ?? themeVariables.primaryTextColor`
+  // (`wardleyDiagram-*.mjs`), and that fallback is `LABEL_ON_MARK`, the near-white a label on a
+  // mark carries. These labels have the transparent canvas behind them rather than a mark, so
+  // the fallback leaves them invisible on the light page; they are text on the page like any
+  // other, and read through the same property as `textColor`. mermaid passes the value straight
+  // to a `fill` attribute, deriving and fading nothing from it, so a custom property holds here.
+  wardley: { axisTextColor: "var(--mermaid-text-color)" },
 };
 
 /** The colours that cannot follow the reader's scheme, and so are literals measured against both

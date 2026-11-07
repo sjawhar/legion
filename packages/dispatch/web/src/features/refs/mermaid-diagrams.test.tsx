@@ -12,6 +12,7 @@ import {
   requestMermaidDrawing,
   resetMermaidDiagrams,
 } from "./mermaid-diagrams";
+import { installDomShim } from "./mermaid-dom-shim";
 import {
   answerMermaidRequest,
   type MermaidReply,
@@ -24,17 +25,48 @@ function withQueries(children: ReactNode): ReactNode {
 }
 
 /**
+ * A source beautiful-mermaid refuses falls through to Mermaid (`mermaid-render.worker.ts`), and
+ * loading Mermaid installs the worker's DOM shim on the globals of whatever thread it runs on
+ * (`mermaid-dom-shim.ts`): in a worker those are the worker's own, and here they are this
+ * process's happy-dom ones, which every row renders into. So the shim is installed once here,
+ * before any row, and the page's own globals are put back before each row from the descriptors
+ * taken above the install; `installDomShim` is idempotent, so the fall-through installs nothing
+ * over them again. Without this the first row whose source falls through would leave every row
+ * after it rendering into linkedom's document.
+ */
+const pageGlobals = new Map(
+  Object.getOwnPropertyNames(globalThis).map(
+    (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const
+  )
+);
+const shimGlobals = installDomShim().globalsDefined;
+
+function restorePageGlobals(): void {
+  for (const name of shimGlobals) {
+    const page = pageGlobals.get(name);
+    if (page === undefined) Reflect.deleteProperty(globalThis, name);
+    else Object.defineProperty(globalThis, name, page);
+  }
+}
+
+restorePageGlobals();
+
+/**
  * Stands in for the page's `Worker`, so a test decides what the worker answers and when. Like the
  * real one it posts `{ ready: true }` on a later task once started, `readyDelayMs` after it (or,
  * while `startFails` is set, fires `error` as a worker whose module cannot load does), then
  * answers each request on a later task with `answer`'s reply: the worker module's own
  * `answerMermaidRequest` by default, run on the test's thread; a reply of `undefined` never
- * arrives, as from a worker stuck in a layout. `sent` records each request's source as it is
- * posted. A terminated one posts nothing more.
+ * arrives, as from a worker stuck in a layout. An answer may be a promise, as the worker module's
+ * own is. Before each it posts the job's `drawing` phase, which is the one phase the real worker
+ * posts for a source beautiful-mermaid draws, and which arms the page's render bound; without it
+ * every source here would sit under the renderer's load bound instead. `sent` records each
+ * request's source as it is posted. A terminated one posts nothing more.
  */
 class FakeWorker {
   static created: FakeWorker[] = [];
-  static answer: (request: MermaidRequest) => MermaidReply | undefined = answerMermaidRequest;
+  static answer: (request: MermaidRequest) => MermaidReply | undefined | Promise<MermaidReply> =
+    answerMermaidRequest;
   static startFails = false;
   static readyDelayMs = 0;
   static sent: string[] = [];
@@ -60,8 +92,9 @@ class FakeWorker {
 
   postMessage(request: MermaidRequest): void {
     FakeWorker.sent.push(request.source);
-    setTimeout(() => {
-      const reply = FakeWorker.answer(request);
+    setTimeout(async () => {
+      this.emit("message", { data: { id: request.id, phase: "drawing" } });
+      const reply = await FakeWorker.answer(request);
       if (reply !== undefined) this.emit("message", { data: reply });
     }, 0);
   }
@@ -81,15 +114,16 @@ class FakeWorker {
   }
 }
 
-// The worker's renderer runs on the test's thread here, under happy-dom, where ELK, which lays out
-// flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge is refused in
-// validation, before any layout.
+// The worker's renderers run on the test's thread here, under happy-dom, where ELK, which lays
+// out flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge, which
+// beautiful-mermaid refuses in validation, falls through to Mermaid's own parser.
 describe("Mermaid diagrams", () => {
   const pageWorker = globalThis.Worker;
 
   // The worker, the drawn-source cache and a failure are module state that outlives every render,
   // so each case starts from a page that has started and drawn nothing.
   beforeEach(() => {
+    restorePageGlobals();
     FakeWorker.created = [];
     FakeWorker.answer = answerMermaidRequest;
     FakeWorker.startFails = false;
@@ -370,6 +404,7 @@ describe("Mermaid diagrams", () => {
     FakeWorker.answer = ({ id }) => ({
       id,
       markup: '<svg xmlns="http://www.w3.org/2000/svg"><text>From the worker</text></svg>',
+      renderer: "beautiful-mermaid",
     });
     const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Hi")} />);
     try {
@@ -505,7 +540,8 @@ describe("Mermaid diagrams", () => {
       expect(sent).toHaveLength(1);
       expect(figuresIn(view.container)).toHaveLength(0);
 
-      for (const listener of listeners) listener({ data: answerMermaidRequest(sent[0]) });
+      const drawn = await answerMermaidRequest(sent[0]);
+      for (const listener of listeners) listener({ data: drawn });
       await waitFor(() =>
         expect(diagramIn(figuresIn(view.container)[0] ?? view.container)?.textContent).toContain(
           "Streamed"

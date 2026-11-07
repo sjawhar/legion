@@ -35,13 +35,20 @@ const characterReferenceDecoder = createRequire(
 const vite = packageRoot("vite", fileURLToPath(new URL(".", import.meta.url)));
 /**
  * The code the build emits from no source file it records: Vite's own helpers (module preload,
- * and the CommonJS interop of the @rollup/plugin-commonjs build Vite 5 carries inside it), and
- * the wrappers that interop puts around a CommonJS module, whose own file the build records.
+ * the stand-in for an optional peer dependency that is not installed, and the CommonJS interop
+ * of the @rollup/plugin-commonjs build Vite 5 carries inside it), and the wrappers that interop
+ * puts around a CommonJS module, whose own file the build records.
  */
 const GENERATED_CODE: GeneratedCode[] = [
   viteRuntimeGeneratedCode(vite),
   { id: /^\0(commonjsHelpers\.js|commonjs-dynamic-modules)$/, packages: [vite] },
   { id: /^\0\/.*\?commonjs-(module|exports)$/, packages: [] },
+  // linkedom, which the diagram worker gives upstream Mermaid a DOM with, declares the native
+  // `canvas` package as an optional peer dependency for its own `<canvas>`. Nothing installs it
+  // and nothing needs it: the shim answers `getContext` from the worker's `OffscreenCanvas`
+  // (`features/refs/mermaid-dom-shim.ts`). Vite emits a module of its own that throws if the
+  // import is ever reached, so the code is Vite's.
+  { id: /^\0?__vite-optional-peer-dep:/, packages: [vite] },
 ];
 
 /**
