@@ -50,15 +50,26 @@ func joinedNotices(t *testing.T, pool *pgxpool.Pool, child string) []string {
 	return reasons
 }
 
-// assertJoinedAndPlanning asserts child left admission's queue for tree's run: recorded in tree at
-// generation, planning under the open gate with its planner's start queued at that generation, the
-// tree's architect told once, and — read again by a later admission pass with a slot to spare —
-// no slot, no tree lifecycle and no architect of its own.
+// assertJoinedAndPlanning asserts child left admission's queue for tree's run: recorded in tree
+// at generation and, once an admission pass with a slot to spare has read it, planning there on
+// a slot of its own with one planner start queued at that generation, its tree's architect told
+// that it joined and that it started, no tree lifecycle and no architect of its own.
+//
+// The child waits for a slot where it used to start the moment it joined: the cap counts the
+// issues at work now, so a child of a running tree takes a slot of its own for its first phase
+// and stands in the waiting line until one is free. When it starts therefore depends on what
+// else that tree is doing — a root whose gate has opened holds no slot of its own, so its tree's
+// one slot may fall to this child at once — and the assertion is about where it ends up, which
+// is the tree it joined and never a tree of its own.
 func assertJoinedAndPlanning(t *testing.T, pool *pgxpool.Pool, child, tree string, generation uint64) {
 	t.Helper()
-	got := issue(t, pool, child)
-	if got.Tree != tree || got.Generation != generation || got.Phase != phase.Planning {
-		t.Fatalf("%s = %#v, want it planning in the tree of %s at generation %d", child, got, tree, generation)
+	if got := issue(t, pool, child); got.Tree != tree || got.Generation != generation {
+		t.Fatalf("%s = %#v, want it in the tree of %s at generation %d", child, got, tree, generation)
+	}
+	spare := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	applyFact(t, pool, spare, "tick-after-"+child, intake.ControllerTick{})
+	if got := issue(t, pool, child); got.Tree != tree || got.Generation != generation || got.Phase != phase.Planning {
+		t.Fatalf("%s at its slot = %#v, want it planning in the tree of %s at generation %d", child, got, tree, generation)
 	}
 	planners := 0
 	for _, effect := range effects(t, pool) {
@@ -72,17 +83,17 @@ func assertJoinedAndPlanning(t *testing.T, pool *pgxpool.Pool, child, tree strin
 	if planners != 1 {
 		t.Fatalf("%s has %d planner starts queued, want one", child, planners)
 	}
-	if want := []string{child + " joined the tree of " + tree + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, child), want) {
+	if want := []string{child + " joined the tree of " + tree + " from the admission queue",
+		child + " starts planning under " + tree + ": it reached the front of the waiting line and took an admission slot"}; !reflect.DeepEqual(joinedNotices(t, pool, child), want) {
 		t.Fatalf("child-status notices of %s = %q, want %q", child, joinedNotices(t, pool, child), want)
 	}
 	assertWaiting(t, pool, nil)
-
-	spare := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	applyFact(t, pool, spare, "tick-after-"+child, intake.ControllerTick{})
+	held := false
 	for _, slot := range slots(t, pool) {
-		if slot.Issue == child {
-			t.Fatalf("%s holds slot %#v, want none: it runs in the tree of %s", child, slot, tree)
-		}
+		held = held || slot.Issue == child
+	}
+	if !held {
+		t.Fatalf("%s holds no slot, want one of its own: it is an issue at work in the tree of %s", child, tree)
 	}
 	var lifecycles int
 	if err := pool.QueryRow(context.Background(), `select count(*) from tree_lifecycles where tree = $1`, child).Scan(&lifecycles); err != nil {
@@ -100,9 +111,9 @@ func assertJoinedAndPlanning(t *testing.T, pool *pgxpool.Pool, child, tree strin
 
 // A labelled root waiting in admission's queue that a person makes a child of a running tree
 // leaves the queue on that event: it joins the tree at its next generation and, the tree's gate
-// open, starts planning there, as any todo child of the tree does. It never takes a slot or an
-// architect of its own, even once a slot stands free.
-func TestAQueuedRootReparentedUnderALiveTreeJoinsItAndTakesNoSlot(t *testing.T) {
+// open, waits there for a slot of its own and starts planning at it, as any todo child of the
+// tree does. It never takes a tree or an architect of its own.
+func TestAQueuedRootReparentedUnderALiveTreeJoinsItAndTakesNoTreeOfItsOwn(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, child = "LEGION-168", "LEGION-214"
@@ -186,7 +197,9 @@ func TestACarriedOrphanUnderAReopenedOldRootStillGetsItsSlot(t *testing.T) {
 	const old, child = "LEGION-100", "LEGION-214"
 	seedOpenTree(t, pool, old)
 	carried := queuedRoot(child, old, "B", 2)
-	carried.Phase, carried.Generation = phase.Planning, 2
+	// An orphan carried out of its old tree records that tree (admit's readmit): that is what
+	// says the run it carries was the old tree's and its own tree has still to be opened.
+	carried.Phase, carried.Generation, carried.HandedOverFrom = phase.Planning, 2, old
 	putIssue(t, pool, carried)
 	inTx(t, pool, func(tx pgx.Tx) {
 		if err := record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: child, Generation: 2}); err != nil {
@@ -205,7 +218,7 @@ func TestACarriedOrphanUnderAReopenedOldRootStillGetsItsSlot(t *testing.T) {
 // generation, and the tree's architect is told each joined its own tree.
 func TestNestedQueuedRootsJoinTheLiveTreeAtTheTop(t *testing.T) {
 	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, middle, leaf = "LEGION-168", "LEGION-214", "LEGION-213"
 	seedOpenTree(t, pool, tree)
 	putIssue(t, pool, queuedRoot(middle, tree, "B", 2))
@@ -217,7 +230,9 @@ func TestNestedQueuedRootsJoinTheLiveTreeAtTheTop(t *testing.T) {
 		if got.Tree != tree || got.Generation != 2 || got.Phase != phase.Planning {
 			t.Fatalf("%s = %#v, want it planning in the tree of %s at generation 2", key, got, tree)
 		}
-		if want := []string{key + " joined the tree of " + tree + " from the admission queue"}; !reflect.DeepEqual(joinedNotices(t, pool, key), want) {
+		want := []string{key + " joined the tree of " + tree + " from the admission queue",
+			key + " starts planning under " + tree + ": it reached the front of the waiting line and took an admission slot"}
+		if !reflect.DeepEqual(joinedNotices(t, pool, key), want) {
 			t.Fatalf("child-status notices of %s = %q, want %q", key, joinedNotices(t, pool, key), want)
 		}
 	}
@@ -225,16 +240,20 @@ func TestNestedQueuedRootsJoinTheLiveTreeAtTheTop(t *testing.T) {
 		t.Fatalf("%s = %#v, want its parent kept as %s", leaf, got, middle)
 	}
 	assertWaiting(t, pool, nil)
-	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	// The tree's own root takes the first slot — its gate has opened, so its own first phase is
+	// work coming back — and the two it took in follow by their rank.
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow},
+		{Issue: middle, Index: 1, AdmittedAt: fixedNow}, {Issue: leaf, Index: 2, AdmittedAt: fixedNow}})
 }
 
 // A queued root that waits on an unfinished Dispatch issue still joins the live tree its recorded
 // parent runs in, and the blocked-by rule then holds it there like any child: it is recorded in
 // the tree at its next generation, admitted and not planning, though the tree's gate is open, and
-// takes no slot. The close of its last blocker starts it.
+// it is in no waiting line and takes no slot, with one standing free. The close of its last
+// blocker puts it in the line, where it takes that slot and starts.
 func TestAQueuedRootThatWaitsOnAnUnfinishedIssueJoinsTheLiveTreeAndIsHeldThere(t *testing.T) {
 	pool := migratedPool(t)
-	admission := quiet(t, 1)
+	admission := quiet(t, 2)
 	const tree, root, blocker = "LEGION-168", "LEGION-214", "LEGION-400"
 	seedOpenTree(t, pool, tree)
 	putIssue(t, pool, queuedRoot(root, tree, "B", 2))
@@ -256,6 +275,7 @@ func TestAQueuedRootThatWaitsOnAnUnfinishedIssueJoinsTheLiveTreeAndIsHeldThere(t
 	if got := issue(t, pool, root); got.Tree != tree || got.Phase != phase.Planning {
 		t.Fatalf("%s = %#v once %s is done, want it planning in the tree of %s", root, got, blocker, tree)
 	}
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}, {Issue: root, Index: 1, AdmittedAt: fixedNow}})
 }
 
 // A child that left its tree as a root of its own stays its own tree when a person sets its old
@@ -436,7 +456,9 @@ func TestAnAncestryHoldStandsWhileAQueuedRootOnItsChainIsAdoptedIntoTheLiveTree(
 	}
 	applyFact(t, pool, admission, "tick", intake.ControllerTick{})
 	assertWaiting(t, pool, nil)
-	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	// The tree's own root takes a slot for its first phase, and the ancestor it took in takes
+	// the next; the child held under that ancestor's chain takes none.
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}, {Issue: ancestor, Index: 1, AdmittedAt: fixedNow}})
 	if starts := architectStarts(t, pool, child); starts != 0 {
 		t.Fatalf("%s has %d architect starts queued, want none while %s runs with %s in it", child, starts, tree, ancestor)
 	}
@@ -497,7 +519,7 @@ func TestARootHeldPastAParkedRootOnItsChainQueuesOnceTheTreeLingers(t *testing.T
 // root, the child joins that tree with it.
 func TestAChildOfAnAncestryHeldRootWaitsWithIt(t *testing.T) {
 	pool := migratedPool(t)
-	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	const tree, parent, held, child = "LEGION-168", "LEGION-169", "LEGION-214", "LEGION-300"
 	seedOpenTree(t, pool, tree)
 
@@ -525,7 +547,10 @@ func TestAChildOfAnAncestryHeldRootWaitsWithIt(t *testing.T) {
 		}
 	}
 	assertWaiting(t, pool, nil)
-	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow}})
+	// Both joined the tree and took slots of their own, behind the tree's root: the child ranks
+	// above the root it was held under, so it is the first of the two.
+	assertSlots(t, pool, []record.Slot{{Issue: tree, Index: 0, AdmittedAt: fixedNow},
+		{Issue: child, Index: 1, AdmittedAt: fixedNow}, {Issue: held, Index: 2, AdmittedAt: fixedNow}})
 	if starts := architectStarts(t, pool, child); starts != 0 {
 		t.Fatalf("%s has %d architect starts queued, want none: it runs in the tree of %s", child, starts, tree)
 	}
@@ -550,7 +575,9 @@ func TestARootThatRanKeepsQueueingUnderAnUnreleasedChild(t *testing.T) {
 		}},
 		{name: "a carried orphan", seed: func(t *testing.T, pool *pgxpool.Pool) record.Issue {
 			carried := queuedRoot(root, "", "B", 1)
-			carried.Phase, carried.Generation = phase.Planning, 2
+			// A carried orphan records the tree it left, which is what says its own tree has
+			// still to be opened though it carries a run (admit's readmit).
+			carried.Phase, carried.Generation, carried.HandedOverFrom = phase.Planning, 2, "LEGION-700"
 			putIssue(t, pool, carried)
 			inTx(t, pool, func(tx pgx.Tx) {
 				if err := record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: root, Generation: 2}); err != nil {

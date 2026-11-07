@@ -46,6 +46,9 @@ export type SessionContext = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's managed `ctx.setTimeout`: the one-shot timer the extension arms through the
+   *  session (the heartbeat's extra call after a failed pass), cleared with it. */
+  readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
   /** The host's `ctx.isIdle()`: false while a turn runs. */
   readonly isIdle?: () => boolean;
   readonly ui: {

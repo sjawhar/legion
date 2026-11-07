@@ -1,6 +1,6 @@
 // packages/envoy/cmd/agent-secrets/pod.go
 //
-// A Kubernetes pod's own enrollment, the pod-side mirror of vm.go. A pod an operator launches by
+// A Kubernetes pod's own enrollment. A pod an operator launches by
 // hand holds no credential a person installed and has no agent-secrets-helper: what it has is the
 // projected ServiceAccount token its own kubelet mounts, which the broker verifies against the
 // cluster's OIDC issuer. So it logs in with that token at POST /v1/launcher-credentials/token for
@@ -8,10 +8,6 @@
 // proof. Nothing is stored but the session key and its enrollment id, the two files file mode
 // already reads (identity.go), so every later form — the exec form, request, self, renew — works
 // from AGENT_SECRETS_KEY_DIR unchanged.
-//
-// It differs from a VM's enrollment in three ways and no more: the token is read from the file the
-// pod's projection mounts rather than fetched from a metadata server, the runtime id is the pod's
-// own UID, and the enrollment's kind is `pod`.
 //
 // The token must be the pod's own projected token, not one `kubectl create token` mints: the
 // broker lets a pod's own machine login enrol that pod alone, and a login bound to no pod enrols
@@ -55,8 +51,7 @@ type podIdentity struct {
 }
 
 // runtimeID is the one string that names this pod at the broker: its enrollment's runtime_id. A
-// pod UID is unique across the cluster and across time, so it names one pod by itself — unlike a
-// VM's instance id, which needs its project and zone.
+// pod UID is unique across the cluster and across time, so it names one pod by itself.
 func (p podIdentity) runtimeID() string { return p.PodUID }
 
 // String names the pod in a refusal, so an operator reading the pod's log knows which pod the
@@ -149,7 +144,7 @@ func (c *client) CreatePodEnrollment(ctx context.Context, signer proofSigner, ru
 
 // cmdEnrollPod implements "enroll --pod --service <name> [--pod-token-file <file>] [--out <dir>]":
 // the whole of a pod's enrollment, from the projected token to the enrollment file the exec form
-// reads next. It is idempotent over one directory, as `enroll --vm` is: it keeps key.pem (a new
+// reads next. It is idempotent over one directory: it keeps key.pem (a new
 // key while the old enrollment is live would be refused ALREADY_ENROLLED), and when the broker
 // answers that this key's enrollment is already live — which it returns without extending the
 // lease — it renews that lease before it answers. Only the enrollment id reaches stdout; every
@@ -175,9 +170,7 @@ func cmdEnrollPod(service, tokenFile, out string, stdout, stderr io.Writer) int 
 	unlock, err := lockEnrollDir(filepath.Join(out, enrollLockFile))
 	if err != nil {
 		if errors.Is(err, errNoEnrollLock) {
-			// The sentinel's own text names a VM, since that is the mode that reaches it from a
-			// lane; this is the same platform fault told as a pod's.
-			fmt.Fprintf(stderr, "%s --pod: enroll --pod runs only on a Linux pod: this platform has no flock to serialize concurrent enrollments on\n", prefix)
+			fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
 			return exitUsageError
 		}
 		fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
@@ -238,7 +231,7 @@ func enrolPod(service, tokenFile, out, base, prefix string, stdout, stderr io.Wr
 	if alreadyLive {
 		// The broker gave back the enrollment this key already holds without extending its
 		// lease, so a pod that only ever re-runs enroll would let that lease lapse.
-		if _, err := c.RenewEnrollment(ctx, &fileSigner{key: key, enrollmentID: enrollmentID}, enrollmentID, "pod_token", token); err != nil {
+		if _, err := c.RenewEnrollment(ctx, &fileSigner{key: key, enrollmentID: enrollmentID}, enrollmentID, token); err != nil {
 			fmt.Fprintln(stderr, podRefusal(prefix, "renew the lease of the enrollment it already holds", identity, base, err))
 			return 1
 		}
@@ -268,3 +261,63 @@ func podRefusal(prefix, what string, identity podIdentity, base string, err erro
 	}
 	return fmt.Sprintf("%s --pod: this pod (%s) could not %s: %s", prefix, identity, what, refusalText(brokerSource(base), err))
 }
+
+// TokenLogin is POST /v1/launcher-credentials/token, the public route a service logs in at with
+// a token its own issuer signed: no proof, no person. It answers the launcher credential the
+// signed request object's key now holds.
+func (c *client) TokenLogin(ctx context.Context, token, request string) (string, error) {
+	body, err := json.Marshal(map[string]string{"token": token, "request": request})
+	if err != nil {
+		return "", err
+	}
+	raw, err := c.do(ctx, http.MethodPost, c.baseURL+"/v1/launcher-credentials/token", body, nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		CredentialID string `json:"credential_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("decode token login response: %w", err)
+	}
+	if result.CredentialID == "" {
+		return "", errors.New("the broker's token login answered no credential_id")
+	}
+	return result.CredentialID, nil
+}
+
+// enrollSessionKey is the session key in dir: the one already there, so re-running enroll on a dir
+// keeps the key whose enrollment the broker holds live, or a new one written exactly as keygen
+// writes it (PKCS8 PEM, 0600, in a 0700 directory, renamed into place).
+func enrollSessionKey(dir string) (*ecdsa.PrivateKey, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, keyFile)
+	if exists(path) {
+		return loadKey(path)
+	}
+	key, err := proof.NewKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+	pemBytes, err := encodeKeyPEM(key)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomic(path, pemBytes, 0o600); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// enrollLockFile is the lock a pod's self-enrollment is serialized on, in the key dir it writes.
+// A pod can run `enroll --pod` more than once over one directory, so two runs can overlap;
+// without the lock the second would log in again (moving the launcher credential the first is
+// still enrolling under) and the two would race over key.pem and enrollment.
+const enrollLockFile = "enroll.lock"
+
+// errNoEnrollLock is lockEnrollDir's answer on a platform with no flock, where no Kubernetes pod
+// of this cluster runs either: asking for --pod there is a usage error, not a failure of the
+// machine.
+var errNoEnrollLock = errors.New("enroll --pod runs only on a Linux pod: this platform has no flock to serialize concurrent enrollments on")

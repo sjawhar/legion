@@ -212,6 +212,14 @@ export interface RepoProject {
   /** The project's default repository: an issue with no repository of its own and none on its
    *  parent chain resolves to it. At most one mapping of a project is its default. */
   readonly default: boolean;
+  /** The full `owner/name` this repository is called today, null for one that was never
+   *  renamed. Dispatch holds both names of a renamed repository and canonicalises every
+   *  comparison through this field, so an issue recorded under the old name is held to a pull
+   *  request on the new one. `PUT /api/v1/settings/repo-projects/{owner}/{repo}` takes it:
+   *  absent or null leaves the stored pair alone, `""` clears it. Optional here because a
+   *  client written before the field existed builds this shape without it; Dispatch always
+   *  answers it. */
+  readonly renamed_to?: string | null;
   readonly created_by: Actor;
   readonly created_at: string;
 }
@@ -351,6 +359,54 @@ export interface IssueClaim {
   readonly at: string;
 }
 
+/**
+ * How long an issue claim is held for a holder the Envoy registry calls `unresponsive`: a
+ * session past the listener's live window but inside its gone horizon has missed heartbeats, not
+ * ended, and under box load that is ordinary. Dispatch refuses another agent's claim or release
+ * while the holder was last seen no longer ago than this, so a stalled session keeps the issue
+ * it is working and two sessions never write the same branch; a person still forces the claim
+ * (`force`), which is the escape this grace leaves open.
+ *
+ * Twenty minutes is four times the listener's live window (`ENVOY_SESSION_LIVE_WINDOW`, 5m) and
+ * well inside its gone horizon (`ENVOY_SESSION_GONE_HORIZON`, 1h), so a session that is merely
+ * slow keeps its work while a box that really lost one frees it long before the horizon.
+ * `scripts/gen-go.ts` emits it as `contracts.IssueClaimUnresponsiveGrace`, so the refusal the
+ * server writes and the wait a client predicts are one number.
+ */
+export const ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS = 20 * 60 * 1000;
+
+/**
+ * The state of the session holding an issue's claim, as an issue read reports it beside the
+ * claim: `live`, `unresponsive` (past the live window, inside the gone horizon - stalled, not
+ * gone, and still the holder), `gone` (past the horizon, or no registration at all), or
+ * `unknown` when the Envoy listener gave the read no list to judge it by.
+ */
+export type IssueClaimHolderState = "live" | "unresponsive" | "gone" | "unknown";
+
+/**
+ * What an issue read says about the session holding its claim. It is resolved on read from the
+ * server's copy of the listener's session list, at most 5 s old, stored in no table and never on
+ * an event payload - which is why it sits beside `claim` rather than inside it: `IssueClaim` is
+ * the payload of `issue.claimed` and `issue.released`, and a read-time state must not persist
+ * into one. A claim write judges the holder again, against the listener's authoritative
+ * per-session read, so the two can disagree by the age of that copy.
+ *
+ * All three are null when nobody holds the issue, and when a person does: a human holder has no
+ * session to be live or gone, and is released by a person alone.
+ */
+export interface IssueClaimLiveness {
+  readonly holder_state: IssueClaimHolderState | null;
+  /** RFC3339 timestamp of the holder's last registration; null when the read cannot say. */
+  readonly last_seen: string | null;
+  /**
+   * RFC3339 timestamp from which another agent may take or release the claim without `force`:
+   * the holder's `last_seen` plus `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` while it is unresponsive,
+   * the read's own time once the holder is gone, and null for a `live` holder, which no waiting
+   * frees, and for an `unknown` one, which this read cannot judge.
+   */
+  readonly takeable_at: string | null;
+}
+
 /** Done of total: the task items of a spec, or the direct children of an issue; `done` ≤ `total`. */
 export interface ProgressCount {
   readonly done: number;
@@ -418,20 +474,29 @@ export interface Issue {
  * Whether an issue's route reaches a running session right now: `live` when a live session
  * holds the role or the routed session is live, `no_holder` when nobody live holds the role (it
  * is unclaimed or its holder's session lapsed) or the session is not live, `unknown` when the
- * Envoy listener did not answer (never read as live).
+ * Envoy listener gave no list to judge it by (never read as live, nor as `no_holder`).
  */
 export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
+
+/**
+ * Why a route reads `unknown`: `refilling` when the Envoy listener answered that its agent list
+ * is refilling (it will be back in a moment, and a missing holder there says nothing), and
+ * `unreachable` when the listener is not configured, did not answer, or failed otherwise.
+ */
+export type IssueRouteStatusReason = "refilling" | "unreachable";
 
 /**
  * Every issue read (the detail, the list, the pinned list) and every ask read (`AskReach`, for
  * the ask's issue's route) resolves this from the server's copy of the listener's session list,
  * at most 5 s old. It is stored in no table and is never on an event payload, which is why it is
- * not a field of `Issue`. Both are null when there is no route.
+ * not a field of `Issue`. All three are null when there is no route.
  */
 export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
   /** The live session the route reaches; set only when `route_status` is `live`. */
   readonly route_holder: string | null;
+  /** Why the route could not be judged; set exactly when `route_status` is `unknown`. */
+  readonly route_status_reason: IssueRouteStatusReason | null;
 }
 
 /**
@@ -724,6 +789,8 @@ export interface ArtifactReview {
   readonly ask_id: string | null;
   readonly kind?: ArtifactReviewKind;
   readonly created_at: string;
+  readonly content_sha256: string | null;
+  readonly content_sha256_source: "insert" | "backfill" | null;
 }
 
 /** The document's approval as of its latest version: `draft` has never been reviewed or
@@ -747,6 +814,8 @@ export interface ArtifactApproval {
   readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
   readonly requested_by?: Actor;
   /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
    *  version moved it past the one its agent last handed to the human, or a reply left it with the
@@ -831,6 +900,9 @@ export interface ArtifactBlock {
   /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
    *  server older than the listing. */
   readonly table?: BlockTable;
+  /** Where meaning search stands on the block (`BlockEmbedding`). Absent from a Dispatch older
+   *  than block windows. */
+  readonly embedding?: BlockEmbedding;
 }
 
 /** One attribute a typed block carries: the name its type declares it under, the value the
@@ -958,6 +1030,7 @@ export interface Version {
    *  Absent on a document version from a server that predates it. */
   readonly size?: number;
   readonly mime?: string;
+  /** The stored bytes' hash; present on a document version read as well as a file version. */
   readonly sha256?: string;
 }
 
@@ -1389,6 +1462,26 @@ export interface ThreadLoginsPayload {
   readonly thread_logins?: string[];
 }
 
+/** What of an item an event carries, on the `comment.*`, `suggestion.*` and `message.*` payloads.
+ *
+ *  `body_truncated` is that `body` is the first part of the item's body and not all of it. A
+ *  comment, comment edit, message or broadcast body is bounded block by block
+ *  (`DISPATCH_BLOCK_UNITS` on each block, `DISPATCH_ITEM_BLOCKS` on how many it holds), so one
+ *  body can be far longer than the `DISPATCH_EVENT_BODY_MAX` UTF-16 units an event carries, and
+ *  the rest is one read away: `GET /api/v1/comments/{id}` or `GET /api/v1/messages/{id}`. Envoy's
+ *  webhook normalizer writes a field of the same name, a string (`"true"`), on the payload of a
+ *  GitHub review whose body it cut; that is another payload and another field, and a reader must
+ *  not take one for the other.
+ *
+ *  `payload_omitted` is that the message bus refused this event whole, so Dispatch's outbox
+ *  published a stand-in in its place: the payload holds the original's top-level fields that are
+ *  short enough to send and nothing else, so `body` and every other long field is absent. The
+ *  item itself answers the rest. */
+export interface CarriedBodyPayload {
+  readonly body_truncated?: boolean;
+  readonly payload_omitted?: boolean;
+}
+
 /** What an `issue.created`, `issue.updated` or `issue.closed` write changed, read in its own
  *  transaction. Each field is absent from every other `issue.*` type and from an event written
  *  before the fields existed, which a reader takes as "anything may have changed". */
@@ -1502,6 +1595,11 @@ export interface Comment extends AnchorPosition {
   readonly body: string;
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
+  /** The comment this reply answers: the one the write named, where `reply_to` is the head of
+   *  the thread the write climbed to. The two are the same on a reply to a thread's root; a
+   *  reply that names an ask alone carries neither, as no comment that is not a reply does.
+   *  Absent from a Dispatch older than the field. A conversation nests a reply under it. */
+  readonly answers?: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
@@ -1560,7 +1658,16 @@ export interface ItemBlock {
   readonly to: number;
   readonly changed_revision?: number;
   readonly changed_at?: string;
+  /** Where meaning search stands on the block. Absent on a hit from a Dispatch older than block
+   *  windows. */
+  readonly embedding?: BlockEmbedding;
 }
+
+/** Where meaning search stands on one block: every window of blocks covering it is embedded at
+ *  the text it holds now, one of them is still waiting for its vector, or no window covers the
+ *  block at all - a block the indexer leaves out of every window, and every block of an item
+ *  whose windows are not written yet. */
+export type BlockEmbedding = "embedded" | "pending" | "none";
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
  *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
@@ -1599,6 +1706,7 @@ export interface AcceptSuggestionResponse extends Comment {
  */
 export interface CommentEventPayload
   extends Omit<Comment, "mentions" | "deliveries">,
+    CarriedBodyPayload,
     ReferenceChangesPayload,
     ThreadLoginsPayload {
   readonly mentions?: CommentMention[];
@@ -1708,6 +1816,15 @@ export const DISPATCH_LOGIN_HEADER = "Dispatch-Login";
 /** The code of the `409` for a write whose `DISPATCH_LOGIN_HEADER` names a login that is not its
  *  caller's: nothing ran. The page drops every write that login pressed. */
 export const DISPATCH_LOGIN_CHANGED = "LOGIN_CHANGED";
+
+/**
+ * The code of the `403` for a write by an access token the secrets broker issued that names a
+ * session and a service but no person: the machine holding it has signed nobody in, so Dispatch
+ * has nobody to record the write under. Its reads are unaffected. The message names
+ * `agent-secrets login`, the one command that makes the write possible, because whoever reads
+ * the refusal is whoever must run it.
+ */
+export const DISPATCH_SIGN_IN_REQUIRED = "SIGN_IN_REQUIRED";
 
 /** The codes of a write Dispatch made and has no answer to give for: `409 KEY_COMMITTED`, or a
  *  replayed 2xx reading `ANSWER_NOT_KEPT`. A client treats either as landed. */
@@ -1931,7 +2048,11 @@ export interface ChangedReference {
 /** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
  *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
  *  thread, so its messages carry none. */
-export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
+export interface MessageEventPayload
+  extends Message,
+    CarriedBodyPayload,
+    ReferenceChangesPayload,
+    ThreadLoginsPayload {
   /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
    *  empty otherwise. */
   readonly reply_body?: string;
@@ -2016,6 +2137,12 @@ export interface SearchResult {
   };
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
+  /** The block of the hit whose own text matched: a block of the document, of the comment's or
+   *  the message's body, or the part of an ask's question, options or answer. Meaning search
+   *  reads windows of neighbouring blocks and names the covered block that ranks highest for the
+   *  query, so this is absent on an issue hit, which has no blocks, on a hit only the keyword
+   *  list found, and on every hit from a Dispatch older than block windows. */
+  readonly block_id?: string;
   readonly snippet: string;
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
@@ -2083,26 +2210,46 @@ export interface SearchCoverageCounts {
   readonly oldest_lacking_seconds: number | null;
 }
 
-/** `SearchCoverage`'s counts for each kind meaning search ranks. Mirrors
+/** `SearchCoverage`'s counts for each kind meaning search ranks: the issue, whose vector is its
+ * title and the head of its spec, and one kind for each kind of window of blocks - a document's,
+ * a comment's, a message's and an ask's parts (INFRA-370) - whose items are the windows
+ * themselves, not the documents or the comments they belong to. Mirrors
  * `model.SearchCoverageKinds`. */
 export interface SearchCoverageKinds {
   readonly issue: SearchCoverageCounts;
-  readonly document: SearchCoverageCounts;
-  readonly comment: SearchCoverageCounts;
-  readonly ask: SearchCoverageCounts;
-  readonly message: SearchCoverageCounts;
+  readonly document_block: SearchCoverageCounts;
+  readonly comment_block: SearchCoverageCounts;
+  readonly message_block: SearchCoverageCounts;
+  readonly ask_part: SearchCoverageCounts;
 }
 
 /** `GET /api/v1/search/coverage`: how much of what meaning search ranks has a current vector from
  * the configured embedder (INFRA-393). `identity` is the value `embeddings.model` records and
  * search compares, `place` and `model` are read from it; all three are null when no embedder is
- * configured, and then nothing is current. Mirrors `model.SearchCoverage`. */
+ * configured, and then nothing is current. `dev` is the local harness's own embedder, which no
+ * deployment runs. Mirrors `model.SearchCoverage`. */
 export interface SearchCoverage {
   readonly identity: string | null;
-  readonly place: "bedrock" | "azure" | null;
+  readonly place: "bedrock" | "azure" | "dev" | null;
   readonly model: string | null;
   readonly total: SearchCoverageCounts;
   readonly kinds: SearchCoverageKinds;
+}
+
+/** `GET /api/v1/limits`: the bounds the Dispatch server holds a write to, each from the constant
+ * that enforces it, which `dispatch limits` prints. `block_units` and `ask_units` are UTF-16 code
+ * units, `event_body_units` the units of a body an event carries whole; `item_blocks` is the most
+ * blocks one body may hold and `ask_options` the most options one ask may have; `request_bytes`,
+ * `document_bytes` and `handoff_bytes` are UTF-8 bytes. Mirrors `model.DispatchLimits`. */
+export interface DispatchLimits {
+  readonly block_units: number;
+  readonly item_blocks: number;
+  readonly ask_options: number;
+  readonly ask_units: number;
+  readonly event_body_units: number;
+  readonly request_bytes: number;
+  readonly document_bytes: number;
+  readonly handoff_bytes: number;
 }
 
 export interface DuplicateCandidate {
@@ -2226,6 +2373,14 @@ export interface RelatedChecksReport {
   readonly total_ms: RelatedCheckTiming;
 }
 
+/**
+ * The registry's own answer for a session it still holds a record of: `live` within the
+ * listener's live window, `unresponsive` past it and inside the gone horizon. These are the two
+ * a list can carry; `gone` is a session no list names. `IssueClaimHolderState` adds `unknown`,
+ * which is a read's own answer about a holder rather than anything the registry reports.
+ */
+export type AgentSessionState = "live" | "unresponsive";
+
 export interface Agent {
   readonly session_id: string;
   readonly title: string;
@@ -2233,7 +2388,8 @@ export interface Agent {
   readonly machine_id: string;
   /**
    * The session's real machine, as its own Envoy plugin reported it (envoy-client's
-   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * machineID(): `ENVOY_MACHINE_ID`, then an agent box's `AGENTBOX_HOST`, falling back to the
+   * kernel hostname). `machine_id` is
    * always the listener that registered the session and owns its delivery, which may be a
    * single shared listener for every machine; this is the one to show and filter on. The
    * listener falls back to `machine_id` itself for a session whose plugin predates this field,
@@ -2247,6 +2403,15 @@ export interface Agent {
    */
   readonly capabilities: string[];
   readonly last_seen: number;
+  /**
+   * The state the listener's own record puts the session in when it answered: `live`, or
+   * `unresponsive` for one past the live window that has not reached the gone horizon - it has
+   * missed heartbeats, it has not ended, and it keeps its roles and claims, so the list carries
+   * it rather than dropping it (dispatch://INFRA-392). A `gone` session is listed by nobody.
+   * Absent from a Dispatch server that predates the field, and a reader then has only the
+   * membership it always had: every listed session is running.
+   */
+  readonly state?: AgentSessionState;
   readonly open_asks: number;
   readonly last_activity: string | null;
 }
@@ -2322,6 +2487,7 @@ export type GraphEdgeKind =
   | "anchored_to"
   | "owned_by"
   | "replies_to"
+  | "answers"
   | "followed_by"
   | "part_of"
   | "depends_on"
@@ -2422,6 +2588,25 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+// ReferenceQuestion is one question block of a document on
+// GET /api/v1/references/questions: the block id a `#id` in the source's text writes, the whole
+// id of the ask settlement made for it (for a copied block, the ask it was copied from), and
+// that ask's `dispatch://` address, the one the `#id`'s own edge is stored under. `reference` is
+// empty for an ask no address names, one on an agent conversation's document.
+export interface ReferenceQuestion {
+  readonly block_id: string;
+  readonly ask: string;
+  readonly reference: string;
+}
+
+// ReferenceQuestions is GET /api/v1/references/questions?kind=&id=: the document one reference
+// source's text belongs to (`refs.ScopeOf`) and every question block that document's latest
+// version declares, by block id. A source whose text belongs to no document answers 404.
+export interface ReferenceQuestions {
+  readonly document: string;
+  readonly questions: ReferenceQuestion[];
 }
 
 // BlockLink is one link from a block of one document to a block of a document: its edge kind,
@@ -2567,6 +2752,8 @@ export interface ArtifactReviewEventPayload {
   readonly actor: Actor;
   readonly reason: string | null;
   readonly ask_id: string | null;
+  readonly content_sha256?: string;
+  readonly content_sha256_source?: "insert" | "backfill";
 }
 
 /** Whether a recorded result still speaks for the work as it stands: `current` at the commit the
@@ -2612,7 +2799,9 @@ export interface CheckResult {
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
 
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. */
+ *  first: `created_at` descending — the time the recording transaction began — with `id`
+ *  descending breaking a tie. Two results recorded in transactions that overlapped can come
+ *  back in either order. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
@@ -2629,7 +2818,11 @@ export interface CheckBlock {
 }
 
 /** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order. An issue with no Verification document answers no checks. */
+ *  document order, each check's results newest first, by `created_at` descending — the time the
+ *  recording transaction began — with `id` descending breaking a tie; a client that reads one
+ *  result per check reads `results[0]`, which is what `dispatch results` prints. Two results
+ *  recorded in transactions that overlapped can come back in either order. An issue with no
+ *  Verification document answers no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
   /** The issue's Verification document, `""` for an issue that has none. */
@@ -2646,7 +2839,9 @@ export interface CheckResultRecorded {
 }
 
 /** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. */
+ *  them is refused `400 RESULT_CONTRADICTS`. `commit` is 40 lowercase hex; one the repository of
+ *  the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and
+ *  that `owner/repo`, while a repository Dispatch cannot read stores the result as before. */
 export interface RecordCheckResultInput {
   readonly actor?: Actor;
   readonly check: string;
@@ -3425,7 +3620,7 @@ export interface EditArtifactInput {
   readonly actor?: Actor;
 }
 
-export interface IssueDetails extends Issue, IssueRouteReach {
+export interface IssueDetails extends Issue, IssueRouteReach, IssueClaimLiveness {
   readonly progress: IssueProgress;
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
@@ -3614,10 +3809,37 @@ export interface TargetCandidate {
   readonly context: string;
 }
 
+/**
+ * The code of the `409` Dispatch answers an id written as a prefix two items or more carry: a
+ * page address, a `dispatch://` reference or a dashboard address in text, or a route that takes
+ * an id in its path (INFRA-869). `candidates` then lists the items it names, at most ten, in id
+ * order, for the caller to write more of the id or to choose one. Generated into Go as
+ * `contracts.IDAmbiguous`.
+ */
+export const ID_AMBIGUOUS = "ID_AMBIGUOUS";
+
+/**
+ * One item an ambiguous id prefix names (`ID_AMBIGUOUS`). `id` is the whole id the prefix
+ * shortens - the item's uuid, or the block id a document block is unique under - and `ref` its
+ * whole `dispatch://` reference, empty for an item that has no address (a direct message, a
+ * document of an agent's conversation). At most one of `issue_key` and `document` names its
+ * owner: the issue that owns it, or the reference of the project document it is written on.
+ * `first_line` is the head of what tells two candidates apart, absent for a direct message a
+ * caller may not read.
+ */
+export interface IDCandidate {
+  readonly kind: "ask" | "comment" | "message" | "artifact" | "block";
+  readonly id: string;
+  readonly ref: string;
+  readonly issue_key?: string;
+  readonly document?: string;
+  readonly first_line?: string;
+}
+
 export interface DispatchServiceErrorShape {
   readonly error?: string;
   readonly code?: string;
-  readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
+  readonly candidates?: TargetCandidate[] | DuplicateCandidate[] | IDCandidate[];
   readonly current?: EditPreconditionCurrent;
   readonly mismatches?: EditPreconditionMismatch[];
 }
@@ -3695,6 +3917,8 @@ export const ArtifactReviewEventPayloadSchema = z.object({
   actor: z.object({ kind: z.string(), id: z.string() }).passthrough().optional(),
   reason: z.string().nullish(),
   ask_id: z.string().nullish(),
+  content_sha256: z.string().optional(),
+  content_sha256_source: z.enum(["insert", "backfill"]).optional(),
 });
 
 const askEventPayloadFields = {
@@ -3819,6 +4043,9 @@ export const CommentEventPayloadSchema = z
     project_key: z.string().optional(),
     artifact_slug: z.string().optional(),
     body: z.string().optional(),
+    // `CarriedBodyPayload` states what these two mean and who answers the rest.
+    body_truncated: z.boolean().optional(),
+    payload_omitted: z.boolean().optional(),
     reply_to: z.string().nullish(),
     ask_id: z.string().nullish(),
     ask_question: z.string().optional(),
@@ -3854,6 +4081,9 @@ export const CommentEventPayloadSchema = z
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),
   body: z.string().optional(),
+  // `CarriedBodyPayload` states what these two mean and who answers the rest.
+  body_truncated: z.boolean().optional(),
+  payload_omitted: z.boolean().optional(),
   target: z.string().nullish(),
   in_reply_to: z.string().nullish(),
   reply_body: z.string().optional(),

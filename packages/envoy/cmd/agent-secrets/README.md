@@ -44,37 +44,33 @@ any session. `agent-secrets enroll --helper` is open to any process of the user,
 can also enroll a box and read the operator's agent secrets. `agent-secrets --help` lists every
 form, and each form answers `-h`.
 
+A value is injected exactly as it is stored, line endings and all: a stored secret may
+legitimately be several lines, a PEM document among them. A one-line credential that ends in a
+line ending, though, is nearly always a seeding mistake — the trailing newline of whatever
+produced it, kept by a `gcloud secrets versions add --data-file=-` or an `aws secretsmanager
+put-secret-value` where a single trailing LF is what `secret set` would have removed. It is
+invisible where it is written
+and expensive where it is read: a caller that puts such a value straight into an HTTP header gets
+a rejected header, and the error reporting that can quote the whole secret into a log or a saved
+session (dispatch://INFRA-1042). So the exec form writes one more line to standard error before
+the command runs, naming each released secret whose value ends in a line ending and never any
+part of a value. Keep the ending where the value is meant to end that way; where it is not,
+store the value again with `agent-secrets secret set`, piping it with the ending already
+removed, because that form drops one final LF from its standard input and no carriage return —
+a value re-piped as it stands keeps the CR of a CRLF, keeps a lone CR, and keeps every LF but
+the last.
+
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
 
-A Google Cloud VM needs no credential a person installs and no machine login a person approves: it
-logs in and enrols itself with the identity token its own metadata server signs. It then holds a
-session key and its enrollment id in its key dir, as a box does, and a machine login, which
-Dispatch's machine-login page lists; each `enroll --vm` run logs in again with a launcher key it
-keeps only in memory.
-
-```sh
-export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
-export AGENT_SECRETS_AUDIENCE=example-vm-audience
-agent-secrets enroll --vm --service example-fleet
-agent-secrets renew --vm &
-agent-secrets DEMO_API_KEY --reason "Run the lane" -- ./lane.sh
-```
-
-`enroll --vm` writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR` (`--out` names
-another directory) and prints the enrollment id, alone, on stdout. Re-running it on the same
-directory keeps that key, gets its own live enrollment back and renews that enrollment's lease,
-so a VM that re-runs `enroll --vm` often enough needs no `renew --vm` at all; concurrent runs on
-one directory take turns on `<out>/enroll.lock`. `renew --vm` is the other way to hold the lease:
-it asks the metadata server for a fresh token before every renewal, since a VM enrollment's
-renewal must carry one. `GCE_METADATA_HOST` replaces the metadata server's host. Every other
-form then reads the key dir as a box's or a pod's.
-
-A Kubernetes pod an operator launches by hand enrols itself the same way, with the projected
-ServiceAccount token its own kubelet mounts in place of the metadata server's: its ServiceAccount
-must be one the broker's service logins name, and the token must be the pod's own projection, not
-one `kubectl create token` minted, since a login bound to no pod enrols nothing.
+A Kubernetes pod an operator launches by hand needs no credential a person installs and no machine
+login a person approves: it logs in and enrols itself with the projected ServiceAccount token its
+own kubelet mounts. Its ServiceAccount must be one the broker's service logins name, and the token
+must be the pod's own projection, not one `kubectl create token` minted, since a login bound to no
+pod enrols nothing. It then holds a session key and its enrollment id in its key dir, as a box
+does, and a machine login, which Dispatch's machine-login page lists; each `enroll --pod` run logs
+in again with a launcher key it keeps only in memory.
 
 ```sh
 export AGENT_SECRETS_URL=https://broker.example AGENT_SECRETS_KEY_DIR=/run/agent-secrets
@@ -85,9 +81,12 @@ agent-secrets DEMO_API_KEY --reason "Run the session" -- ./session.sh
 
 `enroll --pod` reads `/var/run/legion/agent-secrets-token/token` unless `--pod-token-file` names
 another file, takes the pod's UID from that token's own `kubernetes.io/pod/uid` claim as the
-enrollment's runtime id, and writes the same two files `enroll --vm` writes. A pod holds its lease
+enrollment's runtime id, and writes `key.pem` and `enrollment` into `AGENT_SECRETS_KEY_DIR`
+(`--out` names another directory), printing the enrollment id, alone, on stdout. Re-running it on
+the same directory keeps that key, gets its own live enrollment back and renews that enrollment's
+lease; concurrent runs on one directory take turns on `<out>/enroll.lock`. A pod holds its lease
 with `renew --pod-token-file <file>`, which re-reads the file before every renewal because the
-kubelet rotates the token in place.
+kubelet rotates the token in place. Every other form then reads the key dir as a box's.
 
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
@@ -227,6 +226,15 @@ agent-secrets secret retag NAME --tier human
 agent-secrets secret delete NAME
 agent-secrets secret restore NAME
 ```
+
+`--requesters` lists who may ask for a secret at all — people by their lowercase sign-in email,
+services by their registered name, separated by spaces — and a secret carrying such a list bounds
+its grants to an hour, so give it `--max-grant 1h` or less; `--requesters none` removes the list
+on retag. `secret create` and `secret retag` check those rules before they write, but neither can
+check whether an entry naming a service is one your deployment registers: this CLI holds no list
+of registered services, so only the broker knows. The reread that follows the write is what
+catches an unregistered name — the broker's refusal prints with its reason and the command exits
+1, with the tag already written — so correct the name with another `secret retag`.
 
 `agent-secrets --help` and `agent-secrets-helper --help` list every form and environment variable.
 

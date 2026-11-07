@@ -772,6 +772,15 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The windows of a document's blocks are written under the artifact id; a block the live
+	// document holds and no window covers - a block inside another, whose text its parent's
+	// window already holds, and every block of a version the indexer has not windowed yet -
+	// reads as model.BlockNotEmbedded.
+	embedding, err := refs.BlockEmbeddingStates(r.Context(), s.deps.Store.Pool, refs.DocumentWindowKind, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	for index := range blocks {
 		counts := references[blocks[index].ID]
 		for _, descendantID := range blocks[index].DescendantIDs {
@@ -780,6 +789,7 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 			counts.Asks += descendant.Asks
 		}
 		blocks[index].References = counts
+		blocks[index].Embedding = blockEmbedding(embedding, blocks[index].ID)
 	}
 	WriteJSON(w, http.StatusOK, blocks)
 }
@@ -867,6 +877,9 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		hash := sha256.Sum256([]byte(markdown))
+		sha := hex.EncodeToString(hash[:])
+		version.SHA256 = &sha
 		WriteJSON(w, http.StatusOK, struct {
 			Markdown string `json:"markdown"`
 			model.Version
@@ -1181,14 +1194,33 @@ func participantsOrEmpty(participants []model.Actor) []model.Actor {
 	return participants
 }
 
-func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
-	rows, err := q.Query(ctx, `
-		select `+artifactColumns+`
+// issueArtifactsStatement lists an issue's artifacts, $1 the issue key, in the order every
+// reader of the issue shows them; collectArtifacts reads its rows. The issue read queues it in
+// a batch with its other reads (getIssue), so the statement and the scan live apart from the
+// sequential loader that every other route calls.
+const issueArtifactsStatement = `
+		select ` + artifactColumns + `
 		from artifacts where issue_key = $1 order by created_at, id
-	`, issueKey)
+	`
+
+func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
+	rows, err := q.Query(ctx, issueArtifactsStatement, issueKey)
 	if err != nil {
 		return nil, err
 	}
+	artifacts, err := collectArtifacts(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := loadArtifactDetails(ctx, q, artifactPointers(artifacts)); err != nil {
+		return nil, err
+	}
+	return artifacts, nil
+}
+
+// collectArtifacts reads the rows issueArtifactsStatement returns. An issue with no artifact
+// keeps a non-nil empty list, which the response carries as [].
+func collectArtifacts(rows pgx.Rows) ([]model.Artifact, error) {
 	artifacts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
 		return scanArtifact(row)
 	})
@@ -1198,19 +1230,65 @@ func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) 
 	if artifacts == nil {
 		artifacts = []model.Artifact{}
 	}
+	return artifacts, nil
+}
+
+// artifactPointers addresses each artifact in place, which the version and approval loaders fill.
+func artifactPointers(artifacts []model.Artifact) []*model.Artifact {
 	pointers := make([]*model.Artifact, len(artifacts))
 	for index := range artifacts {
-		versions, err := s.loadVersions(ctx, q, artifacts[index].ID)
-		if err != nil {
-			return nil, err
-		}
-		artifacts[index].Versions = versions
 		pointers[index] = &artifacts[index]
 	}
-	if err := s.attachApprovals(ctx, q, pointers); err != nil {
-		return nil, err
+	return pointers
+}
+
+// artifactIDs is every listed artifact's id, the argument artifactVersionsStatement takes.
+func artifactIDs(artifacts []*model.Artifact) []string {
+	ids := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		ids = append(ids, artifact.ID)
 	}
-	return artifacts, nil
+	return ids
+}
+
+// queueArtifactDetails queues in b what a list of artifacts carries beside its rows - every
+// artifact's versions in one statement rather than a query per artifact, and every document's
+// latest review and open approval request (queueApprovals) - and returns the apply that fills
+// them in once the batch is closed. The statements are queued in that order wherever artifacts
+// are read with their details: the issue read queues them beside its other reads
+// (readIssueDetails), and a read of its own sends them as a batch of its own (loadArtifactDetails).
+// The apply fills the versions first, since an approval's state reads them (applyApprovals), and
+// leaves an artifact with no version a non-nil empty list (applyVersions). No artifact queues
+// nothing and its apply fills nothing.
+func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
+	versions := map[string][]model.Version{}
+	if ids := artifactIDs(artifacts); len(ids) > 0 {
+		b.Queue(artifactVersionsStatement, ids).Query(func(rows pgx.Rows) error {
+			return scanVersionsByArtifact(rows, versions)
+		})
+	}
+	approvals := queueApprovals(b, artifacts)
+	return func() {
+		applyVersions(artifacts, versions)
+		approvals()
+	}
+}
+
+// loadArtifactDetails sends queueArtifactDetails's statements as a batch of their own on q, for a
+// read that queues nothing else: an issue's artifacts (loadArtifacts), a project's
+// (listProjectArtifacts) and one artifact read by id or by ref_key (loadArtifactRow). The batch
+// holds q's connection until its results close, so nothing else reads the database in between.
+func loadArtifactDetails(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+	batch := &pgx.Batch{}
+	apply := queueArtifactDetails(batch, artifacts)
+	if batch.Len() == 0 {
+		return nil
+	}
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	apply()
+	return nil
 }
 
 func validateArtifactRequestRef(r *http.Request) error {
@@ -1508,6 +1586,9 @@ func (s *server) loadArtifactByRefKey(ctx context.Context, q queryer, refKey str
 	`, refKey))
 }
 
+// loadArtifactRow reads one artifact from the row a lookup by id or by ref_key returns, with the
+// details every artifact read carries - its versions, and its approval when it is a document - in
+// one batch (loadArtifactDetails), so the read costs that lookup and one round trip more.
 func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (model.Artifact, error) {
 	artifact, err := scanArtifact(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1516,12 +1597,7 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 	if err != nil {
 		return model.Artifact{}, err
 	}
-	versions, err := s.loadVersions(ctx, q, artifact.ID)
-	if err != nil {
-		return model.Artifact{}, err
-	}
-	artifact.Versions = versions
-	if err := s.attachApproval(ctx, q, &artifact); err != nil {
+	if err := loadArtifactDetails(ctx, q, []*model.Artifact{&artifact}); err != nil {
 		return model.Artifact{}, err
 	}
 	return artifact, nil
@@ -1589,6 +1665,60 @@ func lookupArtifactByNameOrSlug(ctx context.Context, q queryer, target artifactT
 // sha256. The size never reads a document's markdown (model.VersionSize).
 const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256`
 
+// artifactVersionsStatement reads the versions of every artifact in $1 at once, so a list of
+// artifacts costs one statement rather than one per artifact. Ordering by the artifact first
+// leaves each artifact's own versions in `order by v.number`, the order one artifact's read
+// answers; scanVersionsByArtifact keys them by the artifact id the columns end on.
+const artifactVersionsStatement = `
+		select ` + versionColumns + `, v.artifact_id::text
+		from artifact_versions v where v.artifact_id = any($1::uuid[]) order by v.artifact_id, v.number
+	`
+
+// scanVersion reads versionColumns from row; extra receives the columns after them.
+func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
+	var version model.Version
+	var authors []byte
+	targets := make([]any, 0, 8+len(extra))
+	targets = append(targets,
+		&version.Number, &version.Named, &version.Summary, &authors,
+		&version.CreatedAt, &version.Size, &version.MIME, &version.SHA256,
+	)
+	targets = append(targets, extra...)
+	if err := row.Scan(targets...); err != nil {
+		return model.Version{}, err
+	}
+	if err := json.Unmarshal(authors, &version.Authors); err != nil {
+		return model.Version{}, fmt.Errorf("decode version authors: %w", err)
+	}
+	return version, nil
+}
+
+// scanVersionsByArtifact reads the rows artifactVersionsStatement returns into versions, keyed by
+// artifact id.
+func scanVersionsByArtifact(rows pgx.Rows, versions map[string][]model.Version) error {
+	for rows.Next() {
+		var artifactID string
+		version, err := scanVersion(rows, &artifactID)
+		if err != nil {
+			return err
+		}
+		versions[artifactID] = append(versions[artifactID], version)
+	}
+	return rows.Err()
+}
+
+// applyVersions fills each artifact's versions from what the statement returned; an artifact with
+// none keeps a non-nil empty list, which the response carries as [].
+func applyVersions(artifacts []*model.Artifact, byArtifact map[string][]model.Version) {
+	for _, artifact := range artifacts {
+		versions := byArtifact[artifact.ID]
+		if versions == nil {
+			versions = []model.Version{}
+		}
+		artifact.Versions = versions
+	}
+}
+
 func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string) ([]model.Version, error) {
 	rows, err := q.Query(ctx, `
 		select `+versionColumns+`
@@ -1600,13 +1730,9 @@ func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string)
 	defer rows.Close()
 	versions := []model.Version{}
 	for rows.Next() {
-		var version model.Version
-		var authors []byte
-		if err := rows.Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.Size, &version.MIME, &version.SHA256); err != nil {
+		version, err := scanVersion(rows)
+		if err != nil {
 			return nil, err
-		}
-		if err := json.Unmarshal(authors, &version.Authors); err != nil {
-			return nil, fmt.Errorf("decode version authors: %w", err)
 		}
 		versions = append(versions, version)
 	}

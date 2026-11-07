@@ -57,9 +57,9 @@ func windowKey(spec runtime.SpawnSpec) string {
 // runtimeOwned are the variables every pane gets from the runtime itself: exactly the names
 // panePairs sets for a tree pane (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the
 // shared validator refuses in a spec's Env and as a secret's pointer. A controller pane is told
-// controllerOwned in place of the tree, issue and workspace.
+// controllerOwned in place of the tree, the issue, the issue key it stamps and the workspace.
 var runtimeOwned = map[string]bool{
-	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
+	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ISSUE_TRAILER": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true,
@@ -70,10 +70,11 @@ var runtimeOwned = map[string]bool{
 }
 
 // controllerOwned are the variables a controller pane is told in place of a tree pane's
-// LEGION_TREE, LEGION_ISSUE and LEGION_WORKSPACE: the controller marker the plugin classifies the
-// session by, and LEGION_SLACK_CHANNELS, which the plugin requires of the controller the daemon
-// launches — always empty here, since only a controller enrolled with the secrets broker
-// (runtime.kubernetes.agent_secrets) may have Slack channels (config.checkSlackChannels).
+// LEGION_TREE, LEGION_ISSUE, LEGION_ISSUE_TRAILER and LEGION_WORKSPACE: the controller marker the
+// plugin classifies the session by, and LEGION_SLACK_CHANNELS, which the plugin requires of the
+// controller the daemon launches — always empty here, since only a controller enrolled with the
+// secrets broker (runtime.kubernetes.agent_secrets) may have Slack channels
+// (config.checkSlackChannels).
 var controllerOwned = map[string]bool{"LEGION_CONTROLLER": true, "LEGION_SLACK_CHANNELS": true}
 
 // ownedNames is every variable the runtime sets on some pane itself: a spec may set none of them.
@@ -205,24 +206,30 @@ type PaneInputs struct {
 	// nil.
 	GHOwnersDir, GHDefault, GH string
 	// OperatorEnv is the operator's pane variables (runtime.tmux.pane_env), PiConfigFiles the
-	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files), and
-	// RoleConfigFiles the ones this pane's role alone names (role_config_files); nil for none.
-	OperatorEnv     map[string]string
-	PiConfigFiles   []string
-	RoleConfigFiles []string
+	// operator's Oh My Pi overlays every pane names (runtime.tmux.pi_config_files),
+	// RoleConfigFiles the ones this pane's role alone names (role_config_files), and
+	// MemoryConfigFiles the project's own (memory.config_files), which only a pane whose tree is
+	// in the memory group is given (runtime.SpawnSpec.Memory); nil for none.
+	OperatorEnv       map[string]string
+	PiConfigFiles     []string
+	RoleConfigFiles   []string
+	MemoryConfigFiles []string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// identity — a tree pane's tree and issue, or the controller's marker LEGION_CONTROLLER=1 — the
-// daemon, state and, for a tree pane, workspace variables; for the controller, its empty
-// LEGION_SLACK_CHANNELS; the Envoy and Dispatch variables; for a pane with a GHOwnersDir,
-// GH_CONFIG_DIR, its default owner's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
-// set to the empty string, which gh ignores, so no token in the daemon's environment outranks the
-// file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
+// identity — a tree pane's tree and issue, and, where the project names its repository, the issue
+// key it stamps into its commits (LEGION_ISSUE_TRAILER, left out of a pane that stamps none), or
+// the controller's marker LEGION_CONTROLLER=1 — the daemon, state and, for a tree pane, workspace
+// variables; for the controller, its empty LEGION_SLACK_CHANNELS; the Envoy and Dispatch
+// variables; for a pane with a GHOwnersDir, GH_CONFIG_DIR, its default owner's directory of gh
+// files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the empty string, which gh ignores, so no
+// token in the daemon's environment outranks the file — a non-empty GH_TOKEN would — then
+// LEGION_GH_OWNERS_DIR, the bundle's root, and
 // LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
 // PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
-// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, and nothing of
-// Legion's own, which names no settings overlay at all — empty where neither names one), the
+// agent's bash tool; PI_CONFIG_FILES, the operator's overlays, then the role's own, then the
+// project's memory overlays for a memory-group pane, and nothing of Legion's own, which names no
+// settings overlay at all — empty where none of the three names one), the
 // four XDG base directories under `<state_dir>/home`, the operator's pane variables sorted, the
 // spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among
 // them — tmux would replace it (LEGION-91) — and neither is any secret's value. No other tool path
@@ -236,6 +243,9 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 	} else {
 		add("LEGION_TREE", spec.Tree)
 		add("LEGION_ISSUE", spec.Issue)
+		if spec.IssueTrailer != "" {
+			add("LEGION_ISSUE_TRAILER", spec.IssueTrailer)
+		}
 	}
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))
@@ -264,7 +274,7 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
-	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles), ":"))
+	add("PI_CONFIG_FILES", strings.Join(slices.Concat(in.PiConfigFiles, in.RoleConfigFiles, in.MemoryConfigFiles), ":"))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
@@ -428,7 +438,8 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
-	for _, path := range append(append([]string{}, spec.Prompt.RolePromptPaths...), spec.Prompt.DeploymentInstructionsPath) {
+	for _, path := range slices.Concat(spec.Prompt.RolePromptPaths,
+		[]string{spec.Prompt.DeploymentInstructionsPath, spec.Prompt.MemoryInstructionsPath}) {
 		if path == "" {
 			continue
 		}
@@ -510,10 +521,17 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		return runtime.Locator{}, err
 	}
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
+	// Only a pane whose tree was drawn into the memory group names the project's memory overlays;
+	// every other pane's PI_CONFIG_FILES is the one it had before the block existed.
+	var memoryOverlays []string
+	if spec.Memory {
+		memoryOverlays = r.memoryConfigFiles
+	}
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: credential.root, GHDefault: ghDefault, GH: r.gh,
 		OperatorEnv: r.operatorEnv, PiConfigFiles: r.piConfigFiles, RoleConfigFiles: r.roleConfigFiles[spec.Role],
+		MemoryConfigFiles: memoryOverlays,
 	}, files)
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }

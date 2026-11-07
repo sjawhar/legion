@@ -1,6 +1,7 @@
 import { shortSessionId } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { AGENT_REGISTRY_POLL_MS } from "../web/src/features/refs/agent-registry";
 import {
   BROADCAST_REFUSED,
   broadcastSends,
@@ -20,7 +21,9 @@ import {
   replyToMessageDelivery,
 } from "./api";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { sessionIds } from "./session-ids";
+import { assertPageFits } from "./unclipped";
 import { asUser } from "./users";
 
 // No `last_seen`: the fixture answers every read of the session with the current time. A literal
@@ -67,6 +70,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the whole broadcast flow in a real browser - the fold, four ticks, the send, a live
+// answer and the list that follows it.
 test("a broadcast lists recipient cards in the non-alphabetical order the sender ticked them", async ({
   browser,
 }, testInfo) => {
@@ -82,7 +87,6 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     // is mostly aimed at exactly those, so the fold is the flow's first step.
     const quiet = agents.getByRole("button", { name: "No Dispatch activity (4)" });
     await expect(quiet).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("agents-before.png"), fullPage: true });
     await quiet.click();
 
     for (const title of ["Tester", "Observer", "Planner", "Reviewer"]) {
@@ -151,7 +155,6 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     const list = page.getByRole("region", { name: "Broadcasts" });
     await expect(list.getByText("Stand down and report status.")).toBeVisible();
     await expect(list.getByText("1 of 3 answered")).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("broadcast-list.png"), fullPage: true });
   } finally {
     await alice.close();
   }
@@ -159,9 +162,10 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
 
 // LEGION-540. A broadcast's body is Markdown wherever it shows: the broadcast page's header, the
 // recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
-// list, not one run-on line, on the desktop and on a phone; and the preview, which runs the list
-// onto one line, shows exactly one line of it.
-test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list @phone", async ({
+// list, not one run-on line; and the preview, which runs the list onto one line, shows exactly
+// one line of it. The row's own narrow-screen claim is the row below this one.
+// SLOW(>=2s): one send to two recipients and three renders of the same body.
+test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, tester]);
@@ -214,7 +218,7 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
 
     // The recipient's copy on the Agents page renders the same way. A broadcast is the viewer's
     // own send, not a signal from the session, so both recipients still sit under the fold.
-    await page.goto("/agents");
+    await navigateInApp(page, "/agents");
     const agentsAgain = page.getByRole("region", { name: "Agents" });
     await agentsAgain.getByRole("button", { name: "No Dispatch activity (2)" }).click();
     const plannerRow = agentRow(page, "Planner");
@@ -233,7 +237,7 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
     // The list's one-line preview keeps the formatting and drops the syntax, and the browser
     // cuts it to its one line: the text overflows the box (so there is something to cut) and
     // the box is one line tall. A preview whose clamp a later rule overrides wraps instead.
-    await page.goto("/agents/broadcasts");
+    await navigateInApp(page, "/agents/broadcasts");
     const list = page.getByRole("region", { name: "Broadcasts" });
     const preview = list.locator("[data-markdown-preview]");
     await expect(preview).toContainText(`${intro} Stop the deploy`);
@@ -248,23 +252,15 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
       overflows: element.scrollHeight > element.clientHeight,
     }));
     expect(box).toEqual({ lines: 1, overflows: true });
-    // The sender is drawn above the row's link, never inside it (`AgentName` links a session to
-    // its live conversation, and one link never holds another): the row link keeps its broadcast
-    // destination, the two do not overlap, and on a phone nothing widens the page.
+    // The sender is drawn outside the row's link, never inside it (`AgentName` links a session
+    // to its live conversation, and one link never holds another), and the row link keeps its
+    // broadcast destination.
     const row = list.getByRole("listitem");
     const rowLink = row.getByRole("link", { name: /answered/ });
     await expect(rowLink).toHaveAttribute("href", /^\/agents\/broadcasts\/[0-9a-f-]+$/);
     await expect(row.locator("a a")).toHaveCount(0);
-    const sender = row.getByText("alice", { exact: true });
-    await expect(sender).toBeVisible();
+    await expect(row.getByText("alice", { exact: true })).toBeVisible();
     await expect(rowLink.getByText("alice", { exact: true })).toHaveCount(0);
-    const senderBox = await sender.boundingBox();
-    const rowLinkBox = await rowLink.boundingBox();
-    if (senderBox === null || rowLinkBox === null) throw new Error("the broadcast row is hidden");
-    expect(senderBox.y + senderBox.height).toBeLessThanOrEqual(rowLinkBox.y + 0.5);
-    expect(
-      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
-    ).toBe(true);
     await page.screenshot({
       path: testInfo.outputPath("broadcast-markdown-list.png"),
       fullPage: true,
@@ -274,12 +270,51 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
   }
 });
 
+// The narrow-screen half of the row above. Below `xl` every link is an inline-flex box with
+// centred items (styles.css's touch rule), so a Broadcasts row has to stack its sender above
+// its link itself; and the row's one-line preview is the widest thing on the page, so a row
+// that widens the page widens it here.
+test("a Broadcasts row keeps its sender above its link and fits the screen @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the row stacks, and the page fits, only below xl");
+  await setLiveSessions([planner]);
+  // Longer than the row is wide on any project's viewport, so the preview has something to cut.
+  await createBroadcast({
+    body: "Three things before the cut, in this order, and nothing else until all three are done and reported back on this broadcast, so that whoever reads it later can see who did what and when.",
+    delivery: "steer",
+    session_ids: [planner.session_id],
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents/broadcasts");
+    const row = page.getByRole("region", { name: "Broadcasts" }).getByRole("listitem");
+    const rowLink = row.getByRole("link", { name: /answered/ });
+    const sender = row.getByText("alice", { exact: true });
+    await expect(sender).toBeVisible();
+    const senderBox = await sender.boundingBox();
+    const rowLinkBox = await rowLink.boundingBox();
+    if (senderBox === null || rowLinkBox === null) throw new Error("the broadcast row is hidden");
+    expect(senderBox.y + senderBox.height).toBeLessThanOrEqual(rowLinkBox.y + 0.5);
+    await assertPageFits(page);
+    await page.screenshot({
+      path: testInfo.outputPath("broadcast-row.png"),
+      fullPage: true,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+// SLOW(>=2s): the Tester's send can only be seen to have failed once the listener take-over
+// window has passed - half a second, the harness's own shortened one - and the row then sends
+// it again and waits for the second verdict on the broadcast page it navigated to.
 test("a session that goes away before the send is excluded by the server and named on the broadcast, and a failed recipient can be retried there", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
-  // Room for the Tester's 12 s listener take-over wait below beside the rest of the row.
-  test.setTimeout(60_000);
   await setLiveSessions([planner, tester, observer]);
   await setSessionSendStatus(tester.session_id, 404);
 
@@ -312,10 +347,10 @@ test("a session that goes away before the send is excluded by the server and nam
     await expect(page.getByRole("article", { name: "Observer" })).toHaveCount(0);
 
     const failed = page.getByRole("article", { name: "Tester" });
-    // The Tester's send settles failed only once the listener take-over window has passed
-    // (listenerTakeoverWindow, 12 s, in packages/envoy/internal/dispatch/api/envoy_resolve.go),
-    // most of the default 15 s expect timeout.
-    await expect(failed.getByText(/^Failed:/)).toBeVisible({ timeout: 30_000 });
+    // The Tester's send settles failed only once the listener take-over window has passed: half a
+    // second under the harness's DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW (e2e/run-server.sh), of
+    // the twelve seconds a deployment runs.
+    await expect(failed.getByText(/^Failed:/)).toBeVisible();
     await expect(
       page.getByRole("article", { name: "Planner" }).getByText("Asking Planner (BTW)")
     ).toBeVisible();
@@ -438,13 +473,13 @@ test("a session that leaves between a refused send and its restore is still in t
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
-  // The page learns of a departure on its 15 s agent poll, which this row waits out.
-  test.setTimeout(60_000);
+  // The page learns of a departure on its 15 s agent poll, which the page's own clock spends.
   await setLiveSessions([planner, observer]);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     const posted = broadcastSends(page);
     const refusal = await refuseBroadcasts(page);
     await page.goto("/agents");
@@ -467,9 +502,9 @@ test("a session that leaves between a refused send and its restore is still in t
     // Genuinely ended, not merely dropped from the listener's list: the server resolves each
     // selected session by id now, so only a session the store holds no record of is excluded.
     await setSessionRecord(observer.session_id, "absent");
+    await page.clock.fastForward(AGENT_REGISTRY_POLL_MS);
     await expect(page.getByRole("checkbox", { name: "Select Observer for broadcast" })).toHaveCount(
-      0,
-      { timeout: 30_000 }
+      0
     );
     refusal.allow();
     await sends.getByRole("button", { name: "Restore draft" }).click();

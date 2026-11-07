@@ -71,7 +71,7 @@ Two rules follow the kept record:
   `rowIsCurrent`). Otherwise another process's edit, which several browsers could have made, is
   credited to whoever edited in this process before.
 - Settlement failures end where the room's generation moves (`reserveRoomCloseLocked`, `Evict`,
-  `Quiesce`, `SetIssueClosed`), never once the close returns, so the closed room's failures never
+  `Quiesce`, `setRoomIssueOpen`), never once the close returns, so the closed room's failures never
   wipe out the failures of the room that replaced it.
 
 The close itself is the service's own injection, so it carries the service's mark
@@ -108,9 +108,9 @@ state.
   `TestAnIssueCloseEndsItsRoomsSettlementFailures`,
   `TestQuiesceDropsAnEditSourceRecordedWhileItClosesTheRooms`.
 
-`packages/envoy/internal/dispatch/docs/stale_room_test.go`:
+`packages/envoy/internal/dispatch/docs/room_behind_head_test.go`:
 
-- `TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue`.
+- `TestACloseOfAReplacedRoomIsNotRefusedByItsClosedIssue`.
 
 Mutation evidence (INFRA-352): restoring the old drop fails all seven rows of the two hand-over
 tests; a nil edit source, a late failure reset and a quiesce that keeps the source each fail their

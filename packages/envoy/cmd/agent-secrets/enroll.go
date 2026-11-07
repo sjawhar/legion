@@ -24,32 +24,27 @@ import (
 // enrolls itself through `agent-secrets register`, and a Legion pod's enrollment is its own
 // launcher's job.
 //
-// --vm is a Google Cloud VM enrolling itself (vm.go): it holds no credential a person installed,
-// and proves who it is with the identity token its own metadata server signs, so it needs no
-// helper and no launcher.
+// --pod is a Kubernetes pod enrolling itself (pod.go): it holds no credential a person
+// installed, and proves who it is with the projected ServiceAccount token its own kubelet
+// mounts, so it needs no helper and no launcher. It is how a pod an operator launches by hand
+// gets a broker identity with no daemon enrolling it.
 //
-// --pod is a Kubernetes pod enrolling itself (pod.go), the same shape with the projected
-// ServiceAccount token its own kubelet mounts in place of the metadata server's. It is how a pod
-// an operator launches by hand gets a broker identity with no daemon enrolling it.
-//
-// The three are mutually exclusive: each is a whole, different way of proving the caller may
+// The two are mutually exclusive: each is a whole, different way of proving the caller may
 // enrol.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
 		"runtime-id": true, "thumbprint": true, "session-id": true,
-		"service": true, "audience": true, "out": true, "pod-token-file": true,
+		"service": true, "out": true, "pod-token-file": true,
 	})
 	flags := newFlagSet("enroll", stderr)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
 	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
-	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required without --vm or --pod: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
-	vmFlag := flags.Bool("vm", false, "enroll this Google Cloud VM with the identity token its own metadata server signs")
+	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required without --pod: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
 	podFlag := flags.Bool("pod", false, "enroll this Kubernetes pod with the projected service-account token its own kubelet mounts")
-	service := flags.String("service", "", "--vm, --pod: the broker-side service this VM's or pod's service account is bound to")
-	audience := flags.String("audience", os.Getenv(vmAudienceVar), "--vm: the audience the broker verifies Google identity tokens for (default "+vmAudienceVar+")")
+	service := flags.String("service", "", "--pod: the broker-side service this pod's service account is bound to")
 	podTokenFile := flags.String("pod-token-file", defaultPodTokenFile, "--pod: a pod's projected service-account token file (default "+defaultPodTokenFile+")")
-	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "--vm, --pod: the directory holding key.pem and enrollment (default AGENT_SECRETS_KEY_DIR)")
+	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "--pod: the directory holding key.pem and enrollment (default AGENT_SECRETS_KEY_DIR)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -57,26 +52,15 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	if *vmFlag && *helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --vm and --helper are mutually exclusive: a VM proves who it is with its own metadata token, and needs no machine login")
-		return exitUsageError
-	}
 	if *podFlag && *helperFlag {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --pod and --helper are mutually exclusive: a pod proves who it is with its own projected token, and needs no machine login")
 		return exitUsageError
-	}
-	if *podFlag && *vmFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --pod and --vm are mutually exclusive: a pod's token comes from its projected file, a VM's from its metadata server")
-		return exitUsageError
-	}
-	if *vmFlag {
-		return cmdEnrollVM(*service, *audience, *out, stdout, stderr)
 	}
 	if *podFlag {
 		return cmdEnrollPod(*service, *podTokenFile, *out, stdout, stderr)
 	}
 	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls a session key only through the local agent-secrets-helper socket; a Google Cloud VM enrolls itself with --vm, and a Kubernetes pod with --pod)")
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls a session key only through the local agent-secrets-helper socket; a Kubernetes pod enrolls itself with --pod)")
 		return exitUsageError
 	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)

@@ -75,12 +75,19 @@ type Settings struct {
 	// update round waits before it asks a worker again, and how long after the round opened the
 	// controller is told it is stalled. They are decimals so a live proof and the production
 	// check can drive each bound inside one run.
-	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
-	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
-	ReviewRoundCap       int                     `json:"review_round_cap"`
-	MaxFixAttempts       int                     `json:"max_fix_attempts"`
-	Controller           config.ControllerLaunch `json:"controller"`
-	Capabilities         CapabilitiesSettings    `json:"capabilities"`
+	PodUpdateRetaskHours float64 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64 `json:"pod_update_notice_hours"`
+	// PodUpdateMaxOpenRounds and PodUpdateRoundsPerMinute are `pod_update_max_open_rounds` and
+	// `pod_update_rounds_per_minute`: how many issues may hold an open update round at once, and
+	// how many rounds one sweep may open in a minute. Each is null, and neither is omitted, when
+	// the file names no limit, so a reader of the settings sees the key and reads from it that
+	// the deployment caps nothing.
+	PodUpdateMaxOpenRounds   *int                    `json:"pod_update_max_open_rounds"`
+	PodUpdateRoundsPerMinute *int                    `json:"pod_update_rounds_per_minute"`
+	ReviewRoundCap           int                     `json:"review_round_cap"`
+	MaxFixAttempts           int                     `json:"max_fix_attempts"`
+	Controller               config.ControllerLaunch `json:"controller"`
+	Capabilities             CapabilitiesSettings    `json:"capabilities"`
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
@@ -131,10 +138,28 @@ type KubernetesSettings struct {
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
 	Setup []string `json:"setup"`
+	// SkillsRepository is the skills marketplace every issue pod's roles install from
+	// (`runtime.kubernetes.skills_repository`), as `<owner>/<name>`; empty while the file names
+	// none. It is a public repository name, not a credential, and every pod's init container
+	// carries it on its command line already.
+	SkillsRepository string `json:"skills_repository"`
 	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
 	TestPostgres    bool                    `json:"test_postgres"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`
+	// IdleRelease is the settled `runtime.kubernetes.idle_release`: how long an issue pod must
+	// have had no turn in progress and no turn due before the daemon releases it, and how long
+	// after a release the backstop wakes a phase worker whose phase is still open. Neither is a
+	// credential, and a role reads both to know whether its own pod may go away under it, so
+	// every pod may read them.
+	IdleRelease IdleReleaseSettings `json:"idle_release"`
+}
+
+// IdleReleaseSettings is the settled `runtime.kubernetes.idle_release`. Zero `idle_minutes` is
+// release switched off.
+type IdleReleaseSettings struct {
+	IdleMinutes     int `json:"idle_minutes"`
+	BackstopMinutes int `json:"backstop_minutes"`
 }
 
 // SchedulingSettings is `runtime.kubernetes.scheduling`; the selector and the tolerations are `{}`
@@ -201,6 +226,19 @@ type ProjectSettings struct {
 	Merge          MergeSettings    `json:"merge"`
 	SlackChannels  []string         `json:"slack_channels"`
 	Deploys        []DeploySettings `json:"deploys"`
+	Memory         MemorySettings   `json:"memory"`
+}
+
+// MemorySettings is a project's `memory` block as the file writes it: the mode each new tree is
+// drawn under, absent for a project that names no block, which is off (config.Memory.Word); the
+// Oh My Pi overlays every role of a memory-group tree names after the operator's and its own, `[]`
+// for a project that names none; and the one instructions file the daemon appends to such a role's
+// system prompt, absent when the block names none. The paths are the operator's own file names,
+// which no credential rides in.
+type MemorySettings struct {
+	Mode         config.MemoryMode `json:"mode,omitempty"`
+	ConfigFiles  []string          `json:"config_files"`
+	Instructions string            `json:"instructions,omitempty"`
 }
 
 // DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
@@ -289,6 +327,8 @@ func SettingsOf(cfg config.Config) Settings {
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
 		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
 		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
+		PodUpdateMaxOpenRounds:                  cfg.PodUpdateMaxOpenRounds,
+		PodUpdateRoundsPerMinute:                cfg.PodUpdateRoundsPerMinute,
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
@@ -309,6 +349,11 @@ func SettingsOf(cfg config.Config) Settings {
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
 			Deploys:        make([]DeploySettings, len(project.Deploys)),
+			Memory: MemorySettings{
+				Mode:         project.Memory.Mode,
+				ConfigFiles:  stringsOf(project.Memory.ConfigFiles),
+				Instructions: project.Memory.InstructionsPath,
+			},
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
@@ -372,14 +417,19 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Issue:      reservationSettingsOf(block.Resources.Issue),
 			Controller: reservationSettingsOf(block.Resources.Controller),
 		},
-		SessionStore: string(block.SessionStore.Kind),
-		Setup:        stringsOf(block.Setup),
-		TestPostgres: block.TestPostgres,
+		SessionStore:     string(block.SessionStore.Kind),
+		Setup:            stringsOf(block.Setup),
+		SkillsRepository: skillsRepositorySetting(block.SkillsRepository),
+		TestPostgres:     block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
 			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
+		},
+		IdleRelease: IdleReleaseSettings{
+			IdleMinutes:     block.IdleRelease.IdleMinutes,
+			BackstopMinutes: block.IdleRelease.BackstopMinutes,
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)
@@ -419,6 +469,16 @@ func seconds(d time.Duration) int {
 // stringsOf is a copy of values that is `[]` on the wire when values is nil.
 func stringsOf(values []string) []string {
 	return append([]string{}, values...)
+}
+
+// skillsRepositorySetting is repository as `<owner>/<name>`, and "" for the zero repository, which
+// is what a file naming no skills marketplace leaves: ghrepo's own String() of the zero value is
+// not the empty string.
+func skillsRepositorySetting(repository ghrepo.Repository) string {
+	if repository.IsZero() {
+		return ""
+	}
+	return repository.String()
 }
 
 // endpointOf is one address key's value as the state shows it: the scheme, the host and the path,

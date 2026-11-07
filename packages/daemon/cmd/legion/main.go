@@ -91,10 +91,10 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
-	"handoffs":       {runHandoffs, "copy each in-flight branch's committed .legion/ handoff files onto its Dispatch issue, then remove .legion/ from the branch"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
-	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, provision the issue's workspace; and a repository cache pod's process"},
+	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, clone the skills marketplace, provision the issue's workspace; and a repository cache pod's process"},
+	"skills-check":   {runSkillsCheck, "compare the skills a role installed with the commit its pod's init container recorded (a role's start wrapper runs it, never a person)"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
 	"git-credential": {runGitCredential, "git's credential helper in every shared clone: answers git with the token of the owner the repository's path names (git runs it, never a person)"},
 	"gh":             {runGh, "the gh first on a pane's or pod's PATH: runs the real gh with the gh directory of the owner the command names (a pane runs it, never a person)"},
@@ -507,24 +507,22 @@ func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runState prints the daemon's state. It reaches the daemon as every operator command does
+// (operatorCall): one decision of which daemon the command reads, and the bearer, which this
+// command alone may leave out, read from the same --operator-token-file. With one it also names
+// who suspended each stranded claim, which the state body does not carry (strandedSuspenders).
 func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("state", "usage: legion state [flags]", stderr)
-	asJSON := flags.Bool("json", false, "print the state as the daemon serves it")
-	configPath := flags.String("config", "", "path to legion.yaml (default "+defaultConfigPath+")")
-	port := flags.Int("port", 0, "port to read, overriding the configured one")
-	if code, ok := parseFlags(flags, args); !ok {
+	c := newOperatorCall("state", "usage: legion state [flags]\nthe configuration is named with --config <file>, never as an argument",
+		"file holding the operator bearer the daemon's operator_token_file names; with it the claims nothing will wake name who suspended each", stdout, stderr)
+	asJSON := c.flags.Bool("json", false, "print the state as the daemon serves it")
+	if code, ok := c.parse(args); !ok {
 		return code
 	}
-	if flags.NArg() > 0 {
-		fmt.Fprintf(stderr, "legion state: unexpected argument %q; name the configuration with --config <file>\n", flags.Arg(0))
-		return 2
-	}
-
-	address, err := daemonAddress(*configPath, *port)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion state: %v\n", err)
+	op, ok := c.connect()
+	if !ok {
 		return 1
 	}
+	address := op.base
 	body, err := get(ctx, address+"/legion/v1/state")
 	if err != nil {
 		fmt.Fprintf(stderr, "legion state: %v\n", err)
@@ -547,15 +545,17 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "legion %s on %s — schema %d, boot %d started %s (first boot %s)\n",
 		state.Daemon.Project, address, state.Daemon.SchemaVersion, state.Daemon.Boots,
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
-	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
-		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintf(stdout, "admission: %d issues hold a slot, cap %d, %d waiting; %d live trees; %d issues\n",
+		len(state.Admission.Active), state.Admission.Cap, len(state.Admission.Waiting),
+		len(state.Admission.Trees), len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, roundsSummary(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
-	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims, strandedSuspenders(ctx, op, state.StrandedClaims)))
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -594,11 +594,50 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
 }
 
+// memorySummary is the one line an operator reads for the memory groups the project's work was
+// drawn into: how many issues carry a draw at all, and how many of those under each group and
+// mode, in group and then mode order, so two runs over one state print one line.
+//
+// It counts issues, and not the trees the draw is made for, because the state carries no tree: a
+// draw would have to stand for its tree, and it cannot. Every issue of a tree carries its root's
+// draw, and a tree handed over as one of its own carries its old tree's draw verbatim — the
+// group, the mode and the instant alike — so two trees share one draw and no draw is a tree's
+// name. It names no issue either: the per-issue values are in `legion state --json`, where a line
+// per issue would print hundreds on a live deployment.
+func memorySummary(issues map[string]api.Issue) string {
+	type groupMode struct{ group, mode string }
+	counts := map[groupMode]int{}
+	drawn := 0
+	for _, issue := range issues {
+		if issue.MemoryGroup == "" {
+			continue
+		}
+		drawn++
+		counts[groupMode{group: issue.MemoryGroup, mode: issue.MemoryDrawMode}]++
+	}
+	if drawn == 0 {
+		return "memory: none"
+	}
+	kinds := slices.SortedFunc(maps.Keys(counts), func(a, b groupMode) int {
+		return cmp.Or(cmp.Compare(a.group, b.group), cmp.Compare(a.mode, b.mode))
+	})
+	named := make([]string, len(kinds))
+	for i, kind := range kinds {
+		named[i] = fmt.Sprintf("%d %s (%s)", counts[kind], kind.group, kind.mode)
+	}
+	noun := "issues"
+	if drawn == 1 {
+		noun = "issue"
+	}
+	return fmt.Sprintf("memory: %d %s — %s", drawn, noun, strings.Join(named, ", "))
+}
+
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot
-// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
-// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
-// a person answered (each at the front of the waiting line for the next free slot), and each by
-// key with what it waits on and whether, when and by what act it was answered.
+// up to wait on a person (api.WaitingOnView): an unanswered one holds no slot and is in neither
+// `active` nor `waiting`, only among the live trees, so without this line the capacity it freed
+// looks idle. It says how many, how many a person answered (each at the front of the waiting line
+// for the next free slot), and each by key with what it waits on and whether, when and by what act
+// it was answered.
 func awaitingSummary(issues map[string]api.Issue) string {
 	var keys []string
 	answered := 0
@@ -774,6 +813,7 @@ func heldSummary(held []api.HeldOutboxRow) string {
 var strandedPhrases = map[api.StrandedMove]string{
 	api.StrandedResume:           "resume",
 	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
+	api.StrandedReleasedNoResume: "released, woken over ten minutes ago and the pod never came back",
 	api.StrandedRetry:            "failed, retry",
 	api.StrandedWorkflowStart:    "failed, needs a workflow start",
 }
@@ -781,12 +821,14 @@ var strandedPhrases = map[api.StrandedMove]string{
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
 // and each by issue and role under the move that brings it back (api.StrandedClaim.Move, which the
 // boot's log line groups by too). A suspended phase worker's move is the troubleshooting page's "A
-// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows.
-func strandedSummary(stranded []api.StrandedClaim) string {
+// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows;
+// a released one is a pod whose wake was taken and whose replacement never took a turn, which is
+// the daemon's own log of that wake to read, not a suspension to lift.
+func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	grouped := api.StrandedByMove(stranded)
+	grouped := api.StrandedByMove(stranded, suspended)
 	var groups []string
 	for _, move := range api.StrandedMoves() {
 		if named := grouped[move]; len(named) > 0 {
@@ -794,6 +836,32 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// strandedSuspenders is who suspended each stranded claim, which the state body does not carry:
+// every plugin parses that body with the schema of its own contract, so a key added to it refuses
+// the whole state in a session whose plugin predates INFRA-1048 and that the daemon has not
+// relaunched, and is dropped by every plugin after it (api.StrandedClaim). The
+// operator claim routes serve it, and this reads them with the bearer --operator-token-file
+// names, on the daemon op already names. Without that flag, and when the daemon refuses the
+// bearer or answers nothing, the lookup is empty and every stranded claim reads as the plain
+// suspension it is, which `legion claims list --json` tells apart. The state is the operator's
+// one unguarded read, so nothing here fails the command.
+func strandedSuspenders(ctx context.Context, op operator, stranded []api.StrandedClaim) api.Suspenders {
+	if len(stranded) == 0 || op.bearer == "" {
+		return nil
+	}
+	timed, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	status, answer, err := op.do(timed, http.MethodGet, claimsRoute, nil)
+	if err != nil || status/100 != 2 {
+		return nil
+	}
+	var list api.OperatorClaims
+	if json.Unmarshal(answer, &list) != nil {
+		return nil
+	}
+	return api.SuspendersOfOperatorClaims(list.Claims)
 }
 
 // webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App

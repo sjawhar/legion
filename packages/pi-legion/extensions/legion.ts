@@ -13,6 +13,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { currentSessionID } from "@legion/pi-shared/dispatch-session-id";
 import { findPushedBranchHead, paneHandoffReport } from "@legion/pi-shared/handoff-record";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -31,15 +32,28 @@ import {
 } from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
+import {
+  asyncJobKinds,
+  type SessionActivityReport,
+  sameSessionActivity,
+  sessionActivity,
+  sessionActivityRequest,
+} from "@legion/pi-shared/session-activity";
 import { stallLimits } from "@legion/pi-shared/stall-limits";
 import { clearStartupTurn } from "@legion/pi-shared/startup-turn";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+  type CapabilityBudgets,
   type CapabilityHost,
   measureCapabilities,
   ompCapabilityHost,
 } from "../src/capability-report";
+import {
+  CAPABILITY_SEND_TIMEOUT_MS,
+  type CapabilitySchedule,
+  createCapabilitySchedule,
+} from "../src/capability-schedule";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
@@ -68,6 +82,24 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
 let capabilityHost: () => CapabilityHost = ompCapabilityHost;
 export function setLegionCapabilityHostForTests(host: () => CapabilityHost): void {
   capabilityHost = host;
+}
+
+// The budgets the capability measurement runs under. Production never sets this, so
+// `measureCapabilities` keeps its own 8 s per check and 10 s per report; a test sets a short pair,
+// since one row that fails on its own budget would otherwise cost 8 s, past Bun's 5 s default for
+// a single test.
+let capabilityBudgets: CapabilityBudgets | undefined;
+export function setLegionCapabilityBudgetsForTests(budgets: CapabilityBudgets | undefined): void {
+  capabilityBudgets = budgets;
+}
+
+// The bound on one `claims/ready` the capability schedule sends. Production never sets this, so
+// the send keeps `CAPABILITY_SEND_TIMEOUT_MS`, the real 10 s; a test sets a short one, since a
+// send the daemon never answers would otherwise hold its tick for 10 s, past Bun's 5 s default
+// for a single test.
+let capabilitySendTimeoutMs = CAPABILITY_SEND_TIMEOUT_MS;
+export function setLegionCapabilitySendTimeoutForTests(ms: number | undefined): void {
+  capabilitySendTimeoutMs = ms ?? CAPABILITY_SEND_TIMEOUT_MS;
 }
 
 async function persistedTranscript(
@@ -171,10 +203,15 @@ export default function legionExtension(pi: PiApi): void {
         const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {
           cwd: process.cwd(),
           nats: false,
+          session: currentSessionID,
         });
         architectPublisher = {
           publish: envoy.enabled
-            ? createEnvoyClient({ baseUrl: envoy.url, token: envoy.token, fetch }).publish
+            ? createEnvoyClient({
+                baseUrl: envoy.url,
+                credential: envoy.credential,
+                fetch,
+              }).publish
             : undefined,
         };
       }
@@ -184,6 +221,61 @@ export default function legionExtension(pi: PiApi): void {
     limits: stallLimits(process.env, logger),
     log: logger,
   });
+
+  /**
+   * INFRA-945: what this pane is doing, which the daemon reads to decide whether its issue pod
+   * may be released. A report is sent at every settle, change or no change — the daemon releases
+   * no claim whose last report predates its last turn, so a quiet turn that sent nothing would
+   * hold the pod for ever — and between turns only when the report's content changes.
+   *
+   * Oh My Pi fires no event for background work, so what it is running is read rather than
+   * waited for: `SESSION_ACTIVITY_PERIOD_MS` apart, the host's own managed interval reads
+   * `ctx.getAsyncJobSnapshot()`, which is an in-memory look at this session's own job manager,
+   * and compares the report it builds with the last one sent. Nothing leaves the pane unless
+   * that content changed, so the cost between turns is one object comparison, and five seconds
+   * bounds how stale the daemon's view of a job that just started can be against a release rule
+   * measured in minutes.
+   */
+  const SESSION_ACTIVITY_PERIOD_MS = 5_000;
+  let lastActivity: SessionActivityReport | undefined;
+  const reportActivity = async (
+    context: SessionContext,
+    options: { readonly onlyWhenChanged: boolean }
+  ): Promise<void> => {
+    const claim = claimSession.capability(context.sessionManager.getSessionId());
+    if (claim === undefined) return;
+    // An architect arms no phase reminder, so it waits on no reminder of its own; what it
+    // reports is its background work.
+    const report = sessionActivity(
+      asyncJobKinds(context.getAsyncJobSnapshot?.() ?? null),
+      phaseWorkerSession(context) ? phaseReminder.phaseWake() : { nextReminderAt: null }
+    );
+    if (
+      options.onlyWhenChanged &&
+      lastActivity !== undefined &&
+      sameSessionActivity(lastActivity, report)
+    ) {
+      return;
+    }
+    const request = sessionActivityRequest({
+      project: process.env.LEGION_PROJECT,
+      claim,
+      report,
+    });
+    if (request === undefined) return;
+    lastActivity = report;
+    try {
+      await roleDaemon().activity(request);
+    } catch (error) {
+      // The daemon did not take it, so it is not what the daemon holds: the next reading sends
+      // again whether or not its content moved.
+      lastActivity = undefined;
+      logger.warn("legion: this session's activity report did not reach the daemon", {
+        issue: claim.issue,
+        error: messageFor(error),
+      });
+    }
+  };
 
   let daemonClient: LegionDaemonClient | undefined;
   const roleDaemon = (): LegionDaemonClient => {
@@ -197,18 +289,6 @@ export default function legionExtension(pi: PiApi): void {
   const claimSession = createClaimSession({
     daemon: roleDaemon,
     persistedTranscript,
-    // The six live rows, measured against this session's tool surface as session_start sees it
-    // (`pi.getActiveTools()` answers only from a handler), the host's `pi.agents`, and the task
-    // agents the registration says the role's prompts dispatch.
-    measureCapabilities: (context, input) =>
-      measureCapabilities(capabilityHost(), {
-        cwd: context.cwd,
-        sessionId: context.sessionManager.getSessionId(),
-        issue: input.issue,
-        promptAgents: input.promptAgents,
-        activeTools: pi.getActiveTools(),
-        agentsExposed: pi.agents !== undefined,
-      }),
     exitProcess: (code) => exitProcess(code),
   });
   const controllerSession = createControllerSession({
@@ -288,11 +368,68 @@ export default function legionExtension(pi: PiApi): void {
         });
       }
       await claimSession.bootstrap(context);
-      // The claim is registered, so this is now known to be a phase worker: a relaunch into an
-      // open phase gets its reminder from a timer, since nothing else would wake it. The guard
-      // drops that timer when any turn started meanwhile, which is exactly the case to drop —
-      // the daemon re-sending an interrupted task arrives as a prompt.
+      // The claim is registered. A phase worker relaunched into an open phase gets its reminder
+      // from a timer, since nothing else would wake it. The guard drops that timer when any turn
+      // started meanwhile, which is exactly the case to drop — the daemon re-sending an
+      // interrupted task arrives as a prompt.
       if (phaseWorkerSession(context)) phaseReminder.armResumeReminder();
+      /**
+       * INFRA-927: the session measures its six capability rows on this interval, while it is
+       * idle, up to three times, until every row is present — a check that lost the boot-time
+       * race stayed reported open for the session's whole life, since the boot measured once and
+       * never again. The architect measures first at the sixth tick as every other role does
+       * (`CAPABILITY_FIRST_DUE_TICK` plus its index in `LEGION_ROLES`); its extra readies make
+       * its waiting notices due at once, which is the same release a relaunched architect's ready
+       * already makes.
+       *
+       * The measurement's input is snapshotted here, since the host's accessors answer only from
+       * a handler and throw at factory time, and it is read before `registerLegionTool()` below,
+       * so the rows see the tool surface `session_start` exposes.
+       */
+      const capabilityClaim = claimSession.capability(context.sessionManager.getSessionId());
+      let capabilitySchedule: CapabilitySchedule | undefined;
+      if (capabilityClaim !== undefined) {
+        const capabilityInput = {
+          cwd: context.cwd,
+          sessionId: capabilityClaim.sessionID,
+          issue: capabilityClaim.issue,
+          promptAgents: capabilityClaim.promptAgents ?? [],
+          activeTools: pi.getActiveTools(),
+          agentsExposed: pi.agents !== undefined,
+        };
+        capabilitySchedule = createCapabilitySchedule({
+          claim: capabilityClaim,
+          measure: () => measureCapabilities(capabilityHost(), capabilityInput, capabilityBudgets),
+          send: (report, signal) =>
+            roleDaemon().ready(
+              {
+                claimToken: capabilityClaim.claimToken,
+                sessionId: capabilityClaim.sessionID,
+                secret: capabilityClaim.secret,
+                generation: capabilityClaim.generation,
+                capabilities: report,
+              },
+              { signal }
+            ),
+          sendTimeoutMs: capabilitySendTimeoutMs,
+          // Live, as the activity report reads it: a context captured once would answer for the
+          // session as it was at its start.
+          isIdle: () => paneContext?.isIdle?.(),
+          log: (message, fields) => logger.warn(message, fields),
+        });
+      }
+      // Between turns, the host's own managed interval is the only sight of this session's
+      // background work; it sends nothing unless what it reads has changed. Every claimed
+      // session reports, an architect's as much as a phase worker's: the daemon releases a pod
+      // only when each of its live roles has said it runs nothing.
+      context.setInterval(() => {
+        if (paneContext !== undefined) {
+          void reportActivity(paneContext, { onlyWhenChanged: true });
+        }
+        // Neither call is awaited: a measurement that runs for up to 10 s never delays the
+        // activity report the daemon reads to decide whether the pod may be released.
+        void capabilitySchedule?.tick();
+      }, SESSION_ACTIVITY_PERIOD_MS);
     }
     registerLegionTool();
     await activateLegionTool();
@@ -383,8 +520,17 @@ export default function legionExtension(pi: PiApi): void {
   // continuation, one more turn of this same session; every one after it is a timer, so the run
   // settles and the daemon sees the turn end (src/phase-reminder.ts).
   pi.on("session_stop", async (event, context) => {
-    if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
+    if (event.signal.aborted) return undefined;
+    if (!phaseWorkerSession(context)) {
+      // An architect has no phase of its own to settle, and its pod is released on the same rule
+      // as a worker's, so its turn ends with a report of its own.
+      await reportActivity(context, { onlyWhenChanged: false });
+      return undefined;
+    }
     const reminder = await phaseReminder.settle(assistantText(event.last_assistant_message));
+    // After the settle, so the report carries the wake that settle armed: the daemon releases no
+    // claim whose last report is older than its last turn, so this one goes whatever it says.
+    await reportActivity(context, { onlyWhenChanged: false });
     return reminder === undefined ? undefined : { continue: true, additionalContext: reminder };
   });
 
@@ -438,7 +584,8 @@ export default function legionExtension(pi: PiApi): void {
           paneHandoffReport(
             sessionConfigFile("omp", process.env),
             process.env,
-            process.cwd()
+            process.cwd(),
+            currentSessionID()
           )(phase, role),
         branchHead: () => findPushedBranchHead({ env: process.env }),
         resolveDocument: async (issue, reference) => {
@@ -446,6 +593,7 @@ export default function legionExtension(pi: PiApi): void {
           const config = activeDispatchSettings(
             sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
               cwd: process.cwd(),
+              session: currentSessionID,
             }).dispatch
           );
           if (config === null) {
@@ -455,7 +603,7 @@ export default function legionExtension(pi: PiApi): void {
           }
           try {
             return await resolveIssueDocumentId(
-              new DispatchClient(config.url, config.token, fetch),
+              new DispatchClient(config.url, config.credential, fetch),
               issue,
               reference
             );

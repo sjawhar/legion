@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { LegionRole } from "@legion/contracts";
+import { type LegionRole, roleToken } from "@legion/contracts";
 import type { LegionPhase } from "@legion/contracts/legion-api";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import {
@@ -66,7 +66,7 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
     kind: role === "architect" ? "architect" : "phase-worker",
     role,
     sessionID: "ses_208",
-    claimToken: `legion-legion-legion-208-${role}`,
+    claimToken: roleToken("omp", issue, role),
     generation: 5,
     tree: "LEGION-208",
     issue,
@@ -92,6 +92,7 @@ function recordingDaemon(options: {
     "childRerun",
     "issueStatus",
     "handoffComplete",
+    "releaseRecords",
   ];
   const daemon = {
     grant: async (input: object) => {
@@ -121,6 +122,10 @@ function recordingDaemon(options: {
  * (`legionToolDescription` in `@legion/pi-shared/legion-phase-ops`) must reproduce it exactly. */
 const OMP_LEGION_TOOL_DESCRIPTION =
   "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
+  "read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: " +
+  "every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, " +
+  "the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a " +
+  "wake to the woken role's first turn. " +
   "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
   "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
   "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
@@ -149,8 +154,13 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
   "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
-  "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
-  "for them instead. " +
+  "other phase (SIGNOFF_OUTSIDE_ACCEPTING) and while an issue beneath it is still in the workflow " +
+  "(SIGNOFF_CHILD_IN_WORKFLOW, naming each one), since a parent's head proves its children's merged work: take each one " +
+  "to done, or out of the workflow with park_child, and sign off again. close_root is refused the same way and with the " +
+  "same code while an issue beneath the root is still in the workflow, since closing it would stop that work mid-turn. " +
+  "release_children and rerun_child are refused for a child whose ancestor is in retro, merging or awaiting_merge " +
+  "(CHILD_UNDER_ACCEPTED_PARENT, naming the ancestor), since that ancestor's approved head cannot carry work released " +
+  "under it now: wait for the ancestor to close, then release it. " +
   "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
   "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
@@ -202,6 +212,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
         "park_child",
         "rerun_child",
         "read_record",
+        "read_release_records",
         "handoff_complete",
         "ready_for_update",
         "read_state",
@@ -209,6 +220,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
       ],
     },
     issue: { type: "string" },
+    since: { type: "string" },
     artifactId: {
       type: "string",
       description:
@@ -463,6 +475,112 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
   }
   await expect(run(architect, { op: "spawn_worker", issue: "LEGION-208" })).resolves.toMatchObject({
     isError: true,
+  });
+});
+
+// The records the production check of a deployment's idle release counts, read by the pod's own
+// claim: the daemon takes the claim token and the claim's secret, which stay in this process.
+test("read_release_records reads the window with this session's claim, and reports a refusal as read_record does", async () => {
+  const records = {
+    releases: [
+      {
+        id: 1,
+        issue: "LEGION-208",
+        generation: 2,
+        roles: ["tester"],
+        at: "2026-11-01T12:00:00Z",
+        bundleBytes: 64,
+      },
+    ],
+    resumes: [
+      {
+        id: 1,
+        release: 1,
+        issue: "LEGION-208",
+        role: "tester",
+        kind: "task",
+        at: "2026-11-01T12:30:00Z",
+        podReadyAt: "2026-11-01T12:31:00Z",
+        firstTurnAt: "2026-11-01T12:32:00Z",
+        stuck: false,
+      },
+    ],
+    holds: [],
+  };
+  const { calls, daemon } = recordingDaemon({ answers: { releaseRecords: records } });
+  const toolFor = (session: LegionToolSession, answering = daemon) =>
+    createLegionTool({
+      pi,
+      daemon: answering,
+      controllerGrant: noControllerGrant,
+      onPhaseCompleted: () => undefined,
+      onUpdateAnswered: () => undefined,
+      handoffReport: noHandoffReport,
+      branchHead: noBranchHead,
+      resolveDocument: noDocumentLookup,
+      session: () => session,
+    });
+  const window = { op: "read_release_records", since: "2026-11-01T00:00:00Z" };
+
+  for (const session of [claimSession("tester"), claimSession("architect")]) {
+    await expect(
+      toolFor(session).execute("", window, undefined, undefined, context())
+    ).resolves.toMatchObject({
+      details: {
+        counts: { releases: 1, resumes: 1, resumesByKind: { task: 1 }, holds: 0 },
+        wokenWithinTenMinutes: { releases: 0, share: 0 },
+        wakeToFirstTurnSeconds: { measured: 1, median: 120, p90: 120, max: 120 },
+      },
+    });
+    expect(calls.at(-1)).toEqual([
+      "releaseRecords",
+      {
+        claimToken: roleToken(
+          "omp",
+          "LEGION-208",
+          session.kind === "architect" ? "architect" : "tester"
+        ),
+        secret: "claim-secret",
+        since: "2026-11-01T00:00:00Z",
+      },
+    ]);
+  }
+
+  // A window the route could not read is refused here, before the request, as a field problem of
+  // any other op is; a refusal from the daemon reaches the agent as its own sentence.
+  const before = calls.length;
+  await expect(
+    toolFor(claimSession("tester")).execute(
+      "",
+      { op: "read_release_records", since: "yesterday" },
+      undefined,
+      undefined,
+      context()
+    )
+  ).resolves.toMatchObject({
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is",
+      },
+    ],
+  });
+  expect(calls).toHaveLength(before);
+  const refusing = recordingDaemon({
+    answers: { releaseRecords: new Error("the daemon keeps no release records") },
+  });
+  await expect(
+    toolFor(claimSession("tester"), refusing.daemon).execute(
+      "",
+      window,
+      undefined,
+      undefined,
+      context()
+    )
+  ).resolves.toMatchObject({
+    isError: true,
+    content: [{ type: "text", text: "the daemon keeps no release records" }],
   });
 });
 
@@ -1029,7 +1147,7 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
 test("the controller reads the whole state without a grant and sets an issue's status with its own", async () => {
   const state = {
     daemon: { project: "OMP" },
-    admission: { cap: 2, active: ["LEGION-208"], waiting: [] },
+    admission: { cap: 2, active: ["LEGION-208"], waiting: [], trees: ["LEGION-208"] },
     issues: { "LEGION-208": { key: "LEGION-208", phase: "held", holdReason: "escalated" } },
     capabilities: [],
   };
@@ -1083,6 +1201,10 @@ test("the controller reads the whole state without a grant and sets an issue's s
     [{ op: "set_status", status: "todo" }, "set_status requires issue"],
     [{ op: "read_state", issue: "LEGION-208" }, 'read_state does not accept field "issue"'],
     [{ op: "read_record", issue: "LEGION-208" }, "not available to a controller session"],
+    [
+      { op: "read_release_records", since: "2026-11-01T00:00:00Z" },
+      "not available to a controller session",
+    ],
     [{ op: "handoff_complete", summary: "Done." }, "not available to a controller session"],
     [{ op: "sign_off", issue: "LEGION-208" }, "not available to a controller session"],
   ] as const;

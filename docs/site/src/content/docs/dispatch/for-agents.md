@@ -146,10 +146,14 @@ starts. When the list leaves older items out, its last line says how many; `disp
 reads them all. The request waits at most 800 ms for the list and carries the last one read when
 Dispatch does not answer.
 
-The server holds every write to a size, and refuses rather than truncates:
+The server holds every write to a size, refuses rather than truncates, and names what passed the
+bound; `dispatch limits` prints every bound the server you write to holds, and no command carries
+a bound of its own:
 
-- an ask's question is at most 2,000 characters, with at most eight options;
-- a comment or message body is at most 32,000 characters;
+- an ask's question and its options together are at most 32,000 characters, with at most eight
+  options;
+- a comment or message body is bounded block by block: each block — a paragraph, list, quote,
+  table or code block — is at most 32,000 characters, and one body holds at most 32,768 blocks;
 - a comment anchored to a document is also projected into that document's margin, which is bounded
   in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
   few long anchored comments therefore fill a thread or a margin where many short ones used to
@@ -302,6 +306,23 @@ dispatch://PROJECT/artifact/<document>/comment/<id>#b-<block>[@v<N>]
 ```
 
 `dispatch read` on any of them shows what it is and everything that references it.
+
+Write each id whole. Where one reaches you short, Dispatch still resolves it: 8 or more of the
+characters an id starts with name the one ask, comment, message, document or block that carries
+them, in a reference, in a page address and on the API routes that take an id in their path, and
+what is stored is the whole id. A short id two items share resolves to neither: the API answers
+`409 ID_AMBIGUOUS` with the matches, and the text stays as written.
+
+Two forms need no `dispatch://`. An issue key on its own, `CORE-12`, links to that issue when that
+issue exists, and `#` with a question block's id links to that question of the document the text
+belongs to — its own text, its questions and replies, and comments anchored to it; text on an issue
+but on no document resolves against the issue's spec. Both enter the reference graph, so
+`dispatch read` on the target lists the text that wrote them.
+
+To write a literal `#id` in a document rather than a link to that question, put it in a code
+span: a document keeps no escape of its own, since it stores `\#q2` as `#q2`, and code shows as
+text on every surface. A comment, an ask and an issue message store their body as you wrote it,
+so `\#q2` stays text there.
 
 A comment or message is made of blocks, one per paragraph, list or other top-level block, named
 `b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message

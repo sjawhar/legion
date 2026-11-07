@@ -13,6 +13,10 @@ import (
 // under the state directory.
 const DeploymentInstructionsFile = "deployment-instructions.md"
 
+// MemoryInstructionsFile is the copy of the project's memory instructions every memory-group
+// pane's prompt reads, under the state directory.
+const MemoryInstructionsFile = "memory-instructions.md"
+
 // ReadSecretPointer is the trimmed contents of the file a pointer key names — `variable` is the
 // key as the operator wrote it (`envoy_token_file`, `operator_token_file`), so the refusal reads
 // in their words. A set pointer is authoritative: a missing, unreadable, or blank file is a
@@ -147,6 +151,38 @@ func WriteDeploymentInstructions(contents []byte, stateDir, legionID string) (st
 	}
 	target := filepath.Join(stateDir, DeploymentInstructionsFile)
 	body := fmt.Sprintf("# Deployment instructions (%s)\n\n%s", legionID, contents)
+	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", target, err)
+	}
+	return target, nil
+}
+
+// ReadMemoryInstructions is the project's memory instructions file
+// (`projects.<KEY>.memory.instructions`), refused naming the operator's path when it is missing,
+// unreadable, or blank: a configured file with nothing in it is a misconfiguration, not an empty
+// fragment. It writes nothing, so boot reads it with every other refusal before it writes
+// anything.
+func ReadMemoryInstructions(instructionsPath string) ([]byte, error) {
+	contents, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("memory instructions file %s could not be read: %w", instructionsPath, err)
+	}
+	if strings.TrimSpace(string(contents)) == "" {
+		return nil, fmt.Errorf("memory instructions file %s is empty", instructionsPath)
+	}
+	return contents, nil
+}
+
+// WriteMemoryInstructions writes the copy of contents ReadMemoryInstructions answered: boot reads
+// the file with every other refusal before it writes anything, and writes this copy once, before
+// the first pane opens. The two are separate, where the deployment's own has a Materialize pair
+// as well, because only boot writes a memory copy and boot refuses before it writes.
+func WriteMemoryInstructions(contents []byte, stateDir, legionID string) (string, error) {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", fmt.Errorf("create state directory %s: %w", stateDir, err)
+	}
+	target := filepath.Join(stateDir, MemoryInstructionsFile)
+	body := fmt.Sprintf("# Memory instructions (%s)\n\n%s", legionID, contents)
 	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
 		return "", fmt.Errorf("write %s: %w", target, err)
 	}

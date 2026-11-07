@@ -64,6 +64,7 @@ func statusHarness(t *testing.T) (*harness, []intake.Handler, *statusRecorder) {
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
+	h.openTree(t, testDispatchProject, statusRoot)
 	statuses.issues = map[string]dispatch.Issue{
 		statusRoot:  {Key: statusRoot, ResolvedRepo: "acme/widgets", Title: statusRoot, Status: "in_progress", Rank: "A", Labels: []string{"legion"}, HandedOver: true, LastSeq: 3},
 		statusChild: {Key: statusChild, ResolvedRepo: "acme/widgets", Title: "the child", Status: "in_progress", Parent: &root, Rank: "B", LastSeq: 4},
@@ -79,12 +80,17 @@ func statusEcho(seq int64, status string) intake.DispatchIssue {
 		ResolvedRepo: "acme/widgets", DaemonActor: true, ClaimKnown: true}
 }
 
-// superviseRows counts the child's queued supervise rows of op for role.
+// superviseRows counts the child's queued supervise rows of op for role. A start of a phase
+// worker is two rows now (workflow.StartOrOwe): the relaunch, which carries no task and brings
+// the role's session back at once, and the row that carries the task and waits for the issue's
+// admission slot. Only the second is the start these tests count, as every other assertion
+// about a start in this tree counts it.
 func superviseRows(t *testing.T, h *harness, op string, role claim.Role) int {
 	t.Helper()
 	var rows int
 	if err := h.store.Pool().QueryRow(context.Background(),
-		`select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2 and payload->>'role' = $3`,
+		`select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2 and payload->>'role' = $3
+			and (payload->>'op' <> 'start' or coalesce(payload->>'task', '') <> '')`,
 		statusChild, op, string(role)).Scan(&rows); err != nil {
 		t.Fatalf("count the %s rows of %s: %v", op, role, err)
 	}
@@ -152,7 +158,9 @@ func TestParkChildParksTheRecordWithoutWaitingForItsDispatchEvent(t *testing.T) 
 }
 
 // rerun_child starts the child's next run in the record within its own request, as the todo move's
-// event would, without waiting for that event; the write's echo, once it arrives, changes nothing.
+// event would, without waiting for that event: the rerun writes todo to Dispatch, and the child's
+// entry into planning writes in_progress, the status of that phase, over it. The write's echo,
+// once it arrives, changes nothing.
 func TestRerunChildStartsTheNextRunWithoutWaitingForItsDispatchEvent(t *testing.T) {
 	h, handlers, statuses := statusHarness(t)
 	architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
@@ -170,8 +178,8 @@ func TestRerunChildStartsTheNextRunWithoutWaitingForItsDispatchEvent(t *testing.
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, want)
 	}
 	rerun := recordedChild(t, h, statusChild)
-	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "todo" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
-		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning at its write's sequence 6", rerun)
+	if rerun == nil || rerun.Phase != phase.Planning || rerun.Status != "in_progress" || rerun.LastDispatchSeq != 6 || rerun.Generation != 2 {
+		t.Fatalf("the child's record once rerun_child answered = %#v, want its next run (generation 2) planning, in_progress as planning's status, at its write's sequence 6", rerun)
 	}
 	if got := superviseRows(t, h, "start", claim.RolePlanner); got != planners+1 {
 		t.Fatalf("planner start rows = %d, want the rerun to start the planner once more than the %d before it", got, planners)

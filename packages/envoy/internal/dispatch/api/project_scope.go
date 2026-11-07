@@ -20,22 +20,26 @@ package api
 //     than move anything. So the project this check reads before the handler runs is the project
 //     the handler will write, and the check needs no transaction of its own.
 //   - The check is a no-op for a credential that carries no project: a browser cookie, a personal
-//     agent token, a Kubernetes service-account token and the shared token name none, and so does
-//     an access token the broker scoped to a person rather than to one project — a dev box
-//     session, whose `project_scope` is `person`, reaches brokerTokenActor with no Project and is
-//     unscoped here, with no second mechanism of its own. That is the rule and not a transitional
-//     measure: every caller that exists today writes exactly what it wrote before, which is what
-//     lets this deploy before anything presents a broker token.
+//     agent token, a Kubernetes service-account token and the shared token name none, and so do
+//     the two access tokens the broker scopes to a person rather than to one project, each of
+//     which reaches brokerTokenActor with no Project. One is a dev box session's, unscoped here
+//     with no second mechanism of its own; the other is a machine's that names a service and no
+//     person, whose every write writeNeedsASignedInPerson refuses below. Both carry
+//     `project_scope` `person`. That is the rule and not a transitional measure: every caller
+//     that exists today writes exactly what it wrote before, which is what lets this deploy
+//     before anything presents a broker token.
 //
 // For a credential that does name a project, the check fails closed: only a target that
 // resolves to that credential's own project reaches the handler. A target that resolves to
 // another project, to no project at all, or to nothing at all — no such row, or an id Postgres
-// will not read as a uuid — is refused. Each resolver sends the raw path value to Postgres, as
-// the handler behind it does, so the parser that decides what this check resolved is the parser
-// the handler then addresses its row by, and the two cannot disagree about which object a path
-// names: Go's uuid.Parse refuses spellings Postgres accepts (a hyphen after any group of four
-// digits), and a check that resolved nothing where the handler resolves a row would be a write
-// nothing judged.
+// will not read as a uuid — is refused. Each resolver sends Postgres the value the prefix layer
+// resolved, the one the handler behind it sends too: an id written as a unique prefix is the
+// whole id by the time either reads it, and anything else is the path value as written
+// (resolveIDPrefixes, which register wraps outside this check for exactly that reason). So the
+// parser that decides what this check resolved is the parser the handler then addresses its row
+// by, and the two cannot disagree about which object a path names: Go's uuid.Parse refuses
+// spellings Postgres accepts (a hyphen after any group of four digits), and a check that
+// resolved nothing where the handler resolves a row would be a write nothing judged.
 //
 // Failing closed does not close the existence oracle, and does not claim to. The two refusals
 // still read differently — a target of another project is told which project that is, and one
@@ -56,6 +60,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -361,6 +366,35 @@ func (s *server) withinSessionScope(route apiRoute, handler http.HandlerFunc) ht
 // message rows are held to the session their delivery attempt names.
 func addressesOneSession(route apiRoute) bool {
 	return route.Scope == scopeSession && strings.Contains(route.Pattern, "{session_id}")
+}
+
+// writeNeedsASignedInPerson refuses every write by a caller whose credential names a service and
+// no person: an access token the secrets broker issued to a machine nobody has signed in on. The
+// refusal is here, in front of every mutating row whatever its class, rather than in each route,
+// for the reason the two checks above are: a route added later is covered by the table it joins
+// and not by a line someone remembered to write.
+//
+// Such a caller may read everything its session may read. What it may not do is write, because
+// Dispatch records a write under the person who made it and this credential names none; a
+// session that accepted a delivery or answered an ask under it would write as nobody. The
+// refusal's message names `agent-secrets login`, the command that signs a person in on that
+// machine, since running it is the whole remedy.
+//
+// Every other credential is unaffected: a cookie, a personal token, a service-account token, the
+// shared token and a broker token that does name a person each reach the handler as before, at
+// the cost of the one header read brokerCredentialActor makes.
+func (s *server) writeNeedsASignedInPerson(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, resolved := s.brokerCredentialActor(r)
+		if !resolved || actor.Owner != nil || actor.Service == nil {
+			handler(w, r)
+			return
+		}
+		writeError(w, contracts.DispatchSignInRequired, http.StatusForbidden, fmt.Sprintf(
+			"this request's credential acts for service %s and no person, so there is nobody to "+
+				"record this write under; run `agent-secrets login` on this machine and try again",
+			*actor.Service))
+	}
 }
 
 // undecidableWrites names every mutating row the project check cannot decide: one writeClasses

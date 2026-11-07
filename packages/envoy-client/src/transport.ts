@@ -2,14 +2,17 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   type Envelope,
   EnvelopeSchema,
+  ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
+  LISTENER_CALL_ATTEMPTS,
+  LISTENER_CALL_RETRY_DELAY_MS,
+  LISTENER_CALL_TIMEOUT_MS,
   MINTED_DEDUPE_KEY_PATTERN,
 } from "@legion/contracts";
 import { z } from "zod";
+import type { RequestCredential } from "./bearer";
 import { normalizeEnvoyUrl } from "./envoy-settings";
+import { messageFor } from "./errors";
 import { machineID } from "./machine";
-
-const DEFAULT_TIMEOUT_MS = 5_000;
-const RETRY_DELAY_MS = 250;
 
 /**
  * How long one replay call may take. The listener stops reading at 5 s and its HTTP server writes
@@ -23,6 +26,38 @@ const REPLAY_TIMEOUT_MS = 10_000;
  * help, unlike a 503 the listener's start-up gate answers, so a caller tells its session instead.
  */
 export const REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+
+/**
+ * A session's state, which the listener computes from that session's last registration and from
+ * nothing else (dispatch://INFRA-392): `live` within the live window (5 minutes), `unresponsive`
+ * past it and inside the gone horizon (an hour), `gone` past that or with no record at all. An
+ * unresponsive session is not dead — it keeps its role and issue claims, a message sent to it is
+ * stored for it, and nothing starts a replacement for it.
+ */
+const SessionStateSchema = z.enum(["live", "unresponsive", "gone"]);
+
+export type SessionState = z.infer<typeof SessionStateSchema>;
+
+/**
+ * What an agent must do about a session that stopped answering (dispatch://INFRA-392). Every
+ * answer that names a session in that state says this, in one wording: the tool descriptions
+ * (`tool-contract.ts`), the send confirmation, the publish confirmation, and the refusal an
+ * unresponsive holder's role lookup or publish gets, which is read at the moment an agent
+ * decides whether its peer is alive. The minutes are counted from the holder's last registration
+ * (`last_seen`) and are `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` itself, the sum the Dispatch server
+ * refuses another agent's take by, so a change of that constant changes this sentence with it
+ * rather than leaving it saying a number nothing enforces.
+ */
+export const UNRESPONSIVE_RULE =
+  "An unresponsive session is not dead: it keeps its role claims and its issue claims, and a " +
+  "message sent to it is stored until it answers. Start no replacement for it and take no claim " +
+  `from it until it is gone, or until ${ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS / 60_000} minutes ` +
+  "have passed since its last_seen, the time of its last registration.";
+
+// A listener predating the field names no state, and it lists only sessions it holds a
+// registration for: `live` is what such an answer means, and reading an absent state as anything
+// else would make every session on an older listener look dead.
+const WireStateSchema = SessionStateSchema.default("live");
 
 const InterestWireSchema = z.object({
   session_id: z.string(),
@@ -68,6 +103,7 @@ const SessionWireSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   self_subscribed: z.boolean(),
   last_seen: z.number().int().optional(),
+  state: WireStateSchema,
   // The plugin the session registered through and its build; absent from a listener predating the
   // fields and for a session whose plugin predates them.
   plugin: z.string().optional(),
@@ -79,6 +115,10 @@ const RoleWireSchema = z.object({
   holder: z.string(),
   host: z.string().optional(),
   last_seen: z.number().int(),
+  // The holder's own state. A role answer names it `holder_state`; `state` is the same session's
+  // state as a session row reports it, so both are read and `holder_state` wins.
+  state: WireStateSchema,
+  holder_state: SessionStateSchema.optional(),
 });
 
 const RoleHeldWireSchema = z.object({
@@ -87,34 +127,72 @@ const RoleHeldWireSchema = z.object({
   holder: z.string(),
 });
 
+/**
+ * A listener's error body. Beyond the message and its `code`, a refusal that names a session
+ * names that session's state and its last registration, and a role's 404 names its holder too:
+ * a send's `no live session <id>` carries `state` and `last_seen`
+ * (`cmd/listener/api.go`'s `noLiveSessionRefusal`), and a role lookup's or a role publish's
+ * `holder lapsed` carries `holder`, `holder_state`, `last_seen` and `claim_released`
+ * (`cmd/listener/role_holder.go`'s `roleHolderError`). A topic send that some recipient did not
+ * confirm (504 `not_confirmed`, `cmd/listener/confirmed.go`'s `topicSendFailure`) names under
+ * `unresponsive` every other recipient the message was stored for. The listener's own text names
+ * none of them, so `EnvoyApiError` says them itself (`refusalStateText`): an agent told its peer
+ * did not answer must be told whether that peer is unresponsive — still holding its role and its
+ * claims — or gone.
+ */
 const ErrorWireSchema = z.object({
   error: z.string(),
   code: z.string().optional(),
   expected: z.array(z.string()).optional(),
+  state: SessionStateSchema.optional(),
+  holder: z.string().optional(),
+  holder_state: SessionStateSchema.optional(),
+  last_seen: z.number().int().optional(),
+  /** Always false on a lapsed role's 404: a lookup releases no claim, whatever the state. */
+  claim_released: z.boolean().optional(),
+  /** The recipients of a refused topic send the message was stored for, each past its live
+   *  window and asked for no receipt, so none of them failed this send. */
+  unresponsive: z.array(z.string()).optional(),
 });
 
 /**
  * What a send or a publish answers: the envelope, and the fields the listener adds beside it.
  * `duplicate` is a send's: the listener already stored a send under this target and idempotency
  * key, so this one stored nothing new. Absent reads as false, as an older listener's answer does.
+ * `holder` and `holder_state` are a role publish's, under the two names every role answer uses
+ * (`cmd/listener/api.go`'s `publishResponse`), and `unresponsive` names every recipient of an
+ * ad-hoc topic send that was past its live window: its copy was forwarded and stored for it and
+ * no receipt asked of it (`cmd/listener/confirmed.go`'s `confirmTopicRecipient`), so the publish
+ * is answered 200 and the sender is told its peer has the message waiting, not taken. Each is
+ * omitted when there is none, and absent from a listener predating the field.
  */
 const EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: z.string().optional(),
   holder: z.string().optional(),
+  holder_state: SessionStateSchema.optional(),
+  recipient_state: SessionStateSchema.optional(),
+  // The recipient's last registration (epoch ms), which the listener sends with an unresponsive
+  // recipient's state so the sender can say how long it has been stalled; omitted when it knows
+  // none, and absent from a listener predating the field.
+  last_seen: z.number().int().optional(),
+  unresponsive: z.array(z.string()).optional(),
   duplicate: z.boolean().optional(),
 });
 
 /**
  * The publish route's answer. A role topic has three of them, told apart by status: 200, a live
  * holder took the message, with `holder`; 202, nobody holds the role, so the listener kept the
- * message on the role's kept lane and hands it to the role's next holder, with `kept`,
- * `kept_reason` and `holder` when a lapsed claim named one; 404, nothing was kept and the
- * sender's own fallback must run, which `request` throws as an `EnvoyApiError`. 202 is a success
- * answer, so it passes `response.ok` and reaches this schema — load-bearing: without it a kept
- * message would read as a refusal.
+ * message on the role's kept lane and hands it to the role's next holder, with `kept` and
+ * `kept_reason: "unclaimed"`, the one state a listener of this build keeps for; 404, nothing was
+ * kept and the sender's own fallback must run, which `request` throws as an `EnvoyApiError`. 202
+ * is a success answer, so it passes `response.ok` and reaches this schema — load-bearing: without
+ * it a kept message would read as a refusal.
  */
 const PublishResponseSchema = EnvelopeResponseSchema.extend({
   kept: z.boolean().optional(),
+  /** `holder_lapsed` stays readable though no listener of this build sends it: envoy 29.4.0 kept
+   *  for a lapsed claim and answered 202 with that reason, and a reader that refused it would
+   *  read a kept message from such a listener as a refusal. */
   kept_reason: z.enum(["unclaimed", "holder_lapsed"]).optional(),
 });
 
@@ -156,9 +234,13 @@ export type EnvoyClientConfig = {
   /** Whether a request a network error or a 5xx failed is sent once more, after 250 ms. Default
    * true; false for a best-effort read that must not hold its caller past one timeout. */
   readonly retry?: boolean;
-  /** The listener's bearer (`envoySettings`), sent on every call; none sends no `Authorization`
-   * header, for a loopback listener that asks for none. */
-  readonly token?: string | undefined;
+  /**
+   * What every call presents (`EnabledEnvoySettings.credential`): the listener's bearer, as it
+   * always was; or this machine's identity traded at the secrets broker, presented under the
+   * `DPoP` scheme with a proof of this process's key on each request; or none at all, which
+   * sends no `Authorization` header, for a loopback listener that asks for none.
+   */
+  readonly credential?: RequestCredential | undefined;
 };
 
 export type Interest = z.infer<typeof InterestWireSchema>;
@@ -230,6 +312,15 @@ export function mergeInterestSources(
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
 
 export type RoleInfo = z.infer<typeof RoleWireSchema>;
+
+/**
+ * The state a role answer reports for its holder: `holder_state` where the listener names it,
+ * else the row's own state. A holder that is only unresponsive still holds the role — nothing on
+ * a lookup releases its claim — so this never reads as "no holder".
+ */
+export function holderStateOf(role: RoleInfo): SessionState {
+  return role.holder_state ?? role.state;
+}
 
 export type SubscribeInput = {
   readonly sessionID: string;
@@ -369,27 +460,44 @@ export type SetRoleResult =
 export type ListSessionsInput = {
   readonly directory?: string;
   readonly title?: string;
+  /** `unresponsive` asks the listener for the sessions past their live window as well; without it
+   *  the list holds the live ones alone. A gone session is never listed either way. */
+  readonly include?: "unresponsive";
 };
 
 export type SendResult = {
   readonly envelope: Envelope;
   readonly recipient: string;
   readonly confirmed: boolean;
+  /** The recipient's state as the listener resolved it; `live` from a listener that names none.
+   *  A message to an unresponsive recipient is stored and reaches it when it answers again. */
+  readonly recipientState: SessionState;
+  /** The recipient's last registration in epoch milliseconds, which the listener sends beside an
+   *  unresponsive recipient's state so the sender can say since when it has been silent. Absent
+   *  when the listener knows none, and from a listener predating the field. */
+  readonly lastSeen?: number;
   /** The listener already held a send under this target and idempotency key: delivered once. */
   readonly duplicate: boolean;
 };
 
 export type PublishResult = {
   readonly envelope: Envelope;
-  /** The session the message reached, or the one a lapsed claim named on a kept answer. */
+  /** A role publish's resolved holder, and the state the listener's record puts it in. */
   readonly holder?: string;
+  readonly holderState?: SessionState;
+  /** The recipients of an ad-hoc topic send that were past their live window: the listener
+   *  stored this message for each of them and asked none of them for a receipt, so the publish
+   *  succeeded and those peers have not taken it yet. Empty when every recipient confirmed, and
+   *  empty from a listener predating the field. */
+  readonly unresponsive: readonly string[];
   /**
    * True on the listener's 202: no live holder took the message, so the listener kept it on the
    * role's kept lane and hands it to the role's next holder. The message is not lost, so this is
    * a success answer, not a refusal. Absent unless the listener answered it.
    */
   readonly kept?: boolean;
-  /** Why the message was kept: the role was unclaimed, or its holder's claim had lapsed. Read
+  /** Why the message was kept. A listener of this build keeps only for a role nobody claims, so
+   * it sends `unclaimed` alone; `holder_lapsed` is what envoy 29.4.0 sent for a lapsed claim. Read
    * from the answer's own schema, so a reason a later listener adds is added in one place. */
   readonly keptReason?: z.infer<typeof PublishResponseSchema>["kept_reason"];
 };
@@ -416,11 +524,63 @@ export type ReplayResult = z.infer<typeof ReplayWireSchema>;
 export type ReplaySubjectResult = ReplayResult["subjects"][number];
 export type ReplayMessage = ReplaySubjectResult["messages"][number];
 
+/**
+ * What a refusal naming a session's state adds to its message: which of the three states the
+ * listener put that session in, when it last registered, every other recipient the message was
+ * stored for, and, where either names a session that stopped answering, the rule that such a
+ * session is not dead. The listener's own text says none of it ("no live session ses_x",
+ * "role reviewer holder ses_x lapsed; claim retained (last seen 1762...)", "2 of 3 sessions
+ * subscribed to … did not confirm"), and an agent reading only the message cannot tell a peer
+ * that stopped answering from one that ended — which is the mistake this change exists to stop
+ * (dispatch://INFRA-392, R7). A body that names neither adds nothing, so an older listener's
+ * message is what it always was.
+ */
+function refusalStateText(parsed: z.infer<typeof ErrorWireSchema>): string {
+  const sentences: string[] = [];
+  const state = parsed.holder_state ?? parsed.state;
+  if (state !== undefined) {
+    const who = parsed.holder === undefined ? "That session" : `Holder ${parsed.holder}`;
+    // A listener that can name no registration at all sends none (the field is omitted, or 0):
+    // the state alone is said, since a made-up time would read as knowledge nobody has.
+    const seen =
+      parsed.last_seen === undefined || parsed.last_seen <= 0
+        ? ""
+        : `, last seen ${new Date(parsed.last_seen).toISOString()}`;
+    sentences.push(`${who} is ${state}${seen}.`);
+  }
+  const stored = parsed.unresponsive ?? [];
+  if (stored.length > 0) {
+    const one = stored.length === 1;
+    sentences.push(
+      `Envoy stored the message for ${stored.join(", ")}.`,
+      `${one ? "That session" : "Those sessions"} stopped answering, so ${one ? "it" : "they"} did not fail this send.`
+    );
+  }
+  if (sentences.length === 0) return "";
+  // The rule is said once, however many of the two parts named a session that stopped answering.
+  if (state === "unresponsive" || stored.length > 0) sentences.push(UNRESPONSIVE_RULE);
+  return ` ${sentences.join(" ")}`;
+}
+
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
   /** The listener's machine-readable `code`, when its error body carries one. */
   readonly code: string | undefined;
+  /** The session the refusal is about: a role's holder, where its body names one. */
+  readonly holder: string | undefined;
+  /** That session's state as the listener's record put it, when the body names one: a refused
+   *  send's `state`, a lapsed role's `holder_state`. */
+  readonly sessionState: SessionState | undefined;
+  /** That session's last registration in epoch milliseconds, when the body names one. */
+  readonly lastSeen: number | undefined;
+  /** Whether the refusal released the holder's role claim. The listener answers it on every
+   *  lapsed role and it is always false: a lookup or a publish takes nothing from a holder,
+   *  whatever its state. */
+  readonly claimReleased: boolean | undefined;
+  /** The recipients a refused topic send was nonetheless stored for, when the body names any:
+   *  each stopped answering, so none of them is a reason this send was refused. */
+  readonly unresponsive: readonly string[] | undefined;
 
   constructor(
     readonly details: {
@@ -440,10 +600,15 @@ export class EnvoyApiError extends Error {
     super(
       parsed === undefined
         ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}`
-        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`
+        : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}${refusalStateText(parsed)}`
     );
     this.expected = parsed?.expected;
     this.code = parsed?.code;
+    this.holder = parsed?.holder;
+    this.sessionState = parsed?.holder_state ?? parsed?.state;
+    this.lastSeen = parsed?.last_seen;
+    this.claimReleased = parsed?.claim_released;
+    this.unresponsive = parsed?.unresponsive;
   }
 }
 
@@ -537,6 +702,18 @@ type RequestOptions = {
   readonly retry?: boolean;
   /** Called for each attempt that got no answer or a 5xx: one the listener may have acted on. */
   readonly onUnanswered?: () => void;
+  /**
+   * The session this call acts for, where its body names one the listener binds to the
+   * credential: a subscribe, an unsubscribe, a deregistration, a role claim, a replay, and a
+   * send's or a publish's `source_session`. The listener answers 403 to a body naming a session
+   * its broker token does not (`sessionNotBound`, packages/envoy/cmd/listener/brokerauth.go), so
+   * the credential is asked for that session's own headers rather than the caller's current
+   * ones; a call this process makes for the session it has just left — the hand-back of a role
+   * that session still holds — is the one that needs it. A read of another session's record
+   * names none: those are not narrowed, and asking for a credential of a session this process
+   * never acted as would trade for a name the broker refuses.
+   */
+  readonly actingSession?: string;
 };
 
 /** One attempt's outcome: the listener's status and body, or no answer and why. */
@@ -544,21 +721,57 @@ type AttemptOutcome =
   | { readonly response: Response; readonly body: string }
   | { readonly unanswered: unknown };
 
+/**
+ * The one place the client's call timing resolves: a configuration names a per-attempt timeout
+ * and whether a failed call is retried, and whatever it leaves unset comes from the declarations
+ * in `@legion/contracts`, which weigh a whole call's cost against the live window a refresh must
+ * renew a session's registration inside. A per-request override (`RequestOptions.timeoutMs` and
+ * `RequestOptions.retry`) still overrides what this returns, for the one call it is given on.
+ */
+export function resolveCallTiming(config: Pick<EnvoyClientConfig, "timeoutMs" | "retry">): {
+  timeoutMs: number;
+  attempts: number;
+  retryDelayMs: number;
+} {
+  return {
+    timeoutMs: config.timeoutMs ?? LISTENER_CALL_TIMEOUT_MS,
+    attempts: config.retry === false ? 1 : LISTENER_CALL_ATTEMPTS,
+    retryDelayMs: LISTENER_CALL_RETRY_DELAY_MS,
+  };
+}
+
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
-  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config.token;
-  const attempts = config.retry === false ? 1 : 2;
+  const { timeoutMs, attempts, retryDelayMs } = resolveCallTiming(config);
+
+  const credential = config.credential;
 
   const attemptOnce = async (
     url: string,
     init: RequestInit,
-    deadlineMs: number
+    deadlineMs: number,
+    actingSession: string | undefined
   ): Promise<AttemptOutcome> => {
-    const headers = new Headers(init.headers);
-    if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`);
     let response: Response;
+    // What a credential that could not mint said, where one could not. A listener that asks for
+    // no credential answers the same with or without one, so a broker that is down or refused
+    // this machine's trade must not take those calls down: the request goes without the headers
+    // and stands or falls on the listener's own answer. A listener that did want one answers 401
+    // or 403, and that is reported as the failed trade it really is, below.
+    let unminted: unknown;
     try {
+      const headers = new Headers(init.headers);
+      // Awaited only when the credential answers with a promise. A bearer answers at once, and
+      // an awaited microtask here would let whatever the caller does next — the plugin's NATS
+      // drain at shutdown — start before this request leaves.
+      let presented: Readonly<Record<string, string>> | undefined;
+      try {
+        const ready = credential?.headers(init.method ?? "GET", url, actingSession);
+        presented = ready instanceof Promise ? await ready : ready;
+      } catch (error) {
+        unminted = error;
+      }
+      for (const [name, value] of Object.entries(presented ?? {})) headers.set(name, value);
       response = await config.fetch(url, {
         ...init,
         headers,
@@ -566,6 +779,17 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       });
     } catch (error) {
       return { unanswered: error };
+    }
+    if (unminted !== undefined && (response.status === 401 || response.status === 403)) {
+      // The listener wanted the credential this machine could not mint. That is no answer about
+      // the call itself, so it retries like any other unanswered attempt — the broker may have
+      // come back — and the error names both halves.
+      return {
+        unanswered: new Error(
+          `${init.method ?? "GET"} ${url} answered ${response.status}, and this machine's Envoy credential could not be minted: ${messageFor(unminted)}`,
+          { cause: unminted }
+        ),
+      };
     }
     // The body is read under the same deadline. A refusal whose body does not arrive is still the
     // listener's refusal; any other answer whose body does not arrive is no answer.
@@ -587,11 +811,16 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     const url = `${baseUrl}${path}`;
     const tries = options.retry === false ? 1 : attempts;
     for (let attempt = 0; attempt < tries; attempt += 1) {
-      const outcome = await attemptOnce(url, init, options.timeoutMs ?? timeoutMs);
+      const outcome = await attemptOnce(
+        url,
+        init,
+        options.timeoutMs ?? timeoutMs,
+        options.actingSession
+      );
       if ("unanswered" in outcome) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
         throw outcome.unanswered;
@@ -608,7 +837,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       if (response.status >= 500) {
         options.onUnanswered?.();
         if (attempt + 1 < tries) {
-          await waitForRetry();
+          await waitForRetry(retryDelayMs);
           continue;
         }
       }
@@ -632,42 +861,52 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     subscribe: async (input) =>
       parseSubscribeAnswer(
         JSON.parse(
-          await post("/v1/interests/subscribe", {
-            session_id: input.sessionID,
-            dir: input.directory,
-            topics: expandSubscriptionTopics(input.topics),
-            port: input.port,
-            title: input.title,
-            ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
-            driving: input.driving,
-            ...(input.selfSubscribed === undefined
-              ? {}
-              : { self_subscribed: input.selfSubscribed }),
-            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
-            // The client instance driving this session (`clientInstanceID`), omitted when the
-            // caller has none so an older listener sees an unchanged body. The listener stores it
-            // on the registry entry, where a soft role claim and a deregistration compare it.
-            ...(input.clientInstanceID === undefined
-              ? {}
-              : { client_instance_id: input.clientInstanceID }),
-            // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
-            // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
-            // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id and reads it for no delivery: it is what a human-facing
-            // list shows as the session's machine. The owner is the listener the session's stored
-            // subscription names, else the one it registered through; only the owner relays the
-            // session's consumer, and any other listener leaves inbox messages to it silently.
-            host: machineID(),
-            plugin: input.plugin.name,
-            plugin_version: input.plugin.version,
-          })
+          await post(
+            "/v1/interests/subscribe",
+            {
+              session_id: input.sessionID,
+              dir: input.directory,
+              topics: expandSubscriptionTopics(input.topics),
+              port: input.port,
+              title: input.title,
+              ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
+              driving: input.driving,
+              ...(input.selfSubscribed === undefined
+                ? {}
+                : { self_subscribed: input.selfSubscribed }),
+              ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+              // The client instance driving this session (`clientInstanceID`), omitted when the
+              // caller has none so an older listener sees an unchanged body. The listener stores it
+              // on the registry entry, where a soft role claim and a deregistration compare it.
+              ...(input.clientInstanceID === undefined
+                ? {}
+                : { client_instance_id: input.clientInstanceID }),
+              // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
+              // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
+              // re-subscribes on each tick). The listener stores it separately from the registering
+              // listener's own machine_id and reads it for no delivery: it is what a human-facing
+              // list shows as the session's machine. The owner is the listener the session's stored
+              // subscription names, else the one it registered through; only the owner relays the
+              // session's consumer, and any other listener leaves inbox messages to it silently.
+              host: machineID(),
+              plugin: input.plugin.name,
+              plugin_version: input.plugin.version,
+            },
+            // Every call below whose body names the session it acts for presents that session's
+            // own credential, since the listener binds a broker token's session to it.
+            { actingSession: input.sessionID }
+          )
         )
       ),
     unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics),
-      });
+      await post(
+        "/v1/interests/unsubscribe",
+        {
+          session_id: input.sessionID,
+          topics: expandSubscriptionTopics(input.topics),
+        },
+        { actingSession: input.sessionID }
+      );
     },
     getInterest: async (sessionID) =>
       InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
@@ -693,6 +932,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             onUnanswered: () => {
               unanswered = true;
             },
+            ...(input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }),
           }
         );
         // A 2xx whose body does not parse is the listener's word that cannot be read.
@@ -707,6 +949,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         envelope: response,
         recipient: response.recipient ?? input.targetSessionID,
         confirmed: response.recipient !== undefined,
+        recipientState: response.recipient_state ?? "live",
+        // Omitted rather than zero when the listener names none, so a reader never reads 1970
+        // as a last registration.
+        ...(response.last_seen === undefined || response.last_seen <= 0
+          ? {}
+          : { lastSeen: response.last_seen }),
         duplicate: response.duplicate === true,
       };
     },
@@ -714,22 +962,32 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
       const response = PublishResponseSchema.parse(
         JSON.parse(
-          await post("/v1/messages/publish", {
-            source: input.source ?? "agent",
-            ...sourceSession(input.sourceSessionID),
-            topic: input.topic,
-            message: input.message,
-            ...(input.payload === undefined ? {} : { payload: input.payload }),
-            idempotency_key: idempotencyKey,
-            ...messageMetadata(input),
-            // Omitted unless the caller set it, so an older listener sees an unchanged request.
-            ...(input.keep === undefined ? {} : { keep: input.keep }),
-          })
+          await post(
+            "/v1/messages/publish",
+            {
+              source: input.source ?? "agent",
+              ...sourceSession(input.sourceSessionID),
+              topic: input.topic,
+              message: input.message,
+              ...(input.payload === undefined ? {} : { payload: input.payload }),
+              idempotency_key: idempotencyKey,
+              ...messageMetadata(input),
+              // Omitted unless the caller set it, so an older listener sees an unchanged request.
+              ...(input.keep === undefined ? {} : { keep: input.keep }),
+            },
+            input.sourceSessionID === undefined || input.sourceSessionID === ""
+              ? {}
+              : { actingSession: input.sourceSessionID }
+          )
         )
       );
       return {
         envelope: response,
         ...(response.holder === undefined ? {} : { holder: response.holder }),
+        ...(response.holder_state === undefined ? {} : { holderState: response.holder_state }),
+        // A listener that names none, and one predating the field, both read as "every
+        // recipient took it": the caller reads one array rather than two absent cases.
+        unresponsive: response.unresponsive ?? [],
         ...(response.kept === undefined ? {} : { kept: response.kept }),
         ...(response.kept_reason === undefined ? {} : { keptReason: response.kept_reason }),
       };
@@ -741,9 +999,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         input.clientInstanceID === undefined
           ? ""
           : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
-      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
-        method: "DELETE",
-      });
+      await request(
+        `/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`,
+        { method: "DELETE" },
+        { actingSession: input.sessionID }
+      );
     },
     setRole: async (input) => {
       // `soft` and `previous_session_id` are omitted from the wire unless set,
@@ -761,7 +1021,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         };
       let raw: string;
       try {
-        raw = await post("/v1/roles/set", body);
+        raw = await post("/v1/roles/set", body, { actingSession: input.sessionID });
       } catch (error) {
         // A soft claim refused by a live holder is an outcome, not a failure:
         // the listener answers 409 with the holder's id.
@@ -788,6 +1048,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       const search = new URLSearchParams();
       if (input.directory !== undefined) search.set("dir", input.directory);
       if (input.title !== undefined) search.set("title", input.title);
+      if (input.include !== undefined) search.set("include", input.include);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
     },
@@ -805,16 +1066,20 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
               ),
               ...(input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }),
             },
-            { timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS, retry: false }
+            {
+              timeoutMs: input.timeoutMs ?? REPLAY_TIMEOUT_MS,
+              retry: false,
+              actingSession: input.sessionID,
+            }
           )
         )
       ),
   };
 }
 
-function waitForRetry(): Promise<void> {
+function waitForRetry(delayMs: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, RETRY_DELAY_MS);
+  setTimeout(resolve, delayMs);
   return promise;
 }
 

@@ -10,6 +10,8 @@ export * from "./dispatch-text-references";
 export * from "./dispatch-text-rules";
 export * from "./dispatch-tools";
 export * from "./envelope";
+export * from "./envoy-session";
+export * from "./going";
 export * from "./legion-roles";
 export * from "./related-forms";
 export * from "./repo";

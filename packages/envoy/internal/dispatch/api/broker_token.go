@@ -77,7 +77,14 @@ func errNoBrokerConfigured() *apiError {
 // brokerTokenActor authenticates a caller presenting an access token the secrets broker issued,
 // under the DPoP scheme: the broker is asked whether the token is live and the caller is held to
 // the key that token is bound to (internal/brokertoken). A verified caller is the session the
-// token names, acting for the person it names, and is never retried as another credential.
+// token names, acting for the person it names, or, where the broker names none, for the service
+// the machine holding it belongs to. It is never retried as another credential.
+//
+// A caller that names a service and no person is a machine nobody has signed in on
+// (`agent-secrets login`). It reads as any session does, and writeNeedsASignedInPerson refuses
+// its every write at the one chokepoint (project_scope.go), so no write is recorded under an
+// empty writer. It holds no OAuth scope either, so the rows a person's own credential reaches
+// turn it away earlier still (gateRouteScopes): there is no person for it to act as.
 //
 // Each refusal is its own code, and none of them repeats the token the caller presented:
 //
@@ -89,11 +96,11 @@ func errNoBrokerConfigured() *apiError {
 //   - 401 BROKER_TOKEN_KEY_MISMATCH — a sound proof signed by a key that is not the token's
 //     'jkt', which is what makes a stolen token useless.
 //   - 401 BROKER_TOKEN_NOT_A_SESSION — the broker holds the token live, but it is not a
-//     session's credential: it names no session or no person, or it was issued to a client
-//     other than the exchange a session's token comes from. A machine login's own access token
-//     is one of these, and Dispatch records every write under the session its credential
-//     proved, so it acts on none of them rather than letting a request body name a session for
-//     a credential that names none.
+//     session's credential: it names no session, it names neither a person nor a service, or
+//     it was issued to a client other than the exchange a session's token comes from. A machine
+//     login's own access token is one of these, and Dispatch records every write under the
+//     session its credential proved, so it acts on none of them rather than letting a request
+//     body name a session for a credential that names none.
 //   - 429 BROKER_TOKEN_RATE_LIMITED — this source address has no introspection left in its
 //     bucket; nothing was asked of the broker. It carries the wait in Retry-After as well as in
 //     its prose, as the broker's own 429s do.
@@ -137,25 +144,43 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 	// Both scopes go to a token the broker scoped to its person: that token is the person's own
 	// agent acting for them, so it may do what they may, approvals included. A token scoped to a
 	// project gets none, because the deployment mapped that token to a project and not to the
-	// person: it proves a session, not that any person stands behind the request.
+	// person: it proves a session, not that any person stands behind the request. A token that
+	// names a service and no person gets none either, whatever scope the broker answered: there
+	// is no person for it to act as, and a scope that said otherwise would let it act as the
+	// session's own id on the routes that read what belongs to a person.
 	var scopes []string
-	if caller.ProjectScope == brokertoken.ProjectScopePerson {
+	if caller.Person != "" && caller.ProjectScope == brokertoken.ProjectScopePerson {
 		scopes = model.Scopes
 	}
 	actor := model.Actor{
-		Kind:  "session",
-		ID:    caller.Session,
-		Owner: &caller.Person,
+		Kind: "session",
+		ID:   caller.Session,
 		// The broker proved this session, so the credential already names the agent behind the
 		// request and no request body has to name it.
 		Credential: &model.Credential{Scopes: scopes, Session: caller.Session},
 	}
+	// A caller names a person or a service, never both and never neither (brokertoken.Caller),
+	// and the two fields are set from the token alone, never from a body. whoami reports both.
+	if caller.Person != "" {
+		actor.Owner = &caller.Person
+	}
+	if caller.Service != "" {
+		actor.Service = &caller.Service
+	}
 	// Only a token the broker scoped to one project names one, which brokertoken.callerOf has
-	// already read: a dev box session's token is scoped to its person, who may write wherever
-	// they may, so it carries no project at all.
+	// already read. The two it scopes to a person instead carry no project at all: a dev box
+	// session's token, whose person may write wherever they may, and the token of a machine
+	// naming a service and no person, which its fleet entry holds to no project either.
 	if caller.Project != "" {
 		actor.Project = &caller.Project
 	}
-	accesslog.Note(r.Context(), accesslog.KindBrokerToken, caller.Person)
+	// The writer the line names: the person, or the service for a token that names none, under
+	// the `service:` prefix requestKeyLogin spells a service with, so one field never reads a
+	// fleet's name as a person's login.
+	writer := caller.Person
+	if writer == "" {
+		writer = "service:" + caller.Service
+	}
+	accesslog.Note(r.Context(), accesslog.KindBrokerToken, writer)
 	return actor, false, nil
 }

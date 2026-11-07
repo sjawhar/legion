@@ -6,6 +6,7 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import type { IssueDetails } from "../web/src/api/types";
 
 import {
   createComment,
@@ -35,18 +36,17 @@ test.beforeEach(async () => {
 });
 
 /** Opens the comment's thread, where its body is drawn whole (a collapsed turn shows a two-line
- * preview), and returns what holds it: the turn itself, or on a phone the thread's own dialog. */
+ * preview), and returns the turn that holds it. */
 async function openCommentThread(page: Page, commentId: string): Promise<Locator> {
   const turn = page
     .getByRole("list", { name: "Conversation turns" })
     .locator(`:scope > li[data-turn="comment:${commentId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
-  const phoneThread = page.getByRole("dialog", { name: "Thread" });
-  await expect(phoneThread.or(turn.getByRole("button", { name: "Collapse thread" }))).toBeVisible();
-  return (await phoneThread.count()) === 0 ? turn : phoneThread;
+  await expect(turn.getByRole("button", { name: "Collapse thread" })).toBeVisible();
+  return turn;
 }
 
-test("a comment's callout shows the document's header with its kind and title @phone", async ({
+test("a comment's callout shows the document's header with its kind and title", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -91,7 +91,7 @@ test("a comment's callout shows the document's header with its kind and title @p
   }
 });
 
-test("a comment's ask block shows the decision card @phone", async ({ browser }) => {
+test("a comment's ask block shows the decision card", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Decision in a comment" });
   const comment = await createComment(
@@ -172,8 +172,13 @@ async function replyUnderDocumentDecision(
     },
     { as: "agent" }
   );
-  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(1);
-  const [storage] = (await getIssue(issue.key)).open_asks;
+  let storage: IssueDetails["open_asks"][number] | undefined;
+  await expect
+    .poll(async () => {
+      [storage] = (await getIssue(issue.key)).open_asks;
+      return storage;
+    })
+    .toBeDefined();
   if (storage === undefined) {
     throw new Error("the storage decision was not indexed");
   }

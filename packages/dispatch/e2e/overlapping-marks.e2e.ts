@@ -20,11 +20,9 @@ import {
   markSpan,
   placeCaret,
   selectEditorText,
-  setSheet,
 } from "./editor";
 import { commentWithBody } from "./margin-helpers";
 import { resetDatabase } from "./seed";
-import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";
 
 const initialMarkdown = "The quick brown fox";
@@ -37,9 +35,11 @@ test.beforeEach(async () => {
 // "brown". Each record mark keeps its own text in both browsers and in the server's reading of the
 // document, so the anchor refresh a document version runs leaves Bob's quote "quick brown" rather
 // than cutting it to "quick ".
-test("two readers' comments can cover the same text, and neither cuts the other's anchor @phone", async ({
+// SLOW(>=2s): two browser contexts, three composer round trips and the typed paragraph whose
+// settlement writes the version that refreshes both anchors - the refresh is the property.
+test("two readers' comments can cover the same text, and neither cuts the other's anchor", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Overlap" });
   const artifactId = issue.primary_artifact_id;
@@ -73,7 +73,6 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     await expectMark(alicePage, bobMark, "quick brown");
 
     // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
-    await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
     await expect(alicePage.getByRole("form", { name: "Comment composer" })).toContainText("brown");
@@ -93,7 +92,6 @@ test("two readers' comments can cover the same text, and neither cuts the other'
       ])
     );
 
-    await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
     const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -110,7 +108,6 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     // The caret goes after "fox" directly: typeAtEnd's click lands wherever the editor's centre
     // is, which can be a highlight, and the Enter then replaces the selection still on "brown".
     const before = (await getArtifact(artifactId)).versions.length;
-    await setSheet(alicePage, testInfo.project.name, false);
     await placeCaret(alicePage, "after", "fox");
     await alicePage.keyboard.press("Enter");
     await alicePage.keyboard.type("jumps");
@@ -164,9 +161,8 @@ test("two readers' comments can cover the same text, and neither cuts the other'
 // Bob suggests on "quick brown" and his thread stays selected while Alice suggests on "brown"
 // from the same selection control a person uses. Selecting a thread only highlights its text;
 // both browsers keep Bob's anchor whole, show Alice's inside it, and send both quotes to the server.
-test("two readers' suggestions keep both action-bar anchors @phone", async ({
-  browser,
-}, testInfo) => {
+// SLOW(>=2s): two browser contexts and two suggestion sends, each read back from the server.
+test("two readers' suggestions keep both action-bar anchors", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -188,12 +184,7 @@ test("two readers' suggestions keep both action-bar anchors @phone", async ({
     await Promise.all(readers.map((page) => expect(connectedDot(page)).toHaveText("connected")));
 
     const pressSuggestion = async (page: Page) => {
-      const button = actionBar(page).getByRole("button", { exact: true, name: "Suggest" });
-      if (testInfo.project.name === "iphone") {
-        await touchHold(page, await centerOf(button), 0);
-        return;
-      }
-      await button.click();
+      await actionBar(page).getByRole("button", { exact: true, name: "Suggest" }).click();
     };
 
     await selectEditorText(bobPage, "quick brown");
@@ -207,7 +198,6 @@ test("two readers' suggestions keep both action-bar anchors @phone", async ({
     const bobMark = bobSuggestion.anchor.mark_id;
     await Promise.all(readers.map((page) => expectMark(page, bobMark, "quick brown")));
 
-    await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "brown");
     await pressSuggestion(alicePage);
     const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -325,16 +315,15 @@ const overlapOrders: { name: string; quotes: [string, string] }[] = [
 
 for (const { kind, noun } of overlapKinds) {
   for (const order of overlapOrders) {
-    test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name} @phone`, async ({
+    test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name}`, async ({
       browser,
-    }, testInfo) => {
+    }) => {
       await createProject({ key: "CORE", name: "Core" });
       const issue = await createIssue({
         project: "CORE",
         spec: initialMarkdown,
         title: "Overlap click",
       });
-      const project = testInfo.project.name;
       // Written in the row's order: the second mark nests inside or around the first, which is
       // what the two orders are here to cover. They are kept by their quote, since the click
       // below names the narrower record whichever order wrote it.
@@ -347,8 +336,7 @@ for (const { kind, noun } of overlapKinds) {
       const context = await asUser(browser, "alice");
 
       try {
-        // A fresh reader of the document presses the text both marks cover: a click on the
-        // desktop, and a tap on the phone, where the review sheet then opens under the finger.
+        // A fresh reader of the document clicks the text both marks cover.
         const page = await context.newPage();
         await page.goto(`/issues/${issue.key}/spec`);
         await expect(connectedDot(page)).toHaveText("connected");
@@ -356,13 +344,8 @@ for (const { kind, noun } of overlapKinds) {
           expectMark(page, wide.markId, "quick brown"),
           expectMark(page, narrow.markId, "brown"),
         ]);
-        await setSheet(page, project, false);
         const covered = markSpan(page, narrow.markId);
-        if (project === "iphone") {
-          await touchHold(page, await centerOf(covered), 0);
-        } else {
-          await covered.click();
-        }
+        await covered.click();
         // An ask's card is current while it is selected or hovered, and the desktop pointer stays
         // on the text, so there one current card also says the hover names the narrower mark.
         await expect(page.locator('[data-margin-item][aria-current="true"]')).toHaveAttribute(

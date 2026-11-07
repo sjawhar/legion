@@ -30,12 +30,12 @@ later phase keeps it current rather than replacing it:
 - Thread <node id>: accepted by the reviewer — <its reason, one line>; resolved at <head-sha>.
 - Thread <node id>: still open — <what remains>; unresolved at <head-sha>.
 
-**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the reviewed head <sha>:
-<verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
+**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; defects reported: <none | <n>, fixed in <sha>>; thermonuclear pair at the reviewed head <sha>:
+<verdict>. (on a docs-only PR the simplify half and the defects are recorded as on any other diff, and the pair half reads `thermonuclear pair: not run (docs-only)`)
 
 **Checks:** one line per `check` block of the issue's Verification document, in the document's
 order, each the line `dispatch result` printed when the result was recorded:
-- Check <block id> (<when>): <pass|fail> at <the commit's first 12 characters>, recorded by <role>. <the check's first words>
+- Check <block id> (<when>): <pass|fail> at <the commit>, recorded by <role>. <the check's first words>
 - Check <block id> (after_merge): not yet run
 
 **Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
@@ -47,7 +47,10 @@ order, each the line `dispatch result` printed when the result was recorded:
 
 The implementer runs the repository's fast local checks for the paths it changed before the push,
 then pushes and completes. It never waits for, watches or polls the pull request's remote CI
-(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
+(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop
+(the step's spaced reads of the pull request's head after a push are the one sleep this rule
+allows, and they read no check; `skill://legion-worker`, *Every role pushes its own commits*,
+gives them).
 Under the Go daemon a check or workflow the base branch requires that settles red on the head,
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
@@ -99,6 +102,19 @@ that run, screenshot, or e2e; human review does not replace user-facing verifica
 unit suite is not it. A unit or integration test is a regression lock, never the result of a
 check. The agent that develops the change records its results this way before the merge, and
 whatever blocks a check is fixed, not skipped (*When no surface reaches the changed path*, below).
+
+**Record a result after the commit is pushed.** Dispatch asks GitHub whether the repository of
+the check's issue holds the commit, and refuses a result at one it does not hold with `400
+RESULT_COMMIT_UNKNOWN`, naming the commit and the repository; a commit that is still only local
+is such a commit. Where Dispatch cannot read the repository at all it stores the result as
+before, and the result reads `unknown`.
+
+**A check that cannot fail is not a result.** Before a check counts as evidence, show it
+failing: the negative control is that demonstration, run on the same command with a deliberately
+wrong input or call. A check whose pass survives empty output, a missing file or the wrong head
+proves nothing about the change. A documented procedure counts only when it ran: reading it, or
+reading the document that describes it, is not a run, and a procedure no surface available to
+you can run is reported under *When no surface reaches the changed path* below, never passed.
 
 **A result is current** while its commit is still the head of an open pull request of the check's
 issue, or the final head of a merged one, and the check's words have not changed since; an
@@ -161,13 +177,13 @@ gap and decides there, which is the only gate on such an issue.
   and at the new head. Equal: re-run only the
   bare gates — the repository's CI green at the new head and its smoke check — and record each
   check again at the new head, its `--observed` ending
-  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
+  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only, class search of earlier findings clean`. A search that finds an instance is a failure, not a re-check: record it under `failures` and run a full test round. The
   real-surface verification is not repeated, except in a parent's last round, which the architect
   or the implementer's forward-merge comment names to you: then run a full test round. Different:
   a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
-  implementing round, after its own results and before it completes that round, when the diff
-  touches runtime code; a docs-only diff gets none.** The daemon starts no implementing round
+  implementing round, after its own results and before it completes that round,
+  whatever the diff touches, a docs-only diff included.** The daemon starts no implementing round
   between a clean review and the approval, so this is the one slot before the tester and the
   reviewer read the head; a later round answering a review runs no second pass. It is scoped to
   the pull request's own diff at that head: nothing applied leaves the head as it is; applied →
@@ -175,7 +191,12 @@ gap and decides there, which is the only gate on such an issue.
   for the surface the simplify diff touched, since a refactor that "preserves behaviour" is a
   claim until it is executed, and records each result at that head before it completes.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
-  The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
+  The pass covers every file of the diff, workflow YAML and documentation with the code, and a
+  defect it reports is fixed outside the pass with the results recorded again, never dropped as
+  out of scope; the `Thermo` line's `defects reported` half names how many and the commit that
+  fixed them, so a head that moved for a reported defect is not recorded as `0 applied` alone.
+  The reviewer's pair runs at the head each round reviews, when the diff touches runtime code.
+  Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
   `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
   is made in the running round, because a later round costs a CI pass and a re-read of the whole

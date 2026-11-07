@@ -17,6 +17,7 @@
     "docs:media": "bun docs/site/media/shots.ts"
   },
   "workspaces": [
+    "packages/broker-client",
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",

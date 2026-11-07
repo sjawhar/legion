@@ -2,8 +2,8 @@
 //
 // `enroll --pod` against a projected token file and a fake broker: what the pod reads, what it
 // sends the broker, what it writes, and what it says when the file, the token or the broker
-// refuses it. The broker here is serveVMBroker (vm_enroll_test.go): a pod's enrollment uses the
-// same two routes a VM's does, so the same fake records both.
+// refuses it. The broker here is servePodBroker (pod_broker_test.go), which records the token
+// login, the enrollment and the renewal this mode makes.
 package main
 
 import (
@@ -72,7 +72,7 @@ func writePodToken(t *testing.T, token string) string {
 func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 	token := fakePodToken(t, testPodAccount, testPodUID)
 	tokenFile := writePodToken(t, token)
-	broker, calls := serveVMBroker(t, "enrollment-of-the-pod")
+	broker, calls := servePodBroker(t, "enrollment-of-the-pod")
 	out := t.TempDir()
 	t.Setenv("AGENT_SECRETS_URL", broker.URL)
 	t.Setenv("AGENT_SECRETS_KEY_DIR", out)
@@ -148,7 +148,7 @@ func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 			return sessionThumbprint, id == "enrollment-of-the-pod", nil
 		},
 		LookupLauncher: func(_ context.Context, id string) (string, bool, error) {
-			return login.Thumbprint, id == "credential-for-the-vm", nil
+			return login.Thumbprint, id == "credential-for-the-pod", nil
 		},
 		Replay: func(context.Context, string, time.Time) (bool, error) { return true, nil },
 	}
@@ -156,11 +156,8 @@ func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify the enrollment's launcher proof: %v", err)
 	}
-	if subject.LauncherID != "credential-for-the-vm" {
+	if subject.LauncherID != "credential-for-the-pod" {
 		t.Fatalf("the enrollment's proof names launcher %q, want the credential the login issued", subject.LauncherID)
-	}
-	if enrol.body["vm_token"] != "" {
-		t.Fatalf("the enrollment carried a vm_token %q, want none", enrol.body["vm_token"])
 	}
 
 	keyPath := filepath.Join(out, keyFile)
@@ -220,11 +217,11 @@ func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 }
 
 // TestPodUsageRefusals: every way of naming the pod form wrongly is exit 2, and says what is
-// missing or which two flags cannot be given together. With none of the three modes the refusal
-// names all three, so a pod that forgot --pod is told the mode exists.
+// missing or which two flags cannot be given together. With neither mode the refusal names both,
+// so a pod that forgot --pod is told the mode exists.
 func TestPodUsageRefusals(t *testing.T) {
 	tokenFile := writePodToken(t, fakePodToken(t, testPodAccount, testPodUID))
-	broker, calls := serveVMBroker(t, "never-reached")
+	broker, calls := servePodBroker(t, "never-reached")
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -234,7 +231,6 @@ func TestPodUsageRefusals(t *testing.T) {
 		{"no mode at all", nil, nil, "--pod"},
 		{"no mode at all names the helper", nil, nil, "--helper is required"},
 		{"--pod with --helper", []string{"--pod", "--helper", "--service", testPodService}, nil, "mutually exclusive"},
-		{"--pod with --vm", []string{"--pod", "--vm", "--service", testPodService}, nil, "mutually exclusive"},
 		{"--pod with no service", []string{"--pod", "--pod-token-file", tokenFile}, nil, "--service"},
 		{"--pod with no token file", []string{"--pod", "--service", testPodService, "--pod-token-file", ""}, nil, "--pod-token-file"},
 		{"--pod with no key dir", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile}, map[string]string{"AGENT_SECRETS_KEY_DIR": ""}, "--out"},
@@ -267,7 +263,7 @@ func TestAPodTokenFileThatCannotBeReadIsNamed(t *testing.T) {
 	blank := writePodToken(t, "")
 	for name, path := range map[string]string{"a missing file": missing, "an empty file": blank} {
 		t.Run(name, func(t *testing.T) {
-			broker, calls := serveVMBroker(t, "never-reached")
+			broker, calls := servePodBroker(t, "never-reached")
 			t.Setenv("AGENT_SECRETS_URL", broker.URL)
 			var stdout, stderr bytes.Buffer
 			code := cmdEnroll([]string{"--pod", "--service", testPodService, "--pod-token-file", path, "--out", t.TempDir()}, &stdout, &stderr)
@@ -290,7 +286,7 @@ func TestAPodTokenFileThatCannotBeReadIsNamed(t *testing.T) {
 // operator has to decode.
 func TestAPodTokenBoundToNoPodIsNamed(t *testing.T) {
 	tokenFile := writePodToken(t, fakePodToken(t, testPodAccount, ""))
-	broker, calls := serveVMBroker(t, "never-reached")
+	broker, calls := servePodBroker(t, "never-reached")
 	t.Setenv("AGENT_SECRETS_URL", broker.URL)
 	var stdout, stderr bytes.Buffer
 	if code := cmdEnroll([]string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--out", t.TempDir()}, &stdout, &stderr); code != 1 {
@@ -310,7 +306,7 @@ func TestAPodTokenBoundToNoPodIsNamed(t *testing.T) {
 // as such, not sent to the broker to be refused there.
 func TestNotAJWTInThePodTokenFileIsNamed(t *testing.T) {
 	tokenFile := writePodToken(t, "not-a-jwt")
-	broker, calls := serveVMBroker(t, "never-reached")
+	broker, calls := servePodBroker(t, "never-reached")
 	t.Setenv("AGENT_SECRETS_URL", broker.URL)
 	var stdout, stderr bytes.Buffer
 	if code := cmdEnroll([]string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--out", t.TempDir()}, &stdout, &stderr); code != 1 {
