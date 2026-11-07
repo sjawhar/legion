@@ -130,6 +130,8 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 	if anchor := anchorOf(tx); anchor.Orphaned {
 		t.Fatalf("anchor = %#v after the write's version, want it anchored: that version still holds the quote", anchor)
 	}
+	// The version's anchor refresh is a write, which the transaction's write phase runs at Commit,
+	// and the Commit that runs it ends the transaction, so every read after it goes to the pool.
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the joined edit: %v", err)
 	}

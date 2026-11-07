@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // An issue's claim is the session that intends to implement it, so two sessions never take
@@ -224,7 +225,7 @@ type judgement struct {
 	live   holderLiveness
 }
 
-// claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
+// claimBlockedBy is the whole taking rule, and it runs under the issue's owner lock: the caller
 // brings what it judged before the lock, this decides against the row. It returns the conflict
 // that stops actor from taking or clearing current, nil when nothing does, or errHolderUnjudged
 // when the judgement cannot speak for the holder the row shows.
@@ -387,25 +388,66 @@ func (s *server) readIssueClaim(ctx context.Context, key string) (*model.IssueCl
 // would put updated_at past the other two, which the one write produced together.
 const issueClaimedNow = "greatest(updated_at, now())"
 
-// writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil. The two claim
-// columns always move together, and the issue's status is never touched here. claimed_at is the
-// transaction's now(): each process's host keeps its own clock, and a claim's time is compared
-// with times other processes wrote.
-func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
-	if holder == nil {
-		_, err := tx.Exec(ctx, `
-			update issues set claimed_by = null, claimed_at = null, updated_at = `+issueClaimedNow+` where key = $1
-		`, key)
-		return err
+// issueClaimStatement is the one statement that moves an issue's two claim columns together; a
+// nil holder clears them, and the issue's status is never touched here. Both claimed_at and
+// updated_at are the transaction's now() (issueClaimedNow), from the statement's own clock,
+// unless the caller read that moment itself and passes it as at: a caller whose write phase
+// reads no row back writes the value explicitly (claimWrite), and reads it as that same
+// transaction's now(), so the three stamps still carry one value. The statement returns the
+// updated_at it left, which is not always the value it wrote - greatest keeps a later one a
+// writer holding the row alone stamped while this transaction waited for it - so the answer
+// carries what the row holds.
+func issueClaimStatement(key string, holder *model.Actor, at time.Time) (string, []any, error) {
+	var actor any
+	claimedAt := "null"
+	if holder != nil {
+		encoded, err := encodeJSON(*holder)
+		if err != nil {
+			return "", nil, err
+		}
+		actor, claimedAt = encoded, "now()"
 	}
-	actor, err := encodeJSON(*holder)
+	updated := issueClaimedNow
+	args := []any{key, actor}
+	if !at.IsZero() {
+		updated, args = "greatest(updated_at, $3)", append(args, at)
+		if holder != nil {
+			claimedAt = "$3"
+		}
+	}
+	return `update issues set claimed_by = $2, claimed_at = ` + claimedAt + `, updated_at = ` + updated +
+		` where key = $1 returning updated_at`, args, nil
+}
+
+// writeIssueClaim sets the issue's claim to holder, or clears it when holder is nil, at once and
+// in the transaction's own clock: the issue patch's close, which runs its writes directly, and
+// the tests that seed a claim.
+func writeIssueClaim(ctx context.Context, tx pgx.Tx, key string, holder *model.Actor) error {
+	sql, args, err := issueClaimStatement(key, holder, time.Time{})
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
-		update issues set claimed_by = $2, claimed_at = now(), updated_at = `+issueClaimedNow+` where key = $1
-	`, key, actor)
+	_, err = tx.Exec(ctx, sql, args...)
 	return err
+}
+
+// queueIssueClaim queues that statement on a write phase's batch, with the claim's stamps
+// written as the moment the caller read before the write phase, and reads the updated_at it
+// left into stored: no row is read back, so the update and the event's append go to Postgres
+// back to back, and the one value the answer cannot project comes from the update itself
+// (claimWrite).
+func queueIssueClaim(b *store.WriteBatch, key string, holder *model.Actor, at time.Time, stored *time.Time) error {
+	sql, args, err := issueClaimStatement(key, holder, at)
+	if err != nil {
+		return err
+	}
+	b.Queue("", sql, args...).QueryRow(func(row pgx.Row) error {
+		if err := row.Scan(stored); err != nil {
+			return fmt.Errorf("write issue %s claim: %w", key, err)
+		}
+		return nil
+	})
+	return nil
 }
 
 // claimEvent is the issue.claimed or issue.released record: what the claim became, whose claim
@@ -427,7 +469,8 @@ func claimEvent(
 
 // claimChange is what the locked decision asks for: the holder to store (nil clears the claim),
 // the event to append, whose claim it replaced, and why. changed false means there is nothing to
-// write.
+// write. The claim's At is stamped by claimWrite, with the database's clock at the write, so the
+// row, the answer and the event carry one value.
 type claimChange struct {
 	holder    *model.Actor
 	eventType string
@@ -491,7 +534,7 @@ func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool 
 	}
 	// Healthy walks complete in single-digit milliseconds. Bound this one at 500 ms, as the
 	// advice path bounds the same predicate, so neither a future plan regression nor the
-	// detached context above can hold the issue row lock and a pool connection indefinitely.
+	// detached context above can hold the issue's owner lock and a pool connection indefinitely.
 	if _, err := walk.Exec(walkCtx, "set local statement_timeout = '500ms'"); err != nil {
 		_ = walk.Rollback(walkCtx)
 		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
@@ -524,6 +567,15 @@ func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool 
 // and commit. No listener call happens inside this function, so no pool connection is ever
 // held across one. A decision the judgement cannot make is errHolderUnjudged, which this
 // reports as errStaleResolution once the rollback has run, for the cycle to redo.
+//
+// Everything it reads - the issue, the Legion-managed walk, the moment the claim is stamped
+// with - is read before its first write, so the transaction holds a transaction id only for the
+// claim's update, the event's append and the commit, which go to the server as one batch
+// (INFRA-636). The issue the answer and the event's payload carry is the read issue with the
+// claim this write gives it, not a second read of the row: a claim change moves nothing else in
+// the row, and every other writer of the row takes the issue's owner lock, which this
+// transaction holds. Only updated_at can move under a writer that takes the row alone, so it
+// comes back from the update itself (queueIssueClaim), which costs no statement.
 func (s *server) claimWrite(
 	ctx context.Context,
 	key string,
@@ -535,7 +587,9 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+	// The issue's owner lock, then the re-read in a statement of its own, so it sees whatever the
+	// lock's previous holder committed (store.LockOwner); an issue with no row fails the re-read.
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
 		return claimApplied{}, err
 	}
 	before, err := s.loadIssue(ctx, tx, key)
@@ -551,29 +605,48 @@ func (s *server) claimWrite(
 	}
 	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
 	// claim changed or not, and the same on either side of the write: one query, either way,
-	// under the issue's row lock this transaction already holds. It runs here, before the
-	// write, so that nothing at all sits between appendEvent and COMMIT. The row lock is not
-	// what makes the answer stable - it holds the issue's own row, not its ancestors' - so the
-	// chain is read as it stands, which is enough for a sentence of guidance. A statement that
-	// fails or times out costs the field alone: claimLegionManagedStatus runs it in a savepoint,
-	// on a context no cancellation reaches, bounded by its own statement timeout, and a claim is
-	// what stops two sessions working one issue.
+	// under the issue's owner lock this transaction already holds. It runs here, before the
+	// write, so that nothing at all sits between appendEvent and COMMIT, and so it holds no
+	// transaction id. The owner lock is not what makes the answer stable - it holds the issue,
+	// not its ancestors - so the chain is read as it stands, which is enough for a sentence of
+	// guidance. A statement that fails or times out costs the field alone:
+	// claimLegionManagedStatus runs it in a savepoint, on a context no cancellation reaches,
+	// bounded by its own statement timeout, and a claim is what stops two sessions working one
+	// issue.
 	managed := claimLegionManagedStatus(ctx, tx, key)
 	applied := claimApplied{issue: before, legionManagedStatus: managed}
 	if change.changed {
-		if err := writeIssueClaim(ctx, tx, key, change.holder); err != nil {
+		// The moment the claim is stamped with, read where the update's own now() would have
+		// run and written explicitly below, as a comment's created_at is (comment_create.go).
+		// `select now()` takes no transaction id, so the window stays shut until the update,
+		// and it is this transaction's own timestamp, the one the update and the event's insert
+		// would each have taken, so the claim's three stamps still carry one value
+		// (issueClaimedNow) and the answer carries the time the row will hold. The row's own
+		// updated_at comes back from the update, which is the one value the read cannot
+		// project: greatest keeps a later stamp left by a writer that held the row alone while
+		// this transaction waited for it.
+		var now time.Time
+		if err := tx.QueryRow(ctx, `select now()`).Scan(&now); err != nil {
 			return claimApplied{}, err
 		}
-		after, err := s.loadIssue(ctx, tx, key)
-		if err != nil {
-			return claimApplied{}, err
+		var claim *model.IssueClaim
+		if change.holder != nil {
+			claim = &model.IssueClaim{Actor: *change.holder, At: now}
 		}
+		after := before
+		after.Claim = claim
 		after.LastSeq++
-		event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
-		if err != nil {
+		appended := new(model.Event)
+		event := claimEvent(change.eventType, key, actor, after, change.previous, change.reason)
+		if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+			if err := queueIssueClaim(b, key, change.holder, now, &after.UpdatedAt); err != nil {
+				return err
+			}
+			return s.deps.Events.QueueAppend(b, event, func(written model.Event) { *appended = written })
+		}); err != nil {
 			return claimApplied{}, err
 		}
-		applied = claimApplied{issue: after, legionManagedStatus: managed, event: event}
+		applied = claimApplied{issue: after, legionManagedStatus: managed, event: *appended}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
@@ -587,7 +660,7 @@ func (s *server) claimWrite(
 var errClaimContended = errors.New("the issue's claim changed under every attempt")
 
 // claimCycle is the whole of both claim routes past their own decision: resolve the holder
-// and its liveness with nothing held, decide under the issue's row lock, and answer. The
+// and its liveness with nothing held, decide under the issue's owner lock, and answer. The
 // cycle is bounded at one redo (resolutionAttempts) because a holder that changes twice means
 // a genuinely contended issue whose current holder the caller should simply be told about.
 func (s *server) claimCycle(
@@ -666,6 +739,7 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		return claimChange{
+			// claimWrite stamps the claim's At with the database's clock where it writes it.
 			holder:    &actor,
 			eventType: "issue.claimed",
 			previous:  previous,

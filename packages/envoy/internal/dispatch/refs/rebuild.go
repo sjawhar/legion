@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -162,7 +163,7 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	body, _, found, err := sourceText(ctx, tx, fromKind, fromID, false)
+	body, _, found, err := sourceText(ctx, tx, fromKind, fromID)
 	if err != nil || !found {
 		return false, err
 	}
@@ -173,38 +174,106 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 	return true, tx.Commit(ctx)
 }
 
-// sourceText reads the text one reference source writes, with the time that text was written: a
-// document's latest version's markdown (fromID its uuid) and that version's created_at, an ask's
-// question, a comment's body, or an issue message's body, with the row's edited_at where its table
-// has one (asks, comments) and its created_at otherwise. found is false when no such source
-// exists: a deleted row, a document with no markdown version, a direct message, which nothing
-// indexes. forUpdate takes the row read `for no key update`, the lock an edit of that text takes,
-// so the caller's index of the text and a concurrent edit of it are ordered.
-func sourceText(ctx context.Context, q Queryer, kind, id string, forUpdate bool) (body string, writtenAt time.Time, found bool, err error) {
-	var query string
+// sourceRead is the statement that reads the text one reference source writes, with the time that
+// text was written: a document's latest version's markdown (id its uuid) and that version's
+// created_at, an ask's question, a comment's body, or an issue message's body, with the row's
+// edited_at where its table has one (asks, comments) and its created_at otherwise. It locks
+// nothing: a caller that orders itself against the edits of that text holds the source's owner
+// lock and runs this statement after it (ReindexOwedItem).
+func sourceRead(kind, id string) (string, error) {
 	switch kind {
 	case "artifact":
-		query = `select markdown, created_at from artifact_versions
-			where artifact_id = $1::uuid and markdown is not null order by number desc limit 1`
+		return `select markdown, created_at from artifact_versions
+			where artifact_id = $1::uuid and markdown is not null order by number desc limit 1`, nil
 	case "ask":
-		query = `select question, coalesce(edited_at, created_at) from asks where id = $1::uuid`
+		return `select question, coalesce(edited_at, created_at) from asks where id = $1::uuid`, nil
 	case "comment":
-		query = `select body, coalesce(edited_at, created_at) from comments where id = $1::uuid`
+		return `select body, coalesce(edited_at, created_at) from comments where id = $1::uuid`, nil
 	case "message":
-		query = `select body, created_at from messages where id = $1::uuid and issue_key is not null`
-	default:
-		return "", time.Time{}, false, fmt.Errorf("read the text of %s %s: not a reference source", kind, id)
+		return `select body, created_at from messages where id = $1::uuid and issue_key is not null`, nil
 	}
-	if forUpdate {
-		query += " for no key update"
+	return "", fmt.Errorf("read the text of %s %s: not a reference source", kind, id)
+}
+
+// sourceText reads one reference source's text, and the time it was written, with sourceRead's
+// statement. found is false when no such source exists: a deleted row, a document with no
+// markdown version, a direct message, which nothing indexes.
+func sourceText(ctx context.Context, q Queryer, kind, id string) (string, time.Time, bool, error) {
+	read, err := sourceRead(kind, id)
+	if err != nil {
+		return "", time.Time{}, false, err
 	}
-	switch err := q.QueryRow(ctx, query, id).Scan(&body, &writtenAt); {
+	var body string
+	var writtenAt time.Time
+	switch err := q.QueryRow(ctx, read, id).Scan(&body, &writtenAt); {
 	case errors.Is(err, pgx.ErrNoRows):
 		return "", time.Time{}, false, nil
 	case err != nil:
 		return "", time.Time{}, false, fmt.Errorf("read the text of %s %s: %w", kind, id, err)
 	}
 	return body, writtenAt, true, nil
+}
+
+// readSourceUnderOwner takes the owner lock of reference source kind id (sourceOwner) and runs
+// read, the statement that lock guards, in the statement after it, scanning its one row into dest.
+// It is how a background pass reads a source it is about to re-index (ReindexOwedItem,
+// IndexOwedItemBlocks): the lock excludes every writer of that source, and the read sees what the
+// lock's previous holder committed. A source whose owner is nil - a direct message, whose
+// conversation is no owner - is read with no lock, since nothing rewrites a message's body.
+// found is false when the source is gone, before the lock or while the pass waited for it: no row
+// is a source that does not exist rather than a failure.
+func readSourceUnderOwner(ctx context.Context, tx pgx.Tx, kind, id, read string, dest ...any) (bool, error) {
+	owner, found, err := sourceOwner(ctx, tx, kind, id)
+	if err != nil || !found {
+		return false, err
+	}
+	// The owner's lock, then the read in a statement of its own (store.LockOwnerAndRead): that
+	// statement's snapshot is taken once the lock is granted, so it holds everything the lock's
+	// previous holder committed, an edit of this source among it.
+	if owner != nil {
+		err = store.LockOwnerAndRead(ctx, tx, *owner, read, []any{id}, dest...)
+	} else {
+		err = tx.QueryRow(ctx, read, id).Scan(dest...)
+	}
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read %s %s under its owner: %w", kind, id, err)
+	}
+	return true, nil
+}
+
+// sourceOwner is the owner whose lock every writer of reference source kind id takes, and which a
+// re-index of its text takes before it reads it (readSourceUnderOwner): the issue of an issue's
+// document, comment, ask or issue message (api.ownerForArtifact, api.ownerOf,
+// api.createStoredMessage), and the artifact of a document no issue owns and of the comments and
+// asks on it (the owner api.lockedComment locks). The issue-else-document rule is store.OwnerOf's,
+// which holds it for every caller. A direct message has none: its conversation is no owner, and no
+// site rewrites a message's body. The read takes no lock, since no source moves between owners.
+// found is false when the source is gone.
+func sourceOwner(ctx context.Context, q Queryer, kind, id string) (*store.Owner, bool, error) {
+	var query string
+	switch kind {
+	case "artifact":
+		query = `select issue_key, id::text from artifacts where id = $1::uuid`
+	case "ask":
+		query = `select issue_key, artifact_id::text from asks where id = $1::uuid`
+	case "comment":
+		query = `select issue_key, artifact_id::text from comments where id = $1::uuid`
+	case "message":
+		query = `select issue_key, null::text from messages where id = $1::uuid`
+	default:
+		return nil, false, fmt.Errorf("read the owner of %s %s: not a reference source", kind, id)
+	}
+	var issueKey, artifactID *string
+	switch err := q.QueryRow(ctx, query, id).Scan(&issueKey, &artifactID); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("read the owner of %s %s: %w", kind, id, err)
+	}
+	return store.OwnerOf(issueKey, artifactID), true, nil
 }
 
 // OwedQueue is one queue of text owed a re-index: a table of (kind, id, enqueued_at) a trigger
@@ -302,82 +371,180 @@ func SettleOwed(ctx context.Context, q Execer, source Owed) (bool, error) {
 	return settled.RowsAffected() > 0, nil
 }
 
+// stillOwed reports whether source's row still holds the enqueued_at source was listed with,
+// read in the drain's read phase, under the source's owner lock. Every writer of that text takes
+// that lock before it writes, and the owing trigger fires in that write's write phase, so no
+// write can move the row while this transaction holds the lock: what this read answers is what
+// the write phase's delete finds, and the drain decides whether to write anything without
+// reading one of its own statements' results before the rest are sent.
+func stillOwed(ctx context.Context, q Queryer, source Owed) (bool, error) {
+	var enqueuedAt time.Time
+	switch err := q.QueryRow(ctx,
+		`select enqueued_at from `+source.Queue.table+` where kind = $1 and id = $2::uuid`,
+		source.Kind, source.ID).Scan(&enqueuedAt); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("read the index %s owes for %s %s: %w", source.Queue.table, source.Kind, source.ID, err)
+	}
+	return enqueuedAt.Equal(source.EnqueuedAt), nil
+}
+
+// queueSettleOwed queues SettleOwed's delete on a write phase's batch, first among the drain's
+// writes, so the row is settled before the text it was owed for is written. It is still guarded
+// by the enqueued_at the row was listed with, which stillOwed read under the source's owner lock.
+func queueSettleOwed(b *store.WriteBatch, source Owed) {
+	b.Queue(fmt.Sprintf("settle the index %s owes for %s %s", source.Queue.table, source.Kind, source.ID),
+		`delete from `+source.Queue.table+` where kind = $1 and id = $2::uuid and enqueued_at = $3`,
+		source.Kind, source.ID, source.EnqueuedAt)
+}
+
 // ReindexOwed reconciles one owed comment's, ask's or issue message's refs with its text, read
 // with the grammar this build reads it with, and settles its owed row, in one transaction. It
-// takes the source row first (sourceText, forUpdate) and the owed row after, the order a write
-// takes them in (the row's update, then its trigger's upsert), so the two never deadlock. The
-// owed row is settled only while it holds the enqueued_at source was listed with (SettleOwed),
-// and it is settled before the text is written: one a write moved meanwhile is left owed with
-// nothing written for it, and the next pass, which reads its newer text, writes it. It reports
-// whether it re-indexed the source.
+// takes the source's owner lock (sourceOwner), the lock every writer of that text takes, and
+// reads the text in the statement after it (readSourceUnderOwner, sourceRead), so a write
+// committed while it waited is the text it indexes; a direct message, whose conversation is no
+// owner, has no such lock and needs none, since nothing rewrites a message's body. It takes no
+// source row: a row lock would assign the transaction a transaction id to hold through
+// everything it reads and plans, and under the owner lock it excludes nothing the owner lock
+// does not. Everything it writes is read and planned first, under that lock and with no
+// transaction id held - the owed row itself (stillOwed), a comment's or a message's block index
+// (ReadItemIndex, PlanItemIndex), an ask's part index (PlanAskParts) and the references the text
+// cites (PlanReplace) - and its writes then go as one batch, the owed row's delete first
+// (queueSettleOwed, store.RunWrite). It reports whether it re-indexed the source.
 //
-// A new edge takes the time the text was written (sourceText) and no source_seq, since no event
+// The owed row is read and settled only while it holds the enqueued_at source was listed with: a
+// write that lands between the listing and the lock moves it, and this pass is left with nothing
+// written for the text it read, for the next pass, which reads the newer text under the same
+// lock. Dropping the source's row lock leaves no deadlock with the trigger that writes the owed
+// row: the trigger fires on the write's update of the text, in that write's write phase, under
+// the owner lock it took before its first read, so a write and this pass never hold a row the
+// other waits for, and the owner lock alone orders them.
+//
+// A new edge takes the time the text was written (sourceRead) and no source_seq, since no event
 // introduced it, as a rebuild's does; a re-index of text no one rewrote appends no event, as
 // rebuild-refs appends none. So no ?since= read lists such an edge until a later write of the
 // source stamps it with that write's event (Stamp), and then it is listed as that write's. A
 // source that is gone has its edges deleted with its owed row, and its blocks and an ask's
-// parts are indexed with its text (reindexText).
+// parts are indexed with its text (planReindex).
 func ReindexOwed(ctx context.Context, pool Pool, source Owed, serverURL string) (bool, error) {
 	if !source.reindexable() {
 		return false, fmt.Errorf("re-index %s %s: a %s row of %s names no text of its own",
 			source.Kind, source.ID, source.Kind, source.Queue.table)
+	}
+	read, err := sourceRead(source.Kind, source.ID)
+	if err != nil {
+		return false, err
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	body, writtenAt, found, err := sourceText(ctx, tx, source.Kind, source.ID, true)
+	var body string
+	var writtenAt time.Time
+	found, err := readSourceUnderOwner(ctx, tx, source.Kind, source.ID, read, &body, &writtenAt)
 	if err != nil {
 		return false, err
 	}
-	settled, err := SettleOwed(ctx, tx, source)
-	if err != nil || !settled {
+	owes, err := stillOwed(ctx, tx, source)
+	if err != nil || !owes {
 		return false, err
 	}
-	if err := reindexText(ctx, tx, source.Kind, source.ID, body, serverURL, writtenAt, found); err != nil {
+	plan, err := planReindex(ctx, tx, source.Kind, source.ID, body, serverURL, writtenAt, found)
+	if err != nil {
 		return false, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		queueSettleOwed(b, source)
+		plan.queue(b)
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("re-index %s %s with this build's grammar: %w", source.Kind, source.ID, err)
 	}
 	return true, tx.Commit(ctx)
 }
 
-// reindexText reconciles one item's refs, and the blocks its text holds, with body as this build's
-// grammar reads it, in tx, which holds the item's row (sourceText, forUpdate). found is what
-// sourceText answered: an item whose source is gone has its edges deleted instead. A comment or
-// message has its blocks indexed too (IndexItem, which takes the item's block state row after the
-// source row), and an ask its parts (IndexAskParts, read from the same row sourceText locked), so
-// the mentions its blocks hold are read with the same grammar as its own.
-func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL string, writtenAt time.Time, found bool) error {
+// reindexPlan is one source's text as a re-index of it is planned: the index of its own blocks -
+// a comment's and a message's, an ask's parts - and the reconciliation of the references its
+// text cites. Both are planned with no transaction id held and written by queue, which puts
+// their statements on a write phase's batch. A source that is gone holds neither, and its edges
+// are deleted instead.
+type reindexPlan struct {
+	kind, id string
+	// found is what the read of the source answered, and indexed whether the plan holds an index
+	// of the source's own blocks: a comment's and a message's, read from the body, and an ask's
+	// parts, read from its row, where an ask gone since has none.
+	found, indexed bool
+	indexing       ItemIndexing
+	replacement    Replacement
+}
+
+// planReindex plans the re-index of kind id's text, body read with the whole grammar through a
+// reader of the source's own (NewReader), in tx, which holds the source's owner lock and read
+// the text in the statement after it (readSourceUnderOwner). found is what that read answered: a
+// source that is gone is planned as the delete of its edges. A comment or a message has its
+// blocks planned too (PlanItemIndex, whose first queued statement takes the item's block state
+// row), and an ask its parts (PlanAskParts, read from the row the owner lock guards and through
+// the same reader), so the mentions its blocks hold are read with the same grammar as its own.
+func planReindex(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL string, writtenAt time.Time, found bool) (reindexPlan, error) {
+	plan := reindexPlan{kind: kind, id: id, found: found}
 	if !found {
-		if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, kind, id); err != nil {
-			return fmt.Errorf("delete the references of %s %s, which is gone: %w", kind, id, err)
-		}
-		return nil
+		return plan, nil
 	}
 	resolve := NewReader(ctx, tx, kind, id, serverURL)
 	located := resolve.Mentions(body)
 	switch itemKind := ItemKind(kind); itemKind {
 	case ItemComment, ItemMessage:
-		if _, err := IndexItem(ctx, tx, itemKind, id, body, writtenAt, located, nil); err != nil {
-			return fmt.Errorf("index the blocks of %s %s: %w", kind, id, err)
-		}
-	case ItemAsk:
-		// An ask's parts are its question, its options and its answer, where sourceText reads
-		// the question alone, which is what the ask's own refs are written from.
-		ask, _, found, err := askForParts(ctx, tx, id)
+		index, err := ReadItemIndex(ctx, tx, itemKind, id)
 		if err != nil {
-			return err
+			return reindexPlan{}, fmt.Errorf("index the blocks of %s %s: %w", kind, id, err)
 		}
-		if found {
-			if _, err := IndexAskParts(ctx, tx, resolve, ask, writtenAt); err != nil {
-				return fmt.Errorf("index the parts of ask %s: %w", id, err)
+		if plan.indexing, err = PlanItemIndex(index, itemKind, id, body, writtenAt, located, nil); err != nil {
+			return reindexPlan{}, fmt.Errorf("index the blocks of %s %s: %w", kind, id, err)
+		}
+		plan.indexed = true
+	case ItemAsk:
+		// An ask's parts are its question, its options and its answer, where sourceRead reads
+		// the question alone, which is what the ask's own refs are written from. They are read
+		// from the row the owner lock guards, in the read phase, and planned as every other
+		// item's blocks are.
+		ask, _, held, err := askForParts(ctx, tx, id)
+		if err != nil {
+			return reindexPlan{}, err
+		}
+		if held {
+			index, err := ReadItemIndex(ctx, tx, ItemAsk, id)
+			if err != nil {
+				return reindexPlan{}, fmt.Errorf("index the parts of ask %s: %w", id, err)
 			}
+			if plan.indexing, err = PlanAskParts(index, resolve, ask, writtenAt); err != nil {
+				return reindexPlan{}, err
+			}
+			plan.indexed = true
 		}
 	}
-	if _, err := replaceRefs(ctx, tx, kind, id, text.Refs(located), &writtenAt); err != nil {
-		return fmt.Errorf("index %s %s: %w", kind, id, err)
+	replacement, err := PlanReplace(ctx, tx, kind, id, text.Refs(located), &writtenAt)
+	if err != nil {
+		return reindexPlan{}, fmt.Errorf("index %s %s: %w", kind, id, err)
 	}
-	return nil
+	plan.replacement = replacement
+	return plan, nil
+}
+
+// queue queues the plan's writes on a write phase's batch: the source's blocks and the mentions
+// each holds, then the reconciliation of its own references; for a source that is gone, the
+// delete of its edges.
+func (p reindexPlan) queue(b *store.WriteBatch) {
+	if !p.found {
+		b.Queue(fmt.Sprintf("delete the references of %s %s, which is gone", p.kind, p.id),
+			`delete from refs where from_kind = $1 and from_id = $2`, p.kind, p.id)
+		return
+	}
+	if p.indexed {
+		p.indexing.Queue(b)
+	}
+	p.replacement.Queue(b)
 }
 
 // ReindexScopeSource re-indexes one comment, ask or issue message whose text belongs to a document
@@ -385,14 +552,16 @@ func reindexText(ctx context.Context, tx pgx.Tx, kind, id, body, serverURL strin
 // is stored as an edge to that ask now. It writes nothing for a text that holds no `#id` candidate
 // at all (HoldsQuestionCandidate), which is what most of a document's scope is - for a spec, every
 // message, ask and comment of its issue. It reports whether it re-indexed the source, and the
-// source's own owed row, if it has one, is settled by that re-index (replaceRefs).
+// source's own owed row, if it has one, is settled by that re-index (Replacement.Queue).
 //
 // The text is read twice: once with no lock (SourceText), which decides only whether this source
-// is worth a transaction, and again inside the transaction under the row's `for no key update`
-// (sourceText, forUpdate), which is the text the index is written from. Locking first would take
-// the lock an edit of that text takes on every source of the scope before throwing most of them
-// away, and a concurrent edit of each such row would wait behind it; the artifact branch of
-// docs.Service.reindexScope already reads first and owes the work after.
+// is worth a transaction, and again inside the transaction under the source's owner lock
+// (readSourceUnderOwner), which is the text the index is written from. Locking first would take
+// the lock every writer of that text takes on every source of the scope before throwing most of
+// them away, and a concurrent write of each would wait behind it; the artifact branch of
+// docs.Service.reindexScope already reads first and owes the work after. Everything the write
+// needs is read and planned under that lock, with no transaction id held (planReindex), and its
+// statements go as one batch.
 //
 // A text that gains a `#id` between the two reads is indexed by the write that gave it one: a
 // write of this build re-indexes the text it wrote in its own transaction (replaceRefs), reading
@@ -405,20 +574,33 @@ func ReindexScopeSource(ctx context.Context, pool Pool, kind, id, serverURL stri
 	if err != nil || !found || !HoldsQuestionCandidate(unlocked, serverURL) {
 		return false, err
 	}
+	read, err := sourceRead(kind, id)
+	if err != nil {
+		return false, err
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	body, writtenAt, found, err := sourceText(ctx, tx, kind, id, true)
+	var body string
+	var writtenAt time.Time
+	found, err = readSourceUnderOwner(ctx, tx, kind, id, read, &body, &writtenAt)
 	if err != nil || !found {
 		return false, err
 	}
 	if !HoldsQuestionCandidate(body, serverURL) {
 		return false, nil
 	}
-	if err := reindexText(ctx, tx, kind, id, body, serverURL, writtenAt, true); err != nil {
+	plan, err := planReindex(ctx, tx, kind, id, body, serverURL, writtenAt, true)
+	if err != nil {
 		return false, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		plan.queue(b)
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("re-index %s %s against the questions of its document: %w", kind, id, err)
 	}
 	return true, tx.Commit(ctx)
 }
@@ -427,7 +609,7 @@ func ReindexScopeSource(ctx context.Context, pool Pool, kind, id, serverURL stri
 // lock: what a drain reads to decide whether that text has anything a re-index would move. found
 // is false for a source that is gone, a document with no markdown version and a direct message.
 func SourceText(ctx context.Context, q Queryer, kind, id string) (body string, writtenAt time.Time, found bool, err error) {
-	return sourceText(ctx, q, kind, id, false)
+	return sourceText(ctx, q, kind, id)
 }
 
 // HoldsQuestionCandidate reports whether body writes a `#id` the whole grammar would resolve

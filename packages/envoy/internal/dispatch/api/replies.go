@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // The Replies page lists every thread a person wrote in - an ask's thread, a comment thread by its
@@ -191,11 +192,13 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 // so a row a tab read less of a moment ago never comes back. A thread the caller has no row for
 // writes nothing.
 //
-// The transaction locks the thread's owner row `for share` before it touches the caller's row:
-// every writer that moves a user_threads row (a comment, an answer, an issue message) holds that
-// owner `for no key update` before its trigger fires, so a mark that took the row first could wait
-// on a writer waiting on it. Owner first, then the project the event names, is the order every
-// multi-owner transaction takes (LockOwners).
+// The transaction takes the thread's owner lock in shared mode (store.LockOwnerShared) before it
+// touches the caller's row: every writer that moves a user_threads row (a comment, an answer, an
+// issue message) holds that owner's lock exclusively from its read phase on, before its trigger
+// fires, so a mark that took the row first could wait on a writer waiting on it. The shared lock
+// waits for that writer to commit, as the owner row's `for share` waited for its `for no key
+// update`, and two marks never wait on each other. It takes the owner's lock first, then the
+// project's, which the event's append takes.
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.actingPerson(w, r)
 	if !ok {
@@ -240,11 +243,11 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A closed issue is not refused: reading a thread on a closed issue is reading it.
-	if issueKey != nil {
-		_, err = tx.Exec(r.Context(), `select 1 from issues where key = $1 for share`, *issueKey)
-	} else if artifactID != nil {
-		_, err = tx.Exec(r.Context(), `select 1 from artifacts where id = $1 for share`, *artifactID)
+	// A closed issue is not refused: reading a thread on a closed issue is reading it. The lock
+	// is the one every reader and writer of the thread's rows takes (store.OwnerOf); a direct
+	// message's thread names no owner and takes none.
+	if owner := store.OwnerOf(issueKey, artifactID); owner != nil {
+		err = store.LockOwnerShared(r.Context(), tx, *owner)
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)

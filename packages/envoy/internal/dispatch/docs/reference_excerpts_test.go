@@ -369,7 +369,20 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 
 	ctx := context.Background()
 	for name, leaveOwed := range map[string]func() error{
-		"ClearExcerpts": func() error { return refs.ClearExcerpts(ctx, database.Pool, document) },
+		"ClearExcerpts": func() error {
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+				refs.ClearExcerpts(b, document)
+				return nil
+			}); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		},
 		"a direct update": func() error {
 			_, err := database.Pool.Exec(ctx, `update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1`, document)
 			return err

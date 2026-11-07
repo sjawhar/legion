@@ -140,6 +140,10 @@ type Service struct {
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
 	afterEditNoticeIDs func(ids []string)
+	// afterEditNoticeRead runs once a sweep has read a due notice under its document owner's lock,
+	// before its write phase claims it. Nil outside tests; tests use it to move the notice on behind
+	// the sweep, which no writer holding the owner's lock can do.
+	afterEditNoticeRead func(artifactID string)
 	// afterBlockIndexListed runs once a block-index tick has listed its owed documents, with no
 	// lock held, and before it reads or locks the first. Nil outside tests; tests use it to reopen
 	// an issue in that window.
@@ -196,10 +200,19 @@ type Service struct {
 	// since the write read it (refuseLostWrite), and before it renders the write's fork. Nil
 	// outside tests; tests use it to edit the room in that window.
 	afterCaptureFork func(room string)
-	// afterForkRead runs once a transaction's one read of a document has built its write's fork
-	// (forkLive), under the document's advisory lock, before the write's operation runs on it. Nil
-	// outside tests; tests use it to edit the room after the fork read it.
+	// afterForkRead runs once an operation of a transaction holds its write's fork (forkLive),
+	// under the document's advisory lock, before the operation runs on it: at the transaction's
+	// one read of the document, and again at each later operation, which takes the fork that read
+	// left. Nil outside tests; tests use it to edit the room after the fork read it, and take the
+	// first call where they want that window alone.
 	afterForkRead func(room string)
+	// afterAnchorRefresh runs as soon as an anchor refresh has decided which rows it refreshes
+	// (refreshAnchors), with the document it ran on and the number of rows whose anchor it writes.
+	// Its writes are queued, so a transaction refused before its write phase refreshes rows no
+	// reader of its events ever sees; this hook says what the refresh found whichever way the
+	// transaction ends. Nil outside tests; the margin-equivalence test counts each operation's
+	// refreshes with it.
+	afterAnchorRefresh func(artifactID string, refreshed int)
 	// checkRendering runs where a write's rendering (liveWrite.tree, markdown, offsets) is to
 	// describe its fork, at names where: "fork" once forkLive has brought the fork up to date,
 	// "margin", "docTree" and "capture" as a margin write (applyMargin) or a read joined to the
@@ -231,10 +244,10 @@ type Service struct {
 	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
 	// edit the room while the version renders.
 	afterSettleVersionRead func(room string)
-	// afterSettleVersionWrite runs once a settlement that is writing a version has written it
-	// (writeVersionTx) and deleted the pending authors it lists, and before the settlement appends
-	// that version's own event. Nil outside tests; tests return an error from it to force the
-	// settlement to abandon after its version write, before its commit.
+	// afterSettleVersionWrite runs once a settlement that is writing a version has queued it
+	// (writeVersionTx) and the delete of the pending authors it lists, and before it queues that
+	// version's own event; the write phase has not run. Nil outside tests; tests return an error from
+	// it to force the settlement to abandon after its version write, before its commit.
 	afterSettleVersionWrite func(room string) error
 	// beforeSettleCommit runs once a settlement's room has taken in the versions the settlement
 	// appended and before the settlement's transaction commits (commitSettlement). Nil outside
@@ -402,10 +415,13 @@ type artifactOwner struct {
 	Name     string
 }
 
-// lockArtifactOwner loads an artifact's owner, then locks that owner row: the artifact itself
-// for a project document, its issue otherwise. The lock is `for no key update`, so it
-// serialises this writer against every other writer that takes it without blocking the
-// `for key share` a child insert takes - see lockDocumentRoom for why that is the rule.
+// lockArtifactOwner loads an artifact's owner, then takes that owner's lock (store.LockOwner): the
+// artifact itself for a project document, its issue otherwise. The lock is a transaction advisory
+// lock, so it serialises this writer against every other writer of the owner without taking a row
+// lock, and so without giving the transaction a transaction id or blocking the `for key share` a
+// child insert takes - see lockDocumentRoom for why that is the rule. Whether the issue is open is
+// read in the statement after the lock, sent with it (store.LockOwnerAndRead), so a close committed
+// while this waited is seen.
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
@@ -415,19 +431,18 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 		return artifactOwner{}, false, fmt.Errorf("load document owner: %w", err)
 	}
 	if owner.IssueKey == nil {
-		var exists bool
-		if err := tx.QueryRow(ctx, `
-			select true from artifacts where id = $1 and issue_key is null for no key update
-		`, artifactID).Scan(&exists); err != nil {
-			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
+		if err := store.LockOwnerAndRead(ctx, tx, store.ArtifactOwner(artifactID), `
+			select true from artifacts where id = $1 and issue_key is null
+		`, []any{artifactID}, new(bool)); err != nil {
+			return artifactOwner{}, false, fmt.Errorf("lock and read document artifact: %w", err)
 		}
 		return owner, true, nil
 	}
 	var open bool
-	if err := tx.QueryRow(ctx, `
-		select closed_at is null from issues where key = $1 for no key update
-	`, *owner.IssueKey).Scan(&open); err != nil {
-		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
+	if err := store.LockOwnerAndRead(ctx, tx, store.IssueOwner(*owner.IssueKey), `
+		select closed_at is null from issues where key = $1
+	`, []any{*owner.IssueKey}, &open); err != nil {
+		return artifactOwner{}, false, fmt.Errorf("lock and read document issue: %w", err)
 	}
 	return owner, open, nil
 }
@@ -924,7 +939,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				settles = true
 			} else {
 				// A document whose updates have all been settled would spend the budget
-				// repeating that work - a 1 MiB document's for seconds, holding the issue's row.
+				// repeating that work - a 1 MiB document's for seconds, holding the issue's lock.
 				mu.Lock()
 				owed[room.name] = owes
 				mu.Unlock()
@@ -1425,11 +1440,12 @@ func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room strin
 // sender the document's pending-settlement row names, all read in tx under the document's
 // advisory lock, and the room's in-flight credits no committed version has listed that were
 // observed before the read. Taken once the settlement has stored the room's updates through the
-// read (Ledger.flushThrough), the pending authors hold the authors those appends wrote, so a
-// credit observed after the bound whose update the settlement stored is listed too; one whose
-// update the read lacks stays pending for the next version.
+// read (Ledger.flushThrough), the pending authors hold the authors those appends wrote - the
+// ones its queue has yet to write among them (transactionPendingAuthors) - so a credit observed
+// after the bound whose update the settlement stored is listed too; one whose update the read
+// lacks stays pending for the next version.
 func settlementCredit(ctx context.Context, tx pgx.Tx, state *roomState, room string, read settlementRead) (settlementVersionCredit, error) {
-	owed, err := readPendingAuthors(ctx, tx, room)
+	owed, err := transactionPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return settlementVersionCredit{}, err
 	}
@@ -1661,6 +1677,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return stoppedShort(fmt.Errorf("begin document transaction: %w", err))
 	}
 	defer tx.Rollback(ctx)
+	// Settlement decides everything before it writes anything: every write below goes through
+	// write and queues on this ledger, and the queue runs back to back right before the commit, so
+	// the transaction holds a transaction id only for those statements, not while it renders the
+	// document, walks its anchors or carries an approval.
+	ledger.writer = tx
 	owner, open, err := lockArtifactOwner(ctx, tx, room)
 	if err != nil {
 		return stoppedShort(err)
@@ -1668,7 +1689,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if !open {
 		return settleOutcome{}
 	}
-	// The owner row is read and locked in this transaction, so the repairs settlement injects
+	// The owner is read under its lock in this transaction, so the repairs settlement injects
 	// below do not read it again: that read would be a second pooled connection taken while
 	// this transaction holds one, which is what deadlocks the pool.
 	ctx = withOwnerVerified(ctx)
@@ -1853,7 +1874,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.discardSuppressedPersistence(room, slots...)
 		return settleOutcome{}
 	}
-	// An open live write is not in the room yet, and since this settlement holds the owner row,
+	// An open live write is not in the room yet, and since this settlement holds the owner's lock,
 	// the write's transaction has already committed: the cursor this settlement versions against
 	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
 	superseded := state.roomGeneration != generation
@@ -1879,6 +1900,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if err := recordStampedAskAuthors(ctx, tx, room, renamed, carried); err != nil {
 			return abandon(err)
 		}
+		// The write phase: every statement this settlement decided on, in the order it made them.
+		if err := ledger.runQueue(ctx, nil); err != nil {
+			return abandon(err)
+		}
 		if advanced, err := s.commitSettlement(ctx, tx, ledger, room, authorCapture{}, nil); err != nil {
 			return commitFailed(advanced, fmt.Errorf("commit superseded document identity update: %w", err))
 		}
@@ -1890,8 +1915,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// observer has not left its blocks unseen, for the settlement that observer arms (askBlockSources).
 	credit.askSources = state.askSources()
 	state.mu.Unlock()
-	// Recorded before reconcileAskBlocks reads the durable authors, so a block the stamp renamed is
-	// found under its minted id there too.
+	// Queued before reconcileAskBlocks reads the durable authors, so a block the stamp renamed is
+	// found under its minted id there too: the write phase has not run, so that read takes the
+	// rows this queued from the ledger (transactionRecordedAskAuthors).
 	if err := recordStampedAskAuthors(ctx, tx, room, renamed, carried); err != nil {
 		return abandon(err)
 	}
@@ -1953,11 +1979,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		versioned = versionRead.tree
 	}
 	// The version's authors, taken once the room's updates it holds are stored, and the head it
-	// records (doc_update_version), through which every one of them is stored.
+	// records (doc_update_version), through which every one of them is stored. The head counts
+	// what this transaction has queued and not yet written (transactionHead): the settlement's
+	// appends are among them.
 	if credit, err = settlementCredit(ctx, tx, state, room, versionRead); err != nil {
 		return abandon(err)
 	}
-	snapshotCursor, err := currentUpdateCursor(ctx, tx, room)
+	snapshotCursor, err := transactionHead(ctx, tx, room)
 	if err != nil {
 		return abandon(err)
 	}
@@ -1997,25 +2025,31 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	s.unlockState(room, state)
 
-	published := make([]model.Event, 0, len(reconciliation.events)+1)
 	// Each event that carries a reconciled source's text stamps that source's new mention edges
 	// with the event that introduced them: the version event for the document itself, and each
 	// ask's own opened/edited event. writeVersionTx reconciled the edges earlier in this
-	// transaction, so stamping runs after the append and never touches sequence allocation.
+	// transaction, so stamping runs after the append, naming the event's id as the id sequence
+	// left it (refs.QueueStamp), and never touches sequence allocation. The appends and stamps are
+	// one step of the write phase; what it appends joins the ledger's events, after those the
+	// version write appended, which the settlement publishes once it commits. An ask event that
+	// names thread_logins has its insert read them (settlementEventLogins), after the ask writes
+	// queued before it.
+	sink := eventSink(ctx)
 	appendEvents := func(events []model.Event) error {
-		for _, planned := range events {
-			appended, appendErr := s.events.Append(ctx, tx, planned)
-			if appendErr != nil {
-				return appendErr
-			}
-			if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
-				if err := refs.Stamp(ctx, tx, sourceKind, sourceID, appended.ID); err != nil {
+		if len(events) == 0 {
+			return nil
+		}
+		return write(ctx, tx, func(b *store.WriteBatch) error {
+			for _, planned := range events {
+				if err := s.events.QueueAppendWithLogins(b, planned, settlementEventLogins(planned), sink); err != nil {
 					return err
 				}
+				if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
+					refs.QueueStamp(b, sourceKind, sourceID)
+				}
 			}
-			published = append(published, appended)
-		}
-		return nil
+			return nil
+		})
 	}
 	// Settlement writes a version only when the document now reads differently from the latest
 	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the
@@ -2041,11 +2075,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit. It goes before the first event this
 	// settlement appends. A transaction marking this document owed as a copy (owedCopiesOf) holds
-	// its row until it commits, and this settlement then waits for it holding its owner row and
+	// its row until it commits, and this settlement then waits for it holding its owner lock and
 	// room lock, which that transaction never takes; nor does it take what this settlement goes on
-	// to lock, its events locking only this document's owner row. The pending authors stay unless
-	// this settlement's version lists them (deleted below): a settlement that writes no version
-	// lists no one.
+	// to lock, its events locking only this document's owner and owner row. The pending authors
+	// stay unless this settlement's version lists them (deleted below): a settlement that writes no
+	// version lists no one.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		return abandon(err)
 	}
@@ -2076,7 +2110,6 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if err := s.recordEditNotice(ctx, tx, room, result.version.Number, credit.authors, credit.capture.latest); err != nil {
 			return abandon(err)
 		}
-		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{
@@ -2095,6 +2128,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if err := appendEvents(reconciliation.events); err != nil {
 		return abandon(err)
 	}
+	// The write phase: every statement this settlement decided on, in the order it made them.
+	if err := ledger.runQueue(ctx, nil); err != nil {
+		return abandon(err)
+	}
+	published := ledger.events
 	// The commit marks the in-flight credits the version listed consumed before it releases the
 	// room's state, and the room updates the settlement stored marked stored (commitSettlement); a
 	// settlement that writes no version takes out none.
@@ -2446,6 +2484,16 @@ func currentUpdateCursor(ctx context.Context, q Queryer, artifactID string) (int
 	return cursor, nil
 }
 
+// transactionHead is the version artifactID's stored history stands at for tx (currentUpdateCursor),
+// counting the writes tx's ledger has queued to it and not yet run: a transaction that queued one
+// holds the document's lock and knows the head they leave (pendingRoom), and reads nothing.
+func transactionHead(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {
+	if pending := pendingRoomOf(ctx, tx, artifactID); pending != nil {
+		return pending.head, nil
+	}
+	return currentUpdateCursor(ctx, tx, artifactID)
+}
+
 func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {
 	if !s.shuttingDown(room) {
 		return lockDocumentRoom(ctx, tx, room)
@@ -2625,8 +2673,10 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return abandon(fmt.Errorf("append identity update: %w", err))
 	}
 	// Before the commit, in the transaction that stores the stamp: the authors it carried are
-	// recorded with it.
-	if err := recordStampedAskAuthors(ctx, tx, artifactID, renamed, carried); err != nil {
+	// recorded with it, queued on the same ledger as the append above (storeCtx), so they are
+	// written in the write phase after it, where the statements running them one at a time wrote
+	// them.
+	if err := recordStampedAskAuthors(storeCtx, tx, artifactID, renamed, carried); err != nil {
 		return abandon(err)
 	}
 	if _, err := s.commitSettlement(storeCtx, tx, ledger, artifactID, authorCapture{}, nil); err != nil {

@@ -22,12 +22,12 @@ import (
 // it. With no store, or for a document, it writes nothing. It reports whether the upload may go on.
 //
 // The object goes first: the bytes (up to maxArtifactBlobSize) cross the network to a store whose
-// wait nothing here bounds, and the transaction takes a pooled connection and the owner's row
-// lock, which every other writer of that issue queues behind. So the refusals that transaction
-// makes are made first, from the pool and locking nothing (refuseUploadBeforeItsObject; an issue
-// that is closed or missing is refused before the body is read, refuseUploadToAClosedIssue):
-// nothing deletes an object, and one a refused upload left would be named by no row. Deleting it
-// on refusal instead is not safe, since the store is keyed by the bytes' hash and another version,
+// wait nothing here bounds, and the transaction takes a pooled connection and the owner's lock,
+// which every other writer of that issue queues behind. So the refusals that transaction makes
+// are made first, from the pool and locking nothing (refuseUploadBeforeItsObject; an issue that
+// is closed or missing is refused before the body is read, refuseUploadToAClosedIssue): nothing
+// deletes an object, and one a refused upload left would be named by no row. Deleting it on
+// refusal instead is not safe, since the store is keyed by the bytes' hash and another version,
 // or another upload in flight, can name the same object. The transaction's own checks still
 // decide: an upload this check passes that a concurrent write then makes refusable (another
 // upload taking its name with another kind, the issue closing), or whose insert fails, leaves an

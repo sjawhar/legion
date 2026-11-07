@@ -100,7 +100,7 @@ func lastProjectRank(ctx context.Context, q queryer, project, issueKey string) (
 }
 
 // rankBoundary reads a rank neighbour the PATCH already locked under this same trimmed key
-// (lockPatchRows), so it takes no lock of its own.
+// (lockPatchOwners), so it takes no lock of its own.
 func rankBoundary(ctx context.Context, q queryer, project, issueKey, key string) (string, error) {
 	if key == "" || key == issueKey {
 		return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor must name another issue")

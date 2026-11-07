@@ -27,6 +27,51 @@ func CountLockWaits(ctx context.Context, database *store.Store, like string) (in
 	return waiting, nil
 }
 
+// OwnerLockWaiters counts the backends of database waiting on an owner lock (the statements
+// store.LockOwner and LockOwnerShared run, which name their result owner_lock), and how many of
+// them hold a transaction id while they wait: every writer takes its owner's lock in its read
+// phase, before its first write, so a waiter holding a transaction id is holding one open behind
+// the lock. The caller's own backend is left out. It reads through the pool, as CountLockWaits
+// does and for the same reason.
+func OwnerLockWaiters(t testing.TB, database *store.Store) (waiting, holdingXid int) {
+	t.Helper()
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), count(*) filter (where backend_xid is not null)
+		from pg_stat_activity
+		where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'
+		  and query like '%owner_lock%' and pid <> pg_backend_pid()
+	`).Scan(&waiting, &holdingXid); err != nil {
+		t.Fatalf("read pg_stat_activity: %v", err)
+	}
+	return waiting, holdingXid
+}
+
+// AwaitOwnerLockWaiter waits up to ten seconds for a backend to wait on an owner lock
+// (OwnerLockWaiters) and answers how many of the waiters hold a transaction id. It returns the
+// call's answer and true when the call under test answers on answered before any backend waited,
+// as WaitForQueuedBehind does: such a call never waited for the lock the test holds, and the
+// caller fails with what it answered. what names that call, for the failure when the ten seconds
+// pass first.
+func AwaitOwnerLockWaiter[T any](t testing.TB, database *store.Store, what string, answered <-chan T) (T, bool, int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case early := <-answered:
+			return early, true, 0
+		default:
+		}
+		if waiting, holdingXid := OwnerLockWaiters(t, database); waiting > 0 {
+			var none T
+			return none, false, holdingXid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never waited on an owner lock within 10s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // waitingBehindHolder is the recursive CTE naming, as waiting(pid), every backend queued behind a
 // lock the current transaction owns, directly or behind an earlier waiter.
 const waitingBehindHolder = `
@@ -104,42 +149,5 @@ func WaitForQueuedBehind[T any](t testing.TB, holder pgx.Tx, pid uint32, answere
 			t.Fatalf("backend %d never queued behind the lock within %s", pid, within)
 		}
 		time.Sleep(2 * time.Millisecond)
-	}
-}
-
-// WaitForStatementBehind waits up to within for a session of database whose current statement is
-// exactly statement to queue behind a lock holder's transaction owns (QueuedBehind), and returns
-// that session's backend process id, or 0 if none did. It is for a call under test that runs in
-// another process, whose connection a test cannot give a pool of its own: the statement names
-// the call's backend, and a session queued behind the same lock with any other statement is
-// never taken for it. It reads pg_stat_activity through the pool, a fresh view on each read.
-func WaitForStatementBehind(t testing.TB, database *store.Store, holder pgx.Tx, statement string, within time.Duration) uint32 {
-	t.Helper()
-	ctx := context.Background()
-	deadline := time.Now().Add(within)
-	for {
-		rows, err := database.Pool.Query(ctx, `
-			select pid from pg_stat_activity where datname = current_database() and query = $1
-		`, statement)
-		if err != nil {
-			t.Fatalf("read the sessions running %q: %v", statement, err)
-		}
-		pids, err := pgx.CollectRows(rows, pgx.RowTo[uint32])
-		if err != nil {
-			t.Fatalf("read the sessions running %q: %v", statement, err)
-		}
-		for _, pid := range pids {
-			queued, err := QueuedBehind(ctx, holder, pid)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if queued {
-				return pid
-			}
-		}
-		if time.Now().After(deadline) {
-			return 0
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

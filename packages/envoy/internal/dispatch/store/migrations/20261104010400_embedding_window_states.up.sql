@@ -11,12 +11,12 @@
 -- and the arm passes over it for ever, because it does hold windows.
 --
 -- This table is what the arm reads instead: one row per owner whose windows were written, with
--- the state its blocks were in when they were (refs.writeWindows writes it in the same
--- transaction as the windows). A document's state is the version its blocks are indexed at
--- (document_block_versions.version), an item's the sum of the body they were split from
--- (comment_block_state, message_block_state and ask_block_state's body_sha256) - in each case
--- the value the older build does move when it re-indexes blocks. An owner whose state is not
--- the one its windows carry, and one with no row at all, is an owner the arm windows again.
+-- the state its blocks were in when they were (the statement refs.planWindows builds writes it
+-- in the same transaction as the windows). A document's state is the version its blocks are
+-- indexed at (document_block_versions.version), an item's the sum of the body they were split
+-- from (comment_block_state, message_block_state and ask_block_state's body_sha256) - in each
+-- case the value the older build does move when it re-indexes blocks. An owner whose state is
+-- not the one its windows carry, and one with no row at all, is an owner the arm windows again.
 --
 -- The owner key is the windows' own: a document's artifact id, "<kind>/<uuid>" for a comment, a
 -- message or an ask, the part of an embeddings window id before its #. There is no foreign key

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -161,25 +162,35 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 	return s.hydrateCommentSideTables(ctx, q, replies)
 }
 
+// withReply is replies, a chain loadReplyChain read, with reply, a reply to the chain's root this
+// transaction has queued the insert of and the table does not hold yet, in the place the chain's
+// query would have returned it: ordered by created_at, then id (a uuid orders as its canonical
+// text does).
+func withReply(replies []model.Comment, reply model.Comment) []model.Comment {
+	index, _ := slices.BinarySearchFunc(replies, reply, func(stored, added model.Comment) int {
+		if order := stored.CreatedAt.Compare(added.CreatedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(stored.ID, added.ID)
+	})
+	return slices.Insert(replies, index, reply)
+}
+
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
 		select `+commentColumns+`
 		from comments where id = $1
 	`, id))
 }
-func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
-	return scanComment(tx.QueryRow(ctx, `
-		select `+commentColumns+`
-		from comments where id = $1 for update
-	`, id))
-}
 
-// loadOwnedCommentForUpdate locks a comment and refuses one that is not on this owner, with
-// the 400 every reply_to walk answers.
-func (s *server) loadOwnedCommentForUpdate(
+// loadOwnedComment reads a comment and refuses one that is not on this owner, with the 400 every
+// reply_to walk answers. It locks no row: the caller holds the owner's lock (requireOpenOwner),
+// which every writer of a comment takes before it reads one, so the comment cannot change under
+// the caller until it commits.
+func (s *server) loadOwnedComment(
 	ctx context.Context, tx pgx.Tx, owner owner, id string,
 ) (model.Comment, error) {
-	comment, err := s.loadCommentForUpdate(ctx, tx, id)
+	comment, err := s.loadComment(ctx, tx, id)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(comment, owner)) {
 		return model.Comment{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
 	}

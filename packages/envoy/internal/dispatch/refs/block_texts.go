@@ -7,7 +7,7 @@ import (
 )
 
 // BlockVersion is what the block index recorded of one block at one version of its document
-// (IndexBlocks writes document_block_texts and document_indexed_versions).
+// (BlockIndexing.Queue writes document_block_texts and document_indexed_versions).
 type BlockVersion struct {
 	// Exists is whether the document has the version.
 	Exists bool

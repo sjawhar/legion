@@ -11,7 +11,7 @@ import (
 // A block pasted in the browser keeps its source's id until a settlement stamps a new one, so the
 // live document can hold one id twice. Version 1 holds "Foo." twice, indexed as rows p1 and p2.
 // The live document holds p1, a paste of it that kept the id p1, and p2; in the edited case the
-// paste's text is "Bar.". refs.IndexBlocks indexes only the first holder of an id, so the
+// paste's text is "Bar.". refs.PlanBlocks indexes only the first holder of an id, so the
 // version's two "Foo." blocks take p1 and p2, each once.
 func TestClosedVersionBlocksCountsOnlyTheFirstHolderOfAnID(t *testing.T) {
 	paragraph := func(id, body string) *pmdoc.Node {

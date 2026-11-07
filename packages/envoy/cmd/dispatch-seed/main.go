@@ -5,8 +5,9 @@
 // (pmdoc.SetBlockIDGenerator), so two runs at one scale write the same rows: a measurement taken
 // before a change and one taken after it read the same data.
 //
-// It writes the rows and then calls the server's own indexers over them (refs.IndexBlocks for a
-// document's blocks, refs.IndexItem for a comment's or a message's), and settles the state those
+// It writes the rows and then indexes them with the server's own indexers (refs.PlanBlocks for a
+// document's blocks, refs.IndexItem for a comment's or a message's), runs in its own
+// transaction the plans that PlanBlocks and PlanAskParts return, and settles the state those
 // writes leave owed, so a Dispatch server started on the seeded database rewrites nothing. A
 // server that rewrote it would make the two sides of a before-and-after measurement two different
 // data sets.

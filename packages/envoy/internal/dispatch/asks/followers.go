@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Execer is the pgx surface shared by *pgxpool.Pool and pgx.Tx for writes.
@@ -23,14 +24,18 @@ type Queryer interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// followAsk is the insert that makes $2 a follower of the ask $1, which a second follow leaves
+// as it is.
+const followAsk = `
+	insert into ask_followers (ask_id, session_id)
+	values ($1, $2)
+	on conflict do nothing
+`
+
 // Follow records that sessionID follows askID and reports whether that is new;
 // following twice changes nothing.
 func Follow(ctx context.Context, db Execer, askID, sessionID string) (bool, error) {
-	tag, err := db.Exec(ctx, `
-		insert into ask_followers (ask_id, session_id)
-		values ($1, $2)
-		on conflict do nothing
-	`, askID, sessionID)
+	tag, err := db.Exec(ctx, followAsk, askID, sessionID)
 	if err != nil {
 		return false, fmt.Errorf("follow ask %q as %q: %w", askID, sessionID, err)
 	}
@@ -45,6 +50,14 @@ func FollowAuthor(ctx context.Context, db Execer, askID string, author model.Act
 	}
 	_, err := Follow(ctx, db, askID, author.ID)
 	return err
+}
+
+// QueueFollowAuthor is FollowAuthor queued on a write phase's batch.
+func QueueFollowAuthor(b *store.WriteBatch, askID string, author model.Actor) {
+	if author.Kind != "session" || author.ID == "" {
+		return
+	}
+	b.Queue(fmt.Sprintf("follow ask %q as %q", askID, author.ID), followAsk, askID, author.ID)
 }
 
 // Unfollow removes sessionID from askID's followers and reports whether a row went.

@@ -40,6 +40,8 @@ func reviewHashFixture(t *testing.T) (*store.Store, model.Artifact) {
 	return database, artifact
 }
 
+// writeHashReview records one review the way every caller does on this branch: queued on a write
+// batch (QueueReview), whose statements the commit sends back to back.
 func writeHashReview(t *testing.T, database *store.Store, artifact model.Artifact, version int) (model.ArtifactReview, model.Event) {
 	t.Helper()
 	ctx := context.Background()
@@ -48,8 +50,14 @@ func writeHashReview(t *testing.T, database *store.Store, artifact model.Artifac
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	review, event, err := WriteReview(ctx, tx, events.NewBroker(), artifact, version, "approved", ReviewKindPerson, model.Actor{Kind: "user", ID: "alice"}, nil, nil)
-	if err != nil {
+	var review model.ArtifactReview
+	var event model.Event
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		return QueueReview(b, events.NewBroker(), artifact, version, "approved", ReviewKindPerson,
+			model.Actor{Kind: "user", ID: "alice"}, nil, nil, func(written model.ArtifactReview, appended model.Event) {
+				review, event = written, appended
+			})
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

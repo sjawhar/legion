@@ -223,12 +223,13 @@ type uploadHold struct {
 	hold *roomHold
 }
 
-// capturePendingAuthors reads R in tx, which holds the document's advisory lock, with the
+// capturePendingAuthors reads R in tx, which holds the document's advisory lock, as tx sees it -
+// the rows the table holds and the rows tx has queued (transactionPendingAuthors) - with the
 // document's latest person sender (readLastPerson), and takes whom a version lists
 // (captureAuthors), with the in-flight credits observed through `through`, under room's state
 // lock.
 func (s *Service) capturePendingAuthors(ctx context.Context, tx pgx.Tx, room string, write *liveWrite, actor *model.Actor, through uint64) (authorCapture, error) {
-	owed, err := readPendingAuthors(ctx, tx, room)
+	owed, err := transactionPendingAuthors(ctx, tx, room)
 	if err != nil {
 		return authorCapture{}, err
 	}
@@ -508,17 +509,41 @@ func pendingAuthorsArgs(room string, authors []pendingAuthor) ([]any, error) {
 	return []any{room, kinds, ids, encoded, versions}, nil
 }
 
-// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in one
-// statement (pendingAuthorsStatement).
+// upsertPendingAuthors writes authors to R in tx, which holds the document's advisory lock, in
+// one statement (pendingAuthorsStatement). It goes through write, so a transaction whose writes
+// are queued runs it in its write phase; deletePendingAuthors, deleteHeldPendingAuthors and
+// markSettlementPending do the same.
 func upsertPendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors []pendingAuthor) error {
 	args, err := pendingAuthorsArgs(room, authors)
 	if err != nil || args == nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, pendingAuthorsStatement, args...); err != nil {
-		return fmt.Errorf("record the document's pending authors: %w", err)
+	if err := writeExec(ctx, tx, "record the document's pending authors", pendingAuthorsStatement, args...); err != nil {
+		return err
+	}
+	// A queued statement writes nothing until the write phase runs, so the rows it will add are
+	// recorded for the reads of this transaction that follow it (transactionPendingAuthors).
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		ledger.queuedAuthors(room, authors)
 	}
 	return nil
+}
+
+// transactionPendingAuthors is R for room as tx sees it: the rows the table holds, and the rows
+// the writes tx has queued will add (Ledger.queuedAuthors). A version's transaction stores the
+// room's updates before it reads R (Ledger.flushThrough), and each of those appends writes the
+// authors of the edit it stores; where its writes are queued the table holds none of them yet, so
+// a version reading the table alone would neither list those authors nor delete their rows when
+// it commits, and the next version would be owed them again.
+func transactionPendingAuthors(ctx context.Context, tx pgx.Tx, room string) (map[string]model.Actor, error) {
+	owed, err := readPendingAuthors(ctx, tx, room)
+	if err != nil {
+		return nil, err
+	}
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		maps.Copy(owed, ledger.owedAuthors[room])
+	}
+	return owed, nil
 }
 
 // readPendingAuthors is R for room, keyed by actorKey. It says nothing about who edited last: the
@@ -564,26 +589,20 @@ func deletePendingAuthors(ctx context.Context, tx pgx.Tx, room string, authors [
 		kinds = append(kinds, actor.Kind)
 		ids = append(ids, actor.ID)
 	}
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "delete the document's listed pending authors", `
 		delete from doc_pending_authors
 		where artifact_id = $1 and (actor_kind, actor_id) in (select * from unnest($2::text[], $3::text[]))
-	`, room, kinds, ids); err != nil {
-		return fmt.Errorf("delete the document's listed pending authors: %w", err)
-	}
-	return nil
+	`, room, kinds, ids)
 }
 
 // deleteHeldPendingAuthors deletes, in an upload's transaction, every R row of room whose writing
 // update the upload's room instance held: written through the head it loaded, or by an update it
 // took since.
 func deleteHeldPendingAuthors(ctx context.Context, tx pgx.Tx, room string, held heldUpdates) error {
-	if _, err := tx.Exec(ctx, `
+	return writeExec(ctx, tx, "delete the pending authors an upload's room held", `
 		delete from doc_pending_authors
 		where artifact_id = $1 and (written_through <= $2 or written_through = any($3::bigint[]))
-	`, room, held.through, held.since); err != nil {
-		return fmt.Errorf("delete the pending authors an upload's room held: %w", err)
-	}
-	return nil
+	`, room, held.through, held.since)
 }
 
 // recordLatestEditSource records lastActor as the latest edit source on room's pending-settlement
@@ -659,10 +678,7 @@ func markSettlementPending(ctx context.Context, tx pgx.Tx, rooms []string, lastA
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, settlementPendingStatement, args...); err != nil {
-		return fmt.Errorf("record the document's pending settlement: %w", err)
-	}
-	return nil
+	return writeExec(ctx, tx, "record the document's pending settlement", settlementPendingStatement, args...)
 }
 
 // settlementPendingStatement is the one statement markSettlementPending runs, in one statement

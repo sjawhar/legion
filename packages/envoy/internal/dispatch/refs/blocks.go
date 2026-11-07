@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -28,16 +30,85 @@ type Pointer struct {
 	Targets                []string
 }
 
-// IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
-// graph nodes, and each mention written inside a block as an edge out of the innermost block
-// holding its start, in the caller's transaction, which holds the document's owner row. blocks
-// are the version's rendered blocks in document order, each parent before its children; the first
-// holder of a repeated id is the node. located must be Mentions of the document's text, the one
-// reading of it a version's index takes, so a mention's offset places it in the block holding it
-// however the text wrote the reference. A block whose id is longer than text.MaxBlockIDBytes,
-// which no key of the index can hold, is no node: a mention inside it starts at the innermost
-// node holding it, if any, and the indexing logs a warning naming the document, the longest
-// such id's length and the bound.
+// BlockIndex is what a document's block index holds: the sha256 of each block's text, by block
+// id, and the links its blocks hold, each with the block types it points at.
+type BlockIndex struct {
+	sums  map[string]string
+	pairs []blockPair
+}
+
+// ReadBlockIndex reads what q's block index holds for artifactID, its links read with the predicate
+// the reconciling delete visits them by, each with the block types it points at, so a plan can
+// tell a link whose attribute now names other types.
+func ReadBlockIndex(ctx context.Context, q Queryer, artifactID string) (BlockIndex, error) {
+	sums, err := storedBlockSums(ctx, q, artifactID)
+	if err != nil {
+		return BlockIndex{}, err
+	}
+	rows, err := q.Query(ctx, `select block_id, kind, to_kind, to_id, to_types from block_refs where artifact_id = $1`, artifactID)
+	if err != nil {
+		return BlockIndex{}, fmt.Errorf("read the block mentions of %s: %w", artifactID, err)
+	}
+	defer rows.Close()
+	var pairs []blockPair
+	for rows.Next() {
+		var pair blockPair
+		if err := rows.Scan(&pair.blockID, &pair.kind, &pair.target.Kind, &pair.target.ID, &pair.toTypes); err != nil {
+			return BlockIndex{}, fmt.Errorf("scan a block mention of %s: %w", artifactID, err)
+		}
+		pairs = append(pairs, pair)
+	}
+	if err := rows.Err(); err != nil {
+		return BlockIndex{}, fmt.Errorf("read the block mentions of %s: %w", artifactID, err)
+	}
+	return BlockIndex{sums: sums, pairs: pairs}, nil
+}
+
+// BlockIndexing is one version's block index, planned against what the index holds
+// (PlanBlocks), so the targets it moves are known before anything is written, and written by
+// Queue, which puts its statements on a write phase's batch and does nothing else.
+type BlockIndexing struct {
+	artifactID    string
+	version       int
+	versionAt     time.Time
+	firstIndexing bool
+	// deleted are the blocks the version no longer holds; ids, types, sums and excerpts the
+	// blocks whose text it changed (new, changed or restored); textIDs and texts the block texts
+	// it records, nil for a deleted block.
+	deleted, ids, types, sums, excerpts, textIDs []string
+	texts                                        []*string
+	pairs                                        []blockPair
+	moved                                        []Target
+	held                                         BlockIndex
+	// windows is the write of the windows the version's blocks are embedded in, planned here
+	// and queued last, after the row that records what the blocks stand at, whose state it
+	// stamps beside them (queueWindows).
+	windows windowWrite
+}
+
+// PlanBlocks plans version's block index of artifactID against index, what the document's block
+// index holds: one ReadBlockIndex read, or the Held of the caller's own earlier indexing of the
+// document that is not written yet. It does the indexing's whole work - each block's text sum, its
+// excerpt, the links its mentions and its pointers write - and reads nothing. A version writer
+// plans the indexing in its read phase and queues it in its write phase (docs.indexDocument).
+//
+// The plan makes the version's blocks graph nodes, and each mention written inside a block an edge
+// out of the innermost block holding its start. blocks are the version's rendered blocks in
+// document order, each parent before its children, and the first holder of a repeated id is the
+// node; located must be the Mentions of the document's text (NewReader), the one reading of it a
+// version's index takes, so a mention's offset places it in the block holding it however the text
+// wrote the reference. A block whose id is longer than text.MaxBlockIDBytes, which no key of the
+// index can hold, is no node: a mention inside it starts at the innermost node holding it, if
+// any, and the plan logs a warning naming the document, the longest such id's length and the
+// bound.
+//
+// A block whose text (markdown[From:To]) is unchanged keeps the version its text last changed in;
+// a new, changed or restored block takes this version, dated versionAt, and its excerpt is its
+// text cut to BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
+// A block the version no longer holds is deleted. title is the document's title, which the
+// windows of its blocks embed (planDocumentWindows): it is handed over rather than read here,
+// because this plan reads nothing and because a transaction creating the document has only
+// queued its artifacts row (docs.documentTitle).
 //
 // pointers are the version's `block[]` values (pmdoc.BlockPointers, which lists none of a typed
 // block repeating the id of a typed block before it): each whose block is a node is an edge of its
@@ -46,40 +117,18 @@ type Pointer struct {
 // its typed block's opening line, so the extraction also finds it as a mention held by that block:
 // the block's mention of a target is kept only while the block itself holds more references to it
 // than its pointers do (a string attribute citing it too, say).
-//
-// A block whose text (markdown[From:To]) is unchanged keeps its changed version; a new, changed
-// or restored block takes this version, and its text is recorded in document_block_texts; a
-// block the version no longer holds is deleted, recorded there with no text, and the edges at it
-// stop resolving until a version holds its id again. A block's stored excerpt is its text cut to
-// BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
-//
-// A pair (block, kind, target) that survives keeps its created version, time and source event,
-// and takes the to_types this version gives it. A new pair takes this version and versionAt, and
-// the source event Stamp gives it. On the document's first indexing (no block rows yet), a new
-// pair dates instead from the document's own refs row for that target, when one exists. The
-// version is recorded as indexed, and as the version the document's blocks stand at
-// (document_block_versions). It returns the targets of the pairs it inserted or deleted, or whose
-// to_types it changed, whose counts moved: a node is counted once for each block citing it. It
-// also returns what else a Referenced by panel or a link shows that the version moved: the target
-// of each pair it kept in a block whose text it changed (the block's text is that link's excerpt),
-// and each block it changed or deleted that some source cites (citedBlocks), whose text every
-// link to it and its own panel show.
-func IndexBlocks(
-	ctx context.Context,
-	tx pgx.Tx,
-	artifactID string,
+func PlanBlocks(
+	index BlockIndex,
+	artifactID, title string,
 	version int,
 	versionAt time.Time,
 	markdown string,
 	blocks []model.ArtifactBlock,
 	located []text.Located,
 	pointers []Pointer,
-) ([]Target, error) {
-	stored, err := storedBlockSums(ctx, tx, artifactID)
-	if err != nil {
-		return nil, err
-	}
-	firstIndexing := len(stored) == 0
+) (BlockIndexing, error) {
+	stored := maps.Clone(index.sums)
+	indexing := BlockIndexing{artifactID: artifactID, version: version, versionAt: versionAt, firstIndexing: len(stored) == 0}
 	nodes, long, longest := uniqueBlocks(blocks)
 	if long > 0 {
 		slog.Warn("dispatch: block ids past the bound are not graph nodes; a mention inside one of their blocks starts at the block holding it",
@@ -87,36 +136,109 @@ func IndexBlocks(
 	}
 
 	// The blocks whose text this version changed (new, changed or restored), and those it deleted.
-	var ids, types, sums, excerpts []string
-	var textIDs []string
-	var texts []*string
+	held := make(map[string]string, len(nodes))
 	for _, block := range nodes {
 		body := markdown[block.From:block.To]
 		hexSum := BlockTextSum(body)
-		previous, held := stored[block.ID]
+		held[block.ID] = hexSum
+		previous, kept := stored[block.ID]
 		delete(stored, block.ID)
-		if held && previous == hexSum {
+		if kept && previous == hexSum {
 			continue
 		}
-		ids, types, sums = append(ids, block.ID), append(types, block.Type), append(sums, hexSum)
-		excerpts = append(excerpts, text.HeadRunes(body, BlockExcerptRunes))
-		textIDs, texts = append(textIDs, block.ID), append(texts, &body)
+		indexing.ids, indexing.types, indexing.sums = append(indexing.ids, block.ID), append(indexing.types, block.Type), append(indexing.sums, hexSum)
+		indexing.excerpts = append(indexing.excerpts, text.HeadRunes(body, BlockExcerptRunes))
+		indexing.textIDs, indexing.texts = append(indexing.textIDs, block.ID), append(indexing.texts, &body)
 	}
-	deleted := make([]string, 0, len(stored))
+	indexing.deleted = make([]string, 0, len(stored))
 	for id := range stored {
-		deleted = append(deleted, id)
-		textIDs, texts = append(textIDs, id), append(texts, nil)
+		indexing.deleted = append(indexing.deleted, id)
+		indexing.textIDs, indexing.texts = append(indexing.textIDs, id), append(indexing.texts, nil)
 	}
 
-	if len(deleted) > 0 {
-		if _, err := tx.Exec(ctx, `
-			delete from document_blocks where artifact_id = $1 and block_id = any($2)
-		`, artifactID, deleted); err != nil {
-			return nil, fmt.Errorf("delete the blocks version %d of %s no longer holds: %w", version, artifactID, err)
+	// The links the version drops, in the order the index listed them, then those it adds and
+	// those whose block types it changes, in the order the insert writes them: the targets the
+	// two statements stand for. Then the target of every link the version writes in a block whose
+	// text it changed, whose excerpt moved.
+	indexing.pairs = blockPairs(nodes, located, pointers)
+	written := make(map[blockPairKey]struct{}, len(indexing.pairs))
+	for _, pair := range indexing.pairs {
+		written[pair.key()] = struct{}{}
+	}
+	indexed := make(map[blockPairKey][]string, len(index.pairs))
+	for _, pair := range index.pairs {
+		indexed[pair.key()] = pair.toTypes
+		if _, still := written[pair.key()]; !still {
+			indexing.moved = append(indexing.moved, pair.target)
 		}
 	}
-	if len(ids) > 0 {
-		if _, err := tx.Exec(ctx, `
+	for _, pair := range indexing.pairs {
+		if toTypes, already := indexed[pair.key()]; !already || !slices.Equal(toTypes, pair.toTypes) {
+			indexing.moved = append(indexing.moved, pair.target)
+		}
+	}
+	changedBlocks := make(map[string]struct{}, len(indexing.ids))
+	for _, id := range indexing.ids {
+		changedBlocks[id] = struct{}{}
+	}
+	for _, pair := range indexing.pairs {
+		if _, changed := changedBlocks[pair.blockID]; changed {
+			indexing.moved = append(indexing.moved, pair.target)
+		}
+	}
+	indexing.held = BlockIndex{sums: held, pairs: indexing.pairs}
+	var err error
+	if indexing.windows, err = planDocumentWindows(artifactID, title, markdown, nodes); err != nil {
+		return BlockIndexing{}, err
+	}
+	return indexing, nil
+}
+
+// Moved is the targets of the links the indexing inserts or deletes, and of those whose block
+// types it changes, whose counts move - a node is counted once for each block citing it - and of
+// the links it writes in a block whose text it changes, whose excerpts move, a link's excerpt
+// being the text of the block holding it.
+func (b BlockIndexing) Moved() []Target {
+	return b.moved
+}
+
+// Cited is, of the blocks the indexing changes, restores or deletes (textIDs), each that a source
+// cites (citedBlocks), as q holds them before the indexing is written: such a block's text is what
+// every link to it and its own Referenced by panel show, so the version moved what they show. A
+// block whose citing link the indexing itself inserts or deletes is among Moved already, so the
+// read names the same targets the written index would.
+func (b BlockIndexing) Cited(ctx context.Context, q Queryer) ([]Target, error) {
+	return citedBlocks(ctx, q, b.artifactID, b.textIDs)
+}
+
+// Held is what the document's block index holds once the indexing is written.
+func (b BlockIndexing) Held() BlockIndex {
+	return b.held
+}
+
+// Queue queues the indexing's writes on a write phase's batch, which its caller runs in the
+// transaction holding the document's owner lock: the blocks the version deleted, which
+// document_blocks loses, and the blocks it changed, with their excerpts; the text each of those
+// blocks has at this version, recorded in document_block_texts, a deleted block's as no text,
+// after which the edges at it stop resolving until a version holds its id again; the links its
+// blocks hold; the version recorded as indexed (document_indexed_versions) and as the version
+// the document's blocks stand at (document_block_versions); and last the windows those blocks
+// are embedded in, which stamp the state they are in beside them, read from the row the
+// statement before it wrote (planDocumentWindows).
+//
+// A pair (block, target) that survives keeps its created version, time and source event. A new
+// pair takes this version and versionAt, and the source event Stamp gives it. On the document's
+// first indexing (no block rows yet), a new pair dates instead from the document's own refs row
+// for that target, when one exists.
+func (b BlockIndexing) Queue(batch *store.WriteBatch) {
+	artifactID, version := b.artifactID, b.version
+	if len(b.deleted) > 0 {
+		batch.Queue(fmt.Sprintf("delete the blocks version %d of %s no longer holds", version, artifactID), `
+			delete from document_blocks where artifact_id = $1 and block_id = any($2)
+		`, artifactID, b.deleted)
+	}
+	if len(b.ids) > 0 {
+		batch.Queue(fmt.Sprintf("record the blocks version %d of %s changed", version, artifactID), `
 			insert into document_blocks (artifact_id, block_id, node_id, type, text_sha256, excerpt, changed_version, changed_at)
 			select $1::uuid, b.id, a.ref_key || '#' || b.id, b.type, b.sum, b.excerpt, $2, $3
 			from unnest($4::text[], $5::text[], $6::text[], $7::text[]) as b (id, type, sum, excerpt)
@@ -127,58 +249,27 @@ func IndexBlocks(
 				excerpt = excluded.excerpt,
 				changed_version = excluded.changed_version,
 				changed_at = excluded.changed_at
-		`, artifactID, version, versionAt, ids, types, sums, excerpts); err != nil {
-			return nil, fmt.Errorf("record the blocks version %d of %s changed: %w", version, artifactID, err)
-		}
+		`, artifactID, version, b.versionAt, b.ids, b.types, b.sums, b.excerpts)
 	}
-	if len(textIDs) > 0 {
-		if _, err := tx.Exec(ctx, `
+	if len(b.textIDs) > 0 {
+		batch.Queue(fmt.Sprintf("record the block texts of version %d of %s", version, artifactID), `
 			insert into document_block_texts (artifact_id, block_id, version, text)
 			select $1::uuid, t.id, $2, t.text from unnest($3::text[], $4::text[]) as t (id, text)
 			on conflict (artifact_id, block_id, version) do update set text = excluded.text
-		`, artifactID, version, textIDs, texts); err != nil {
-			return nil, fmt.Errorf("record the block texts of version %d of %s: %w", version, artifactID, err)
-		}
+		`, artifactID, version, b.textIDs, b.texts)
 	}
-
-	pairs := blockPairs(nodes, located, pointers)
-	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, pairs)
-	if err != nil {
-		return nil, err
-	}
-	changedBlocks := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		changedBlocks[id] = struct{}{}
-	}
-	for _, pair := range pairs {
-		if _, changed := changedBlocks[pair.blockID]; changed {
-			moved = append(moved, pair.target)
-		}
-	}
-	// textIDs is every block this version changed, restored or deleted.
-	cited, err := citedBlocks(ctx, tx, artifactID, textIDs)
-	if err != nil {
-		return nil, err
-	}
-	moved = append(moved, cited...)
-	if _, err := tx.Exec(ctx, `
+	b.queueBlockRefs(batch)
+	batch.Queue(fmt.Sprintf("record version %d of %s indexed", version, artifactID), `
 		insert into document_indexed_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id, version) do nothing
-	`, artifactID, version); err != nil {
-		return nil, fmt.Errorf("record version %d of %s indexed: %w", version, artifactID, err)
-	}
+	`, artifactID, version)
 	// Migration 0122's trigger marked the document owed when this version's row was inserted;
 	// this transaction's own index settles it.
-	if _, err := tx.Exec(ctx, `
+	batch.Queue(fmt.Sprintf("record the blocks of %s indexed at version %d", artifactID, version), `
 		insert into document_block_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id) do update set version = excluded.version
-	`, artifactID, version); err != nil {
-		return nil, fmt.Errorf("record the blocks of %s indexed at version %d: %w", artifactID, version, err)
-	}
-	if err := writeDocumentWindows(ctx, tx, artifactID, markdown, nodes); err != nil {
-		return nil, err
-	}
-	return moved, nil
+	`, artifactID, version)
+	b.windows.queue(batch)
 }
 
 // DocumentWindowKind is the embeddings kind of a window of a document's blocks, as
@@ -187,7 +278,7 @@ const DocumentWindowKind = "document_block"
 
 // windowKinds is every kind an embeddings window row is written under. A statement naming them
 // as literals is one the planner can prove embeddings_window_owner's partial predicate for,
-// whatever a parameter holds (writeWindows).
+// whatever a parameter holds (planWindows).
 const windowKinds = `('document_block', 'comment_block', 'message_block', 'ask_part')`
 
 // BlockEmbeddingStates is where meaning search stands on each block of the owner whose windows
@@ -196,7 +287,7 @@ const windowKinds = `('document_block', 'comment_block', 'message_block', 'ask_p
 // vector. A block no window covers is in no entry of the map, which a reader of one block reads
 // as model.BlockNotEmbedded - a block the indexer puts in no window, and every block of an owner
 // whose windows are not written yet. The read names the window kinds as literals beside the
-// parameter, as every read and write of a window does (writeWindows), so the planner can prove
+// parameter, as every read and write of a window does (planWindows), so the planner can prove
 // embeddings_window_owner's partial predicate and reach the owner's rows through that index.
 //
 // It lives here, with the writes of the rows it reads, so the list of window kinds is held in
@@ -233,26 +324,48 @@ func BlockEmbeddingStates(ctx context.Context, q Queryer, kind, ownerKey string)
 }
 
 // WriteDocumentWindows writes the windows of document artifactID's blocks, as the version write
-// writes them (IndexBlocks), for the block-index tick's window arm: blocks are the document's
-// blocks in document order, each parent before its children, and markdown the text they index
-// into.
+// writes them (BlockIndexing.Queue), for the block-index tick's window arm: blocks are the
+// document's blocks in document order, each parent before its children, and markdown the text
+// they index into. The title the windows embed is read first, and the one statement that writes
+// them is sent as a batch of its own (store.RunWrite), so the transaction takes its transaction
+// id at that statement and holds it only to the commit.
 func WriteDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown string, blocks []model.ArtifactBlock) error {
+	title, err := documentTitle(ctx, tx, artifactID)
+	if err != nil {
+		return err
+	}
 	nodes, _, _ := uniqueBlocks(blocks)
-	return writeDocumentWindows(ctx, tx, artifactID, markdown, nodes)
+	write, err := planDocumentWindows(artifactID, title, markdown, nodes)
+	if err != nil {
+		return err
+	}
+	return store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		write.queue(b)
+		return nil
+	})
 }
 
-// writeDocumentWindows writes the windows of the document's blocks (nodes, as uniqueBlocks keeps
-// them) in the caller's transaction, which holds the document's owner row, and stamps the state
-// those blocks are in beside them, so the window arm can tell these windows from ones an older
-// build left behind. The owner key of a document's windows is its artifact id, and the context
-// of each is the document's own title and the heading above the window
-// (itemblocks.DocumentWindows).
-func writeDocumentWindows(ctx context.Context, tx pgx.Tx, artifactID, markdown string, nodes []model.ArtifactBlock) error {
+// documentTitle is the name document artifactID's artifacts row holds, which the windows of its
+// blocks embed. A transaction creating the document has only queued that row, so a write there
+// hands over the title its insert writes instead (PlanBlocks, docs.documentTitle); this read is
+// for a caller whose document is stored.
+func documentTitle(ctx context.Context, q Queryer, artifactID string) (string, error) {
 	var title string
-	if err := tx.QueryRow(ctx, `select name from artifacts where id = $1::uuid`, artifactID).Scan(&title); err != nil {
-		return fmt.Errorf("read the title of %s for its windows: %w", artifactID, err)
+	if err := q.QueryRow(ctx, `select name from artifacts where id = $1::uuid`, artifactID).Scan(&title); err != nil {
+		return "", fmt.Errorf("read the title of %s for its windows: %w", artifactID, err)
 	}
-	return writeWindows(ctx, tx, DocumentWindowKind, artifactID,
+	return title, nil
+}
+
+// planDocumentWindows plans the write of the windows of the document's blocks (nodes, as
+// uniqueBlocks keeps them), which stamps the state those blocks are in beside them, so the
+// window arm can tell these windows from ones an older build left behind. The owner key of a
+// document's windows is its artifact id, and the context of each is the document's own title
+// and the heading above the window (itemblocks.DocumentWindows). The state is read from
+// document_block_versions inside the statement, so an indexing whose earlier statement wrote
+// that row stamps the version it has just recorded.
+func planDocumentWindows(artifactID, title, markdown string, nodes []model.ArtifactBlock) (windowWrite, error) {
+	return planWindows(DocumentWindowKind, artifactID,
 		itemblocks.DocumentWindows(title, documentBlockTexts(markdown, nodes)), blockState{
 			query: `select ` + documentBlockState + ` as block_state
 			          from document_block_versions v where v.artifact_id = $5::uuid`,
@@ -278,39 +391,55 @@ func documentBlockTexts(markdown string, nodes []model.ArtifactBlock) []itembloc
 	return blocks
 }
 
-// blockState is how one write of an owner's windows (writeWindows) tells that write what state
+// blockState is how one write of an owner's windows (planWindows) tells that write what state
 // the blocks those windows cover are in: one query returning a single block_state column, which
 // the write runs as a common table expression and stamps beside the windows. An index that
 // settles the owner's own state row writes that row here, returning the state it has just
-// written (indexedItemState), so it pays no round trip for the stamp; a write that settles no
-// such row reads the state the row already holds (storedItemState, and the document's own query
-// above). The query numbers its parameters from $5 and passes their values in args, since
-// writeWindows holds $1 to $4.
+// written (indexedItemState), so the index needs no statement of its own for it; a write that
+// settles no such row reads the state the row already holds (storedItemState, and the
+// document's own query above). The query numbers its parameters from $5 and passes their values
+// in args, since the window write holds $1 to $4.
 type blockState struct {
 	query string
 	args  []any
 }
 
-// writeWindows writes windows as the windows of owner ownerKey, of kind kind, in the caller's
-// transaction: each takes the id "<owner key>#<its id suffix>" through
-// embeddings_enqueue_window, which rewrites a row only where the hash of its text moved, and the
-// owner's rows of that kind the new set does not name are deleted. Rewriting an owner's windows
-// when none of them changed therefore leaves every row's vector, attempts and wait as they
-// stand, and an owner left with no block loses every window it had.
+// windowWrite is the write of one owner's windows, planned where the windows are built - in the
+// read phase of the write that indexes those blocks - and queued on that write's batch
+// (BlockIndexing.Queue, ItemIndexing.Queue), or sent as a batch of its own by the block-index
+// tick's window arm (WriteDocumentWindows, WriteItemWindows). Everything the statement needs is
+// worked out when it is planned, so queueing it reads nothing and nothing is read between two
+// of a write phase's statements.
+type windowWrite struct {
+	kind, ownerKey string
+	// payload is the windows as the statement's jsonb_to_recordset reads them, and ids the
+	// embeddings id of each, which the delete of the rows the new set does not name takes.
+	payload []byte
+	ids     []string
+	state   blockState
+}
+
+// planWindows plans windows as the windows of owner ownerKey, of kind kind: each takes the id
+// "<owner key>#<its id suffix>" through embeddings_enqueue_window, which rewrites a row only
+// where the hash of its text moved, and the owner's rows of that kind the new set does not name
+// are deleted. Rewriting an owner's windows when none of them changed therefore leaves every
+// row's vector, attempts and wait as they stand, and an owner left with no block loses every
+// window it had.
 //
-// The whole write is one statement, so a document of fifty windows costs one round trip and an
-// index whose state query settles its owner's state row (indexedItemState) pays nothing beyond
-// the round trip it was already sending for that. The windows go through jsonb_to_recordset in
-// the top-level select; the state query, the stamp of what it returns and the delete are common
-// table expressions, and Postgres runs a data-modifying one exactly once and to completion
-// whether or not the select reads it. The delete cannot race the enqueue: it names only ids the
-// new set does not hold, and the enqueue writes only ids it does.
+// The whole write is one statement, so a document of fifty windows is one statement of the
+// batch its transaction sends, and an index whose state query settles its owner's state row
+// (indexedItemState) writes that row in this statement rather than in one of its own. The
+// windows go through jsonb_to_recordset in the top-level select; the state query, the stamp of
+// what it returns and the delete are common table expressions, and Postgres runs a
+// data-modifying one exactly once and to completion whether or not the select reads it. The
+// delete cannot race the enqueue: it names only ids the new set does not hold, and the enqueue
+// writes only ids it does.
 //
 // The delete names the kind twice, as the parameter and in the literal list of every window
 // kind, because a generic plan knows nothing of what the parameter holds: the literal list is
 // what lets the planner prove embeddings_window_owner's partial predicate and read the owner's
 // rows through that index.
-func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows []itemblocks.Window, state blockState) error {
+func planWindows(kind, ownerKey string, windows []itemblocks.Window, state blockState) (windowWrite, error) {
 	type row struct {
 		Suffix string   `json:"suffix"`
 		Text   string   `json:"text"`
@@ -324,11 +453,16 @@ func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows
 	}
 	payload, err := json.Marshal(rows)
 	if err != nil {
-		return fmt.Errorf("encode the windows of %s %s: %w", kind, ownerKey, err)
+		return windowWrite{}, fmt.Errorf("encode the windows of %s %s: %w", kind, ownerKey, err)
 	}
-	if _, err := tx.Exec(ctx, `
+	return windowWrite{kind: kind, ownerKey: ownerKey, payload: payload, ids: ids, state: state}, nil
+}
+
+// queue queues the planned write on a write phase's batch.
+func (w windowWrite) queue(b *store.WriteBatch) {
+	b.Queue(fmt.Sprintf("write the windows of %s %s", w.kind, w.ownerKey), `
 		with state as (
-			`+state.query+`
+			`+w.state.query+`
 		),
 		stamped as (
 			insert into embedding_window_states (kind, owner_key, block_state, written_at)
@@ -343,14 +477,11 @@ func writeWindows(ctx context.Context, tx pgx.Tx, kind, ownerKey string, windows
 		)
 		select embeddings_enqueue_window($1, $2 || '#' || w.suffix, w.text, w.covers)
 		from jsonb_to_recordset($3::jsonb) as w (suffix text, text text, covers text[])
-	`, append([]any{kind, ownerKey, payload, ids}, state.args...)...); err != nil {
-		return fmt.Errorf("write the windows of %s %s: %w", kind, ownerKey, err)
-	}
-	return nil
+	`, append([]any{w.kind, w.ownerKey, w.payload, w.ids}, w.state.args...)...)
 }
 
 // documentBlockState is the state of a document's blocks that its windows are stamped with
-// (writeDocumentWindows) and read back against (DocumentsOwedWindows): the version they are
+// (planDocumentWindows) and read back against (DocumentsOwedWindows): the version they are
 // indexed at, over document_block_versions v. A document owed its first block index holds a
 // null version, which stamps and compares as the empty string, so windowing it once settles it
 // until the index that gives it a version writes its windows again. The state is read from
@@ -405,11 +536,11 @@ func uuidAfter(after string) string {
 
 // citedBlocks is, of the document's blocks named by ids, each that a source cites (a refs or a
 // block_refs row points at its node), as a block target.
-func citedBlocks(ctx context.Context, tx pgx.Tx, artifactID string, ids []string) ([]Target, error) {
+func citedBlocks(ctx context.Context, q Queryer, artifactID string, ids []string) ([]Target, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	cited, err := scanTargets(tx.Query(ctx, `
+	cited, err := scanTargets(q.Query(ctx, `
 		select 'block', b.node_id
 		from (
 			select a.ref_key || '#' || t.id as node_id
@@ -433,8 +564,8 @@ func BlockTextSum(body string) string {
 }
 
 // storedBlockSums is each block the document's index holds, by id, with its text's sha256.
-func storedBlockSums(ctx context.Context, tx pgx.Tx, artifactID string) (map[string]string, error) {
-	rows, err := tx.Query(ctx, `select block_id, text_sha256 from document_blocks where artifact_id = $1`, artifactID)
+func storedBlockSums(ctx context.Context, q Queryer, artifactID string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `select block_id, text_sha256 from document_blocks where artifact_id = $1`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("read the blocks of %s: %w", artifactID, err)
 	}
@@ -459,6 +590,19 @@ type blockPair struct {
 	toTypes []string
 }
 
+// blockPairKey is how block_refs keys a pair: all of it but the block types it points at, which
+// a surviving pair takes from the version being indexed.
+type blockPairKey struct {
+	blockID string
+	kind    string
+	target  Target
+}
+
+// key is the pair as block_refs keys it.
+func (p blockPair) key() blockPairKey {
+	return blockPairKey{blockID: p.blockID, kind: p.kind, target: p.target}
+}
+
 // heldTarget is a target as one block holds it.
 type heldTarget struct {
 	blockID string
@@ -468,7 +612,7 @@ type heldTarget struct {
 // blockPairs is each distinct link the pointers of nodes and the mentions in located write: a
 // pointer from its typed block (pointerPairs), a mention from the innermost of nodes holding its
 // start. A mention no block holds, and an external URL, write none; nor does a block's mention of
-// a target its own pointers account for (IndexBlocks).
+// a target its own pointers account for (PlanBlocks).
 func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []Pointer) []blockPair {
 	pairs, pointed := pointerPairs(nodes, pointers)
 	pairs = slices.Grow(pairs, len(located))
@@ -549,18 +693,10 @@ func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair,
 	return pairs, pointed
 }
 
-// replaceBlockRefs reconciles the document's block_refs with pairs, matching on the five columns
-// of its key, and returns the targets of the pairs it deleted and inserted, and of those whose
-// to_types it changed.
-func replaceBlockRefs(
-	ctx context.Context,
-	tx pgx.Tx,
-	artifactID string,
-	version int,
-	versionAt time.Time,
-	firstIndexing bool,
-	pairs []blockPair,
-) ([]Target, error) {
+// queueBlockRefs queues the reconciliation of the document's block_refs with the indexing's pairs,
+// matching on the five columns of its key.
+func (b BlockIndexing) queueBlockRefs(batch *store.WriteBatch) {
+	pairs := b.pairs
 	blockIDs := make([]string, len(pairs))
 	kinds := make([]string, len(pairs))
 	toKinds := make([]string, len(pairs))
@@ -575,22 +711,18 @@ func replaceBlockRefs(
 			toTypes[i] = &joined
 		}
 	}
-	moved, err := scanTargets(tx.Query(ctx, `
+	batch.Queue(fmt.Sprintf("delete the block mentions version %d of %s dropped", b.version, b.artifactID), `
 		delete from block_refs r
 		where r.artifact_id = $1 and not exists (
 			select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
 			where p.block_id = r.block_id and p.kind = r.kind and p.to_kind = r.to_kind and p.to_id = r.to_id)
-		returning r.to_kind, r.to_id
-	`, artifactID, blockIDs, kinds, toKinds, toIDs))
-	if err != nil {
-		return nil, fmt.Errorf("delete the block mentions version %d of %s dropped: %w", version, artifactID, err)
-	}
+	`, b.artifactID, blockIDs, kinds, toKinds, toIDs)
 	if len(pairs) == 0 {
-		return moved, nil
+		return
 	}
-	// A surviving pair keeps its dates and source event and takes this version's to_types, so a
-	// change of an attribute's targets reaches it here; it is returned only when that changed.
-	added, err := scanTargets(tx.Query(ctx, `
+	// A surviving pair takes this version's to_types, so a change of an attribute's targets
+	// reaches it here; PlanBlocks named the targets it moves.
+	batch.Queue(fmt.Sprintf("record the block mentions of version %d of %s", b.version, b.artifactID), `
 		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, to_types, created_version, created_at, source_seq)
 		select $1::uuid, p.block_id, a.ref_key || '#' || p.block_id, p.to_kind, p.to_id, p.kind, string_to_array(p.to_types, ' '), $6,
 		       coalesce(case when $8 then r.created_at end, $7), case when $8 then r.source_seq end
@@ -600,12 +732,7 @@ func replaceBlockRefs(
 		                and r.to_kind = p.to_kind and r.to_id = p.to_id
 		on conflict (artifact_id, block_id, to_kind, to_id, kind) do update set to_types = excluded.to_types
 		where block_refs.to_types is distinct from excluded.to_types
-		returning to_kind, to_id
-	`, artifactID, blockIDs, kinds, toKinds, toIDs, version, versionAt, firstIndexing, toTypes))
-	if err != nil {
-		return nil, fmt.Errorf("record the block mentions of version %d of %s: %w", version, artifactID, err)
-	}
-	return append(moved, added...), nil
+	`, b.artifactID, blockIDs, kinds, toKinds, toIDs, b.version, b.versionAt, b.firstIndexing, toTypes)
 }
 
 // BlockLinks lists each link from a block of document fromArtifact to a block of document
@@ -669,7 +796,7 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 }
 
 // BlockChange is when a block of a document last changed: the version its text last changed in
-// and that version's time, as document_blocks records them (IndexBlocks).
+// and that version's time, as document_blocks records them (BlockIndexing.Queue).
 type BlockChange struct {
 	Version int
 	At      time.Time
@@ -703,24 +830,49 @@ func BlockChanges(ctx context.Context, q Queryer, artifactID string) (map[string
 	return changes, nil
 }
 
-// BlockTargets is where a write to document artifactID lands and the block each of targets names,
-// by node id (text.TargetID), as the block index would hold it once that write, leaving the blocks
-// written (rendered, in document order, each parent before its children), is indexed, read through
-// q: a block of that document as written's node for its id (uniqueBlocks: the first holder of a
-// repeated id, and no id the index cannot key), any other as its document's current blocks
-// (document_blocks) hold it, with one query for every such target. A target no block has is
-// absent. The write lands in the document's own issue, or in none when a project holds it; that
-// issue's ancestors are read only once a target turns out to sit in another document
-// (IssueAncestors), since a pointer inside the writing document - a plan task's `needs`, the
-// common case - is held to nothing above it (pmdoc.CheckBlockPointers), and this runs inside
-// the write's transaction.
-func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []model.ArtifactBlock, targets []text.Ref) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
-	var writing pmdoc.BlockWriting
-	if err := q.QueryRow(ctx, `
-		select coalesce(ref_key, ''), coalesce(issue_key, '') from artifacts where id = $1
-	`, artifactID).Scan(&writing.Document, &writing.Issue); err != nil {
-		return pmdoc.BlockWriting{}, nil, fmt.Errorf("read the reference of document %s: %w", artifactID, err)
-	}
+// DocumentAddress is where a document sits and what it is called: the reference key its blocks'
+// node ids are built from, the issue holding it, the parent of an issue this transaction creates
+// too, and the title the windows of its blocks embed. A write hands the address over rather than
+// a read of it taking those from the artifacts row, because a transaction creating the document
+// has only queued that row: its own reads cannot see it, while the caller knows what the queued
+// insert will write. It is what a read of the document's address answers before and after the
+// write phase has run (docs.addressOfDocument).
+type DocumentAddress struct {
+	// RefKey is the document's reference key, its owner's key and its slug (migration 0071).
+	RefKey string
+	// IssueKey is the issue the document belongs to, "" for a project's or a session's document.
+	IssueKey string
+	// Name is the document's title, which the windows of its blocks embed (PlanBlocks).
+	Name string
+	// PendingParent is the parent of IssueKey when this transaction creates that issue's row
+	// too, "" when it does not or when the issue is a root. The ancestors walk starts there
+	// while the issues row is only queued: no read of this transaction can see that row, so the
+	// walk from the issue itself (IssueAncestors) would answer nothing, and the ancestors are
+	// that parent followed by its own. A pending issue with no parent is a root, and both paths
+	// answer the empty list.
+	PendingParent string
+}
+
+// BlockTargets is where a write to document artifactID, which sits at address, lands and the
+// block each of targets names, by node id (text.TargetID), as the block index would hold it once
+// that write, leaving the blocks written (rendered, in document order, each parent before its
+// children), is indexed, read through q: a block of that document as written's node for its id
+// (uniqueBlocks: the first holder of a repeated id, and no id the index cannot key), any other as
+// its document's current blocks (document_blocks) hold it, with one query for every such target.
+// A target no block has is absent. The issue's ancestors are read only once a target turns out to
+// sit in another document (IssueAncestors, walked from DocumentAddress.PendingParent when the
+// address names one), since a pointer inside the writing document - a plan task's `needs`, the
+// common case - is held to nothing above it (pmdoc.CheckBlockPointers), and this runs inside the
+// write's transaction.
+func BlockTargets(
+	ctx context.Context,
+	q Queryer,
+	artifactID string,
+	address DocumentAddress,
+	written []model.ArtifactBlock,
+	targets []text.Ref,
+) (pmdoc.BlockWriting, map[string]pmdoc.BlockTarget, error) {
+	writing := pmdoc.BlockWriting{Document: address.RefKey, Issue: address.IssueKey}
 	nodes, _, _ := uniqueBlocks(written)
 	own := make(map[string]string, len(nodes))
 	for _, node := range nodes {
@@ -763,10 +915,18 @@ func BlockTargets(ctx context.Context, q Queryer, artifactID string, written []m
 		return pmdoc.BlockWriting{}, nil, err
 	}
 	// Only a target in another document can sit in another issue, so the ancestor walk is paid
-	// for only here.
-	if writing.Ancestors, err = IssueAncestors(ctx, q, writing.Issue); err != nil {
+	// for only here. A pending parent stands at the head of the answer, the walk starting there
+	// (DocumentAddress.PendingParent).
+	above := writing.Issue
+	if address.PendingParent != "" {
+		above = address.PendingParent
+		writing.Ancestors = append(writing.Ancestors, address.PendingParent)
+	}
+	ancestors, err := IssueAncestors(ctx, q, above)
+	if err != nil {
 		return pmdoc.BlockWriting{}, nil, err
 	}
+	writing.Ancestors = append(writing.Ancestors, ancestors...)
 	return writing, found, nil
 }
 

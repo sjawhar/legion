@@ -491,6 +491,55 @@ func TestEditNoticeSweepOwnsAProjectDocumentsNoticeByTheDocument(t *testing.T) {
 	}
 }
 
+// The sweep's claim decides the notice. One moved on behind the sweep after it read it - which no
+// writer holding the document owner's lock can do - is not the notice it read, so the claim's
+// callback refuses it, and the event append the server already ran in the same batch rolls back
+// with it: no event, nothing published, the moved notice left as it stands, no failure reported.
+func TestEditNoticeSweepSendsNothingForANoticeMovedBehindItsClaim(t *testing.T) {
+	service, _ := newTestService(t)
+	document := createProjectDocument(t, service.store, "First.")
+	addPersonsVersion(t, service.store, document, 2, "Second.\n", model.Actor{Kind: "user", ID: "alice@example.com"})
+	ctx := context.Background()
+	service.afterEditNoticeRead = func(artifactID string) {
+		if _, err := service.store.Pool.Exec(ctx, `
+			update document_edit_notices set to_version = to_version + 1 where artifact_id = $1
+		`, artifactID); err != nil {
+			t.Errorf("move the notice on behind the sweep: %v", err)
+		}
+	}
+	var eventsBefore int
+	if err := service.store.Pool.QueryRow(ctx, `select count(*) from events`).Scan(&eventsBefore); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	published, unsubscribe := service.events.Subscribe()
+	defer unsubscribe()
+
+	sent, err := service.sendDueEditNotices(ctx)
+	if err != nil || sent != 0 {
+		t.Fatalf("sweep = %d sent, %v; want none sent and no failure", sent, err)
+	}
+	var eventsAfter, from, to int
+	if err := service.store.Pool.QueryRow(ctx, `select count(*) from events`).Scan(&eventsAfter); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("events went from %d to %d, want the claim's refusal to roll its batch's append back", eventsBefore, eventsAfter)
+	}
+	if err := service.store.Pool.QueryRow(ctx, `
+		select from_version, to_version from document_edit_notices where artifact_id = $1
+	`, document).Scan(&from, &to); err != nil {
+		t.Fatalf("read the moved notice: %v", err)
+	}
+	if from != 1 || to != 3 {
+		t.Fatalf("notice = %d..%d, want the moved 1..3 left as it stands", from, to)
+	}
+	select {
+	case event := <-published:
+		t.Fatalf("published %s for a notice the sweep did not claim", event.Type)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // A notice whose quiet time has not passed stays, and sends nothing.
 func TestEditNoticeSweepLeavesANoticeThatIsNotDue(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -658,7 +707,7 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 		}()
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			waiting, err := storetest.CountLockWaits(context.Background(), service.store, "%from issues where key = $1 for no key update%")
+			waiting, err := storetest.CountLockWaits(context.Background(), service.store, "%as owner_lock%")
 			if err != nil {
 				t.Errorf("count the sweep's lock waits: %v", err)
 				return nil

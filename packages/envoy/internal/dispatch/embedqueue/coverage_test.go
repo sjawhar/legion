@@ -150,7 +150,7 @@ func seedItems(t *testing.T, q querier, project string) seededItems {
 }
 
 // enqueueWindow writes one window of owner ownerKey, covering covers, as the indexer that wrote
-// those blocks writes it (refs.writeWindows, through embeddings_enqueue_window).
+// those blocks writes it (refs.planWindows, through embeddings_enqueue_window).
 func enqueueWindow(t *testing.T, q querier, kind, ownerKey, suffix, text string, covers ...string) {
 	t.Helper()
 	mustExec(t, q, `select embeddings_enqueue_window($1, $2, $3, $4)`, kind, ownerKey+"#"+suffix, text, covers)
@@ -174,7 +174,7 @@ func seedEveryKind(t *testing.T, q querier, project string) int {
 
 // seedWindowsAgain rewrites every window the database holds with the text and the covers it
 // already holds, as an indexer rewrites the windows of an owner whose blocks a write left
-// unchanged: refs.writeWindows writes an owner's windows at every index of its blocks, and
+// unchanged: refs.planWindows writes an owner's windows at every index of its blocks, and
 // embeddings_enqueue_window writes a row only where the hash of its text moved.
 func seedWindowsAgain(t *testing.T, database *store.Store) {
 	t.Helper()

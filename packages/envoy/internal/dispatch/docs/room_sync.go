@@ -467,9 +467,14 @@ var announceDocumentChangeStatement = `select ` + announceDocumentHead(
 // which holds the document's advisory lock (lockDocumentRoom), with the head that transaction
 // leaves and processID, the sending process. It is a rebuild's, a prune's and a deletion's
 // announcement, one per transaction; an append folds the same announcement into its own insert
-// rather than spending a second round trip on it under that lock (appendUpdateTxClass), and a
+// rather than spending a second statement on it under that lock (appendUpdateTxClass), and a
 // transaction a caller joined announces once at its commit (Ledger.announceAppends). A compaction
 // announces nothing: it changes neither the document's state nor its head.
+//
+// It goes through write, so a transaction whose writes are queued announces in its write phase,
+// after the writes it announces, and any other announces at once; a caller building that phase's
+// batch itself queues the statement on it (queueAnnounceDocumentChange). The head is read in the
+// statement, not handed to it, so it is the head the statements before it leave.
 //
 // Inside that transaction for two reasons. Postgres delivers a notification only if the
 // transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one
@@ -484,8 +489,14 @@ var announceDocumentChangeStatement = `select ` + announceDocumentHead(
 // does with this - catch up the room it holds - is worth nothing once that process is gone, so
 // rows nobody would ever read back are the whole cost of a table.
 func announceDocumentChange(ctx context.Context, tx pgx.Tx, room, processID string) error {
-	if _, err := tx.Exec(ctx, announceDocumentChangeStatement, room, room, processID); err != nil {
-		return fmt.Errorf("announce the document's change: %w", err)
-	}
-	return nil
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		queueAnnounceDocumentChange(b, room, processID)
+		return nil
+	})
+}
+
+// queueAnnounceDocumentChange puts announceDocumentChange's statement on b, the write phase's
+// batch of the transaction that made the change, after the writes it announces.
+func queueAnnounceDocumentChange(b *store.WriteBatch, room, processID string) {
+	b.Queue("announce the document's change", announceDocumentChangeStatement, room, room, processID)
 }

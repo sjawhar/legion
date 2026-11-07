@@ -17,11 +17,11 @@ import (
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
-// A project document's owner row is the artifact itself, and the upload has to take it before the
-// document's room lock. A settlement holds that owner row and then takes the room; an upload that
-// took the room first - locking no owner until the event it appends at the end - would close a
-// cycle with it, which Postgres breaks with `deadlock detected`, a 500 from this path under
-// load. Holding the owner row here must therefore stop the upload before the room lock, leaving
+// A project document's owner is the artifact itself, and the upload has to take its owner lock
+// before the document's room lock. A settlement holds that owner lock and then takes the room; an
+// upload that took the room first - locking no owner until the event it appends at the end - would
+// close a cycle with it, which Postgres breaks with `deadlock detected`, a 500 from this path under
+// load. Holding the owner lock here must therefore stop the upload before the room lock, leaving
 // the room free to take behind it.
 func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -39,10 +39,7 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 		t.Fatalf("begin the settlement-shaped transaction: %v", err)
 	}
 	defer settling.Rollback(context.Background())
-	var held bool
-	if err := settling.QueryRow(ctx, `
-		select true from artifacts where id = $1 and issue_key is null for no key update
-	`, document.ID).Scan(&held); err != nil {
+	if err := store.LockOwner(ctx, settling, store.ArtifactOwner(document.ID)); err != nil {
 		t.Fatalf("hold the document owner: %v", err)
 	}
 
@@ -52,7 +49,7 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 			"name": "Notes", "content": "# Notes\n\nsecond\n",
 		}, "alice")
 	}()
-	// The upload blocks on the owner row this transaction holds, and on nothing else.
+	// The upload blocks on the owner lock this transaction holds, and on nothing else.
 	waitForDatabaseLocks(t, settling, 1)
 
 	if _, err := settling.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, document.ID); err != nil {
@@ -258,10 +255,10 @@ func awaitCopyShows(t *testing.T, ctx context.Context, database *store.Store, co
 	}
 }
 
-// The upload holds the document's owner row across the room lock it then waits for, so that lock
-// has to be `for no key update`: a durable writer holding the room reaches the same row through
-// doc_updates' foreign key, and while the owner lock was `for update` that key share conflicted
-// and the two deadlocked.
+// The upload holds the document's owner lock across the room lock it then waits for, so that lock
+// must not block the key share a durable writer holding the room takes on the same row through
+// doc_updates' foreign key: while the owner lock was a `for update` row lock that key share
+// conflicted and the two deadlocked. The owner's advisory lock takes no row lock at all.
 func TestProjectDocumentUploadOwnerLockLeavesTheForeignKeyFree(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -288,7 +285,7 @@ func TestProjectDocumentUploadOwnerLockLeavesTheForeignKeyFree(t *testing.T) {
 			"name": "Notes", "content": "# Notes\n\nsecond\n",
 		}, "alice")
 	}()
-	// The upload takes the owner row, then waits here for the room.
+	// The upload takes the owner lock, then waits here for the room.
 	waitForDatabaseLocks(t, appending, 1)
 
 	if _, err := appending.Exec(ctx, `

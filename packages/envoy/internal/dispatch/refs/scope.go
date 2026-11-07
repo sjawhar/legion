@@ -181,7 +181,7 @@ func ScopeSources(ctx context.Context, q Queryer, doc string) ([]Target, error) 
 // reads the latest version's directive lines (sourceText), never parsing the document, and takes
 // no lock.
 func QuestionMap(ctx context.Context, q Queryer, doc string) (map[string]text.Ref, error) {
-	markdown, _, found, err := sourceText(ctx, q, "artifact", doc, false)
+	markdown, _, found, err := sourceText(ctx, q, "artifact", doc)
 	if err != nil {
 		return nil, fmt.Errorf("read the latest version of document %s: %w", doc, err)
 	}

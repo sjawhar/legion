@@ -2,11 +2,12 @@ package docs
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // browser is what a room's own append of one of its updates carries, nil for every other append
@@ -22,7 +23,16 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if !roomLocked {
+	// A transaction that has already queued a write of this document's history holds the
+	// document's lock from that write's own read and knows the head its queue leaves
+	// (pendingRoom): the table holds none of those rows yet, so the head and the intact flag come
+	// from the queue (appendGateRead.after) and the rest of the verdict from this read, and the
+	// prune recovery is the first write's alone. Every other append takes the lock here, once:
+	// before the cursor the gate reads and before the gate's own read, and not again, since a
+	// second acquisition in the transaction that holds it grants what the transaction has and
+	// costs the round trip every other writer of the document waits out.
+	pending := pendingRoomOf(ctx, tx, room)
+	if !roomLocked && pending == nil {
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return 0, err
 		}
@@ -43,7 +53,8 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	//
 	// One read answers for all three (readAppendGate), and carries the prune checkpoint with it:
 	// a crashed prune's recovery (recoverPruneTx) runs only where a checkpoint stands, and the
-	// gate is read again after it, since the recovery deletes the rows above the ceiling.
+	// gate is read again under the ceiling that recovery leaves, since its deletes of the rows
+	// above it are queued with the transaction's other writes.
 	gated := appendingCursor(ctx, room, flush)
 	kind, observed := appendDerived, time.Time{}
 	var replacedCursor *roomCursor
@@ -62,18 +73,25 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	if gated != nil {
 		through = gated.heldThrough()
 	}
-	read, err := readAppendGate(ctx, tx, room, through)
+	read, err := readAppendGate(ctx, tx, room, through, nil)
 	if err != nil {
 		return 0, err
 	}
-	if read.pruneCeiling != nil {
-		if _, err := p.recoverPruneTx(ctx, tx, room); err != nil {
+	if read.pruneCeiling != nil && pending == nil {
+		ceiling, recovering, err := p.recoverPruneTx(ctx, tx, room)
+		if err != nil {
 			return 0, err
 		}
-		if read, err = readAppendGate(ctx, tx, room, through); err != nil {
+		// The recovery's deletes go on the transaction's write phase, so the gate is read again
+		// under the ceiling they leave rather than over rows they have not taken out yet.
+		if read, err = readAppendGate(ctx, tx, room, through, ceilingOf(ceiling, recovering)); err != nil {
 			return 0, err
 		}
+		pending = recordPendingRoom(ctx, tx, room, read.latest, ceilingOf(ceiling, recovering))
+	} else if pending == nil {
+		pending = recordPendingRoom(ctx, tx, room, read.latest, nil)
 	}
+	read = read.after(pending)
 	latest := read.latest
 	if gated != nil {
 		var replaced bool
@@ -91,10 +109,11 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	version := persistence.Version(latest + 1)
-	// Every write the append owes goes in one round trip (appendWrites): the row itself, the
-	// pending settlement the update leaves owed, the pending authors it credits and the authors of
-	// the ask blocks its render first showed. None of them reads another's result, and they run on
-	// the server in the order they are queued, as they did when each was a statement of its own.
+	// Every write the append owes goes on the transaction's write phase in one step
+	// (appendWrites): the row itself, the pending settlement the update leaves owed, the pending
+	// authors it credits and the authors of the ask blocks its render first showed. None of them
+	// reads another's result, and they run on the server in the order they are queued, as they
+	// did when each was a statement of its own.
 	//
 	// The insert announces the change itself (announceDocumentHead), as a data-modifying CTE
 	// rather than a statement of its own. Why the announcement belongs inside this transaction is
@@ -128,6 +147,14 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 			select `+announceDocumentHead("$5::text", "$2::bigint", "$6::text"),
 			room, int64(version), update, contentChanged, room, p.processID, latest > 0)
 	}
+	// The history this transaction's queue leaves now stands at this append (pendingRoom): a
+	// later append of the same document in the same transaction goes after it, and a read of the
+	// head takes it from there.
+	if pending != nil {
+		pending.head = int64(version)
+		pending.appended++
+		pending.changed = pending.changed || contentChanged
+	}
 	if !owes {
 		if err := writes.send(ctx, tx); err != nil {
 			return 0, err
@@ -147,12 +174,19 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	}
 	writes.queue("record the document's pending settlement", settlementPendingStatement, owedArgs...)
 	if include {
-		pendingArgs, err := pendingAuthorsArgs(room, pendingAuthorsAt(authors, version))
+		pendingAt := pendingAuthorsAt(authors, version)
+		pendingArgs, err := pendingAuthorsArgs(room, pendingAt)
 		if err != nil {
 			return 0, err
 		}
 		if pendingArgs != nil {
 			writes.queue("record the document's pending authors", pendingAuthorsStatement, pendingArgs...)
+			// A queued statement writes nothing until the write phase runs, so the rows it will
+			// add are recorded for the reads of this transaction that follow it
+			// (transactionPendingAuthors), as upsertPendingAuthors records its own.
+			if ledger := queueFor(ctx, tx); ledger != nil {
+				ledger.queuedAuthors(room, pendingAt)
+			}
 		}
 	}
 	// The authors of the ask blocks this update's render first showed are recorded with it, so a
@@ -171,35 +205,37 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	return version, nil
 }
 
-// appendWrites gathers the writes one append owes, each with what to say when it fails, and sends
-// them in one round trip (appendUpdateTxClass). They go under the document's advisory lock the
-// append holds, in the order they were queued, and no later one reads an earlier one's result, so
-// the pipeline writes exactly what the same statements wrote one at a time. A round trip is what
-// a browser update costs most of under that lock, and every keystroke is its own append
-// (PersistCoalesceWindow = -1), so the count is what the rooms on the other processes see the
-// typing arrive at (room_sync.go).
+// appendWrites gathers the writes one append owes, each with what to say when it fails, and puts
+// them on the transaction's write phase as one step (appendUpdateTxClass): where the transaction
+// queues its writes they join its one pipelined batch, in the order the transaction made its
+// writes, and where it does not they are a batch of their own, one round trip (write,
+// store.RunWrite). They go under the document's advisory lock the append holds, in the order they
+// were queued, and no later one reads an earlier one's result, so the pipeline writes exactly
+// what the same statements wrote one at a time. A round trip is what a browser update costs most
+// of under that lock, and every keystroke is its own append (PersistCoalesceWindow = -1), so the
+// count is what the rooms on the other processes see the typing arrive at (room_sync.go).
 type appendWrites struct {
-	batch pgx.Batch
-	what  []string
+	queued []appendWrite
+}
+
+// appendWrite is one statement of an append, with what to say when it fails.
+type appendWrite struct {
+	what string
+	sql  string
+	args []any
 }
 
 func (w *appendWrites) queue(what, sql string, args ...any) {
-	w.batch.Queue(sql, args...)
-	w.what = append(w.what, what)
+	w.queued = append(w.queued, appendWrite{what: what, sql: sql, args: args})
 }
 
-// send runs every queued write, reading the results in the order they were queued so a failure is
-// reported as its own statement's.
+// send puts every queued write on the transaction's write phase, in the order they were queued,
+// so a failure is reported as its own statement's.
 func (w *appendWrites) send(ctx context.Context, tx pgx.Tx) error {
-	results := tx.SendBatch(ctx, &w.batch)
-	for _, what := range w.what {
-		if _, err := results.Exec(); err != nil {
-			_ = results.Close()
-			return fmt.Errorf("%s: %w", what, err)
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		for _, queued := range w.queued {
+			b.Queue(queued.what, queued.sql, queued.args...)
 		}
-	}
-	if err := results.Close(); err != nil {
-		return fmt.Errorf("send the append's writes: %w", err)
-	}
-	return nil
+		return nil
+	})
 }

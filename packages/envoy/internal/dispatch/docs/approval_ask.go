@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // ApprovalDocumentsJSONPath is the artifact ids of every document an approval names, over the
@@ -22,18 +23,21 @@ import (
 // each stands in the list.
 const ApprovalDocumentsJSONPath = `jsonb_path_query_array(a.approval, '$.documents[*].artifact_id')`
 
-// OpenApprovalAsk returns the open approval ask naming artifactID, locked, or nil. A request
-// that names two documents is found by either of them. The caller holds the document owner's
-// row, so it observes the same version the review and approval routes use.
+// OpenApprovalAsk returns the open approval ask naming artifactID, or nil. A request that names
+// two documents is found by either of them. The caller holds the document owner's lock, which
+// every writer of an approval ask takes first (a request, a review, a version move or carry), so
+// it observes the same version the review and approval routes use and the row holds still until
+// the caller's transaction ends; the read takes no row lock.
 func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	return OpenApprovalAskForDocuments(ctx, tx, []string{artifactID})
 }
 
-// OpenApprovalAskForDocuments returns the newest open approval ask naming any of artifactIDs,
-// locked, or nil. A request about to name several documents is found by any one of them, so a
-// request opened over an issue's Verification document alone is the one a later request over
-// the spec and that document renews: two open requests naming one document would ask a person
-// twice about it and strand whichever they did not answer.
+// OpenApprovalAskForDocuments returns the newest open approval ask naming any of artifactIDs, or
+// nil; like OpenApprovalAsk it takes no row lock, the caller holding the document owner's lock. A
+// request about to name several documents is found by any one of them, so a request opened over
+// an issue's Verification document alone is the one a later request over the spec and that
+// document renews: two open requests naming one document would ask a person twice about it and
+// strand whichever they did not answer.
 func OpenApprovalAskForDocuments(ctx context.Context, tx pgx.Tx, artifactIDs []string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`
@@ -41,7 +45,6 @@ func OpenApprovalAskForDocuments(ctx context.Context, tx pgx.Tx, artifactIDs []s
 		where a.kind = 'approval' and a.state = 'open' and `+ApprovalDocumentsJSONPath+` ?| $1::text[]
 		order by a.created_at desc, a.id desc
 		limit 1
-		for no key update
 	`, artifactIDs)
 	ask, err := ScanAsk(row)
 	if err == nil {
@@ -53,6 +56,23 @@ func OpenApprovalAskForDocuments(ctx context.Context, tx pgx.Tx, artifactIDs []s
 	return nil, fmt.Errorf("read open approval ask: %w", err)
 }
 
+// openApprovalAsk is OpenApprovalAsk as this transaction's own move of the request left it: the
+// row a version write of this transaction moved to its version (MoveApprovalAsk), edited_at
+// included, else the stored one. A request naming several documents is held under the one this
+// transaction's version write moved, which is the document the carry that follows reads it by.
+// The move is all the ledger holds of the request, so the row reads open even once the carry has
+// queued its answer; nothing that commits reads it so, since the carry's answer
+// (answerApprovalAsk) is the only write that closes the request, and refuseSecondCarry fails
+// every later version write of that document in the same transaction.
+func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		if ask := ledger.approvals[artifactID]; ask != nil {
+			return ask, nil
+		}
+	}
+	return OpenApprovalAsk(ctx, tx, artifactID)
+}
+
 // MoveApprovalAsk advances the open approval ask naming the document to a new settled version of
 // it; a request that names two documents moves whichever of them was written. mover is the actor
 // whose edit moved the request: the caller knows it even when the version credits more than one
@@ -60,22 +80,29 @@ func OpenApprovalAskForDocuments(ctx context.Context, tx pgx.Tx, artifactIDs []s
 // back before a human sees it in Waiting on you again. Only the first move since the request was
 // opened or handed back wakes anyone, even when a thread reply already left it waiting on its
 // agent; a later one, while a document's requested_version is already below the version it named,
-// is quiet (RewriteApprovalAsk).
-func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) ([]model.Event, error) {
-	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
+// is quiet (RewriteApprovalAsk). It runs in a transaction a caller joined, as every other document
+// operation does, and in the one a settlement or the block-id backfill owns, which no caller joins
+// (Ledger): the version write every document version goes through (writeVersionTx) runs in both.
+// A context holding no ledger at all is refused by the rewording it makes (RewriteApprovalAsk,
+// errUnjoined). Its writes reach the transaction's write queue and the event it appends reaches
+// its ledger (eventSink), which publishes it after its Commit. Where its writes are queued, the
+// ledger records the request as moved (recordPendingApproval), so the carry that follows in the
+// same version write reads the request as this move leaves it.
+func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
+	ask, err := openApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if ask == nil {
-		return nil, nil
+		return nil
 	}
 	moved := ask.Approval.Document(artifactID)
 	if moved == nil || moved.Version == version.Number {
-		return nil, nil
+		return nil
 	}
 	summary, err := ApprovalAskSummary(*ask)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	documents := slices.Clone(ask.Approval.Documents)
 	for index := range documents {
@@ -83,21 +110,37 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 			documents[index].Version = version.Number
 		}
 	}
-	event, err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, documents, summary, serverURL)
-	if err != nil {
-		return nil, err
+	if err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, documents, summary, serverURL); err != nil {
+		return err
 	}
-	return []model.Event{event}, nil
+	recordPendingApproval(ctx, tx, artifactID, ask)
+	return nil
 }
 
 // RewriteApprovalAsk rewords one open approval row to name documents with summary, indexes its
-// new question, stamps edited_at, and records its ask.edited event. A document version move, a
-// request with a new summary and a request that changes which documents it covers all reword;
-// none hands the request back, so each document's requested_version stays as it was. A move of a
-// request that an earlier version already moved since it was opened or handed back, a document's
-// requested_version below the version it named, is recorded quiet
+// new question and the parts that question is the first of, stamps edited_at, and records its
+// ask.edited event. A document version move, a request with a new summary and a request that
+// changes which documents it covers all reword; none hands the request back, so each document's
+// requested_version stays as it was. A move of a request that an earlier version already moved
+// since it was opened or handed back, a document's requested_version below the version it named,
+// is recorded quiet
 // (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
-// it wakes nobody.
+// it wakes nobody. The event it appends goes to the ledger of the transaction it runs in, as every
+// document operation's does (eventSink), which publishes it after its Commit; no caller reads it
+// back, since where the writes are queued the append has not run when this returns.
+//
+// It refuses a context holding no ledger at all (errUnjoined), the one context in which the
+// rewording would be told to nobody: there the update runs at once while the event reaches no
+// ledger to publish it, leaving the row reworded and the request's readers none the wiser. A
+// settlement's ledger and the block-id backfill's are in the context of the writes they own, so
+// this refuses neither.
+//
+// The new question, the approval it encodes, the references it cites, the parts it leaves and
+// its edited_at are worked out here; the update, the references' writes, the parts' writes, the
+// append and the stamp are one step (write).
+// edited_at is clock_timestamp(), read here rather than in the update, so the event's copy of the
+// row carries it before the write phase runs, and so does ask, which a later step of the same
+// transaction queues from (carryApproval's answer).
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -106,49 +149,67 @@ func RewriteApprovalAsk(
 	actor model.Actor,
 	documents []model.AskApprovalDocument,
 	summary, serverURL string,
-) (model.Event, error) {
+) error {
+	if ledgerFrom(ctx) == nil {
+		return errUnjoined
+	}
+	sink := eventSink(ctx)
 	previous := model.NewAskEditPrevious(*ask)
 	quiet := approvalMoves(ask.Approval.Documents, documents) && approvalAwaitsHandBack(ask.Approval.Documents)
 	ask.Question = ApprovalQuestion(documents, summary)
-	ask.Approval.Documents = documents
+	// A fresh approval rather than the old one changed in place: the event below keeps its own
+	// copy of the row, which a later rewording of the same request in this transaction must not
+	// reach before the event is appended.
+	reworded := *ask.Approval
+	reworded.Documents = documents
+	ask.Approval = &reworded
 	approval, err := EncodeApproval(ask.Approval)
 	if err != nil {
-		return model.Event{}, err
+		return err
+	}
+	reader := refs.NewReader(ctx, tx, "ask", ask.ID, serverURL)
+	changes, index, err := planEditedAskReferences(ctx, tx, reader, ask.ID, previous.Question, ask.Question)
+	if err != nil {
+		return fmt.Errorf("index approval ask: %w", err)
 	}
 	var editedAt time.Time
-	if err := tx.QueryRow(ctx, `
-		update asks
-		set question = $2, approval = $3, edited_at = clock_timestamp()
-		where id = $1
-		returning edited_at
-	`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {
-		return model.Event{}, fmt.Errorf("rewrite approval ask: %w", err)
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&editedAt); err != nil {
+		return fmt.Errorf("read approval ask edit time: %w", err)
 	}
 	ask.EditedAt = askTimestamp(&editedAt)
-	reader := refs.NewReader(ctx, tx, "ask", ask.ID, serverURL)
-	changes, err := refs.ReplaceCountedEdit(ctx, tx, reader, previous.Question, ask.Question)
-	if err != nil {
-		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
-	}
+	row := *ask
 	// The rewording is a revision of the request's question part, read through the one reader,
-	// which its ask.edited names beside the request's own references.
-	changes, err = refs.IndexAskPartsCounted(ctx, tx, reader, *ask, editedAt, changes)
+	// which its ask.edited names beside the request's own references. The parts are planned from
+	// the row the update below writes, which the read of the index does not show yet, and written
+	// in that same step; the row carries the edited_at that update sets, so the plan marks the
+	// request edited without reading it back.
+	changes, parts, err := planAskPartsCounted(ctx, tx, reader, row, editedAt, changes)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+		return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
 	}
-	payload := model.NewAskEditEventPayload(*ask, previous, actor, changes)
+	payload := model.NewAskEditEventPayload(row, previous, actor, changes)
 	payload.Quiet = quiet
-	event, err := broker.Append(ctx, tx, model.Event{
-		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-		Type: "ask.edited", Actor: actor, Payload: payload,
+	return write(ctx, tx, func(b *store.WriteBatch) error {
+		b.Queue("rewrite approval ask", `
+			update asks
+			set question = $2, approval = $3, edited_at = $4
+			where id = $1
+		`, ask.ID, row.Question, approval, editedAt)
+		if err := index(b); err != nil {
+			return fmt.Errorf("index approval ask: %w", err)
+		}
+		if err := parts(b); err != nil {
+			return fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+		}
+		if err := broker.QueueAppend(b, model.Event{
+			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
+			Type: "ask.edited", Actor: actor, Payload: payload,
+		}, sink); err != nil {
+			return fmt.Errorf("append approval ask edit: %w", err)
+		}
+		refs.QueueStamp(b, "ask", ask.ID)
+		return nil
 	})
-	if err != nil {
-		return model.Event{}, fmt.Errorf("append approval ask edit: %w", err)
-	}
-	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
-		return model.Event{}, fmt.Errorf("stamp approval ask references: %w", err)
-	}
-	return event, nil
 }
 
 // EncodeApproval is an approval ask's approval as asks.approval stores it.

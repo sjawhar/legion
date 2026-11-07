@@ -11,13 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-// windowServer is the server a window test's references are read against; no test of this file
-// writes one.
-const windowServer = "https://dispatch.example"
 
 // part is one block of a test document: its id, its node type and its text.
 type part struct{ id, nodeType, text string }
@@ -148,10 +145,7 @@ func TestAWindowRecordsTheBlocksItCovers(t *testing.T) {
 	}
 
 	ask := insertAsk(t, tx, "WIND-1", "Which region?", model.AskOption{Label: "eu", Description: "for latency"})
-	reader := NewReader(ctx, tx, "ask", ask.ID, windowServer)
-	if _, err := IndexAskParts(ctx, tx, reader, ask, time.Now()); err != nil {
-		t.Fatalf("index the ask's parts: %v", err)
-	}
+	indexAskPartsAt(t, tx, ask, 1)
 	parts := windowRowsOf(t, tx, "ask_part", "ask/"+ask.ID)
 	if got := slices.Sorted(maps.Keys(parts)); !slices.Equal(got, []string{"b1"}) {
 		t.Fatalf("the ask's windows are %v, want one covering its question and its option", got)
@@ -286,4 +280,43 @@ func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
 	if !slices.Equal(nodes, want) || long != 2 || longest != 3200 {
 		t.Fatalf("uniqueBlocks = %#v, %d long, longest %d; want %#v, 2 long, longest 3200", nodes, long, longest, want)
 	}
+}
+
+// IndexBlocks is the tests' one call for a document version's whole block index: the title its
+// windows embed, ReadBlockIndex, PlanBlocks, Cited and Queue back to back, the queued statements
+// run at once as a batch of their own.
+func IndexBlocks(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	version int,
+	versionAt time.Time,
+	markdown string,
+	blocks []model.ArtifactBlock,
+	located []text.Located,
+	pointers []Pointer,
+) ([]Target, error) {
+	title, err := documentTitle(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	index, err := ReadBlockIndex(ctx, tx, artifactID)
+	if err != nil {
+		return nil, err
+	}
+	indexing, err := PlanBlocks(index, artifactID, title, version, versionAt, markdown, blocks, located, pointers)
+	if err != nil {
+		return nil, err
+	}
+	cited, err := indexing.Cited(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return append(indexing.Moved(), cited...), nil
 }

@@ -207,8 +207,8 @@ func (r *roundTripRecorder) labelsOn(conn *pgx.Conn) []string {
 	return roundTripLabels(trips)
 }
 
-// roundTripLabels names each trip for an assertion's message: the statements one store runs are
-// few and fixed, so each has a name of its own and anything else is reported as its own SQL.
+// roundTripLabels names each trip for an assertion's message, in order (roundTripLabel): the
+// statements one store runs are few and fixed, so each has a name of its own.
 func roundTripLabels(trips []roundTrip) []string {
 	labels := make([]string, 0, len(trips))
 	for _, trip := range trips {
@@ -217,16 +217,19 @@ func roundTripLabels(trips []roundTrip) []string {
 	return labels
 }
 
+// roundTripLabel names one trip. A batch is named by what it holds, not by being a batch: the
+// append's writes are the batch of a document's store (appendWrites), and a transaction's read
+// phase sends batches of its own - the owner's lock and the read that lock guards go out as one
+// (store.LockOwnerAndRead, lockArtifactOwner) - which are no trip of an append and must not read
+// as one. Anything else is reported as its own SQL, a batch's statements joined.
 func roundTripLabel(trip roundTrip) string {
-	if trip.batch {
-		if trip.prepare {
-			return "a prepare of the append's writes (one batch)"
-		}
-		return "the append's writes (one batch)"
-	}
 	sql := oneLineSQL(trip.sql[0])
 	label := sql
 	switch {
+	case trip.batch && slices.ContainsFunc(trip.sql, isAppendInsert):
+		label = "the append's writes (one batch)"
+	case trip.batch:
+		label = oneLineSQL(strings.Join(trip.sql, "; ")) + " (one batch)"
 	case sql == oneLineSQL(appendGateStatement):
 		label = "the append gate read"
 	case strings.Contains(sql, "pg_advisory_lock(hashtext"):
@@ -242,6 +245,12 @@ func roundTripLabel(trip roundTrip) string {
 		return "a prepare of " + label
 	}
 	return label
+}
+
+// isAppendInsert reports whether sql is the statement an append writes its update row with, the
+// first of the writes it queues (appendUpdateTxClass): the batch holding it is the append's.
+func isAppendInsert(sql string) bool {
+	return strings.Contains(sql, "insert into doc_updates")
 }
 
 func oneLineSQL(sql string) string {
@@ -313,11 +322,11 @@ func TestAWarmBrowserKeystrokeFlushesInSixRoundTrips(t *testing.T) {
 
 // What the saving above must not cost: the room's two durable writers of one document, a live
 // write and the room's own persistence worker, are serialised by the room's advisory lock. The
-// write takes it in its own transaction at its one read of the document (readFork, lockedHead)
-// and holds it until the transaction ends; the worker holds the session-level form on its own
-// connection for the whole of its store (withRoomLock). That lock is also what lets every append
-// of a flush skip a lock of its own (Service.flushThrough's rule): a flush runs inside the
-// transaction its caller already locked the room in.
+// write takes it in its own transaction at its one read of the document (readFork,
+// headUnderDocumentLock) and holds it until the transaction ends; the worker holds the
+// session-level form on its own connection for the whole of its store (withRoomLock). That lock
+// is also what lets every append of a flush skip a lock of its own (Service.flushThrough's
+// rule): a flush runs inside the transaction its caller already locked the room in.
 //
 // Here a transaction of the test's own holds the room's lock, Bob's keystroke queues on it and
 // the live write queues behind the keystroke, watched on its own backend: the write's one read
@@ -368,7 +377,7 @@ func TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost(t *testing.T
 	}
 	for _, appended := range []string{"the append gate read", "the append's writes (one batch)"} {
 		if labels := recorder.labelsOn(writeConn); slices.Contains(labels, appended) {
-			t.Fatalf("the live write queued behind the room's lock only after %q, so it did not wait at its one read of the document (readFork, lockedHead); it ran:\n\t%s",
+			t.Fatalf("the live write queued behind the room's lock only after %q, so it did not wait at its one read of the document (readFork, headUnderDocumentLock); it ran:\n\t%s",
 				appended, strings.Join(labels, "\n\t"))
 		}
 	}

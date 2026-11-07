@@ -283,16 +283,16 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // taken before the head it is gated on was read: the room's own persistence worker holds the
 // session-level lock on its connection across the whole transaction (AppendRoomFlush,
 // withRoomLock), and every caller of Ledger.flushThrough took the transaction-level lock in the
-// same transaction - a live write's one read of the document (readFork, lockedHead), a version
-// capture's (captureLiveTextAndAuthors) and the write's own (captureWrite, through its read), a
-// settlement's (lockSettlementCursor) and the block-id backfill's (lockDocumentRoom), which a
-// repair's flush runs under too (storeRepair). So the appends this makes take no lock of their
-// own: a second acquisition would cost a round trip each and grant what the caller holds
-// (appendUpdateTxClass). The caller calls this before its own append. The classes are read under
-// that lock, and every writer marks what it stored before the lock passes on, so no update is
-// stored twice. Every class is measured before the first append: between its appends it renders
-// and decodes nothing, so it is the lock, the read of the room's queue, the measures, and the
-// appends.
+// same transaction - a live write's one read of the document (readFork,
+// headUnderDocumentLock), a version capture's (captureLiveTextAndAuthors) and the write's own
+// (captureWrite, through its read), a settlement's (lockSettlementCursor) and the block-id
+// backfill's (lockDocumentRoom), which a repair's flush runs under too (storeRepair). So the
+// appends this makes take no lock of their own: a second acquisition would cost a round trip
+// each and grant what the caller holds (appendUpdateTxClass). The caller calls this before its
+// own append. The classes are read under that lock, and every writer marks what it stored before
+// the lock passes on, so no update is stored twice. Every class is measured before the first
+// append: between its appends it renders and decodes nothing, so it is the lock, the read of the
+// room's queue, the measures, and the appends.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {

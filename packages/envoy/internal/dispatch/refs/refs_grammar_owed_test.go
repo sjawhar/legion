@@ -102,8 +102,16 @@ func TestADocumentVersionLeavesItsScopeOwed(t *testing.T) {
 	}
 
 	reader := NewReader(ctx, tx, "artifact", document, refsGrammarServer)
-	if _, err := ReplaceDocumentCounted(ctx, tx, document, 1, versionAt,
-		text.Refs(reader.Mentions("Blocked on CORE-1.")), nil, nil); err != nil {
+	replacement, err := PlanReplace(ctx, tx, "artifact", document,
+		text.Refs(reader.Mentions("Blocked on CORE-1.")), &versionAt)
+	if err != nil {
+		t.Fatalf("plan the version's references: %v", err)
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		ClearExcerpts(b, document)
+		return nil
+	}); err != nil {
 		t.Fatalf("index the version: %v", err)
 	}
 

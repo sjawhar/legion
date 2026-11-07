@@ -1058,15 +1058,15 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 }
 
 // whileTheRowIsHeld answers request with the claim moved to holder strictly between the
-// request's pre-lock read and its locked re-read. The test holds the row itself — the same
-// `select ... for no key update` claimWrite takes — waits until the request is queued behind that
-// lock, writes the new holder and commits, so the change lands inside the request with no
-// production seam and no second server.
+// request's pre-lock read and its locked re-read. The test holds the issue's owner lock itself —
+// the same store.LockOwner claimWrite takes — waits until the request is queued behind that lock,
+// writes the new holder and commits, so the change lands inside the request with no production
+// seam and no second server.
 //
 // The request runs through a handler of its own whose store holds one connection
 // (oneConnectionHandler), so the wait watches the backend of the request under test. A count of
-// the backends behind the row would also take the issue's document settlement, which locks the
-// same row, for the request, and the test would go on before the request had queued.
+// the backends behind the lock would also take the issue's document settlement, which takes the
+// same owner lock, for the request, and the test would go on before the request had queued.
 func whileTheRowIsHeld(
 	t *testing.T, database *store.Store, deps Deps, key string, holder string,
 	request func(http.Handler) *httptest.ResponseRecorder,
@@ -1078,14 +1078,14 @@ func whileTheRowIsHeld(
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
-		t.Fatalf("hold the issue row: %v", err)
+	if err := store.LockOwner(ctx, tx, store.IssueOwner(key)); err != nil {
+		t.Fatalf("hold the issue's owner lock: %v", err)
 	}
 	callHandler, callPID := oneConnectionHandler(t, deps)
 	answered := make(chan *httptest.ResponseRecorder, 1)
 	go func() { answered <- request(callHandler) }()
 	if response, early := storetest.WaitForQueuedBehind(t, tx, callPID, answered, 10*time.Second); early {
-		t.Fatalf("the request answered %d before it queued behind the issue row: %s", response.Code, response.Body.String())
+		t.Fatalf("the request answered %d before it queued behind the issue's owner lock: %s", response.Code, response.Body.String())
 	}
 	holderActor := model.Actor{
 		Kind:   "session",
@@ -1102,7 +1102,7 @@ func whileTheRowIsHeld(
 	case response := <-answered:
 		return response
 	case <-time.After(10 * time.Second):
-		t.Fatal("the request never answered once the row was free")
+		t.Fatal("the request never answered once the owner lock was free")
 		return nil
 	}
 }

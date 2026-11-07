@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -475,6 +476,12 @@ type equivalenceSide struct {
 	// classes records the class the side's rooms record for each update they apply, installed at
 	// the side's first room load (recordClasses).
 	classes *recordedClasses
+	// refreshes counts the rows every anchor refresh of the side has refreshed
+	// (Service.afterAnchorRefresh); an operation's own refreshes are the rise in it over that
+	// operation. A transaction's events are appended in its write phase, so a flow the record
+	// bound refuses appends none, and this is what says its refresh found rows to write all the
+	// same.
+	refreshes atomic.Int64
 }
 
 func newEquivalenceSide(t *testing.T, name string, margin bool, write marginWriter) *equivalenceSide {
@@ -484,7 +491,9 @@ func newEquivalenceSide(t *testing.T, name string, margin bool, write marginWrit
 	if _, err := database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('EQ', 'Equivalence')`); err != nil {
 		t.Fatalf("create the %s's project: %v", name, err)
 	}
-	return &equivalenceSide{name: name, margin: margin, write: write, database: database, service: service}
+	side := &equivalenceSide{name: name, margin: margin, write: write, database: database, service: service}
+	service.afterAnchorRefresh = func(_ string, refreshed int) { side.refreshes.Add(int64(refreshed)) }
+	return side
 }
 
 // execer is a pool or a transaction.

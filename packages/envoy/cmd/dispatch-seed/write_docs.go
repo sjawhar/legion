@@ -11,11 +11,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // writeDocuments writes every document with its versions and indexes the latest version of each,
-// the only version a block index records (refs.IndexBlocks) and the only one search, the
+// the only version a block index records (refs.PlanBlocks) and the only one search, the
 // related-item check and every anchor read look at.
 func (r *seedRun) writeDocuments(ctx context.Context) error {
 	return r.inBatches(ctx, "documents", len(r.plan.documents), batchDocuments,
@@ -31,7 +32,7 @@ func (r *seedRun) writeDocuments(ctx context.Context) error {
 
 // writeDocument writes one document, its versions and the index of its latest version. The
 // latest version's markdown is the markdown the renderer wrote (RenderWithBlockOffsets), not the
-// markdown the renderer was given, because refs.IndexBlocks indexes `markdown[block.From:block.To]`
+// markdown the renderer was given, because refs.PlanBlocks indexes `markdown[block.From:block.To]`
 // and those offsets are into that render: a row holding anything else would index the wrong
 // bytes.
 func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error {
@@ -42,11 +43,14 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 	}
 	projectKey := r.plan.projects[document.Project].Key
 	created := timeAt(index, len(r.plan.documents))
+	// The document's title, written with its row and embedded by the windows of its blocks
+	// (refs.PlanBlocks), which the indexing below plans.
+	name := r.plan.vocabulary.phrase(r.random, 4)
 	if _, err := tx.Exec(ctx, `
 		insert into artifacts (id, issue_key, project_key, slug, name, kind, is_primary, created_by, created_at, last_seq)
 		values ($1, $2, $3, $4, $5, 'doc', $6, $7::jsonb, $8, 0)
 	`, document.ID, issueKey, projectKey, document.Slug,
-		r.plan.vocabulary.phrase(r.random, 4), document.Primary, seedActor, created); err != nil {
+		name, document.Primary, seedActor, created); err != nil {
 		return fmt.Errorf("artifact row: %w", err)
 	}
 
@@ -88,17 +92,45 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 	// No block pointers: a typed block's `block[]` attribute is what carries one, and every
 	// document this tool writes is plain markdown with no typed block in it, so the list the
 	// server builds from a document's block tree is empty here.
-	moved, err := refs.IndexBlocks(ctx, tx, document.ID, document.Versions, versionAt, latest, blocks, located, nil)
+	//
+	// The index the version is planned against is the one the document holds, which is empty:
+	// this is its first indexing, the rows being written here. The seed's transaction joins no
+	// write phase of anyone's, so each plan's statements run at once, as a batch of their own
+	// (store.RunWrite). The targets the plans move are counted by nobody: the seed appends no
+	// event for a document write, which is what names them.
+	blockIndex, err := refs.ReadBlockIndex(ctx, tx, document.ID)
 	if err != nil {
 		return fmt.Errorf("index blocks: %w", err)
 	}
-	// ReplaceDocumentCounted stores each mention's excerpt at this version number, which is the
-	// document's highest: refs.MarkStaleExcerpts re-owes a mention whose excerpt_version is
-	// below max(artifact_versions.number), so a seed that wrote 1 would leave every one of the
+	indexing, err := refs.PlanBlocks(blockIndex, document.ID, name, document.Versions, versionAt, latest, blocks, located, nil)
+	if err != nil {
+		return fmt.Errorf("index blocks: %w", err)
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("index blocks: %w", err)
+	}
+	// The document's own references are reconciled after its blocks, as the server's own version
+	// write reconciles them (docs.indexRenderedVersion): the block mentions of a first indexing
+	// date from the document's refs row for their target, so they are written while the document
+	// holds no refs row yet, and take this version's time.
+	replacement, err := refs.PlanReplace(ctx, tx, "artifact", document.ID, text.Refs(located), &versionAt)
+	if err != nil {
+		return fmt.Errorf("index references: %w", err)
+	}
+	// The excerpts are stored at this version number, which is the document's highest:
+	// refs.MarkStaleExcerpts re-owes a mention whose excerpt_version is below
+	// max(artifact_versions.number), so a seed that wrote 1 would leave every one of the
 	// 28-version documents owed, which settle.go's owedWorkCounts refuses and a server started
-	// on the data set would rewrite.
-	if _, err := refs.ReplaceDocumentCounted(ctx, tx, document.ID, document.Versions, versionAt,
-		text.Refs(located), moved, refs.MentionExcerpts(latest, blocks, located)); err != nil {
+	// on the data set would rewrite. They are queued after the reconciliation, whose rows the
+	// update reads (refs.QueueRecordExcerpts).
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		replacement.Queue(b)
+		refs.QueueRecordExcerpts(b, document.ID, document.Versions, refs.MentionExcerpts(latest, blocks, located))
+		return nil
+	}); err != nil {
 		return fmt.Errorf("index references: %w", err)
 	}
 	if document.Primary {

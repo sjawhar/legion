@@ -36,7 +36,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 	if input.MarkID != nil && strings.TrimSpace(*input.MarkID) == "" {
 		return nil, "", nil, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor mark_id must not be empty")
 	}
-	artifact, err := s.lockAnchorArtifact(ctx, tx, owner, artifactRef)
+	artifact, err := s.loadAnchorArtifact(ctx, tx, owner, artifactRef)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -81,13 +81,15 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 	return &anchor, artifact.Name, nil, nil
 }
 
-func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner, artifactRef string) (model.Artifact, error) {
+// loadAnchorArtifact reads the document an anchor targets, which must be one of owner's. The caller
+// holds owner's lock; the read takes no row lock, since nothing deletes an artifact or changes its
+// key, and the only update an artifact row takes, its event sequence, moves nothing read here.
+func (s *server) loadAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner, artifactRef string) (model.Artifact, error) {
 	if owner.IssueKey != nil {
 		return scanArtifact(tx.QueryRow(ctx, `
 			select `+artifactColumns+`
 			from artifacts
 			where issue_key = $1 and (id::text = $2 or slug = $2)
-			for key share
 		`, *owner.IssueKey, artifactRef))
 	}
 	if owner.ArtifactID == nil {
@@ -97,7 +99,6 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner,
 		select `+artifactColumns+`
 		from artifacts
 		where id = $1 and issue_key is null
-		for key share
 	`, *owner.ArtifactID))
 	if err != nil {
 		return model.Artifact{}, err

@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // An approval ask's fixed options: the labels a human's answer is matched against, and the ones
@@ -36,13 +39,13 @@ const ReviewColumns = `id::text, artifact_id::text, version, state, kind, actor,
 // ReviewOrder sorts a document's reviews newest first by the order their events committed: the
 // event sequence each review kept on its document's owner, then, for a review recorded before the
 // sequence was kept, its own time and id. Every review written once migration 0120 committed
-// carries a sequence, whichever release wrote it: this release's WriteReview writes it, and the
+// carries a sequence, whichever release wrote it: this release's QueueReview writes it, and the
 // migration's deferred trigger gives one to a review the release before it writes during a
 // rollout or a rollback. A row without one was committed before that migration, so every row that
 // carries a sequence is newer than every row without one, which `nulls last` says. created_at is
 // the review's transaction start, so it places two reviews only when neither carries a sequence.
-// This holds only while WriteReview is the one writer of the table: the api package's
-// TestOnlyWriteReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
+// This holds only while QueueReview is the one writer of the table: the api package's
+// TestOnlyQueueReviewWritesReviews refuses an insert into or update of artifact_reviews anywhere
 // else in the module. Its id is the table's column, artifact_reviews.id: a bare `id` in an order by
 // names the output column ReviewColumns selects, `id::text`, which orders the same and which no
 // index holds, so artifact_reviews_by_artifact_event_seq could not give the order whole. Every read
@@ -62,63 +65,106 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	return review, nil
 }
 
-// WriteReview records a review of artifact pinned to version and appends its event,
+// QueueReview records a review of artifact pinned to version and appends its event,
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
 // belongs to one, else the document itself. kind is who gave it (ReviewKindPerson,
 // ReviewKindPlanReview). askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's row before it calls this; inside WriteReview the
-// row is inserted before the event is appended and its sequence written after. The update that
-// writes the sequence runs the foreign-key checks again, since Postgres re-checks a row its own
-// transaction inserted, and so asks for the same FOR KEY SHARE locks the insert took: the
-// transaction already holds them, so the request never waits. Migration 0120's trigger, which gives
-// the release before this one's reviews their sequence, would give this row its sequence too, but
-// only at the commit, the first moment the event exists for every release; so WriteReview writes it
-// itself, and the row is right for any read the caller makes before it commits. The trigger then
-// finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
-func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state, kind string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
+// events.
+//
+// Every caller already holds the owner's lock before it queues this, and its statements go on one
+// write phase's batch: the row is inserted before the event is appended and its sequence written
+// after. The review's id is chosen here, so the statement that writes that sequence names the row,
+// and takes the sequence from the event the statements before it appended (store.LatestEventID):
+// nothing is read back in Go between them. The update that writes the sequence runs the
+// foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so
+// asks for the same FOR KEY SHARE locks the insert took: the transaction already holds them, so
+// the request never waits. Migration 0120's trigger, which gives the release before this one's
+// reviews their sequence, would give this row its sequence too, but only at the commit, the first
+// moment the event exists for every release; so the batch writes it itself, and the row is right
+// for any read the caller makes before it commits. The trigger then finds the row sequenced and
+// leaves it. written receives the review and its event as the batch leaves them, and the caller,
+// which owns the transaction, publishes the event after its commit.
+func QueueReview(b *store.WriteBatch, broker *events.Broker, artifact model.Artifact, version int, state, kind string, actor model.Actor, reason *string, askID *string, written func(model.ArtifactReview, model.Event)) error {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("encode review actor: %w", err)
-	}
-	review, err := ScanReview(tx.QueryRow(ctx, `
-		insert into artifact_reviews (artifact_id, version, state, kind, actor, reason, ask_id)
-		values ($1, $2, $3, $4, $5, $6, $7)
-		returning `+ReviewColumns, artifact.ID, version, state, kind, actorJSON, reason, askID))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
-	}
-	if review.ContentSHA256 == nil {
-		slog.Warn("dispatch: review recorded with no content hash: the version names no stored text", "artifact", artifact.ID, "version", version, "review", review.ID)
+		return fmt.Errorf("encode review actor: %w", err)
 	}
 	eventType := "artifact.approved"
 	if state == "changes_requested" {
 		eventType = "artifact.changes_requested"
 	}
-	event, err := broker.Append(ctx, tx, documentAskEvent(
+	id := uuid.NewString()
+	var review model.ArtifactReview
+	var event model.Event
+	b.Queue("", `
+		insert into artifact_reviews (id, artifact_id, version, state, kind, actor, reason, ask_id)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		returning `+ReviewColumns, id, artifact.ID, version, state, kind, actorJSON, reason, askID).QueryRow(func(row pgx.Row) error {
+		scanned, err := ScanReview(row)
+		if err != nil {
+			return fmt.Errorf("insert artifact review: %w", err)
+		}
+		review = scanned
+		if review.ContentSHA256 == nil {
+			slog.Warn("dispatch: review recorded with no content hash: the version names no stored text",
+				"artifact", artifact.ID, "version", version, "review", review.ID)
+		}
+		return nil
+	})
+	if err := broker.QueueAppend(b, documentAskEvent(
 		artifactOwner{IssueKey: artifact.IssueKey}, artifact.ID, eventType, actor,
 		model.ArtifactReviewEventPayload{
-			ArtifactID:          artifact.ID,
-			Name:                artifact.Name,
-			Version:             version,
-			Kind:                kind,
-			Actor:               actor,
-			Reason:              reason,
-			AskID:               askID,
-			ContentSHA256:       review.ContentSHA256,
-			ContentSHA256Source: review.ContentSHA256Source,
+			ArtifactID: artifact.ID,
+			Name:       artifact.Name,
+			Version:    version,
+			Kind:       kind,
+			Actor:      actor,
+			Reason:     reason,
+			AskID:      askID,
+			// content_sha256 and content_sha256_source are not set here: the insert's trigger
+			// derives them, and the statement after this append writes them into this payload.
 		},
-	))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("append %s: %w", eventType, err)
+	), func(appended model.Event) { event = appended }); err != nil {
+		return fmt.Errorf("append %s: %w", eventType, err)
 	}
-	seq := int64(event.Seq)
-	if _, err := tx.Exec(ctx, `update artifact_reviews set event_seq = $2 where id = $1`, review.ID, seq); err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("record the sequence of %s: %w", eventType, err)
-	}
-	review.EventSeq = &seq
-	return review, event, nil
+	// The digest of the bytes the review approves is the row's, which the insert's trigger wrote
+	// (migration 20261105084017), and the event's payload must carry the same two values. Nothing
+	// of this batch is read in Go before the event is appended - the write phase sends every
+	// statement back to back - so the payload takes them in SQL, from the row this batch
+	// inserted, as the event's own sequence is taken. A carry needs it that way: it pins a
+	// version this same batch writes, so no read before the batch could know the digest at all.
+	b.Queue("record the approved bytes' digest on "+eventType, `
+		update events set payload = payload || jsonb_build_object(
+			'content_sha256', review.content_sha256,
+			'content_sha256_source', review.content_sha256_source)
+		from artifact_reviews review
+		where review.id = $1 and events.id = `+store.LatestEventID+`
+		returning review.content_sha256, review.content_sha256_source
+	`, id).QueryRow(func(row pgx.Row) error {
+		var digest, source *string
+		if err := row.Scan(&digest, &source); err != nil {
+			return fmt.Errorf("record the approved bytes' digest on %s: %w", eventType, err)
+		}
+		payload, ok := event.Payload.(model.ArtifactReviewEventPayload)
+		if !ok {
+			return fmt.Errorf("%s payload must be model.ArtifactReviewEventPayload", eventType)
+		}
+		payload.ContentSHA256, payload.ContentSHA256Source = digest, source
+		event.Payload = payload
+		return nil
+	})
+	b.Queue("record the sequence of "+eventType, `
+		update artifact_reviews set event_seq = (select seq from events where id = `+store.LatestEventID+`)
+		where id = $1
+	`, id).Exec(func(pgconn.CommandTag) error {
+		seq := int64(event.Seq)
+		review.EventSeq = &seq
+		written(review, event)
+		return nil
+	})
+	return nil
 }
 
 // ReviewHashFill counts rows pinned at boot and rows whose version has no stored text.
@@ -263,7 +309,7 @@ func changesRequestedSince(ctx context.Context, q Queryer, review model.Artifact
 	return requested, nil
 }
 
-// reviewedArtifact reads the document a review names as WriteReview takes it: its id, name and
+// reviewedArtifact reads the document a review names as QueueReview takes it: its id, name and
 // issue.
 func reviewedArtifact(ctx context.Context, q Queryer, artifactID string) (model.Artifact, error) {
 	artifact := model.Artifact{ID: artifactID}

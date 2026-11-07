@@ -29,7 +29,10 @@ type anchorRead struct {
 // from main as literals rather than built from this package's own helpers: built from the
 // helpers, an edit to a helper would move the oracle and the read together and the comparison
 // would pass whatever either said. Each is the read before this change added the uuid
-// comparison that its table's anchor index carries.
+// comparison that its table's anchor index carries. The last two keep main's `for share` and
+// their own names: this change dropped that lock from them, the caller holding the document
+// owner's lock instead (checkTableAnchorRows), and a row lock changes no row a read returns,
+// so each of them still returns exactly main's rows.
 const (
 	mainOpenAnchoredAsksQuery = `
 		select id::text, anchor, 'dispatchAsk'
@@ -108,14 +111,14 @@ func anchorReads() []anchorRead {
 			ordered: true,
 		},
 		{
-			name:    "lockTableAnchorRows asks",
-			query:   lockTableAskAnchorsQuery,
+			name:    "checkTableAnchorRows asks",
+			query:   tableAskAnchorsQuery,
 			oracle:  mainLockTableAskAnchorsQuery,
 			indexes: []string{asksAnchorTarget.index},
 		},
 		{
-			name:    "lockTableAnchorRows comments",
-			query:   lockTableCommentAnchorsQuery,
+			name:    "checkTableAnchorRows comments",
+			query:   tableCommentAnchorsQuery,
 			oracle:  mainLockTableCommentAnchorsQuery,
 			indexes: []string{commentsAnchorTarget.index},
 		},

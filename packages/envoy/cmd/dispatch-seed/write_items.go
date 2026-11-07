@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -29,8 +30,8 @@ const askQuestionBlock = "b1"
 // ask is indexed into and the `ask.opened` event each one is read through.
 //
 // The parts - the question, each option and the answer the ask holds - are recorded with the
-// server's own indexer (refs.IndexAskParts), in the ask's own transaction, as every route that
-// writes an ask records them (api/references.go's indexAskParts). The insert owes that index
+// server's own indexer (refs.PlanAskParts), in the ask's own transaction, as every route that
+// writes an ask records them (api/references.go's queueAskParts). The insert owes that index
 // (migration 20261101143212's asks_item_blocks_owed trigger), so an ask the seed left unindexed
 // is work a started server would do for itself, rewriting rows a measurement is being read from.
 // A mention the question carries is then a row of `refs`, the ask's own, and a row of
@@ -143,8 +144,25 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 			// created_at)), so a re-index of it would date its parts as this one did.
 			stored := opening
 			stored.State, stored.Answer = ask.State, answer
+			// The seed's transaction joins no write phase of anyone's, so it reads the index the
+			// ask holds - none, its row having just been inserted - plans the parts against it
+			// and runs the plan's statements at once, as a batch of their own, the way a writer
+			// that queues no write phase indexes an item it wrote (refs.IndexItem). The parts
+			// are read through a reader of the ask's own (refs.NewReader), as every other write
+			// of an ask reads them.
+			partIndex, err := refs.ReadItemIndex(ctx, tx, refs.ItemAsk, ask.ID)
+			if err != nil {
+				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
+			}
 			reader := refs.NewReader(ctx, tx, "ask", stored.ID, serverURL)
-			if _, err := refs.IndexAskParts(ctx, tx, reader, stored, ask.CreatedAt); err != nil {
+			parts, err := refs.PlanAskParts(partIndex, reader, stored, ask.CreatedAt)
+			if err != nil {
+				return err
+			}
+			if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+				parts.Queue(b)
+				return nil
+			}); err != nil {
 				return fmt.Errorf("index the parts of ask %s: %w", ask.ID, err)
 			}
 			// The event is owned by the ask's own owner and dated at the ask, as one appended

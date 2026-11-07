@@ -256,7 +256,7 @@ func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, r
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
-		recovered, err := p.recoverPruneTx(ctx, tx, room)
+		_, recovered, err := p.recoverPruneTx(ctx, tx, room)
 		if err != nil {
 			return err
 		}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -86,16 +87,27 @@ func writeAskAnswer(t *testing.T, tx pgx.Tx, ask *model.Ask, user string, select
 	ask.Answer, ask.State = &answer, "answered"
 }
 
-// indexAskPartsAt indexes the ask's parts at the index-th second of a fixed clock, so each indexing
-// of one test has a time of its own.
+// indexAskPartsAt plans the ask's parts at the index-th second of a fixed clock, so each indexing
+// of one test has a time of its own, and writes them as a batch of their own.
 func indexAskPartsAt(t *testing.T, tx pgx.Tx, ask model.Ask, index int) []Target {
 	t.Helper()
+	ctx := context.Background()
 	at := time.Date(2026, 10, 30, 12, 0, index, 0, time.UTC)
-	moved, err := IndexAskParts(context.Background(), tx, NewReader(context.Background(), tx, "ask", ask.ID, askPartServer), ask, at)
+	stored, err := ReadItemIndex(ctx, tx, ItemAsk, ask.ID)
+	if err != nil {
+		t.Fatalf("read the part index of ask %s: %v", ask.ID, err)
+	}
+	indexing, err := PlanAskParts(stored, NewReader(ctx, tx, "ask", ask.ID, askPartServer), ask, at)
 	if err != nil {
 		t.Fatalf("index the parts of ask %s: %v", ask.ID, err)
 	}
-	return moved
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("write the parts of ask %s: %v", ask.ID, err)
+	}
+	return indexing.Moved()
 }
 
 // askPartRow is one row of ask_blocks: a removed part's position is -1 and a part the ask's
@@ -552,7 +564,21 @@ func TestAnAskWriteReadsItsQuestionsOnce(t *testing.T) {
 		t.Fatalf("index the ask's question: %v", err)
 	}
 	at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	if _, err := IndexAskPartsCounted(ctx, tx, reader, ask, at, model.ReferenceChanges{}); err != nil {
+	stored, err := ReadItemIndex(ctx, tx, ItemAsk, ask.ID)
+	if err != nil {
+		t.Fatalf("read the part index of the ask: %v", err)
+	}
+	indexing, err := PlanAskParts(stored, reader, ask, at)
+	if err != nil {
+		t.Fatalf("plan the ask's parts: %v", err)
+	}
+	if _, err := CountedChanges(ctx, tx, indexing.Moved()); err != nil {
+		t.Fatalf("count what the ask's parts moved: %v", err)
+	}
+	if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		return nil
+	}); err != nil {
 		t.Fatalf("index the ask's parts: %v", err)
 	}
 

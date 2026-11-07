@@ -115,11 +115,12 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 
 	// The check is resolved before the transaction opens. Resolving it folds the live
 	// Verification document, which for a document no room holds is a cold read bounded by a
-	// minute (docs/read_cache.go), and no issue row lock is held across a read that long: four
-	// writers parked on one issue's row lock already cost a read of an unrelated issue the whole
-	// seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is settled
-	// here — the check's words and its `when` are the document's, not the issue's — and what it
-	// does protect, the block's indexed version and digest, is read again under it below.
+	// minute (docs/read_cache.go), and no issue's owner lock is held across a read that long:
+	// four writers parked on one issue's lock already cost a read of an unrelated issue the
+	// whole seventeen seconds the lock was held (store/pool.go). Nothing the lock protects is
+	// settled here — the check's words and its `when` are the document's, not the issue's — and
+	// what it does protect, the block's indexed version and digest, is read again under it
+	// below.
 	check, err := s.resolveCheck(r.Context(), pool, issueKey, input.Check)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -166,13 +167,14 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	// Both rows are locked in one key order, whether or not either is open: a result for an
-	// after-merge check is taken on a closed issue, and the lock still stops it closing or
-	// reopening under the write. The check's issue is usually the recording issue's ancestor,
-	// so locking them in call order would let one transaction hold the child while waiting for
-	// the parent and another hold the parent while waiting for the child; lockIssueRows is the
-	// one key order every writer of two issue rows takes.
-	if _, err := lockIssueRows(r.Context(), tx, issueKey, check.IssueKey); err != nil {
+	// Both issues' owner locks are taken in one key order, whether or not either is open: a
+	// result for an after-merge check is taken on a closed issue, and the lock still stops it
+	// closing or reopening under the write. The check's issue is usually the recording issue's
+	// ancestor, so locking them in call order would let one transaction hold the child while
+	// waiting for the parent and another hold the parent while waiting for the child;
+	// lockIssueOwners is the one key order every writer of two issues takes. It is the owner
+	// lock and not the issue rows, so this read phase holds no transaction id.
+	if _, err := lockIssueOwners(r.Context(), tx, issueKey, check.IssueKey); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -323,10 +325,11 @@ func (input checkResultInput) refusal() error {
 }
 
 // issuesOpenForResult answers whether the recording issue and the check's issue are open, in
-// one query over the rows the caller has already locked (lockIssueRows). It makes no refusal of
-// its own for a closed issue, as requireOpenIssue does: the results route decides for itself,
-// since a closed issue takes a result for an after-merge check. An issue with no row is the
-// route's 404, which is the lock's answer too: lockIssueRows skips a key nothing holds.
+// one query under the owner locks the caller has already taken (lockIssueOwners). It makes no
+// refusal of its own for a closed issue, as requireOpenIssue does: the results route decides for
+// itself, since a closed issue takes a result for an after-merge check. An issue with no row is
+// the route's 404, which the locks never answer: lockIssueOwners takes an owner's lock whether
+// or not a row holds that key.
 func issuesOpenForResult(ctx context.Context, tx pgx.Tx, issueKey, checkIssueKey string) (bool, bool, error) {
 	open := map[string]bool{}
 	rows, err := tx.Query(ctx, `select key, closed_at is null from issues where key = any($1)`,
@@ -492,10 +495,10 @@ func unknownCheck(value string) error {
 // attributes included, so a check reworded from before_merge to after_merge carries a digest of
 // its own. A digest the resolve already read is therefore the same words under the same `when`,
 // and the live document is not read a second time for them. That read is the slow one to hold
-// two issue row locks across: a document version landing between the resolve and the lock is
-// exactly what leaves the read cache cold (docs/read_cache.go), so the one case the second read
-// would answer differently is the one it would answer slowest in. Only a digest that moved pays
-// for it.
+// the two issues' owner locks across (lockIssueOwners): a document version landing between the
+// resolve and the lock is exactly what leaves the read cache cold (docs/read_cache.go), so the
+// one case the second read would answer differently is the one it would answer slowest in. Only
+// a digest that moved pays for it.
 func (s *server) refreshResolvedCheck(ctx context.Context, q queryer, check *resolvedCheck, named string) error {
 	resolved := check.SHA256
 	err := q.QueryRow(ctx, `

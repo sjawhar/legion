@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"strings"
@@ -705,5 +706,53 @@ func TestAVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
 	}
 	if reviews, approvals := run(t, true); reviews != 1 || approvals != 0 {
 		t.Fatalf("with the repeat: reviews = %d, artifact.approved events = %d; want alice's approval of version 1 alone and no event", reviews, approvals)
+	}
+}
+
+// A transaction carries one document's approval at most once (errApprovalCarriedTwice, whose doc
+// carries the reason). Here the agent names a version whose text is the approved text, which
+// carries alice's approval, and both routes into the carry are then refused in that same
+// transaction: a second named version of the document (carryApproval's guard) and the restore
+// the upload route runs on its own (CarryRestoredApproval's). SnapshotVersion would not reach
+// the carry for the first version, returning the latest version where the live text has not
+// moved, so the versions are named.
+func TestATransactionCannotCarryOneDocumentsApprovalTwice(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "Context\n")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Second})
+	t.Cleanup(func() { _ = service.Shutdown(ctx) })
+	seedServiceText(t, service, artifactID, "Context\n")
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	// The approved version is one this service wrote, so the version named below restores its
+	// text byte for byte, which is what carries the approval (restoresApprovedText).
+	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := service.NamedVersion(ctx, artifactID, "Named before the approval", agent)
+		return err
+	})
+	approveStoredVersion(t, database, artifactID, 2, "alice")
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joinedCtx, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	restored, err := service.NamedVersion(joinedCtx, artifactID, "Restores the approved text", agent)
+	if err != nil {
+		t.Fatalf("the version restoring the approved text: %v", err)
+	}
+	if _, carried := ledger.PendingReview(artifactID); !carried {
+		t.Fatal("the version restoring the approved text carried no approval, so the second version faces no first carry")
+	}
+	if _, err := service.NamedVersion(joinedCtx, artifactID, "A second version of the same document", agent); !errors.Is(err, errApprovalCarriedTwice) {
+		t.Fatalf("the second version of the document in the same transaction = %v, want %v", err, errApprovalCarriedTwice)
+	}
+	// The upload route writes its version itself and carries the restore alone (the api
+	// package's storeArtifact calls CarryRestoredApproval), so that route's own guard call is
+	// what refuses it here.
+	if err := CarryRestoredApproval(joinedCtx, tx, service.events, artifactID, restored.Version.Number, "Context\n", nil, service.serverURL); !errors.Is(err, errApprovalCarriedTwice) {
+		t.Fatalf("the upload route's restore over the same document in the same transaction = %v, want %v", err, errApprovalCarriedTwice)
 	}
 }

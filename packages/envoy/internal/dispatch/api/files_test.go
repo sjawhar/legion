@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -251,9 +252,8 @@ func (h heldPut) Put(ctx context.Context, sha, mime string, body []byte) error {
 }
 
 // An upload writes its object before its transaction opens, so while the store takes the bytes
-// the issue's row is free: the transaction locks it for no key update, and every other writer
-// of the issue (a comment, an ask, a status change) would queue behind a store write nothing
-// bounds.
+// the issue's owner lock is free: the transaction takes it, and every other writer of the issue
+// (a comment, an ask, a status change) would queue behind a store write nothing bounds.
 func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	held := heldPut{Memory: filestest.NewMemory(), entered: make(chan struct{}), release: make(chan struct{})}
 	var releaseOnce sync.Once
@@ -302,8 +302,27 @@ func TestAnUploadHoldsNoIssueLockWhileTheStoreWrites(t *testing.T) {
 	case response := <-uploaded:
 		t.Fatalf("the upload answered without writing to the store: status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select key from issues where key = $1 for no key update nowait`, issue); err != nil {
-		t.Fatalf("lock the issue while its upload's bytes are in flight: %v", err)
+	// The probe tries the issue's owner lock without waiting, in a statement of its own, until it
+	// takes it: the store write stays parked until release() below, so what this asserts is that
+	// the lock is free at some moment of a window the upload does not end, and a pass of the
+	// server's own holding it for an instant - the settlement of the issue's seeded spec, its
+	// write advice - is not the upload holding it throughout. A lock this probe takes is released
+	// with the statement, since it runs on the pool outside a transaction (store.TryLockOwners).
+	var taken []store.Owner
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, err := store.TryLockOwners(context.Background(), database.Pool, store.IssueOwner(issue))
+		if err != nil {
+			t.Fatalf("try the issue's owner lock while its upload's bytes are in flight: %v", err)
+		}
+		taken = got
+		if len(taken) == 1 || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(taken) != 1 {
+		t.Fatalf("the issue's owner lock stayed held for the whole 10s its upload's bytes were in flight: taken %v", taken)
 	}
 	release()
 	if response := <-uploaded; response.Code != http.StatusCreated {

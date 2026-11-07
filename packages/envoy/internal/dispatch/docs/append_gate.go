@@ -101,13 +101,16 @@ const closeMargin = 2 * time.Second
 // close's commit lands, as it would have a moment earlier, and is settled once the issue reopens.
 // The prune checkpoint comes back with it, so the recovery a crashed prune owes
 // (PgVersioned.recoverPruneTx) costs a round trip only where one stands rather than one on every
-// append: normally the column is null and the append goes on from this read alone.
+// append: normally the column is null and the append goes on from this read alone. $3 is that
+// recovery's ceiling when one is being recovered, and null otherwise: the recovery's deletes of
+// the rows above it go on the transaction's write phase, so the read that follows it has to
+// leave those rows out itself.
 const appendGateStatement = `
 	select coalesce(max(version), 0), coalesce(min(version) <= $2, false),
 		(select (extract(epoch from clock_timestamp() - i.closed_at) * 1000000)::bigint
 			from artifacts a join issues i on i.key = a.issue_key where a.id = $1),
 		(select ceiling from doc_checkpoints where artifact_id = $1)
-	from doc_updates where artifact_id = $1`
+	from doc_updates where artifact_id = $1 and ($3::bigint is null or version <= $3)`
 
 // appendGateRead is what one appendGateStatement read says about a document: latest, its head
 // (0 for an empty history); intact, whether any stored row at or below the reading room's cursor
@@ -121,13 +124,30 @@ type appendGateRead struct {
 	pruneCeiling *int64
 }
 
+// after is the read as the writes the appending transaction has already queued to the document's
+// history leave it (pendingRoom): the head is the one its queued appends and its rebuild's seed
+// give, and a queued rebuild deleted every row this read saw, so nothing at or below a room's
+// cursor remains. A nil pending - a transaction that queues no write, or one whose first write
+// of this document this is - leaves the read as it was read.
+func (read appendGateRead) after(pending *pendingRoom) appendGateRead {
+	if pending == nil {
+		return read
+	}
+	read.latest = pending.head
+	if pending.rebuilt {
+		read.intact = false
+	}
+	return read
+}
+
 // readAppendGate is appendGateStatement for room against a room instance holding every version
 // through through, read through q inside the appending transaction, under the document's advisory
-// lock that transaction's session holds.
-func readAppendGate(ctx context.Context, q Queryer, room string, through int64) (appendGateRead, error) {
+// lock that transaction's session holds. ceiling bounds the rows it reads to those an interrupted
+// prune's queued recovery leaves, nil for a read of every stored row.
+func readAppendGate(ctx context.Context, q Queryer, room string, through int64, ceiling *int64) (appendGateRead, error) {
 	var read appendGateRead
 	var closedMicros *int64
-	if err := q.QueryRow(ctx, appendGateStatement, room, through).
+	if err := q.QueryRow(ctx, appendGateStatement, room, through, ceiling).
 		Scan(&read.latest, &read.intact, &closedMicros, &read.pruneCeiling); err != nil {
 		return appendGateRead{}, fmt.Errorf("read the document's head for the append gate: %w", err)
 	}

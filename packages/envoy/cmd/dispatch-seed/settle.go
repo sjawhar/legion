@@ -7,9 +7,9 @@ import (
 
 // settleOwedWork leaves the database in the state a settled system is in: nothing a Dispatch
 // server starts up and drains. The indexers the seed calls settle most of it as they run -
-// refs.IndexBlocks records the document's blocks at its latest version and refs.IndexItem clears
-// each item's owed_at and stores its body_sha256 - and this settles what is left, then proves the
-// invariant rather than trusting it.
+// refs.PlanBlocks's plan records the document's blocks at its latest version once the seed runs
+// it, and refs.IndexItem clears each item's owed_at and stores its body_sha256 - and this
+// settles what is left, then proves the invariant rather than trusting it.
 //
 // A server that drained owed work would rewrite the seeded rows: RunBlockIndexReconciliation
 // would reindex every document, RunTaskProgressReconciliation would count every issue again and
