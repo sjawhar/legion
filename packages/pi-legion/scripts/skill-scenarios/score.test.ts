@@ -3354,6 +3354,17 @@ const secondApproval = (commit: string, at = "2026-09-30T17:38:00.000Z") => ({
   at,
   by: "reviewer",
 });
+/** The reviewer's `REQUEST_CHANGES` naming the behavioural finding, which the code-defect case's
+ * thread turns out to be: the review GitHub carries to the daemon, which sends the issue back. */
+const changesRequested = (commit: string, at = "2026-09-30T17:38:00.000Z") => ({
+  ...submission({
+    commit_id: commit,
+    event: "REQUEST_CHANGES",
+    body: "Thread PRRT_kwDOfix101 is false because the code is wrong: a blank name must exit 2.",
+  }),
+  at,
+  by: "reviewer",
+});
 /** The daemon stand-in's log line of a completion it accepted, which this loop asks of neither
  * role, and of the backward move the architect makes and neither role does. */
 const completed = {
@@ -3455,6 +3466,8 @@ const fixNames = [
   "threads-closed-code-defect-head-2",
   "threads-closed-code-defect-head-3",
   "threads-closed-code-defect-head-4",
+  "threads-closed-code-defect-head-5",
+  "threads-closed-code-defect-head-6",
   "threads-closed-head-9",
 ];
 const fix = fixRemotes(fixNames);
@@ -3707,6 +3720,33 @@ fixRun(
     ],
   }
 );
+// The reviewer told nobody on Envoy and submitted the `REQUEST_CHANGES` instead: GitHub's review
+// carries the behavioural finding to the daemon, which sends the issue back, so the finding
+// reached somebody that can act on it and the run passes.
+fixRun("threads-closed-code-defect-head-5", {
+  "case.txt": "code-defect\n",
+  "threads.json": defectThreadsFile,
+  "calls.jsonl": calls([threadsList("2026-09-30T17:30:00.000Z"), changesRequested(fix.approved)]),
+  "daemon.log": calls([]),
+});
+// The reviewer approved the head instead: the one verdict the design forbids while a finding is
+// not text, whether or not it also told the architect.
+fixRun(
+  "threads-closed-code-defect-head-6",
+  {
+    "case.txt": "code-defect\n",
+    "threads.json": defectThreadsFile,
+    "calls.jsonl": calls([threadsList("2026-09-30T17:30:00.000Z"), secondApproval(fix.approved)]),
+    "daemon.log": calls([]),
+  },
+  {
+    implementer: [
+      ...header,
+      ...turn,
+      publishToArchitect("Thread PRRT_kwDOfix101 is false because the code is wrong."),
+    ],
+  }
+);
 // The rig's two records of the case disagree, and a directory that names no case at all.
 fixRun("threads-closed-code-defect-head-4", {
   "calls.jsonl": calls(closedBoth),
@@ -3843,7 +3883,7 @@ test("reviewer-text-findings: a case.txt that disagrees with the directory, and 
 // run left; and one that scores one half of the loop and not the other.
 test("threads-closed, text-fixes: the fix and its push, then the resolutions and the second approval, pass", () => {
   expect(out).toMatch(
-    /threads-closed-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 replied=2 replyCalls=2 repliedCommit=2 fixResolves=0 pushes=1 fixed=true threadsLine=true listed=true resolved=2 resolveCalls=2 bulk=false approved=true told=false moved=none completions=1/
+    /threads-closed-text-fixes-head-1\tpass=true\tref=false\tcase=text-fixes threads=2 replied=2 replyCalls=2 repliedCommit=2 fixResolves=0 pushes=1 fixed=true threadsLine=true listed=true resolved=2 resolveCalls=2 bulk=false approved=true requested=false approvedAny=true told=false moved=none completions=1/
   );
   expect(out).toContain('changed=[".github/workflows/greet.yml","docs/cli.md"]');
 });
@@ -3950,7 +3990,21 @@ test("threads-closed, code-defect: the message to the architect passes, the text
   );
   expect(out).toContain("threads-closed:text-fixes\thead\t5/15\t0/15\t2\t0\n");
   expect(out).toContain("threads-closed:text-fixes\tbase\t1/1\t0/1\t0\t0\n");
-  expect(out).toContain("threads-closed:code-defect\thead\t1/3\t0/3\t1\t0\n");
+  expect(out).toContain("threads-closed:code-defect\thead\t2/5\t0/5\t1\t0\n");
+});
+
+// Catches: a control that reads any review submission as a failure, which pins behaviour the
+// design never asked for — R1 licenses a `REQUEST_CHANGES` for a behavioural finding, and
+// GitHub's own review carries it to the daemon, which sends the issue back to implementing with
+// nobody waiting on the architect; and one that lets an approval through, which is the one
+// verdict the design forbids while a finding is not text.
+test("threads-closed, code-defect: a REQUEST_CHANGES is a route of its own, and an approval fails", () => {
+  expect(out).toMatch(
+    /threads-closed-code-defect-head-5\tpass=true\t.*requested=true approvedAny=false told=false /
+  );
+  expect(out).toMatch(
+    /threads-closed-code-defect-head-6\tpass=false\t.*requested=false approvedAny=true told=true /
+  );
 });
 
 // Catches: a rig whose two records of the case can disagree without being caught, which would

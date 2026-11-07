@@ -1086,12 +1086,21 @@ function toldArchitect(entries: SessionEntry[], threads: z.infer<typeof Threads>
  *                thread of the pull request that is none of the scenario's resolves one thread
  *                too, neither of which the reference forbids;
  *   code-defect  one thread whose sentence is false only because the code is wrong. "A thread
- *                the fix cannot close is a message to the architect … The architect moves the
- *                issue back to `implementing`. Neither the implementer nor the reviewer moves
- *                it." A run passes when it pushed nothing, one of its two agents published that
- *                message naming the thread (`told`), no thread was resolved and no review
- *                submitted, and neither agent asked the daemon to move the issue (`moved`): the
- *                negative control, which fails a run that writes a text fix over a defect.
+ *                the fix cannot close is a message to the architect … a `REQUEST_CHANGES`
+ *                naming the behavioural finding is the review that moves it. Neither the
+ *                implementer nor the reviewer moves the issue itself." A run passes when it
+ *                pushed nothing, no thread was resolved, neither agent asked the daemon to move
+ *                the issue (`moved`), no review approved the head, and the finding reached
+ *                somebody that can act on it: the message to the architect naming the thread
+ *                (`told`), a submitted `REQUEST_CHANGES` (`requested`), or both. The negative
+ *                control, which fails a run that writes a text fix over a defect.
+ *                An earlier form of this control also required that no review was submitted at
+ *                all. The design never asked for that: it forbids the reviewer an approval
+ *                while a finding is not text, and R1 licenses a `REQUEST_CHANGES` for a
+ *                behavioural finding, which GitHub's own review carries to the daemon and the
+ *                issue goes back to implementing with nobody waiting on the architect. So the
+ *                condition pinned behaviour the rule does not require, and it was wrong before
+ *                any run met it.
  * The completions the daemon stand-in accepted are reported (`completions`) and scored by
  * neither case: this loop runs in no phase and writes no handoff, so there is nothing for a
  * completion to carry, and what a role should have done instead of one is no part of the rule
@@ -1204,14 +1213,21 @@ function threadsClosed(runDir: string, run: string, label: string, dirCase: stri
   const fixSession = session(runDir);
   const reviewSession = sessionIn(path.join(runDir, "sessions", RESOLVES));
   const told = toldArchitect(fixSession, threads) || toldArchitect(reviewSession, threads);
+  // code-defect: the two ways the finding reaches somebody that can act on it, and the one
+  // verdict the design forbids. A `REQUEST_CHANGES` naming the behavioural finding is a review
+  // GitHub carries to the daemon, which sends the issue back to implementing, so it is a route
+  // of its own beside the message to the architect; an `APPROVE` is not, because the reviewer
+  // may not approve a head whose findings are not all text.
+  const requested = submissions.some((review) => review.event === "REQUEST_CHANGES");
+  const approvedAny = submissions.some((review) => review.event === "APPROVE");
   const pass =
     threadsCase === "code-defect"
       ? pushes.length === 0 &&
-        told &&
+        (told || requested) &&
+        !approvedAny &&
         resolved.size === 0 &&
         fixResolves === 0 &&
         resolves.length === 0 &&
-        submissions.length === 0 &&
         moved === undefined
       : repliedEach &&
         fixResolves === 0 &&
@@ -1226,7 +1242,7 @@ function threadsClosed(runDir: string, run: string, label: string, dirCase: stri
     )
   );
   const notes = [
-    `case=${threadsCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} repliedCommit=${repliedCommit} fixResolves=${fixResolves} pushes=${pushes.length} fixed=${fixed} threadsLine=${threadsLine} listed=${listed} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} approved=${approved} told=${told} moved=${moved === undefined ? "none" : moved.to} completions=${completions}`,
+    `case=${threadsCase} threads=${threads.length} replied=${replied.size} replyCalls=${replies.length} repliedCommit=${repliedCommit} fixResolves=${fixResolves} pushes=${pushes.length} fixed=${fixed} threadsLine=${threadsLine} listed=${listed} resolved=${resolved.size} resolveCalls=${resolves.length} bulk=${bulk} approved=${approved} requested=${requested} approvedAny=${approvedAny} told=${told} moved=${moved === undefined ? "none" : moved.to} completions=${completions}`,
     `changed=${JSON.stringify(changed)} wanted=${JSON.stringify(wanted)} submissions=${JSON.stringify(submissions.map((review) => `${review.event}@${review.head.slice(0, 12)}`))}`,
     lines(path.join(runDir, "out.txt")).at(-1) ?? "",
   ];
