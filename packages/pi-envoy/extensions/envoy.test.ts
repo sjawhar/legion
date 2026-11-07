@@ -19,6 +19,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -76,6 +77,7 @@ import { z } from "zod";
 import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { REPLAY_DELIVERED_ENTRY } from "../src/missed-messages";
+import { SHELL_OUTPUT_MAX } from "../src/typed-shell";
 import {
   type CommandContext,
   createStandInHost,
@@ -459,10 +461,11 @@ afterEach(async () => {
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
-  // Both are read when an extension instance is created, and a row aborted at Bun's own timeout
-  // never runs its `finally`, so a row that sets either must not decide a later row's timings.
+  // Each is read when an extension instance is created, and a row aborted at Bun's own timeout
+  // never runs its `finally`, so a row that sets one must not decide a later row's timings.
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   delete process.env.ENVOY_SUBSCRIBE_FLUSH_TIMEOUT_MS;
+  delete process.env.ENVOY_SHELL_COMMAND_LIMIT_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
   natsState.closedNames.length = 0;
@@ -785,6 +788,11 @@ async function bootDirectSession(
     readonly idle?: () => boolean;
     /** The host's `ctx.getContextUsage`, which a host that predates it lacks. */
     readonly contextUsage?: () => ContextUsage | undefined;
+    /** The session's working directory, which a person's `!command` runs in; the fixture's own
+     *  `/tmp/envoy-omp-test`, which is no real directory, by default. */
+    readonly cwd?: string;
+    /** The host's `ctx.runEphemeralTurn`, which answers a BTW; a context without it refuses one. */
+    readonly sideTurn?: (prompt: string) => string;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -895,6 +903,12 @@ async function bootDirectSession(
     ...base,
     ...(options.idle !== undefined && { isIdle: options.idle }),
     ...(options.contextUsage !== undefined && { getContextUsage: options.contextUsage }),
+    ...(options.cwd !== undefined && { cwd: options.cwd }),
+    ...(options.sideTurn !== undefined && {
+      runEphemeralTurn: async ({ promptText }: { readonly promptText: string }) => ({
+        replyText: options.sideTurn?.(promptText) ?? "",
+      }),
+    }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -12637,6 +12651,301 @@ console.log(JSON.stringify(args));
       });
     });
 
+    // A person's `!command` (R4 of dispatch://INFRA-812). The host is never handed the line: the
+    // session runs the rest of it under `/bin/sh -c` in its own working directory, and what it
+    // printed goes three ways - the live view's conversation, the person's message on Dispatch,
+    // and the agent's transcript for its next turn.
+    describe("a person's shell command", () => {
+      /** The working directories these rows ran their commands in. */
+      const workDirectories: string[] = [];
+      afterEach(() => {
+        for (const directory of workDirectories.splice(0)) {
+          rmSync(directory, { recursive: true, force: true });
+        }
+      });
+
+      /** The user messages this session's live stream carried. */
+      const streamFrames = () =>
+        natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
+
+      /** What the session recorded in its file for the frames it took: a message taken with no
+       *  turn awaited is recorded though the host wrote nothing, which is the whole difference. */
+      const ledgerRecords = (entries: readonly { readonly customType?: string }[]) =>
+        JSON.stringify(entries.filter((entry) => entry.customType === REPLAY_DELIVERED_ENTRY));
+
+      /**
+       * Boots ses_delivery on a host that runs typed input, in a working directory of its own and
+       * with a viewer watching its live stream. The limit a command is stopped after is read when
+       * the extension instance is made, so it is set before the boot; `afterEach` clears it.
+       */
+      const bootShellSession = async (
+        query: string,
+        options: {
+          readonly accept?: (count: number) => AcceptAnswer;
+          readonly limitMs?: number;
+          readonly sideTurn?: (prompt: string) => string;
+        } = {}
+      ) => {
+        const work = mkdtempSync(join(tmpdir(), "envoy-shell-case-"));
+        workDirectories.push(work);
+        if (options.limitMs !== undefined) {
+          process.env.ENVOY_SHELL_COMMAND_LIMIT_MS = String(options.limitMs);
+        }
+        const session = await bootDirectSession(query, {
+          cwd: work,
+          sendUserInput: async () => ({ handled: "prompt" }),
+          ...(options.accept !== undefined && { accept: options.accept }),
+          ...(options.sideTurn !== undefined && { sideTurn: options.sideTurn }),
+        });
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+        return { ...session, work };
+      };
+
+      test("runs the line itself: the host is never handed it, and all three answers carry it", async () => {
+        const { agent, delivered, fixture, inputs, replied, replies, sends } =
+          await bootShellSession("shell-command-ran", {
+            accept: () => ({ accepted: true, body: "!printf hi" }),
+          });
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-ran"));
+        await delivered(1);
+        await replied(1);
+
+        // Nothing of the line reached the host as input, and no prompt carries it.
+        expect(inputs).toEqual([]);
+        expect(fixture.userMessages).toEqual([]);
+
+        // The live view: one user message, keyed on the Dispatch message it answers.
+        const frames = streamFrames();
+        expect(frames).toHaveLength(1);
+        expect(frames[0]?.message.role).toBe("user");
+        expect(frames[0]?.message.dispatchMessageId).toBe(DIRECT_MESSAGE_ID);
+        expect(frames[0]?.message.id).toEndWith(`:${DIRECT_MESSAGE_ID}`);
+        expect(frames[0]?.message.parts).toEqual([{ text: "!printf hi\n\nhi", type: "text" }]);
+
+        // The agent: read at its next turn, with no turn started for it.
+        expect(sends).toEqual([
+          {
+            content: expect.stringContaining("!printf hi\n\nhi"),
+            options: { deliverAs: "nextTurn", triggerTurn: false },
+          },
+        ]);
+
+        // The person's message: its reply.
+        expect(replies).toEqual([
+          {
+            body: {
+              actor: { id: "ses_delivery", kind: "session" },
+              attempt: 1,
+              body: "!printf hi\n\nhi",
+            },
+            path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+          },
+        ]);
+
+        // Taken, with no turn awaited: the host wrote no message for the line, and the record is
+        // there all the same.
+        await until(
+          () => ledgerRecords(fixture.entries).includes("dispatch-shell-command-ran"),
+          "the shell command's message to be recorded as taken"
+        );
+      }, 20_000);
+
+      test("runs it in the directory the session's context names", async () => {
+        const { agent, delivered, replied, replies, work } = await bootShellSession(
+          "shell-command-cwd",
+          { accept: () => ({ accepted: true, body: "!pwd -P" }) }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-cwd"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toMatchObject({ body: `!pwd -P\n\n${realpathSync(work)}` });
+      }, 20_000);
+
+      test("answers a command that printed nothing", async () => {
+        const { agent, delivered, replied, replies } = await bootShellSession(
+          "shell-command-silent",
+          { accept: () => ({ accepted: true, body: "!true" }) }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-silent"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "!true\n\nThe command printed nothing.",
+        });
+      }, 20_000);
+
+      test("names a failing command's status in the frame and in the reply", async () => {
+        const { agent, delivered, replied, replies } = await bootShellSession(
+          "shell-command-failed",
+          { accept: () => ({ accepted: true, body: "!exit 3" }) }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-failed"));
+        await delivered(1);
+        await replied(1);
+
+        const answer =
+          "!exit 3\n\nThe command printed nothing.\n\nThe command ended with exit status 3.";
+        expect(streamFrames()[0]?.message.parts).toEqual([{ text: answer, type: "text" }]);
+        expect(replies[0]?.body).toMatchObject({ body: answer });
+      }, 20_000);
+
+      test("stops a command past its limit and says when, keeping what it printed", async () => {
+        const { agent, delivered, replied, replies } = await bootShellSession(
+          "shell-command-stopped",
+          { accept: () => ({ accepted: true, body: "!printf early; sleep 600" }), limitMs: 1_000 }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-stopped"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toMatchObject({
+          body: "!printf early; sleep 600\n\nearly\n\nThe command was stopped after 1000 ms.",
+        });
+      }, 20_000);
+
+      // One command runs for a session at a time. The pump hands one frame at a time, so the
+      // second message is taken while the first command still runs.
+      test("answers a second command naming the one still running", async () => {
+        const { agent, replied, replies } = await bootShellSession("shell-command-busy", {
+          accept: (count) => ({ accepted: true, body: count === 1 ? "!sleep 600" : "!printf hi" }),
+          limitMs: 1_000,
+        });
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-busy-1"));
+        agent.push(
+          directDispatchEnvelope("steer", "shell-command-busy-2", { messageID: NEXT_MESSAGE_ID })
+        );
+        await replied(2);
+
+        expect(replies.find((reply) => reply.path.includes(NEXT_MESSAGE_ID))?.body).toMatchObject({
+          body: "!printf hi\n\nThe command was not run: this session is still running !sleep 600.",
+        });
+        expect(replies.find((reply) => reply.path.includes(DIRECT_MESSAGE_ID))?.body).toMatchObject(
+          {
+            body: "!sleep 600\n\nThe command printed nothing.\n\nThe command was stopped after 1000 ms.",
+          }
+        );
+      }, 20_000);
+
+      test("cuts output past the bound and says so", async () => {
+        const { agent, delivered, replied, replies } = await bootShellSession("shell-command-cut", {
+          accept: () => ({ accepted: true, body: "!printf 'a%.0s' $(seq 1 20000)" }),
+        });
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-cut"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toMatchObject({
+          body: expect.stringMatching(
+            new RegExp(
+              `^!printf 'a%\\.0s' \\$\\(seq 1 20000\\)\\n\\na{${SHELL_OUTPUT_MAX}}\\n\\nThe output was cut at ${SHELL_OUTPUT_MAX} characters\\.$`
+            )
+          ),
+        });
+      }, 30_000);
+
+      // The mark is one `!`, and the rest is the command whatever it starts with.
+      test("runs the rest of the line, and answers with the shell's own failure", async () => {
+        const { agent, delivered, replied, replies, sends } = await bootShellSession(
+          "shell-command-double-mark",
+          { accept: () => ({ accepted: true, body: "!!printf hi" }) }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-double-mark"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toMatchObject({
+          body: expect.stringMatching(
+            /^!!printf hi\n\n.*!printf.*\n\nThe command ended with exit status 127\.$/s
+          ),
+        });
+        // Nothing is hidden from the model: it reads the same report.
+        expect(sends[0]?.content).toContain("The command ended with exit status 127.");
+      }, 20_000);
+
+      test("a BTW is answered by the model and runs no command", async () => {
+        const { agent, replied, replies, sends } = await bootShellSession("shell-command-btw", {
+          sideTurn: () => "The model's answer.",
+        });
+
+        agent.push(directDispatchEnvelope("btw", "shell-command-btw", { body: "!printf hi" }));
+        await replied(1);
+
+        expect(replies[0]?.body).toMatchObject({ body: "The model's answer." });
+        expect(streamFrames()).toEqual([]);
+        expect(sends).toEqual([]);
+      }, 20_000);
+
+      test("a broadcast keeps its card and runs no command", async () => {
+        const { agent, delivered, replies, sends } =
+          await bootShellSession("shell-command-broadcast");
+
+        agent.push(
+          directDispatchEnvelope("steer", "shell-command-broadcast", {
+            body: "!printf hi",
+            broadcastID: "66666666-6666-4666-8666-666666666666",
+          })
+        );
+        await delivered(1);
+
+        expect(sends.map((send) => send.options)).not.toContainEqual({
+          deliverAs: "nextTurn",
+          triggerTurn: false,
+        });
+        expect(streamFrames()).toEqual([]);
+        expect(replies).toEqual([]);
+      }, 20_000);
+
+      // The plugin's one input handler passes on every line whose source is not `extension`, so a
+      // line typed at the session's own terminal keeps the host's own shell mode.
+      test("passes on a line typed at the session's own terminal", async () => {
+        const { context, fixture } = await bootShellSession("shell-command-interactive");
+        const input = fixture.handlers.get("input");
+        if (input === undefined) throw new Error("no input handler was registered");
+
+        expect(
+          await input({ images: [], source: "interactive", text: "!printf hi" }, context)
+        ).toBeUndefined();
+        expect(streamFrames()).toEqual([]);
+        expect(fixture.deliveries).toEqual([]);
+      }, 20_000);
+
+      // The negative control: the same line without the mark is a prompt, and runs nothing.
+      test("runs nothing for a line that does not start with the mark", async () => {
+        const { agent, delivered, inputs, replies, sends } = await bootShellSession(
+          "shell-command-no-mark",
+          { accept: () => ({ accepted: true, body: "printf hi" }) }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "shell-command-no-mark"));
+        await delivered(1);
+
+        expect(inputs).toEqual([{ options: { tag: DIRECT_MESSAGE_ID }, text: "printf hi" }]);
+        expect(sends.map((send) => send.options)).not.toContainEqual({
+          deliverAs: "nextTurn",
+          triggerTurn: false,
+        });
+        expect(streamFrames()).toEqual([]);
+        expect(replies).toEqual([]);
+      }, 20_000);
+    });
+
     // A host without `pi.sendUserInput` would hand a command to the model as words, so the
     // session refuses it with a reply naming its own version; any other text is sent as before.
     test("refuses a slash command on a host that cannot run typed input, naming the host", async () => {
@@ -15122,23 +15431,34 @@ console.log(JSON.stringify(args));
     ]);
   });
 
+  // The machine a session reports is `ENVOY_MACHINE_ID` where the deploy sets one, and the
+  // kernel's hostname otherwise (`machineID`). Every Legion pod exports it, so this case clears
+  // it for itself and restores whatever the process had: what it asserts then holds on any
+  // machine, and the pod's own environment is left as it was found.
   test("reports the active session directory through envoy_whoami", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
-    const fixture = createPi();
-    const context = sessionContext("ses_whoami");
+    const machine = process.env.ENVOY_MACHINE_ID;
+    delete process.env.ENVOY_MACHINE_ID;
+    try {
+      const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
+      const fixture = createPi();
+      const context = sessionContext("ses_whoami");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, context);
-    const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
-    if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
+      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {}, undefined, undefined, context);
+      const result = await whoami.execute("", {}, undefined, undefined, context);
 
-    expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
-      session_id: "ses_whoami",
-      machine_id: hostname(),
-      dir: "/tmp/envoy-omp-test",
-    });
+      expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
+        session_id: "ses_whoami",
+        machine_id: hostname(),
+        dir: "/tmp/envoy-omp-test",
+      });
+    } finally {
+      if (machine === undefined) delete process.env.ENVOY_MACHINE_ID;
+      else process.env.ENVOY_MACHINE_ID = machine;
+    }
   });
 
   test("registers /whoami and copies the current session ID to the clipboard", async () => {

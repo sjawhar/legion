@@ -96,25 +96,31 @@ export function handledAttempts(entries: readonly unknown[]): Set<string> {
 }
 
 /** What became of a person's text sent to `pi.sendUserInput`: the host's answer, the error it
- *  failed with, or, on a host without the method, that host's version. */
+ *  failed with, on a host without the method that host's version, or, for a line the host is
+ *  never handed, the report of the `!command` the session ran for them instead
+ *  (`src/typed-shell.ts`). */
 export type TypedInputOutcome =
   | UserInputResult
   | { readonly error: string }
-  | { readonly hostVersion: string };
+  | { readonly hostVersion: string }
+  | { readonly shell: string };
 
 /**
  * What the session answers on Dispatch for a person's text, capped to a Dispatch body, or
  * undefined when there is nothing to say: a prompt, skill or command that printed nothing, and, on
  * a host without `pi.sendUserInput`, text that is not a command, which the caller sends as before.
  * What a command printed is the answer whether or not it then submitted a prompt
- * (`/force:<tool> <prompt>` prints its confirmation first). The attempt is already the session's
- * user turn, so the answer is a reply rather than an error, and the conversation shows it.
+ * (`/force:<tool> <prompt>` prints its confirmation first). A `!command` is always answered, one
+ * that printed nothing included: its report is the answer whole, since it already names the
+ * command, what it printed and how it ended. The attempt is already the session's user turn, so
+ * the answer is a reply rather than an error, and the conversation shows it.
  */
 export function typedInputReply(text: string, outcome: TypedInputOutcome): string | undefined {
   const typed = /^\/\S+/.exec(text)?.[0];
   const command = typed ?? "This message";
   let reply: string | undefined;
-  if ("error" in outcome) reply = `${command} was not run: ${outcome.error}`;
+  if ("shell" in outcome) reply = outcome.shell;
+  else if ("error" in outcome) reply = `${command} was not run: ${outcome.error}`;
   else if ("hostVersion" in outcome) {
     if (typed !== undefined) {
       reply = `${typed} was not run: this session's Oh My Pi ${outcome.hostVersion} cannot run commands sent from Dispatch; nothing was sent.`;

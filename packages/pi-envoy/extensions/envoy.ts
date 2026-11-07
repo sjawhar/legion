@@ -198,6 +198,13 @@ import { ServerClock } from "../src/server-clock";
 import { type CarriedAnswers, withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
+import {
+  runShellCommand,
+  shellCommandBusyReport,
+  shellCommandFrom,
+  shellCommandMessage,
+  shellCommandReport,
+} from "../src/typed-shell";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
 import { type AskGateRegistration, registerAskGate } from "./askgate/askgate";
 import {
@@ -1245,6 +1252,93 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  // How long a person's `!command` may run in this session before it is stopped, with what it
+  // printed kept. Read inline, as this file's other knobs are.
+  const SHELL_COMMAND_LIMIT_MS = Number(process.env.ENVOY_SHELL_COMMAND_LIMIT_MS ?? "") || 120_000;
+
+  // The `!command` this session runs now, if one runs. One runs for a session at a time, so a
+  // second is answered naming this one rather than queued behind it.
+  let runningShellCommand: string | undefined;
+
+  // Runs a person's `!command` for them (`../src/typed-shell`). The host is handed nothing: the
+  // session runs the rest of the line under `/bin/sh -c` in its own working directory, and what it
+  // printed goes three ways - the live view's conversation, as the person's own user message, since
+  // they ran it and the host wrote nothing; their message on Dispatch, as its reply, which every
+  // such message gets; and the agent's transcript, which it reads at its next turn with no turn
+  // started for it. The command runs on this detached promise and never inside the queued delivery
+  // task, which takes a pass deadline a two-minute command would blow, holding every other Dispatch
+  // message for the session behind it.
+  const runShellCommandTurn = (
+    delivery: DispatchDelivery,
+    replySessionID: string,
+    turn: AcceptedUserTurn,
+    command: string,
+    taken: () => Promise<void>
+  ): void => {
+    // The host is handed nothing, so this message's pictures are released, as every other
+    // non-submitted typed input releases them.
+    typedPictures.withdraw(turn.messageId);
+    const running = runningShellCommand;
+    const session = sessionID;
+    const cwd = activeSessionContext?.cwd ?? process.cwd();
+    if (running === undefined) runningShellCommand = command;
+    void Promise.resolve()
+      .then(async () => {
+        if (running !== undefined) return shellCommandBusyReport(command, running);
+        try {
+          const result = await runShellCommand(command, { cwd, limitMs: SHELL_COMMAND_LIMIT_MS });
+          const report = shellCommandReport(result);
+          // The frame carries the Dispatch message id, so the live view re-keys it over the
+          // person's Dispatch turn instead of drawing the line twice.
+          if (session !== "") {
+            agentStream.record(
+              agentStreamFramesSubject(session),
+              {
+                content: [{ text: report, type: "text" }],
+                role: "user",
+                tag: turn.messageId,
+                timestamp: Date.now(),
+              },
+              false,
+              turn.messageId
+            );
+          }
+          pi.sendMessage(
+            {
+              content: shellCommandMessage(report),
+              customType: "envoy-message",
+              details: LOCAL_ENVOY_NOTICE,
+              display: true,
+            },
+            { deliverAs: "nextTurn", triggerTurn: false }
+          );
+          return report;
+        } finally {
+          runningShellCommand = undefined;
+        }
+      })
+      .then(async (report) => {
+        const reply = typedInputReply(turn.body, { shell: report });
+        try {
+          if (reply !== undefined) {
+            await postDispatchReply(delivery, { body: reply }, replySessionID);
+          }
+        } finally {
+          // The host writes nothing for this line, so no turn is awaited: the ledger records the
+          // message here and its claim settles. It is recorded whether or not its reply reached
+          // Dispatch, since the command has run and a redelivery would run it again.
+          await taken();
+        }
+      })
+      .catch((error: unknown) => {
+        logger.warn("envoy: a person's shell command from Dispatch was not answered", {
+          attempt: delivery.attempt,
+          error: messageFor(error),
+          messageID: delivery.id,
+        });
+      });
+  };
+
   // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
   // command, a skill, a template, or a prompt. Never awaited here: on an idle session the host
   // answers only once the run it starts ends, and the pump that called `deliver` must keep taking
@@ -1253,14 +1347,28 @@ export default function envoyExtension(pi: PiApi): void {
   // its tag before the send, and dropped once the host answers that the input submitted no message
   // (a command, a terminal-only built-in, a refusal, a failure): no message will carry its tag, so
   // the frame is done with then, and otherwise once the host writes the message that carries it.
+  //
+  // A body whose first character is `!` is read here, before it reaches the host, and only here:
+  // the plugin's own `input` handler passes on every line whose source is not `extension`, so a
+  // line typed at the session's own terminal keeps the host's shell mode. The session runs that
+  // line itself (`runShellCommandTurn`) and the host is handed nothing, so no turn is awaited for
+  // it. A BTW never reaches this path, and a broadcast is no user turn at all
+  // (`isUserTurnCandidate`), so neither runs a command.
   const runTypedInput = (
     sendUserInput: NonNullable<PiApi["sendUserInput"]>,
     delivery: DispatchDelivery,
     replySessionID: string,
     turn: AcceptedUserTurn,
     content: string | readonly ContentBlock[],
-    pictureAddresses: readonly string[]
+    pictureAddresses: readonly string[],
+    ledger: { readonly awaitTurn: () => void; readonly taken: () => Promise<void> }
   ): void => {
+    const command = shellCommandFrom(turn.body);
+    if (command !== undefined) {
+      runShellCommandTurn(delivery, replySessionID, turn, command, ledger.taken);
+      return;
+    }
+    ledger.awaitTurn();
     const images =
       typeof content === "string"
         ? []
@@ -1647,14 +1755,20 @@ export default function envoyExtension(pi: PiApi): void {
               });
             }
           } else {
-            unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
+            // The wait for the host's own message of this turn is armed only for a line the host
+            // is handed: a `!command` is the session's to run, and nothing is written for it.
             runTypedInput(
               sendUserInput,
               accepted.delivery,
               acceptedSessionID,
               turn,
               delivery.content,
-              delivery.shown
+              delivery.shown,
+              {
+                awaitTurn: () =>
+                  unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" }),
+                taken,
+              }
             );
           }
         }

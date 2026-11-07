@@ -211,6 +211,30 @@ reply names the host's Oh My Pi version and says nothing was sent; any other bod
 pick in its header is the person's own Send of `/model <provider/id>` or `/effort <level>`, which
 runs the host's built-in, and what the built-in prints is the reply the page shows as its answer.
 
+A body whose first character is `!` is no prompt: the session runs the rest of it itself
+(`src/typed-shell.ts`), read in `runTypedInput` before the body reaches `sendUserInput` and only
+there, so a line typed at the session's own terminal keeps the host's shell mode (the plugin's one
+`input` handler passes on every line whose source is not `extension`). The mark is one `!` and the
+rest is the command whatever it starts with, so `!!printf hi` runs `!printf hi` and is answered
+with that shell's own failure. The command runs on the same detached promise, never inside the
+queued delivery task, whose pass deadline a two-minute command would blow while holding every
+other Dispatch message for the session behind it: `/bin/sh -c`, in the directory
+`SessionContext.cwd` names, with the session's environment, in a process group of its own, both
+streams to a file in a private directory rather than a pipe, stopped after
+`ENVOY_SHELL_COMMAND_LIMIT_MS` (default 120000) with what it printed kept. One command runs for a
+session at a time, and a `!` that arrives while one runs is answered naming the command still
+running. What it printed goes three ways, each cut at 8,000 characters with a line saying it was
+cut: one user message frame through `AgentStreamPublisher.record` carrying the person's line, the
+output and the status of a command that failed or was stopped, which is a user message because the
+person ran it and the host wrote nothing, and which carries the Dispatch message id so the view
+re-keys it over the person's turn instead of drawing it twice; the reply on Dispatch, which every
+such message gets, one whose command printed nothing included; and the agent's transcript, through
+`pi.sendMessage` with `deliverAs: "nextTurn"` and `triggerTurn: false`, so it reads them at its
+next turn and no turn starts for them. The message is marked taken with no turn awaited, since the
+host wrote nothing for that line, and its pictures are withdrawn as the non-submitted path
+withdraws them. A BTW never reaches this path, and a broadcast is no user turn at all
+(`isUserTurnCandidate`), so neither runs a command.
+
 The stream tags the person's message with its Dispatch id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`,
