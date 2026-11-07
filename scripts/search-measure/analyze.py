@@ -70,9 +70,10 @@ def main():
     parser.add_argument("--serial", default="", help="a one-request-at-a-time run's rows")
     arguments = parser.parse_args()
 
-    rows = [row for row in read(arguments.rows) if "rank" in row]
-    refused = [row for row in read(arguments.rows) if "refused" in row]
-    errors = [row for row in read(arguments.rows) if "error" in row]
+    measured = read(arguments.rows)
+    rows = [row for row in measured if "rank" in row]
+    refused = [row for row in measured if "refused" in row]
+    errors = [row for row in measured if "error" in row]
     print(f"{len(rows)} runs, {len(refused)} cases refused, {len(errors)} errored")
     if errors:
         print("  errors: " + str(Counter(row["error"][:60] for row in errors).most_common(3)))
@@ -91,10 +92,11 @@ def main():
         for depth in DEFECT_DEPTHS:
             document = sum(1 for row in kind_one if hit(row.get("doc_rank"), depth))
             issue = sum(1 for row in kind_one if hit(row.get("rank"), depth))
+            both = defect(kind_one, depth)
             print(f"  @{depth:<3} document {document:>4} ({document / len(kind_one):6.1%})"
                   f"  issue {issue:>4} ({issue / len(kind_one):6.1%})"
-                  f"  document but not the issue {defect(kind_one, depth):>4}"
-                  f" ({defect(kind_one, depth) / len(kind_one):6.1%})")
+                  f"  document but not the issue {both:>4}"
+                  f" ({both / len(kind_one):6.1%})")
 
         absent = [row for row in kind_one if row["rank"] is None]
         reachable = [row for row in absent if row.get("any_item_of_issue_rank")]
@@ -145,8 +147,8 @@ def check(rows):
                                      "ceiling", 0.0, len(kind_rows))
     if missed:
         print("\n== this run does not pass ==")
-        for line_out in missed:
-            print(f"  {line_out}")
+        for line in missed:
+            print(f"  {line}")
         return 1
     print("\n  every floor held.")
     return 0
@@ -219,12 +221,12 @@ def hit(rank, depth):
 def latency(rows, label):
     print(f"\n== latency: {label} ==")
     for column in ("took_ms", "wall_ms"):
-        line(rows, column, "every case")
+        latency_line(rows, column, "every case")
     for kind in sorted(KIND_NAME):
-        line([row for row in rows if row["kind"] == kind], "took_ms", f"kind {kind} only")
+        latency_line([row for row in rows if row["kind"] == kind], "took_ms", f"kind {kind} only")
 
 
-def line(rows, column, label):
+def latency_line(rows, column, label):
     values = sorted(row[column] for row in rows if row.get(column) is not None)
     if not values:
         return

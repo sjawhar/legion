@@ -21,6 +21,25 @@ type newIssueSettings struct {
 	Session string `json:"session"`
 }
 
+// newIssueSettingsFrom trims the two settings and answers them with the name of the first field
+// the bar could not use: "label" where the label is longer than one an issue may carry, "session"
+// where the session id names no route, and "" where both are usable. The first problem wins, as
+// each boundary refused on its own before. Both trust boundaries check here - the deployment's
+// environment at boot (NewDeps) and the test hook's request body (setNewIssueSettings) - and each
+// states its own refusal, because a startup error and a 400 are read by different people.
+func newIssueSettingsFrom(label, session string) (newIssueSettings, string) {
+	set := newIssueSettings{Label: strings.TrimSpace(label), Session: strings.TrimSpace(session)}
+	if itemblocks.Units16(set.Label) > maxIssueLabel16 {
+		return set, "label"
+	}
+	if set.Session != "" {
+		if _, err := model.ParseRoute("session:" + set.Session); err != nil {
+			return set, "session"
+		}
+	}
+	return set, ""
+}
+
 // configuredNewIssue is what the two settings stand at now: what the test hook last set, else
 // what the deployment configured.
 func (s *server) configuredNewIssue() newIssueSettings {
@@ -48,26 +67,21 @@ func (s *server) setNewIssueSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	var input struct {
-		Label   string `json:"label"`
-		Session string `json:"session"`
-	}
+	var input newIssueSettings
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	set := newIssueSettings{Label: strings.TrimSpace(input.Label), Session: strings.TrimSpace(input.Session)}
-	if itemblocks.Units16(set.Label) > maxIssueLabel16 {
+	set, problem := newIssueSettingsFrom(input.Label, input.Session)
+	switch problem {
+	case "label":
 		writeError(w, "INVALID_BODY", http.StatusBadRequest,
 			"label must be a label an issue may carry, or empty for none")
 		return
-	}
-	if set.Session != "" {
-		if _, err := model.ParseRoute("session:" + set.Session); err != nil {
-			writeError(w, "INVALID_BODY", http.StatusBadRequest,
-				"session must be a session id, or empty for no conversation")
-			return
-		}
+	case "session":
+		writeError(w, "INVALID_BODY", http.StatusBadRequest,
+			"session must be a session id, or empty for no conversation")
+		return
 	}
 	s.newIssueOverride.Store(&set)
 	WriteJSON(w, http.StatusOK, set)

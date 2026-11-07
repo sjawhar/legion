@@ -143,8 +143,9 @@ def _join(paragraph):
         collapsed.append(joined[index])
         kept.append(positions[index])
         index += 1
-    text = "".join(collapsed).strip()
-    offset = len("".join(collapsed)) - len("".join(collapsed).lstrip())
+    flat = "".join(collapsed)
+    text = flat.strip()
+    offset = len(flat) - len(flat.lstrip())
     return text, kept[offset : offset + len(text)]
 
 

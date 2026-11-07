@@ -692,7 +692,10 @@ totals as (
 // otherwise. broaden is empty for the query as typed, which is what every search runs first and
 // what nearly every search runs alone; it holds the rarest words of a query that matched nothing
 // (searchRarestWords) on the one second run such a query is given, and the statement then
-// searches for those words alone (searchQOpener).
+// searches for those words alone (searchQOpener). excluded is the -word terms the statement ANDs
+// onto that OR (readSearchQuery, excludedWords), set with broaden and empty whenever broaden is:
+// the query as typed needs none of it, because websearch_to_tsquery is already reading each
+// -word in $1 itself.
 type searchParameters struct {
 	text          string
 	project       string
@@ -704,6 +707,7 @@ type searchParameters struct {
 	offset        int
 	ownKeys       []string
 	broaden       []string
+	excluded      string
 }
 
 // numberScope is the project a bare issue number names: the project filter when the request
@@ -837,27 +841,17 @@ func (s *server) searchOwnIssueKeys(ctx context.Context, q, scope string) ([]str
 	if key != "" {
 		return []string{key}, nil
 	}
-	keys := []string{}
 	if number == 0 {
-		return keys, nil
+		return []string{}, nil
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx,
 		`select key from issues where number = $1 and ($2 = '' or project_key = $2) order by project_key`, number, scope)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var found string
-		if err := rows.Scan(&found); err != nil {
-			return nil, err
-		}
-		keys = append(keys, found)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return keys, nil
+	// CollectRows answers a non-nil slice when there are no rows, which is what the statement's
+	// $11::text[] needs: '{}' rather than NULL.
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // searchQueryArguments binds searchQuery's parameters, in the order its own comment names them:
@@ -870,17 +864,14 @@ func searchQueryArguments(parameters searchParameters) []any {
 		keys = []string{}
 	}
 	// Both of the fallback's own values are empty for the query as typed, which is what has the
-	// statement read $1 as the whole of the query (searchQOpener): the words a person excluded
-	// narrow the fallback's OR alone, since websearch_to_tsquery is already reading their -word
-	// in $1 itself.
-	broaden, excluded := "", ""
+	// statement read $1 as the whole of the query (searchQOpener).
+	broaden := ""
 	if len(parameters.broaden) > 0 {
 		broaden = strings.Join(parameters.broaden, " or ")
-		excluded = readSearchQuery(parameters.text).excludedWords()
 	}
 	return []any{parameters.text, parameters.project, parameters.limit, firstTerm(parameters.text), headlineOptions,
 		parameters.offset, contracts.SearchKindDepth, searchFusionK,
-		broaden, excluded, keys, parameters.status, parameters.author, parameters.since}
+		broaden, parameters.excluded, keys, parameters.status, parameters.author, parameters.since}
 }
 
 // searchMeaningQueryArguments binds searchQueryMeaning's: searchQueryArguments' first eight, the
@@ -1075,12 +1066,14 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
-// runSearch is the search handler's own entry point. The numnode check runs here, before anything
-// else - including before the one model-service call this function ever makes - so a
-// stopword-only or operator-only query never pays for an embedding it would throw away; a query
-// that names an issue by key answers that issue even when it holds no lexeme any item matches,
-// which is why the keys are resolved beside that check rather than after it. It tries meaning
-// search first when an embedder is configured, falling back to keyword-only (runFusedSearchQuery)
+// runSearch is the search handler's own entry point. The keys a query names are resolved here
+// and the numnode check runs behind them, both before anything else - including before the one
+// model-service call this function ever makes - so a stopword-only or operator-only query never
+// pays for an embedding it would throw away. A query that names an issue by key answers that
+// issue even when it holds no lexeme any item matches, so numnode cannot refuse it and its round
+// trip is not made: the key forms need no statement at all (searchOwnIssueKeys), and typing a
+// key is what the bar does on every keystroke. It tries meaning search first when an embedder is
+// configured, falling back to keyword-only (runFusedSearchQuery)
 // only when the query's own embedding could not be had - never when the meaning query itself then
 // fails, which is a real error the caller should see as a 500, not something to paper over as a
 // degraded answer.
@@ -1093,18 +1086,20 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 // The query's embedding is taken once and both runs share it, so a broadened search still costs
 // one model-service call.
 func (s *server) runSearch(ctx context.Context, parameters searchParameters) (model.SearchResponse, error) {
-	var nodes int
-	if err := s.deps.Store.Pool.QueryRow(ctx,
-		"select numnode(websearch_to_tsquery('english', $1))", parameters.text).Scan(&nodes); err != nil {
-		return model.SearchResponse{}, err
-	}
 	keys, err := s.searchOwnIssueKeys(ctx, parameters.text, parameters.numberScope())
 	if err != nil {
 		return model.SearchResponse{}, err
 	}
 	parameters.ownKeys = keys
-	if nodes == 0 && len(keys) == 0 {
-		return model.SearchResponse{Results: []model.SearchResult{}, Limit: parameters.limit, Offset: parameters.offset}, nil
+	if len(keys) == 0 {
+		var nodes int
+		if err := s.deps.Store.Pool.QueryRow(ctx,
+			"select numnode(websearch_to_tsquery('english', $1))", parameters.text).Scan(&nodes); err != nil {
+			return model.SearchResponse{}, err
+		}
+		if nodes == 0 {
+			return model.SearchResponse{Results: []model.SearchResult{}, Limit: parameters.limit, Offset: parameters.offset}, nil
+		}
 	}
 	run := s.runKeywordOnlyDegraded
 	if s.deps.Embedder != nil {
@@ -1130,6 +1125,7 @@ func (s *server) runSearch(ctx context.Context, parameters searchParameters) (mo
 		return response, nil
 	}
 	parameters.broaden = words
+	parameters.excluded = readSearchQuery(parameters.text).excludedWords()
 	broadened, err := run(ctx, parameters)
 	if err != nil {
 		return model.SearchResponse{}, err

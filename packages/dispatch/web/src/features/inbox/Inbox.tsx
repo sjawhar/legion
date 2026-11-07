@@ -17,6 +17,7 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
+import { useMarkedKeys } from "../../hooks/useMarkedKeys";
 import { capSearchQuery } from "../../lib/query-param";
 import {
   borderDefault,
@@ -586,7 +587,8 @@ export function Inbox({
   // unmarked; a mark whose row this view does not list, or whose band is folded shut, drops out
   // of `selected` below, so the bar never counts - and `h` never writes - a row that is not on
   // the page. The mark itself outlives both: open the band, or switch back, and it is still made.
-  const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
+  const listedIds = adoptedInbox?.map((row) => row.id).join(" ");
+  const { marked, onMark, setMarked } = useMarkedKeys(listedIds);
   // The bulk write lives here rather than in the bar, because the optimistic snooze can take
   // every marked row off this view at once and a bar that owned the write would be unmounted
   // before its own refusal arrived. The bar reports one pick downward and renders what it is
@@ -599,24 +601,7 @@ export function Inbox({
   const clearSelection = useCallback(() => {
     setMarked(new Set());
     setBulkRefusal(undefined);
-  }, []);
-  const onMark = useCallback((askId: string) => {
-    setMarked((current) => {
-      const next = new Set(current);
-      if (!next.delete(askId)) next.add(askId);
-      return next;
-    });
-  }, []);
-  const listedIds = adoptedInbox?.map((row) => row.id).join(" ");
-  useEffect(() => {
-    if (listedIds === undefined) return;
-    const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
-    setMarked((current) =>
-      [...current].every((id) => listed.has(id))
-        ? current
-        : new Set([...current].filter((id) => listed.has(id)))
-    );
-  }, [listedIds]);
+  }, [setMarked]);
   // What this list holds, and computed here rather than after the early returns so the bindings
   // below speak for exactly the rows on the page.
   const agent = filter.agent;

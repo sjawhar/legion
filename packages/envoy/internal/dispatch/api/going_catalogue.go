@@ -589,9 +589,13 @@ func goingNoRouteReason(entry GoingAction) string {
 // named, every named argument is one the action takes, and each value is what its field holds.
 // The answer is the refusal, empty for a call the schema accepts.
 func checkGoingArguments(fields []contracts.ToolField, arguments map[string]any) string {
+	// The names first, whole: the "takes no argument" check below reads every field, not the
+	// ones a refusal did not stop at.
 	declared := make(map[string]contracts.ToolField, len(fields))
 	for _, field := range fields {
 		declared[field.Name] = field
+	}
+	for _, field := range fields {
 		value, named := arguments[field.Name]
 		if !named {
 			if field.Required {

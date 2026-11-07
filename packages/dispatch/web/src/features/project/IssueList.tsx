@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 
 import { projectIssuesQuery, userStateQuery } from "../../api/queries";
@@ -8,6 +8,7 @@ import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill, pillClassName } from "../../components/Pill";
+import { useMarkedKeys } from "../../hooks/useMarkedKeys";
 import {
   borderDefault,
   cardHoverBorder,
@@ -140,30 +141,14 @@ export function IssueList({ project }: { project: string }): ReactNode {
   // The issues the reader has selected, by key: `x` and a row's own checkbox are the two ways
   // in, as the Inbox's marks are. A key the list no longer holds - another filter, another
   // project - drops out, so a row that is listed again comes back unselected.
-  const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
-  const onMark = useCallback((key: string) => {
-    setMarked((current) => {
-      const next = new Set(current);
-      if (!next.delete(key)) next.add(key);
-      return next;
-    });
-  }, []);
   const listedKeys = visibleIssues.map((issue) => issue.key).join(" ");
-  useEffect(() => {
-    const listed = new Set(listedKeys === "" ? [] : listedKeys.split(" "));
-    setMarked((current) =>
-      [...current].every((key) => listed.has(key))
-        ? current
-        : new Set([...current].filter((key) => listed.has(key)))
-    );
-  }, [listedKeys]);
+  const { marked, onMark } = useMarkedKeys(listedKeys);
   // What the bar says it will act on when it opens over this list. It belongs to the list while
   // the list is on the page and to nobody after that, so leaving the page clears it.
-  const selectedKeys = [...marked].join(" ");
   useEffect(() => {
-    setSelectedIssues(selectedKeys === "" ? [] : selectedKeys.split(" "));
+    setSelectedIssues([...marked]);
     return () => setSelectedIssues([]);
-  }, [selectedKeys]);
+  }, [marked]);
 
   // The keys that rove these rows register with the page's `project` scope, and they live
   // here because this component mounts only while the List is the view showing: on the Board,

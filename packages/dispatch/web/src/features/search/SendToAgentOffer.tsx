@@ -1,15 +1,14 @@
-import { type ClaimHolderLiveness, claimHolds } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useState } from "react";
 
 import { issueQuery } from "../../api/queries";
 import type { IssueDetails } from "../../api/types";
-import { textMutedOnSurface } from "../../theme/classes";
-import { claimHolding } from "../issue/ClaimChip";
+import { claimHoldingFromRead } from "../issue/ClaimChip";
 import { useAgentText } from "../refs/AgentName";
 import { type AgentRegistry, useAgentRegistry } from "../refs/agent-registry";
 import { useWrites } from "../writes/write-store";
+import { barNoteClassName, refusalText } from "./offer";
 import { type SendToAgent, sendToAgent } from "./send-to-agent";
 
 /** The group the offer's one row sits in, and the row's own id, which the bar's arrows and
@@ -53,12 +52,7 @@ function liveHolderOf(
   if (claim === null || claim.actor.kind !== "session") {
     return undefined;
   }
-  const read: ClaimHolderLiveness = issue.holder_state === null ? {} : issue;
-  const holding =
-    read.holder_state == null
-      ? claimHolding(claim, registry)
-      : claimHolds(claim, registry.titles, read);
-  return holding === "holds" ? claim.actor.id : undefined;
+  return claimHoldingFromRead(claim, registry, issue) === "holds" ? claim.actor.id : undefined;
 }
 
 /**
@@ -112,22 +106,23 @@ export function useSendToAgentOffer({
         );
       },
       (error: unknown) => {
-        // Dispatch's own refusal where it gave one, and whatever else stopped the send
-        // otherwise: a reader told only "could not" has nothing to act on.
-        const refusal =
-          error instanceof Error && error.message !== ""
-            ? error.message
-            : "the message did not reach Dispatch.";
-        setState({ kind: "refused", refusal, words });
+        setState({
+          kind: "refused",
+          refusal: refusalText(error, "the message did not reach Dispatch."),
+          words,
+        });
       }
     );
   };
-  const offered = holder !== undefined && (here.kind === "idle" || here.kind === "refused");
+  // The session to send to, carried rather than tested twice: the row is offered only while an
+  // agent is live on the issue and no send of these words is out.
+  const sendable =
+    holder !== undefined && (here.kind === "idle" || here.kind === "refused") ? holder : undefined;
   return {
     row:
-      offered && holder !== undefined
-        ? { label: `Send this to the agent on ${issue}`, select: () => approve(holder) }
-        : undefined,
+      sendable === undefined
+        ? undefined
+        : { label: `Send this to the agent on ${issue}`, select: () => approve(sendable) },
     said: <SendToAgentSaid issue={issue} state={here} />,
   };
 }
@@ -143,23 +138,22 @@ function SendToAgentSaid({
   if (state.kind === "idle") {
     return null;
   }
-  const line = `shrink-0 px-3 py-2 text-xs ${textMutedOnSurface}`;
   if (state.kind === "sending") {
     return (
-      <p className={line} role="status">
+      <p className={barNoteClassName} role="status">
         Sending to the agent on {issue}…
       </p>
     );
   }
   if (state.kind === "refused") {
     return (
-      <p className={line} data-testid="search-send-to-agent-said" role="alert">
+      <p className={barNoteClassName} data-testid="search-send-to-agent-said" role="alert">
         Could not send it to the agent on {issue}: {state.refusal}
       </p>
     );
   }
   return (
-    <p className={line} data-testid="search-send-to-agent-said" role="status">
+    <p className={barNoteClassName} data-testid="search-send-to-agent-said" role="status">
       Sent to {state.agent}, the agent on {issue}.
     </p>
   );

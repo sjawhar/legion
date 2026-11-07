@@ -60,6 +60,7 @@ import {
   scopeOfProject,
 } from "./bar-scope";
 import { NEW_ISSUE_GROUP_ID, NEW_ISSUE_OPTION_ID, useNewIssueOffer } from "./NewIssueOffer";
+import { barNoteClassName } from "./offer";
 import { type RecentItem, readRecents } from "./recents";
 import { SearchFilterBar } from "./SearchFilterBar";
 import { SearchOperators } from "./SearchOperators";
@@ -632,15 +633,19 @@ function PaletteDialog({
     label: "More actions",
     options: actionOptions.filter((option) => !option.leads),
   };
-  const footRows =
-    newIssueSection.options.length + sendToAgentSection.options.length + moreActions.options.length;
+  // The order the foot is listed and walked in, written once: the rows, the count the highlight
+  // rule keeps off them, and the groups drawn below all read this one array.
+  const footSections: readonly CommandSection[] = [
+    moreActions,
+    sendToAgentSection,
+    newIssueSection,
+  ];
+  const footRows = footSections.reduce((count, section) => count + section.options.length, 0);
   // What the list shows, in the order it shows it: the arrows walk this same list.
   const rows: PaletteRow[] = [
     ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
     ...hitGroups.flatMap((group) => group.rows),
-    ...moreActions.options.map((option) => option.row),
-    ...sendToAgentSection.options.map((option) => option.row),
-    ...newIssueSection.options.map((option) => option.row),
+    ...footSections.flatMap((section) => section.options.map((option) => option.row)),
   ];
   // The highlight is the row the reader sees highlighted, held by its id: hits arriving below
   // the actions, or a refetch re-ranking them, leave it on that row. A new query sends it to the
@@ -924,17 +929,14 @@ function PaletteDialog({
                   </Fragment>
                 );
               })}
-              <CommandGroup activeId={activeRow?.id} onSelect={selectRow} section={moreActions} />
-              <CommandGroup
-                activeId={activeRow?.id}
-                onSelect={selectRow}
-                section={sendToAgentSection}
-              />
-              <CommandGroup
-                activeId={activeRow?.id}
-                onSelect={selectRow}
-                section={newIssueSection}
-              />
+              {footSections.map((section) => (
+                <CommandGroup
+                  activeId={activeRow?.id}
+                  key={section.id}
+                  onSelect={selectRow}
+                  section={section}
+                />
+              ))}
             </div>
           )}
           {/* What the bar says about what it sent and what it made from these words, above the
@@ -969,7 +971,7 @@ function PaletteDialog({
           ) : search.data?.total !== undefined && search.data.total > results.length ? (
             // The bar lists one page of hits, so a query matching more says so rather than
             // looking complete.
-            <p className={`shrink-0 px-3 py-2 text-xs ${textMutedOnSurface}`}>
+            <p className={barNoteClassName}>
               Showing the best {results.length} of {search.data.total} matches
             </p>
           ) : projects.isError && needle !== "" ? (

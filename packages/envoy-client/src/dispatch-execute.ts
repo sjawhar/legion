@@ -730,6 +730,13 @@ function article(kind: string): string {
   return kind === "ask" ? "an ask" : `a ${kind}`;
 }
 
+/** How a posted message points the agent at the conversation it was written into. The two
+ *  writes that post one - a reply on an issue, a message to a session - say the same sentence,
+ *  and say it of their own message. */
+function conversationReadBack(messageId: string): string {
+  return `${commandLine("dispatch_read", { message: messageId })} reads the conversation back.`;
+}
+
 /**
  * Why `value`, given to `field` of a `kind` reply, names no block that reply can answer: a block
  * of another kind of item (a document's included), or one pinned to a revision, since a reply
@@ -4769,7 +4776,7 @@ export async function executeDispatchTool(
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false },
           };
         }
-        const readBack = `${commandLine("dispatch_read", { message: inReplyTo })} reads the conversation back.`;
+        const readBack = conversationReadBack(inReplyTo);
         const parent = reply.in_reply_to ?? undefined;
         const follows = parent === inReplyTo ? undefined : parent;
         return {
@@ -4821,7 +4828,7 @@ export async function executeDispatchTool(
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
       });
       const attempt = message.deliveries.at(-1);
-      const readBack = `${commandLine("dispatch_read", { message: message.id })} reads the conversation back.`;
+      const readBack = conversationReadBack(message.id);
       const arrival =
         attempt === undefined
           ? "Dispatch recorded no delivery attempt for it"

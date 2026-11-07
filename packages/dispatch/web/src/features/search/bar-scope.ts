@@ -10,6 +10,7 @@
  * `Remove Project INFRA` control: that chip says which items are searched, this one says what the
  * bar acts on. They sit on either side of the box, and only the filter chip can be removed.
  */
+import { BLOCK_ID_ATTRIBUTE } from "../doc/block-id";
 import {
   type ProjectDocumentRoute,
   parseIssuePath,
@@ -65,9 +66,8 @@ function blockText(text: string): string {
  * has taken the focus and the document's selection is no longer the page's.
  *
  * A block is a block of a Dispatch document, the thing a `#b-` reference names, so it is found by
- * the id the editor stamps on it (`BLOCK_ID_ATTRIBUTE` in `features/doc/scroll-block.ts`). The
- * cursor has to be inside the writing surface: a reader scrolling an issue page has a selection
- * somewhere too, and that is no cursor.
+ * the id the editor stamps on it (`BLOCK_ID_ATTRIBUTE`). The cursor has to be inside the writing
+ * surface: a reader scrolling an issue page has a selection somewhere too, and that is no cursor.
  */
 export function scopeAtCursor(): string | undefined {
   const focused = document.activeElement;
@@ -77,7 +77,7 @@ export function scopeAtCursor(): string | undefined {
   const anchor = window.getSelection()?.anchorNode ?? null;
   const from = anchor instanceof Element ? anchor : (anchor?.parentElement ?? focused);
   const inside = focused.contains(from) ? from : focused;
-  const block = inside.closest<HTMLElement>("[data-block-id]");
+  const block = inside.closest<HTMLElement>(`[${BLOCK_ID_ATTRIBUTE}]`);
   const text = block === null ? "" : blockText(block.textContent ?? "");
   return text === "" ? undefined : `the block “${text}”`;
 }

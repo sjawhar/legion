@@ -17,11 +17,11 @@ since a reworded title still names an issue's subject. Such a case is counted an
 
 import argparse
 import json
-import os
 import sys
 from collections import Counter
 
 from case_text import digest, document_sentence_spans, extract_ask_span, extract_document_span
+from corpus import read_jsonl
 
 
 def main():
@@ -126,11 +126,6 @@ def find_ask_prefix(question, query):
         if len(extracted) > len(query) + 32:
             return None
     return None
-
-
-def read_jsonl(corpus, name):
-    with open(os.path.join(corpus, name)) as handle:
-        return [json.loads(line) for line in handle]
 
 
 if __name__ == "__main__":

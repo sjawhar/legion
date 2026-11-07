@@ -1,6 +1,7 @@
 import { api } from "../../api/client";
 import type { Message } from "../../api/types";
-import { type Attempt, plainWrite, type Writes } from "../writes/write-store";
+import type { Attempt, Writes } from "../writes/write-store";
+import { press } from "./offer";
 
 /**
  * The words one send carries. The route the send goes through
@@ -49,14 +50,7 @@ export async function sendToAgent(
 ): Promise<string | undefined> {
   const write: Attempt<Message> = (bounds) =>
     api.createAgentMessage(session, { body: handoffBody(issue, words), delivery: "aside" }, bounds);
-  const message = await writes.run({
-    detail: null,
-    inline: true,
-    kind: plainWrite,
-    label: `“${words}” to the agent on ${issue}`,
-    presentation: "indicator",
-    write,
-  });
+  const message = await press(writes, `“${words}” to the agent on ${issue}`, write);
   const attempt = message?.deliveries.at(-1);
   if (attempt === undefined || attempt.state !== "failed") {
     return undefined;

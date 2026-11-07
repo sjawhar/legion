@@ -17,10 +17,9 @@ Nothing here writes: every call is a GET, and a harvest of production is a read 
 """
 
 import argparse
-import json
 import os
-import sys
 
+from corpus import say, write_json, write_jsonl
 from dispatch_read import DispatchRefused, ReadOnlyDispatch, pmap, require_under_tmpdir
 
 
@@ -252,21 +251,6 @@ def counts_only(coverage):
         "total_items": coverage["total"]["items"],
         "kinds": {kind: row["items"] for kind, row in coverage["kinds"].items()},
     }
-
-
-def write_json(out, name, value):
-    with open(os.path.join(out, name), "w") as handle:
-        json.dump(value, handle)
-
-
-def write_jsonl(out, name, rows):
-    with open(os.path.join(out, name), "w") as handle:
-        for row in rows:
-            handle.write(json.dumps(row) + "\n")
-
-
-def say(line):
-    print(line, file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

@@ -23,8 +23,10 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import urllib.parse
+
+import pg
+from corpus import read_json, read_jsonl, say
 
 ACTOR = json.dumps({"kind": "session", "id": "search-measure-fixture"})
 # Work the schema's AFTER triggers queue for Dispatch's background passes. None of it is a search
@@ -162,10 +164,7 @@ def copy(dsn, table, columns, rows, count, create=None, after=None):
         if after:
             handle.write(after + ";\n")
     say(f"copy {count} rows into {table}")
-    result = subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-q", "-f", path],
-                            capture_output=True, text=True)
-    if result.returncode != 0:
-        raise SystemExit(f"psql {table}: {result.stderr.strip()[:2000]}")
+    pg.run(dsn, "-q", "-f", path, label=f"psql {table}")
     os.remove(path)
 
 
@@ -185,11 +184,9 @@ def pg_array(values):
 
 
 def psql(dsn, statement, tolerate=False):
-    result = subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-q", "-c", statement],
-                            capture_output=True, text=True)
-    if result.returncode != 0 and not tolerate:
-        raise SystemExit(f"psql {statement!r}: {result.stderr.strip()}")
-    return result.stdout
+    # The statement names the failure, so a run that stops says which of these calls stopped it.
+    return pg.run(dsn, "-q", "-c", statement, label=f"psql {statement!r}", limit=None,
+                  tolerate=tolerate)
 
 
 def row_counts(dsn):
@@ -212,20 +209,6 @@ order by 1
 def replace_database(dsn, database):
     parts = urllib.parse.urlsplit(dsn)
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/" + database, parts.query, parts.fragment))
-
-
-def read_json(corpus, name):
-    with open(os.path.join(corpus, name)) as handle:
-        return json.load(handle)
-
-
-def read_jsonl(corpus, name):
-    with open(os.path.join(corpus, name)) as handle:
-        return [json.loads(line) for line in handle]
-
-
-def say(line):
-    print(line, file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

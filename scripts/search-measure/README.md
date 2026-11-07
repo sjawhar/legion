@@ -13,6 +13,8 @@ Every script reads the server it harvests from through its read API, with `GET` 
 
 `pg.py` is the psql the others read the fixture with: a statement's rows as JSON, one object per line.
 
+`corpus.py` is the corpus files the others write and read back — `projects.json`, `issues.jsonl` and the rest — and the progress line they say on stderr.
+
 `harvest.py` writes a corpus into a directory under `$TMPDIR`.
 
 - It reads every project, every issue of every project, every document of every project and every issue's primary document, each document's latest markdown, and every issue's comments, asks and messages.

@@ -41,6 +41,21 @@ export function claimHolding(
 }
 
 /**
+ * The same judgement made against an issue read: the read's own verdict on the holder where it
+ * gave one, and the live registry otherwise. One function, so the chip on the issue and the
+ * bar's offer of that issue's agent never disagree about who is on it.
+ */
+export function claimHoldingFromRead(
+  claim: IssueClaim,
+  registry: Pick<AgentRegistry, "state" | "titles">,
+  liveness: ClaimHolderLiveness | undefined
+): ClaimHolding {
+  return liveness?.holder_state == null
+    ? claimHolding(claim, registry)
+    : claimHolds(claim, registry.titles, liveness);
+}
+
+/**
  * The heartbeat an unresponsive holder was last seen at, as an RFC3339 stamp, or null when
  * nothing dates it: the issue read's own `last_seen` where it gave one, else the registry row's,
  * the order `claimTakeableAt` resolves the moment the claim comes free in.
@@ -132,7 +147,7 @@ export function ClaimChip({
   // whose heartbeat then dates the wait.
   const read: ClaimHolderLiveness = liveness?.holder_state == null ? {} : liveness;
   const judged = read.holder_state == null;
-  const holding = judged ? claimHolding(claim, registry) : claimHolds(claim, registry.titles, read);
+  const holding = claimHoldingFromRead(claim, registry, liveness);
   const lapsed = holding === "lapsed";
   const unresponsive = holding === "unresponsive";
   const lastSeen = registry.lastSeen(claim.actor.id);

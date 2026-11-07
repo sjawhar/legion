@@ -40,7 +40,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
-	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -240,15 +239,12 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
 		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)
 	}
-	newIssueLabel := strings.TrimSpace(input.NewIssueLabel)
-	if length := itemblocks.Units16(newIssueLabel); length > maxIssueLabel16 {
-		return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_LABEL %q (at most %d characters)", newIssueLabel, maxIssueLabel16)
-	}
-	newIssueSession := strings.TrimSpace(input.NewIssueSession)
-	if newIssueSession != "" {
-		if _, err := model.ParseRoute("session:" + newIssueSession); err != nil {
-			return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_SESSION %q (expected a session id)", newIssueSession)
-		}
+	newIssue, problem := newIssueSettingsFrom(input.NewIssueLabel, input.NewIssueSession)
+	switch problem {
+	case "label":
+		return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_LABEL %q (at most %d characters)", newIssue.Label, maxIssueLabel16)
+	case "session":
+		return Deps{}, fmt.Errorf("invalid DISPATCH_NEW_ISSUE_SESSION %q (expected a session id)", newIssue.Session)
 	}
 	if input.Events == nil {
 		input.Events = events.NewBroker()
@@ -292,8 +288,8 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Identity:               input.Identity,
 		AgentTokens:            input.AgentTokens,
 		DefaultProject:         defaultProject,
-		NewIssueLabel:          newIssueLabel,
-		NewIssueSession:        newIssueSession,
+		NewIssueLabel:          newIssue.Label,
+		NewIssueSession:        newIssue.Session,
 		ServerURL:              strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:                   input.Docs,
 		Embedder:               input.Embedder,

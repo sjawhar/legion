@@ -9,6 +9,22 @@ import json
 import subprocess
 
 
+def run(dsn, *arguments, label="psql", limit=2000, tolerate=False):
+    """psql against dsn with `ON_ERROR_STOP=1` and arguments, answering its stdout.
+
+    A non-zero return raises `SystemExit` reading "<label>: <stderr>", unless tolerate. label is
+    what that line calls this call and limit bounds the stderr it quotes (None quotes all of it):
+    both are the caller's, because these lines are the harness's own failure messages.
+    """
+    result = subprocess.run(
+        ["psql", dsn, "-v", "ON_ERROR_STOP=1", *arguments], capture_output=True, text=True
+    )
+    if result.returncode != 0 and not tolerate:
+        stderr = result.stderr.strip()
+        raise SystemExit(f"{label}: {stderr if limit is None else stderr[:limit]}")
+    return result.stdout
+
+
 def rows(dsn, sql):
     """Every row of sql as a dict.
 
@@ -17,21 +33,5 @@ def rows(dsn, sql):
     every control character itself, so each row is one line.
     """
     statement = f"select row_to_json(t)::text from ({sql}) t"
-    result = subprocess.run(
-        ["psql", dsn, "-v", "ON_ERROR_STOP=1", "-q", "-At", "-c", statement],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"psql: {result.stderr.strip()[:2000]}")
-    return [json.loads(line) for line in result.stdout.splitlines() if line]
-
-
-def table(dsn, sql):
-    """sql as psql prints it, for a count a report quotes."""
-    result = subprocess.run(
-        ["psql", dsn, "-v", "ON_ERROR_STOP=1", "-c", sql], capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"psql: {result.stderr.strip()[:2000]}")
-    return result.stdout
+    out = run(dsn, "-q", "-At", "-c", statement)
+    return [json.loads(line) for line in out.splitlines() if line]

@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 
 import { newIssueSettingsQuery } from "../../api/queries";
-import { textMutedOnSurface } from "../../theme/classes";
 import { useWrites, type Writes } from "../writes/write-store";
 import { type FiledIssue, fileNewIssue, type NewIssueWrite } from "./new-issue";
+import { barNoteClassName, refusalText } from "./offer";
 
 /** The group the offer's one row sits in, and the row's own id, which the bar's arrows and
  *  `aria-activedescendant` read. */
@@ -96,13 +96,11 @@ export function useNewIssueOffer({
         }
       },
       (error: unknown) => {
-        // Dispatch's own refusal where it gave one, and whatever else stopped the write
-        // otherwise: a reader told only "could not" has nothing to act on.
-        const refusal =
-          error instanceof Error && error.message !== ""
-            ? error.message
-            : "the write did not reach Dispatch.";
-        setState({ kind: "refused", refusal, words });
+        setState({
+          kind: "refused",
+          refusal: refusalText(error, "the write did not reach Dispatch."),
+          words,
+        });
       }
     );
   };
@@ -126,23 +124,22 @@ function NewIssueSaid({ state }: { readonly state: OfferState }): ReactNode {
   if (state.kind === "idle") {
     return null;
   }
-  const line = `shrink-0 px-3 py-2 text-xs ${textMutedOnSurface}`;
   if (state.kind === "making") {
     return (
-      <p className={line} role="status">
+      <p className={barNoteClassName} role="status">
         Making the issue…
       </p>
     );
   }
   if (state.kind === "refused") {
     return (
-      <p className={line} data-testid="search-new-issue-said" role="alert">
+      <p className={barNoteClassName} data-testid="search-new-issue-said" role="alert">
         Could not make the issue: {state.refusal}
       </p>
     );
   }
   return (
-    <p className={line} data-testid="search-new-issue-said" role="status">
+    <p className={barNoteClassName} data-testid="search-new-issue-said" role="status">
       {state.filed === undefined
         ? "The issue is made, and Dispatch had no answer naming it."
         : state.filed.session === ""

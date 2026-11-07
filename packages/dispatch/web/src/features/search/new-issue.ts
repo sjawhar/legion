@@ -1,6 +1,7 @@
 import { api } from "../../api/client";
 import type { Issue, NewIssueSettings } from "../../api/types";
-import { type Attempt, plainWrite, type Writes } from "../writes/write-store";
+import type { Writes } from "../writes/write-store";
+import { press } from "./offer";
 
 /**
  * The whole content of the Verification document a new issue from the bar gets: the words the
@@ -32,21 +33,6 @@ export interface FiledIssue {
   readonly session: string;
   /** The words it was made from, so a bar whose box has moved on drops the result. */
   readonly words: string;
-}
-
-/** One request, under a key of its own, tried until Dispatch decides it and named in the shell's
- *  indicator while it is out. The filing is four of these rather than one, because one write
- *  makes one request (`OneRequestPerWriteError`): Dispatch would refuse a second request under a
- *  key it has already decided. `inline` because the bar says a refusal itself. */
-function press<T>(writes: Writes, label: string, write: Attempt<T>): Promise<T | null> {
-  return writes.run({
-    detail: null,
-    inline: true,
-    kind: plainWrite,
-    label,
-    presentation: "indicator",
-    write,
-  });
 }
 
 /**
