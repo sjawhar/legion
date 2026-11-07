@@ -89,11 +89,16 @@ type LateDraw = (drawn: MermaidDrawing) => void;
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
 
-/** How long the worker may draw one source before it is refused and the worker terminated. On a
- *  2-CPU issue pod, in Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of
- *  100 nodes with 2 edges each in about 1.2 s; at 200 such nodes it takes about 3 s (5 s in WebKit
- *  and Firefox), and at 400 about 10 s; a faster machine draws more within it. The browser rows
- *  of the limit hold the worker (`e2e/mermaid.e2e.ts`), so they depend on no machine's speed. */
+/** How long the worker may draw one source before it is refused and the worker terminated. What
+ *  fits inside it is decided by the renderer and by the diagram's edges as much as by the
+ *  machine: on a 2-CPU issue pod, a flowchart Mermaid draws passes this bound at about 100 nodes
+ *  in Chromium and about 60 in WebKit, where one beautiful-mermaid draws passes at about 2,000
+ *  and about 1,400 — over the same flowcharts Mermaid is 10.6× slower at 50 nodes, 22.1× at 100,
+ *  40.8× at 200 and 84.1× at 400 in Chromium. Edge shape moves beautiful-mermaid as far as the
+ *  machine does: a 400-node flowchart takes 715 ms with each edge pointing at a neighbour and
+ *  4.01 s with each pointing at a pseudorandom later node; the far longer time this comment
+ *  recorded for that size did not reproduce. The browser rows of the limit hold the worker
+ *  (`e2e/mermaid.e2e.ts`), so they depend on no machine's speed. */
 const RENDER_TIME_LIMIT_MS = 5000;
 /** How long the worker may spend loading the renderer a source needs before that source is
  *  refused and the worker terminated. Mermaid's chunks load when the first source needing them
