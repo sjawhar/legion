@@ -193,7 +193,7 @@ jobs:
       # worker image ships, which is the one the daemon is written for.
       - if: matrix.jj
         # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
-        # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+        # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
         timeout-minutes: 18
         uses: ./.github/actions/install-jj
 

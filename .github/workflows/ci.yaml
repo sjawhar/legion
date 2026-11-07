@@ -2396,7 +2396,7 @@ jobs:
       # working-copy filters are among what they plant), and the daemon resolves jj at boot and
       # refuses to start without it.
       # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
-      # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+      # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
       - uses: ./.github/actions/install-jj
         timeout-minutes: 18
 
@@ -2709,7 +2709,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Budget (the header's Budgets note): 600 s, the 10 minutes this job carried, above its
     # 227 s measured maximum, plus its slowest retried step alone — install-jj, whose curl is
-    # 8 x 60 + 127 = 607 s and whose `mise x` is 5 x 60 + 150 = 450 s, 1057 s together, above
+    # 8 x 60 + 127 = 607 s and whose `mise install` is 5 x 60 + 150 = 450 s, 1057 s together, above
     # the workspace install's 1050 s, install-omp's 450 s and the ci-ok report's 600 s.
     # 600 + 1057 = 1657 s -> 28 min.
     timeout-minutes: 28
@@ -2729,7 +2729,7 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
-      # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+      # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
       - uses: ./.github/actions/install-jj
         timeout-minutes: 18
       # extensions/dispatch-first-omp.test.ts, extensions/askgate/askgate-omp.test.ts and
@@ -2805,7 +2805,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Budget (the header's Budgets note): 600 s, the 10 minutes this job carried, above its
     # 374 s measured maximum, plus its slowest retried step alone — install-jj's 1057 s (its
-    # curl's 8 x 60 + 127 and its `mise x`'s 5 x 60 + 150). packages/daemon's `go mod download`
+    # curl's 8 x 60 + 127 and its `mise install`'s 5 x 60 + 150). packages/daemon's `go mod download`
     # led that list until its bound came down to 180 s; at 5 x 180 + 150 = 1050 s it sits just
     # under install-jj, level with the workspace install and above install-omp's 450 s and the
     # ci-ok report's 600 s. 600 + 1057 = 1657 s -> 28 min.
@@ -2823,7 +2823,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
-      # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+      # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
       - uses: ./.github/actions/install-jj
         timeout-minutes: 18
       # extensions/legion-phase-stall-omp.test.ts and controller-start-omp.test.ts run the pinned
@@ -5359,7 +5359,7 @@ jobs:
   # That is 10450 s. Every faulted site runs its retries out inside its own report budget
   # above, so the term the rule adds is this job's slowest download that is not a faulted
   # site: install-jj, whose curl of the mise archive is 8 x 60 + 127 = 607 s and whose
-  # `mise x` of the jj release is 5 x 60 + 150 = 450 s, 1057 s together — above the unfaulted
+  # `mise install` of the jj release is 5 x 60 + 150 = 450 s, 1057 s together — above the unfaulted
   # workspace install's 1050 s and the ci-ok report's 600 s. So 10450 + 1057 = 11507 s, or
   # 192 minutes.
   download-retry:
@@ -5376,7 +5376,7 @@ jobs:
       # through: nothing here drives jj. Unfaulted, because it is this job's prerequisite rather
       # than one of its sites.
       # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
-      # its `mise x` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+      # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
       - uses: ./.github/actions/install-jj
         timeout-minutes: 18
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

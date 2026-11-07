@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Tests for `check-download-retry.sh`: every network fetch of this repository's CI retries at
 # R1's floor, an `apt-get update` fails rather than warns when an index read fails so that the
-# retry has something to retry, one rule holds that retry, and the four exceptions R2 lists are
-# the only sites left bare (dispatch://INFRA-1545, R2).
+# retry has something to retry, a `mise x` carries no retry at all because it exits 0 when it
+# cannot resolve the tool, one rule holds that retry, and the four exceptions R2 lists are the
+# only sites left bare (dispatch://INFRA-1545, R2).
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs. Every fixture starts from the
@@ -416,6 +417,89 @@ RUN set -eu; \
 DOCKER
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
+
+echo "case: a workflow that wraps a mise x in a retry"
+root=$(fixture retried-mise-x)
+cat > "$root/.github/workflows/case.yaml" <<'YAML'
+name: Case
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the worker image's jj
+        run: |
+          . .github/scripts/ci-retry.sh
+          jj_path=$(retry_fetch "the worker image's jj" 60 -- mise x "$jj_tool" -- sh -c 'command -v jj')
+          install -m 0755 "$jj_path" "$HOME/.local/bin/jj"
+YAML
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file, the line, the step and the verb" \
+  "$(contains "$out" "file=.github/workflows/case.yaml,line=9::.mise x. in step .Install the worker image.s jj. is retried, and that retry protects nothing")"
+check "says what goes wrong, not only what to write instead" \
+  "$(contains "$out" 'runs whatever binary of that name is already on PATH')"
+check "names the cure" "$(contains "$out" 'The cure is .mise install <tool>. under the retry')"
+check "names the resolution that follows it" \
+  "$(contains "$out" 'with the resolution after it')"
+
+echo "case: a Dockerfile RUN that wraps a mise x in the canonical retry"
+root=$(fixture retried-mise-x-dockerfile)
+{
+  echo 'FROM debian:trixie-slim AS build'
+  printf '%s\n' "$CANONICAL"
+  cat <<'DOCKER'
+    && install -m 0755 "$(retry 300 "jj download" mise x "$JJ_TOOL" -- sh -c 'command -v jj')" /opt/tools/jj
+DOCKER
+} > "$root/packages/daemon/docker/worker.Dockerfile"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the Dockerfile, the line and the verb" \
+  "$(contains "$out" 'file=packages/daemon/docker/worker.Dockerfile,line=5::.mise x. is retried, and that retry protects nothing')"
+check "names the cure" "$(contains "$out" 'The cure is .mise install <tool>. under the retry')"
+check "counts the one refusal" \
+  "$(contains "$out" '1 download(s) outside the one retry rule')"
+
+echo "case: a workflow's retried mise install with the resolution after it passes"
+root=$(fixture mise-install-cured)
+cat > "$root/.github/workflows/case.yaml" <<'YAML'
+name: Case
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the worker image's jj
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the worker image's jj" 60 -- mise install "$jj_tool"
+          jj_path=$(mise x "$jj_tool" -- sh -c 'command -v jj')
+          install -m 0755 "$jj_path" "$HOME/.local/bin/jj"
+YAML
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+list_check "$root"
+check "the install is on the list" "$(contains "$out" 'case.yaml	9	mise install	')"
+check "the resolution after it is on no list" \
+  "$(is "$(contains "$out" 'mise x')" false)"
+
+echo "case: a Dockerfile's retried mise install with the resolution after it passes"
+root=$(fixture mise-install-cured-dockerfile)
+{
+  echo 'FROM debian:trixie-slim AS build'
+  printf '%s\n' "$CANONICAL"
+  cat <<'DOCKER'
+    && retry 300 "jj download" mise install "$JJ_TOOL" \
+    && install -m 0755 "$(mise x "$JJ_TOOL" -- sh -c 'command -v jj')" /opt/tools/jj
+DOCKER
+} > "$root/packages/daemon/docker/worker.Dockerfile"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+list_check "$root"
+check "the install is on the list" \
+  "$(contains "$out" '^packages/daemon/docker/worker.Dockerfile	5	mise install	-$')"
+check "the resolution after it is on no list" \
+  "$(is "$(contains "$out" 'mise x')" false)"
 
 echo "case: a readiness poll of the loopback is no download"
 root=$(fixture loopback)

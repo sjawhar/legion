@@ -356,9 +356,16 @@ COPY .omp-pin /omp-pin
 # github_token (optional BuildKit secret): mise's github backend reads MISE_GITHUB_TOKEN; a shared
 # builder IP without it can hit GitHub's unauthenticated API limit (403). CI passes secrets.GITHUB_TOKEN;
 # a build without the secret still runs, unauthenticated.
-# Each `mise x` resolves its tool and downloads it on a miss, so each retries: 600 s an attempt for
-# the OMP fork build, the largest of the three, and 300 s each for jj's and gh's release assets.
-# `mise where`, the copy and the three version checks read what is already on disk and stay bare.
+# Each `mise install` downloads its tool, so each retries: 600 s an attempt for the OMP fork
+# build, the largest of the three, and 300 s each for jj's and gh's release assets. What the
+# retry holds is the install, not a `mise x`: `mise x` only warns when it cannot resolve the tool
+# and then runs whatever binary of that name is already on PATH, so a retry around it waits for a
+# failure that never comes, and `mise install` is the half that fails (exit 1,
+# dispatch://INFRA-1545). The two `mise x` lines below read the path of what the install put on
+# disk — a local lookup, not a fetch, which is why they are bare — and they stay lookups rather
+# than `mise where` plus a guess because whether the binary sits at the install's root or under
+# its `bin/` differs by backend. `mise where`, the copy and the three version checks read what is
+# already on disk and stay bare too.
 RUN --mount=type=secret,id=github_token \
     retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
@@ -368,11 +375,13 @@ RUN --mount=type=secret,id=github_token \
       MISE_GITHUB_TOKEN="$(cat /run/secrets/github_token)"; export MISE_GITHUB_TOKEN; \
     fi; \
     pin="$(cat /omp-pin)"; \
-    retry 600 "omp download" mise x "$pin" -- omp --version; \
+    retry 600 "omp download" mise install "$pin"; \
     cp -r "$(mise where "$pin")" /opt/omp; \
     mkdir -p /opt/tools; \
-    install -m 0755 "$(retry 300 "jj download" mise x "$JJ_TOOL" -- sh -c 'command -v jj')" /opt/tools/jj; \
-    install -m 0755 "$(retry 300 "gh download" mise x "$GH_TOOL" -- sh -c 'command -v gh')" /opt/tools/gh; \
+    retry 300 "jj download" mise install "$JJ_TOOL"; \
+    install -m 0755 "$(mise x "$JJ_TOOL" -- sh -c 'command -v jj')" /opt/tools/jj; \
+    retry 300 "gh download" mise install "$GH_TOOL"; \
+    install -m 0755 "$(mise x "$GH_TOOL" -- sh -c 'command -v gh')" /opt/tools/gh; \
     /opt/omp/bin/omp --version && /opt/tools/jj --version && /opt/tools/gh --version
 
 # ------------------------------------------------------------------------------------------------

@@ -42,11 +42,13 @@
 # stripped: curl, wget, apt-get/apt (update, install, download, upgrade, dist-upgrade, source,
 # build-dep), pip install, uv (sync, add, pip, tool, python, lock, export), bun install, bun add,
 # npm/pnpm/yarn (install, ci, add), playwright install, go mod download, go install,
-# mise (install, use, x, exec, up, upgrade), crane (copy, digest, config, pull, export, manifest,
-# blob), docker pull, gh api, gh release download, and pulumi plugin install. `bunx`, `npx`,
-# `pnpx`, `sh -c`, `bash -c` and `eval` are transparent: the verb is what they run, so a
-# `bunx playwright install` is the Playwright download and a `bunx biome check` is not a fetch at
-# all (the binary it runs came from the workspace install, which is itself a site).
+# mise (install, use), crane (copy, digest, config, pull, export, manifest, blob), docker pull,
+# gh api, gh release download, and pulumi plugin install. `mise x`, `mise exec`, `mise up` and
+# `mise upgrade` are deliberately not among them; rule 7 below says why, and what it does with
+# one instead. `bunx`, `npx`, `pnpx`, `sh -c`, `bash -c` and `eval` are transparent: the verb is
+# what they run, so a `bunx playwright install` is the Playwright download and a `bunx biome
+# check` is not a fetch at all (the binary it runs came from the workspace install, which is
+# itself a site).
 #
 # The wrappers stripped before the command is read are an assignment, a shell keyword, `sudo`,
 # `env`, `exec`, `command`, `nice`, `nohup`, `time`, `timeout <seconds>`, `retry_fetch <what>
@@ -100,6 +102,23 @@
 #      `urllib.request` goes through check-ci-images.sh's `read_retrying`, which carries the floor
 #      in that check's own idiom — five attempts, waits of 10, 20, 40 and 80 seconds, each bounded
 #      by the read's own `timeout=30`. One definition, no copies, as the shell has.
+#   7. A `mise x`, `mise exec`, `mise up` or `mise upgrade` carries no retry, anywhere: not a
+#      `retry_fetch` call and not a Dockerfile `retry` call. None of the four fails when it
+#      cannot resolve the tool. `mise x` warns (`Failed to resolve tool version list for … HTTP
+#      host https://api.github.com:443 is unavailable`) and then runs whatever binary of that
+#      name is already on PATH — a different build, at a version nobody asked for — and exits 0;
+#      `mise up` prints `All tools are up to date` having read nothing, and exits 0. Measured on
+#      mise 2026.8.12, the build packages/daemon/docker/worker.Dockerfile pins, against a proxy
+#      faulting every host. So a retry around one of them waits for a failure that never comes,
+#      and the cure is structural: retry `mise install <tool>`, which exits 1 on the failed fetch
+#      on that same build, and read the path afterwards from what that install put on disk.
+#
+#      That is also why the four are not fetch verbs above, and why a bare one is on no list. A
+#      `mise x` that follows the install of the tool it names resolves off disk: with every host
+#      faulting and a decoy binary earlier on PATH it still printed the installed path, silently
+#      and exit 0. A `mise x` that follows no install fetches only as a side effect of the
+#      resolution that install should have done. Holding either to the floor would be demanding
+#      the one shape this rule refuses, so the check reads these four only to refuse a retry.
 #
 # THE EXCEPTIONS, which are R2's four and no others. Each is a site this repository refuses to
 # retry on purpose. Each one written out as an entry of EXEMPTIONS below must match something: an
@@ -273,7 +292,11 @@ APT_DOWNLOAD_ONLY = {"-d", "--download-only"}
 APT_ERROR_MODE = re.compile(r"apt::update::error-mode\s*=\s*any", re.IGNORECASE)
 # A command that answers about itself reads nothing from the network, whatever its verb.
 INFORMATIONAL = {"--version", "--help", "--usage"}
-MISE_SUBCOMMANDS = {"install", "use", "x", "exec", "up", "upgrade"}
+# The mise subcommands that fetch and say so: both exit 1 when the fetch fails.
+MISE_SUBCOMMANDS = {"install", "use"}
+# Rule 7's four: each exits 0 when it cannot resolve the tool, so none of them is a fetch verb
+# and a retry around one protects nothing. The check reads them only to refuse that retry.
+MISE_SILENT = {"x", "exec", "up", "upgrade"}
 CRANE_SUBCOMMANDS = {"copy", "cp", "digest", "config", "pull", "export", "manifest", "blob"}
 UV_SUBCOMMANDS = {"sync", "add", "pip", "tool", "python", "lock", "export"}
 NPM_SUBCOMMANDS = {"install", "ci", "i", "install-test", "add"}
@@ -576,7 +599,8 @@ def verb_of(words: list[str]) -> str | None:
     if not words:
         return None
     # Its own options, which stop at a `--`: past that separator the words belong to a command
-    # this one runs (`mise x "$pin" -- omp --version` downloads the tool and then asks it).
+    # this one runs (`mise x "$pin" -- omp --version` resolves the tool and then asks it, and
+    # that trailing `--version` says nothing about this command).
     own = words[1:words.index("--")] if "--" in words[1:] else words[1:]
     if any(word in INFORMATIONAL for word in own):
         return None
@@ -635,6 +659,20 @@ def verb_of(words: list[str]) -> str | None:
     if name == "pulumi" and rest[:2] == ["plugin", "install"]:
         return "pulumi plugin install"
     return None
+
+
+def silent_verb_of(words: list[str]) -> str | None:
+    """The rule 7 mise subcommand these words run, or None. These are no fetch verbs: each exits
+    0 when it cannot resolve the tool, so what the check does with one is refuse a retry."""
+    if not words:
+        return None
+    own = words[1:words.index("--")] if "--" in words[1:] else words[1:]
+    if any(word in INFORMATIONAL for word in own):
+        return None
+    if PROGRAM.sub("", words[0]).rsplit("/", 1)[-1] != "mise":
+        return None
+    sub = subcommand(words[1:])
+    return f"mise {sub}" if sub in MISE_SILENT else None
 
 
 def verb_in(words: list[str]) -> tuple[str, list[str]] | None:
@@ -697,10 +735,13 @@ def apt_error_mode(words: list[str]) -> bool:
 
 
 class Site:
-    """One network fetch: where it is, what verb it uses, what retries it, and what it is in."""
+    """One network fetch: where it is, what verb it uses, what retries it, and what it is in.
+    `silent` marks rule 7's shape instead: a `mise x`, `mise exec`, `mise up` or `mise upgrade`
+    with a retry around it, which is no fetch to hold to the floor but a retry to refuse."""
 
     def __init__(self, path: str, line: int, verb: str, step: str, words: list[str],
-                 retry: str | None, bounded: bool, loop: int | None) -> None:
+                 retry: str | None, bounded: bool, loop: int | None,
+                 silent: bool = False) -> None:
         self.path = path
         self.line = line
         self.verb = verb
@@ -709,6 +750,7 @@ class Site:
         self.retry = retry
         self.bounded = bounded
         self.loop = loop
+        self.silent = silent
 
 
 def commands_of(body: str,
@@ -786,6 +828,14 @@ def sites_of_command(path: str, command: Command, function_loop: dict[str, int],
         _, _, inner_bound = reduce_words(rest)
         return [Site(path, command.line, verb, step, rest, retry, bounded or inner_bound,
                      function_loop[name])]
+    silent = silent_verb_of(words)
+    if silent:
+        # Rule 7. A bare one is no fetch this check holds to anything; a retried one is the
+        # shape the rule refuses, and it is recorded so the verdict can name it.
+        if not retry:
+            return []
+        return [Site(path, command.line, silent, step, words, retry, bounded, command.loop,
+                     True)]
     verb = verb_of(words)
     if not verb:
         return []
@@ -1029,6 +1079,19 @@ for path in DOCKERFILES:
 for site in sites:
     where = f"`{site.verb}`" + (f" in step '{site.step}'" if site.step != "-" else "")
     dockerfile = site.path in DOCKERFILES
+    if site.silent:
+        problem(site.path, site.line,
+                f"{where} is retried, and that retry protects nothing: `mise x`, `mise exec`, "
+                "`mise up` and `mise upgrade` exit 0 when they cannot resolve the tool. `mise x` "
+                "warns (`Failed to resolve tool version list for …`) and then runs whatever "
+                "binary of that name is already on PATH — a different build, at a version nobody "
+                "asked for — and `mise up` says `All tools are up to date` having read nothing. "
+                "So the retry waits for a failure that never comes, and the first attempt "
+                "succeeds on a tool it never fetched. The cure is `mise install <tool>` under "
+                "the retry, which exits 1 on the failed fetch, with the resolution after it: "
+                "once the install has succeeded, a bare `mise x <tool> -- sh -c 'command -v "
+                "<binary>'` reads the path off disk and fetches nothing.")
+        continue
     if site.verb == "curl":
         retries, all_errors, bounded, fails = curl_options(site.words)
         if site.retry:
