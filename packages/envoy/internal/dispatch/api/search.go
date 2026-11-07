@@ -387,6 +387,11 @@ func (s *server) beginMeaningScan(ctx context.Context) (pgx.Tx, error) {
 // id and covers, the blocks its vector holds, on to legs_unique and the page, which names the
 // one of them that matched (searchPageAndTailSQL).
 //
+// The comment arm is a named piece of its own (searchMeaningCommentArm): it takes its windows
+// through the index under the kind and model filters alone and joins the comment above that
+// limit, where the three window arms beside it join inside the ordered select, and the
+// candidate depth that trade costs a project-scoped search is written there.
+//
 // kinds unions searchKeywordLegs - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs
 // above. Every leg now carries which list it belongs to (list), and ranked's window partitions by
@@ -446,27 +451,7 @@ meaning_document as (
     from meaning_document_candidates where r >= $10
    order by meaning_document_candidates.id, r desc, window_id
 ),
-meaning_comment_candidates as (
-  select c.issue_key, c.artifact_id, c.anchor, c.id, e.id as window_id, e.covers, i.title as issue_title, i.status as issue_status, p.key as owner_project, a.slug as owner_slug, a.name as owner_name,
-         coalesce(i.updated_at, c.created_at) as updated_at,
-         1 - (e.embedding <=> $9::vector) as r
-    from embeddings e
-    join comments c on c.id = ` + windowItemUUID + `
-    left join issues i on i.key = c.issue_key
-    left join artifacts a on a.id = c.artifact_id
-    left join projects p on p.key = a.project_key
-   where e.kind = 'comment_block' and e.embedding is not null and e.model = $11 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
-   order by e.embedding <=> $9::vector
-   ` + searchWindowLimit + `
-),
-meaning_comment as (
-  select distinct on (meaning_comment_candidates.id) 'comment' as kind, 'meaning' as list, issue_key, artifact_id, coalesce(artifact_id, (anchor->>'artifact_id')::uuid), id::text, null::text,
-         window_id, covers,
-         issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
-         false, r
-    from meaning_comment_candidates where r >= $10
-   order by meaning_comment_candidates.id, r desc, window_id
-),
+` + searchMeaningCommentArm + `,
 meaning_ask_candidates as (
   select k.issue_key, k.artifact_id, k.block_artifact_id, k.anchor, k.id, ` + askBlockNodeSQL + ` as block_id, e.id as window_id, e.covers,
          i.title as issue_title, i.status as issue_status,
@@ -535,6 +520,64 @@ totals as (
 ),
 ` + searchPageAndTailSQL("legs_unique")
 }
+
+// searchMeaningCommentArm is searchQueryMeaningBody's comment arm, written apart from the four
+// arms beside it because its order differs from theirs and that order is the whole of it: it
+// takes the nearest comment windows through embeddings_cosine first - under `embedding is not
+// null`, which is that index's own partial predicate, and the kind and model filters, which the
+// scan applies as it walks, so the ordering stays the index's to serve - and joins
+// comments, issues, artifacts and projects above that limit, for the project filter ($2) and the
+// row's own fields.
+//
+// The four arms beside it filter and join inside the ordered, limited select, and for comments
+// that order costs the index. The item join is on an expression of the window's id
+// (windowItemUUID), which carries no statistics, so the planner misreads it: measured on the
+// load-test deployment (INFRA-988, EXPLAIN (ANALYZE, BUFFERS) of this route's own statement with
+// its own eleven arguments), the join planned for 475 rows and got 120,519, its hash side
+// planned 1,030 and got 158,727 per loop, and one hash batch became 32 spilled ones, 330 MB of
+// temp I/O. With that join below the ordering, `order by embedding <=> $9` could not be served
+// by embeddings_cosine at all: the arm read embeddings whole (1.27 M rows for the 117 K
+// comment_block vectors it wanted), read comments whole, and top-N-sorted 120 K rows - 5,166 ms
+// of the statement's 5,351 ms. The document arm, which does the same work the index can serve,
+// read 1,060 rows in 146.8 ms.
+//
+// Searching first and filtering after is paid in candidate depth: comment windows of every
+// project stand in the candidate set that a project-scoped search then filters, so they consume
+// part of it, and such a search can return fewer in-project comments than a filter-first query
+// would. Two things bound what that costs. The arm takes searchWindowCandidates windows, ten
+// times the contracts.SearchKindDepth items it keeps, so an in-project comment is lost only
+// where more than that many comment windows of other projects are nearer to the query than it
+// is. And searchMeaningScan sets hnsw.iterative_scan to relaxed_order, so the index keeps
+// walking until this arm's own LIMIT is met (or hnsw.max_scan_tuples, 20,000, is reached)
+// rather than stopping at the first hnsw.ef_search = 400 vectors, whichever kinds and projects
+// those happen to belong to: the depth is filled rather than cut short.
+//
+// Everything else is as the other window arms have it. The floor (searchMeaningFloor, $10) and
+// the per-item window dedup - `distinct on` over the comment, its nearest window first, carrying
+// that window's id and covers - run where they ran before, now above the join rather than
+// beside it.
+var searchMeaningCommentArm = `meaning_comment_candidates as (
+  select e.id as window_id, e.covers, ` + windowItemUUID + ` as comment_id,
+         1 - (e.embedding <=> $9::vector) as r
+    from embeddings e
+   where e.kind = 'comment_block' and e.embedding is not null and e.model = $11
+   order by e.embedding <=> $9::vector
+   ` + searchWindowLimit + `
+),
+meaning_comment as (
+  select distinct on (c.id) 'comment' as kind, 'meaning' as list, c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
+         meaning_comment_candidates.window_id, meaning_comment_candidates.covers,
+         i.title, i.status, p.key, a.slug, a.name,
+         coalesce(i.updated_at, c.created_at),
+         false, meaning_comment_candidates.r
+    from meaning_comment_candidates
+    join comments c on c.id = meaning_comment_candidates.comment_id
+    left join issues i on i.key = c.issue_key
+    left join artifacts a on a.id = c.artifact_id
+    left join projects p on p.key = a.project_key
+   where meaning_comment_candidates.r >= $10 and ($2 = '' or coalesce(i.project_key, p.key) = $2)
+   order by c.id, meaning_comment_candidates.r desc, meaning_comment_candidates.window_id
+)`
 
 func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
