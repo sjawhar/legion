@@ -237,10 +237,11 @@ func checkTagsFor(tags map[string]string) error {
 // is this CLI's whole mirror of TagRules: an arm for policy.ReasonScopesKind,
 // policy.ReasonAdminTier, policy.ReasonAdminRequesters, policy.ReasonMaxGrantRequired and
 // policy.ReasonRequestersNotOwner, and one fallback refusal after the switch, which quotes the
-// reason it has no arm for. The broker gains no rule this client lacks — the two read the one
-// policy package — so a reason with no arm is a gap in this agent-secrets, which the fallback
-// refuses the write for here rather than leave it to be written and refused on the reread
-// (TestTagRefusalRefusesAReasonNoArmNames).
+// reason TagRules gave. That reason is this binary's own TagRules answer, so a reason, or a
+// requesters fault, with no arm here is a gap in this build of agent-secrets, which the fallback
+// refuses the write for rather than leave it to be written and refused on the reread
+// (TestTagRefusalRefusesAReasonNoArmNames). A broker newer than this client, holding a rule this
+// client's TagRules does not know, is caught by that reread alone.
 //
 // Every arm reads the set rather than a flag, so no message can name tags other than the ones
 // the rules judged; the max-grant arm reads tags as well, to quote the cap too long as whoever
@@ -305,7 +306,7 @@ func tagRefusal(reason string, set policy.TagSet, tags map[string]string) error 
 	// turns on the deployment's binding of the secret to an account, which checkTagsFor never
 	// holds and always passes as an empty BoundAccount, so no run of this CLI reaches it that
 	// way, while a caller handing tagRefusal a set of its own can.
-	return usageErr{fmt.Errorf("the broker refuses a secret carrying these tags as %s, a rule of policy.TagRules this agent-secrets names no flag for: the two read the one policy package, so the missing arm is this client's own gap, and the write is refused here rather than written and refused on the reread; write tags the broker accepts, or give that rule an arm naming the flag that fixes it", reason)}
+	return usageErr{fmt.Errorf("the broker refuses a secret carrying these tags as %s, and this agent-secrets has no message naming the flag that fixes it: write tags the broker accepts", reason)}
 }
 
 // optionalTags is the kind, github-owners, requesters, scopes, admin, max-grant and default-grant

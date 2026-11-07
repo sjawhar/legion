@@ -23,13 +23,13 @@ import (
 // an empty answer.
 const listedValue = "listed-v1"
 
-// anHour is the lifetime every request below signs that names one at all. policytest.ListedSecret
-// gives each secret this file lists a max-grant of an hour, and a request signing longer than a
-// secret's own max-grant is refused before the policy decides it at all (overMaxGrant), which is
-// one of this file's cases rather than its premise. The hour is that fixture's choice and no rule
-// of the list's: policy.TagRules demands a max-grant of an admin secret and of a
-// google-service-account one alone, so a secret that merely lists its requesters keeps whatever
-// cap it sets, or none at all (TestUncappedListedLoginAwaitsOwner).
+// anHour is the lifetime most requests below sign; two sign a multiple of it to ask past an hour's
+// cap. policytest.ListedSecret gives each secret this file lists a max-grant of an hour, and a
+// request signing longer than a secret's own max-grant is refused before the policy decides it at
+// all (overMaxGrant), which is one of this file's cases rather than its premise. The hour is that
+// fixture's choice and no rule of the list's: policy.TagRules demands a max-grant of an admin
+// secret and of a google-service-account one alone, so a secret that merely lists its requesters
+// keeps whatever cap it sets, or none at all (TestUncappedListedLoginAwaitsOwner).
 const anHour = 3600
 
 // listedSecret is policytest.ListedSecret holding the one value this file releases: a namespace
@@ -510,7 +510,7 @@ func TestServiceRequesterAwaitsOwner(t *testing.T) {
 // rather than refused ErrGrantRequiresLifetime before the policy decides it: a list says who may
 // ask, never for how long. The request signs that lifetime rather than naming none, because one
 // naming none takes DefaultHumanGrantLifetime, fifteen minutes, which is inside an hour and so
-// would be served just as readily by a broker that capped every listed secret at one.
+// would be accepted just as readily by a broker that capped every listed secret at one.
 func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 	ctx := context.Background()
 	m, enr, key, _ := newFixture(t)
@@ -530,7 +530,7 @@ func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 		t.Fatalf("Create(UNCAPPED_LOGIN_KEY, 8h) = %+v, %v; want it pending on its owner, neither denied nor granted", req, err)
 	}
 	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != eightHours {
-		t.Fatalf("the pending request asks for %v seconds, want the %d seconds it signed, which no cap of the secret's shortens", req.LifetimeSeconds, eightHours)
+		t.Fatalf("the pending request asks for %v seconds, want the %d seconds it signed: nothing changes a signed lifetime, and a secret with no cap does not refuse it", req.LifetimeSeconds, eightHours)
 	}
 	waiting, err := m.PendingForApprover(ctx, fixtureOperator)
 	if err != nil || len(waiting) != 1 || waiting[0].RecordID != *req.RecordID {
