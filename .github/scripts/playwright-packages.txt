@@ -1,20 +1,37 @@
 # The apt packages the Dispatch browser suite installs for Playwright: Playwright's whole
-# ubuntu24.04-x64 list less four media packages (gstreamer1.0-libav, gstreamer1.0-plugins-bad,
-# gstreamer1.0-plugins-good and libavcodec60). Why those four are dropped, and what that saves,
-# is in the head of .github/scripts/playwright-install.sh, the script that reads this file.
+# ubuntu24.04-x64 list, which is the union of the `tools`, `chromium`, `firefox` and `webkit`
+# entries of that table in playwright-core's lib/coreBundle.js. Nothing is left out of it.
 #
-# One script reads it, that one, which the "Install the lane's Playwright browsers" step of
-# .github/workflows/dispatch-browser.yaml's shard job and of its alone job both run; its `grep`
-# drops these `#` lines and the blank ones. That filter is load-bearing: the shell reads this
-# file, not apt, and `$packages` is left unquoted there and splits into words, so a comment line
-# reaches apt as one package name per word. That script then holds this list against
-# Playwright's own with .github/scripts/playwright-deps-current.sh.
+# This file held that list less four media packages until dispatch://INFRA-1506
+# (cybermonklabs/legion#2888) put the whole list back: WebKit plays video and audio through
+# GStreamer, so without gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav
+# and libavcodec60 it loads a page and plays nothing. What each of those four carries, and the
+# decoder guard that proves they reached the GStreamer registry, are in the head of
+# .github/scripts/playwright-install.sh, the script that reads this file.
 #
-# On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`, `firefox`
-# and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's lib/coreBundle.js, less
-# those four. Deriving it at run time by subtracting one apt closure from the other does not work
-# and must not be written: the two closures share 35 packages Playwright's own list names or
-# needs, and the subtraction leaves WebKit unable to launch.
+# Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456: the 79 names below and
+# gstreamer1.0-tools resolve, with their dependencies, to 182 packages and 114 MB of archives
+# (`0 upgraded, 182 newly installed, 0 to remove and 27 not upgraded.` and `Need to get 114 MB
+# of archives.`).
+#
+# gstreamer1.0-tools is not one of these names. It is the one package the install adds that
+# Playwright's list does not name - it carries the `gst-inspect-1.0` the decoder guard runs -
+# and it is held apart, in the script's `step_tools`, because this file is what
+# .github/scripts/playwright-deps-current.sh holds against Playwright's own list, name for name.
+#
+# One script reads it, .github/scripts/playwright-install.sh, which the "Install the lane's
+# Playwright browsers" step of .github/workflows/dispatch-browser.yaml's shard job and of its
+# alone job both run; its `grep` drops these `#` lines and the blank ones. That filter is
+# load-bearing: the shell reads this file, not apt, and `$packages` is left unquoted there and
+# splits into words, so a comment line reaches apt as one package name per word. That script
+# then holds this list against Playwright's own with .github/scripts/playwright-deps-current.sh.
+#
+# On a Playwright upgrade, re-derive the list as that union again, with nothing taken out of it.
+# Deriving it at run time by subtracting one apt closure from another does not work and must not
+# be written: the closure of the four that carry playback and the closure of the rest share 35
+# packages Playwright's own list names or needs, and the subtraction leaves WebKit unable to
+# launch. That paragraph is a standing refusal, not a record of a design that was taken out:
+# nobody is to re-derive a reduced list.
 fonts-freefont-ttf
 fonts-ipafont-gothic
 fonts-liberation
@@ -22,12 +39,16 @@ fonts-noto-color-emoji
 fonts-tlwg-loma-otf
 fonts-unifont
 fonts-wqy-zenhei
+gstreamer1.0-libav
+gstreamer1.0-plugins-bad
 gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
 libasound2t64
 libatk-bridge2.0-0t64
 libatk1.0-0t64
 libatomic1
 libatspi2.0-0t64
+libavcodec60
 libavif16
 libcairo-gobject2
 libcairo2

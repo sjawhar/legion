@@ -1,11 +1,11 @@
 package api
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 // guardKeep is what this package's guard keeps beyond fixtureenv's own test inputs: the operator's
@@ -29,18 +29,14 @@ var guardKeep = []string{
 // TestMain takes out of the process every variable that could lead this package's real git and gh
 // — the credential proof's `git clone` of a real repository through gh's own credential helper,
 // and the gh it runs over the rendered files — to a repository, remote or credential not the
-// test's own (fixtureenv.Guard), keeping guardKeep, the gated proofs' own inputs. Nothing in this
-// package re-executes the test binary, so there is no helper-child branch before the guard.
+// test's own (fixtureenv.MustGuard), keeping guardKeep, the gated proofs' own inputs. Nothing in
+// this package re-executes the test binary, so there is no helper-child branch before the guard.
+// It then drops the migrated template testStore clones its databases from (testpg.Main), which
+// wraps the run: the guard decides the environment the tests and the template's migration both
+// run in.
 func TestMain(m *testing.M) {
-	if err := fixtureenv.Guard(guardKeep...); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
-	os.Exit(m.Run())
-}
-
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
+	fixtureenv.MustGuard(guardKeep...)
+	os.Exit(testpg.Main("legion_api_test", m.Run))
 }
 
 // TestTheGuardKeepsTheGatedProofsInputs holds guardKeep to the inputs the gated proofs read: with

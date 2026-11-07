@@ -138,11 +138,38 @@ func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 // where the two render alike, which its caller compares markdown for.
 func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdoc.WrittenReadBack, error) {
 	parsed, read, err := pmdoc.ParseWritten(markdown, live)
+	// The ask rule reads the parse's own refusal, before uploadedInput names it the caller's
+	// (ErrInvalidMarkdown), since that naming does not carry the refusal it wraps.
+	if ask := askRefusalInstead(markdown, err); ask != err {
+		return nil, pmdoc.WrittenReadBack{}, ask
+	}
 	tree, err := uploadedInput(parsed, err)
 	if err != nil {
 		return nil, pmdoc.WrittenReadBack{}, err
 	}
 	return tree, read, nil
+}
+
+// askRefusalInstead is err, or the refusal of an ask written with its options and no question
+// where err is the refusal of the rendering this document would be stored as: one that reads back
+// as another document (pmdoc.ErrMisreadRendering) or that no reader reads at all
+// (pmdoc.ErrRenderingRefused). The renderer writes such an ask's empty paragraphs as nothing
+// (both parsers read one back), so markdown writing two of them renders to one the read-back
+// cannot match, and the write is refused for the rendering rather than for the ask. The author's
+// fault is the ask, so it is named: this reads the markdown again without the read-back check and
+// returns the ask rule's own refusal when it has one.
+func askRefusalInstead(markdown string, err error) error {
+	if !errors.Is(err, pmdoc.ErrMisreadRendering) && !errors.Is(err, pmdoc.ErrRenderingRefused) {
+		return err
+	}
+	tree, parseErr := pmdoc.Parse(markdown)
+	if parseErr != nil {
+		return err
+	}
+	if ask := pmdoc.AskWrittenContentError(tree); ask != nil {
+		return &ErrInvalidAskBlock{Reason: ask}
+	}
+	return err
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A

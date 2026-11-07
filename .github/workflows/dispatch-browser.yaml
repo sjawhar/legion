@@ -90,17 +90,60 @@ jobs:
     #   every other step summed                  76, 67, 72, 85      79, 76, 80, 77
     #   the whole job                           515, 383, 402, 413  551, 396, 449, 1004
     #
+    # Those install readings are of the reduced package list this head installed before
+    # dispatch://INFRA-1506 (cybermonklabs/legion#2888) put Playwright's whole list back, and
+    # before the apt archive cache the two steps above the install restore, so they bound
+    # nothing now. The three cache steps came after those two runs as well, so the "every other
+    # step summed" row holds none of them.
+    #
     # The rule is in this file's head. The browser step's maximum is the full lane's 419 s, so
-    # 419 x 1.15 = 482 s -> 9 min. The install step keeps its 22 minutes, which is its own retry
-    # arithmetic rather than a measured maximum, for the reason .github/scripts/playwright-install.sh's
-    # head gives. The job budget is the sum of its step budgets plus the measured maximum of
-    # every step without one: 1320 + 540 + 85 s = 1945 s -> 33 min.
+    # 419 x 1.15 = 482 s -> 9 min, which is the bound this issue's R1 asks of the longest
+    # shard's browser step. The install step keeps its 22 minutes, which is
+    # .github/scripts/playwright-install.sh's retry arithmetic rather than a measured maximum,
+    # for the reason that file's head gives.
+    #
+    # The job budget contains the install step's own 22 minutes, because this file's rule builds a
+    # job budget from its steps' budgets. A warm install is far inside that: it fetches none of
+    # the list's 114 MB (`Need to get 0 B/114 MB of archives.`, job 128209099649 of
+    # cybermonklabs/legion#2888 at 5ff42456) and runs the 90 s bound of the `apt-get update` that
+    # still reads the mirror, 1.1 s to seed the restored .deb files, 13.6 s of unpack, 1.1 s of
+    # keeping, 0.4 s of decoder guard, about 90 s for a cold browser download and 1.6 s for the
+    # list check - 197.8 s, 4 min rounded up. That warm figure is what this lane costs in the
+    # steady state and what this issue's R1 is judged on, and it is in the pull request's body.
+    # It is not this budget.
+    #
+    # A job budget built on the warm figure was written here and taken out, because it cancels the
+    # run that writes the cache. The save step below runs after the install and only where the
+    # steps so far succeeded, so a leg cancelled during a cold install never reaches it: the key
+    # is never written, and the next run under that key is cold again. On main, where the save is
+    # the only save, that is a lane which stays cold and stays cancelled. A 15 min budget would
+    # also have cancelled a leg this branch measured rather than imagined - shard 4's install took
+    # 624 to 631 s in runs 42314019622 and 42314955394, which with this job's other steps is over
+    # 15 min - and cancelled it with no named cause, where the step's own bound fails it saying
+    # which phase ran out.
+    #
+    # The two cache steps before the install have no reading of their own: in job 128209099649
+    # the restore missed, and the key and restore steps took under a second each. The nearest
+    # reading of a restore that hits is that job's browser cache, 482 MB, whose hit line is at
+    # 23:13:54 with the install step starting at 23:14:00, so those 482 MB landed inside 6 s and
+    # this cache's 114 MB are under that. They are counted here as 7 s on top of the 85 s row,
+    # and the save after the install runs on a push to main alone.
+    #
+    # So the job budget is the install step's 1320 s, the browser step's 540 s and 92 s of every
+    # other step summed: 1952 s -> 33 min.
+    #
+    # The 114 MB cold draw is still a tail rather than a cost of the lane: it is paid once per
+    # cache key, on the first run after a Playwright upgrade or an image roll, and it is the same
+    # class of tail as the 1004 s leg below. It is accounted in this pull request's body, cited to
+    # dispatch://INFRA-1443. What this budget costs instead: a leg that is going to fail its
+    # install holds a runner for up to 33 min before it says so.
     #
     # The 1004 s leg sets none of that, and is named here as the tail it is. Its install stalled
     # 627 s on the apt download where every other install of the two runs took 19 to 49 s, and
-    # that stall sits inside the install step's own 22-minute budget, which exists for it. The
-    # rule builds a job budget from step budgets and not from measured job maxima, so letting
-    # that one leg set this figure would charge the job twice for a stall the step already holds.
+    # that stall is the same slow-mirror case the apt archive cache now answers on every run but
+    # the first under a key. The rule builds a job budget from step budgets and not from measured
+    # job maxima, so letting that one leg set this figure would charge the job twice for a stall
+    # the step already holds.
     #
     # The rows behind those seconds, listed at this head: 1,190 in the suite, 1,135 in the eight
     # projects the full lane's four shards run, and 1,048 in the two the pull-request lane runs.
@@ -177,14 +220,44 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
       # The Playwright install both this job and the alone job run, in one place:
-      # .github/scripts/playwright-install.sh. It holds the pinned apt list and the four media
-      # packages it drops, the bounded and retried `apt-get` attempts, the switch to the
-      # fallback origin, the browser download and the check that the list has not fallen behind
-      # Playwright - and the measurements behind each bound, which are its head comment. A
-      # script, not a composite action, for the reason this file's head gives: the step keeps
-      # its own `timeout-minutes`, which this one's 22 minutes are the script's retry
-      # arithmetic for, and the two jobs stop holding two copies of the same body.
+      # .github/scripts/playwright-install.sh. It holds the pinned apt list - Playwright's whole
+      # ubuntu24.04-x64 list, which dispatch://INFRA-1506 put back because WebKit plays no media
+      # without four of its packages - the bounded and retried `apt-get` attempts, the switch to
+      # the fallback origin, the seeding and keeping of the .deb files the two steps above and
+      # the save below carry, the decoder guard, the browser download and the check that the
+      # list has not fallen behind Playwright - and the measurements behind each bound, which
+      # are its head comment. A script, not a composite action, for the reason this file's head
+      # gives: the step keeps its own `timeout-minutes`, which this one's 22 minutes are the
+      # script's retry arithmetic for, and the two jobs stop holding two copies of the same body.
       - name: Install the lane's Playwright browsers
         timeout-minutes: 22
         run: |
@@ -226,6 +299,14 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+      # The .deb files the install step kept, under the same rule as the save above: the first
+      # leg alone, on a push to main whose restore missed. Four legs restore and would save the
+      # same key, so the guard is the browser cache's, written the same way.
+      - if: matrix.shard == 1 && github.event_name == 'push' && success() && steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
@@ -403,11 +484,47 @@ jobs:
     #   every other step summed                             74             72            82
     #   the whole job                                      219            217           259
     #
+    # Those install readings are of the reduced package list this head installed before
+    # dispatch://INFRA-1506 (cybermonklabs/legion#2888) put Playwright's whole list back, and
+    # before the apt archive cache the two steps above the install restore, so they bound
+    # nothing now. Those two steps came after that run as well, so the "every other step summed"
+    # row holds neither of them.
+    #
     # The rule is in this file's head. The browser step's maximum is webkit-alone's 141 s, so
-    # 141 x 1.15 = 162 s -> 3 min. The install step keeps its 22 minutes, for the reason
-    # .github/scripts/playwright-install.sh's head gives. The job budget is the sum of its step
-    # budgets plus the measured maximum of every step without one: 1320 + 180 + 82 s = 1582 s
-    # -> 27 min.
+    # 141 x 1.15 = 162 s -> 3 min. The install step keeps its 22 minutes, which is
+    # .github/scripts/playwright-install.sh's retry arithmetic rather than a measured maximum,
+    # for the reason that file's head gives.
+    #
+    # The job budget contains the install step's own 22 minutes, because this file's rule builds a
+    # job budget from its steps' budgets. A warm install is far inside that: it fetches none of
+    # the list's 114 MB (`Need to get 0 B/114 MB of archives.`, job 128209099649 of
+    # cybermonklabs/legion#2888 at 5ff42456) and runs the 90 s bound of the `apt-get update` that
+    # still reads the mirror, 1.1 s to seed the restored .deb files, 13.6 s of unpack, 1.1 s of
+    # keeping, 0.4 s of decoder guard, about 90 s for a cold browser download and 1.6 s for the
+    # list check - 197.8 s, 4 min rounded up. That warm figure is what this job costs in the
+    # steady state, and it is in the pull request's body. It is not this budget.
+    #
+    # A job budget built on the warm figure was written here and taken out, for the reason the
+    # shard job's own budget gives at length: the save step runs after the install and only where
+    # the steps so far succeeded, so a leg cancelled during a cold install never writes the key,
+    # and the next run under it is cold again. This job's legs restore the same key the shard
+    # job's do, so a cold draw here is the same draw, and the three legs of this matrix never
+    # save it - the shard job's first leg is the one save, as the step below says.
+    #
+    # The two cache steps before the install have no reading of their own: in job 128209099649
+    # the restore missed, and the key and restore steps took under a second each. The nearest
+    # reading of a restore that hits is that job's browser cache, 482 MB, whose hit line is at
+    # 23:13:54 with the install step starting at 23:14:00, so those 482 MB landed inside 6 s and
+    # this cache's 114 MB are under that. They are counted here as 7 s on top of the 82 s row.
+    #
+    # So the job budget is the install step's 1320 s, the browser step's 180 s and 89 s of every
+    # other step summed: 1589 s -> 27 min.
+    #
+    # The 114 MB cold draw is still a tail rather than a cost of this job: it is paid once per
+    # cache key, on the first run after a Playwright upgrade or an image roll, and it is the same
+    # class of tail as the shard job's 627 s apt stall. It is accounted in this pull request's
+    # body, cited to dispatch://INFRA-1443. What this budget costs instead: a leg that is going to
+    # fail its install holds a runner for up to 27 min before it says so.
     #
     # Three legs of one run is a thin reading, and these are the projects whose rows are read
     # from the wall clock, so a slower machine moves them further than it moves a parallel row.
@@ -463,11 +580,42 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment. This job writes no entry under
+      # it, for the reason the browser cache above gives: the shard job's first leg saves the one
+      # key both jobs restore.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
       # The shard job's install step, with one difference: the engine it installs is this leg's
       # own, not the whole lane's set. Both run .github/scripts/playwright-install.sh, whose
-      # head holds the pinned apt list, the bounded apt attempts, the fallback origin and the
-      # 22-minute arithmetic this step's budget is; nothing on this machine changes what it
-      # says, so it is not repeated here.
+      # head holds the pinned apt list, the bounded apt attempts, the fallback origin, the
+      # seeding and keeping of the .deb files the restore above carries, and the 22-minute
+      # arithmetic this step's budget is; nothing on this machine changes what it says, so it is
+      # not repeated here.
       - name: Install the lane's Playwright browsers
         timeout-minutes: 22
         run: |

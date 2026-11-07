@@ -12,17 +12,19 @@ import (
 )
 
 const (
-	byHandNote     = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
-	armedPacketL1  = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"
-	armedMergeLine = "Merge: the daemon submits pull request #42 at head once READY is accepted"
-	armedPacket    = armedPacketL1 + "\n" + armedMergeLine + "\n\nA docs/solutions/legion/retro-LEGION-208.md"
+	byHandNote    = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	armedPacketL1 = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"
+	armedPacket   = armedPacketL1 + "\nMerge: the daemon submits pull request #42 at head once READY is accepted\n\nA docs/solutions/legion/retro-LEGION-208.md"
 )
 
-// A READY a person merges is told as one: the packet the daemon posts on the issue and publishes to
-// the merge queue role starts with READY's by-hand note, and the merger's line asking for the merge
-// to be submitted is replaced, so no reader of the packet arms it. That holds whether READY is
-// accepted at once or refused while the design gate was closed and told when a human approves.
-func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
+// A READY a person merges is told as one: the packet the daemon posts on the issue and the packet
+// it publishes to the merge queue role are one packet, and it is the one record.ReadyPacket builds
+// from the merger's summary and that note — the note at its head, the merger's `Merge:` line
+// replaced — so no reader of it arms the merge. This test owns that the workflow tells both
+// audiences through that function; which lines it replaces, and how, is its own test's
+// (internal/record). That holds whether READY is accepted at once or refused while the design gate
+// was closed and told when a human approves.
+func TestAByHandREADYIsToldWithItsNoteToTheIssueAndTheMergeQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		approved bool
@@ -58,14 +60,13 @@ func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
 			if !strings.HasPrefix(packet, byHandNote+"\n\n") || !strings.Contains(packet, armedPacketL1) || !strings.Contains(packet, "A docs/solutions/legion/retro-LEGION-208.md") {
 				t.Fatalf("told READY %q, want the by-hand note first, then the merger's packet", packet)
 			}
-			merges := 0
-			for line := range strings.Lines(packet) {
-				if strings.HasPrefix(line, "Merge:") {
-					merges++
-				}
-			}
-			if strings.Contains(packet, armedMergeLine) || merges != 1 {
-				t.Fatalf("told READY %q, want the merger's Merge line replaced, one Merge line left", packet)
+			// The whole packet, not the note's prefix alone: the workflow builds what it tells
+			// through record.ReadyPacket, so the merger's `Merge:` line — the one that tells a
+			// reader to arm the merge — is gone from it, and the note stands where that function
+			// puts it. A packet built as the note and the summary instead would keep that line and
+			// pass every other assertion here.
+			if want := record.ReadyPacket(armedPacket, byHandNote); packet != want {
+				t.Fatalf("told READY %q, want record.ReadyPacket's own %q", packet, want)
 			}
 			if published := mergeQueuePublishes(t, pool); len(published) != 1 || published[0].Packet != packet {
 				t.Fatalf("merge queue publishes = %v, want the same packet the issue was told", published)

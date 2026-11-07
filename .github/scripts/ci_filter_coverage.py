@@ -493,13 +493,16 @@ def reduce_line(line: str) -> tuple:
 # each module's hash whichever source serves it. This check's own go commands run with
 # GOPROXY=off over an empty module cache (Go.env below), so a workflow's value never reaches
 # them either. CI_OK_SELECTED_BY and CI_OK_PULL_REQUEST_ONLY are ci.yaml's ci-ok map, which only
-# ci-ok-report.sh and ci-ok.sh read.
+# ci-ok-report.sh and ci-ok.sh read. LEGION_RUN_FUZZ_ITERS and LEGION_KEPT_PROPERTY_RUNS are the
+# counts the pull-request lane reduces: each is read at run time by the test it governs, so go
+# compiles the same files with them set as without.
 ENV_ALLOWED = frozenset({
     "BROKER_TEST_DATABASE_URL", "CI_OK_PULL_REQUEST_ONLY", "CI_OK_SELECTED_BY", "DATABASE_URL",
     "DISPATCH_E2E_FILE_STORE_BUCKET", "DISPATCH_E2E_FILE_STORE_ENDPOINT",
     "DISPATCH_TEST_DATABASE_URL", "ENVOY_INFRA_DOCKER_PLUGIN", "ENVOY_SMOKE_HELD_PORT_IMAGE", "ENVOY_SMOKE_IMAGE",
     "GOPROXY",
-    "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
+    "LEGION_E2E", "LEGION_E2E_ENVOY_STACK", "LEGION_E2E_PG_DSN", "LEGION_KEPT_PROPERTY_RUNS",
+    "LEGION_RUN_FUZZ_ITERS", "LEGION_TEST_NATS_URL", "LEGION_TEST_PG_DSN",
     "TESTCONTAINERS_RYUK_DISABLED",
 })
 

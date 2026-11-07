@@ -135,6 +135,13 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_PORT=" + port,
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
+		// Every measured server collects at GOGC=25, so a peak above idle reads the memory a
+		// request holds plus the collector's margin at that setting, not the resident memory
+		// production shows at Go's default GOGC=100, where the collector lets the heap grow to
+		// twice the live set before it collects and an edit can raise resident memory by up to
+		// about twice what it holds. A test that needs another value sets GOGC in
+		// memoryHarness.env, which is appended after this and wins.
+		"GOGC=25",
 	}
 	command.Env = append(command.Env, h.env...)
 	held.Pass(command, "DISPATCH_LISTEN_FD")

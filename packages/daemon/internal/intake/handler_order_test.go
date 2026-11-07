@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -215,24 +214,10 @@ func seedOrderedIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, is
 	}
 }
 
-// orderedPool is a migrated database of this test's own, dropped when it ends. It is
-// intake_test.go's migratedPool, which the internal test package cannot lend this one.
+// orderedPool is a migrated database of this test's own, cloned from the package's template and
+// dropped when the test ends. It is intake_test.go's migratedPool, which the internal test
+// package cannot lend this one; both clone the one template of the test binary they share.
 func orderedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := testpg.Database(t, "legion_intake_order_test")
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_intake_order_test")
 }

@@ -22,7 +22,7 @@ import (
 const testTimeout = 30 * time.Second
 
 // TestMain takes out of the process every variable that could lead git or jj to a workspace,
-// remote or credential not the test's own (fixtureenv.Guard), and gives the process a home of the
+// remote or credential not the test's own (fixtureenv.MustGuard), and gives the process a home of the
 // package's own (fixtureenv.Home), so every real jj and
 // git these tests run — provisioning's, which reads the process's environment, and the fixtures',
 // which run under fixtureenv.Isolated of that same home (setupEnvironment) — reads none of the
@@ -32,16 +32,15 @@ const testTimeout = 30 * time.Second
 // pile up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
 // that sets a home of its own afterward (newLocalRunner's) still wins: os.Environ() is read fresh
 // by every exec.Command.
-func TestMain(m *testing.M) { os.Exit(runUnderAHomeOfThePackagesOwn(m)) }
+func TestMain(m *testing.M) {
+	fixtureenv.MustGuard()
+	os.Exit(runUnderAHomeOfThePackagesOwn(m))
+}
 
 // runUnderAHomeOfThePackagesOwn does the setup the comment above describes and removes the home
 // afterwards. The removal is deferred, so it also runs when the setup below panics. A run killed
 // by a signal still keeps the home, which nothing here can help.
 func runUnderAHomeOfThePackagesOwn(m *testing.M) int {
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		return 1
-	}
 	home, err := os.MkdirTemp("", "legion-test-home")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -56,10 +55,6 @@ func runUnderAHomeOfThePackagesOwn(m *testing.M) int {
 		}
 	}
 	return m.Run()
-}
-
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
 }
 
 // setupEnvironment is the environment of a fixture command: fixtureenv.Isolated under the home

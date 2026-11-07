@@ -24,7 +24,7 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		{name: "only such a line, with no final line feed", markdown: " ```js\n\n ", codes: []string{""}},
 		// In a quote, after a line of the quote's markers alone, the quote takes that blank line
 		// from the code and the document's last line, with no line feed, ends the code empty: one
-		// line ending stays, which main read so.
+		// line ending stays, as the reader before PR #2481 read it.
 		{name: "quoted, after a blank quote line, short last line with no final line feed", markdown: ">  ~~~\n>  x\n>\n>  ", codes: []string{"x\n"}},
 		{name: "quoted in an item, after a blank quote line, short last line with no final line feed", markdown: "- >  ```\n  >  x\n  >\n  >  ", codes: []string{"x\n"}},
 		// A last line with no line feed holding a tab its container eats part of keeps the
