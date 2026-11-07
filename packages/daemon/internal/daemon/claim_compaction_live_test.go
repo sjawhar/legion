@@ -28,6 +28,12 @@
 // the driver's own (paneStandin), which answers a turn's request and a compaction's summary
 // request separately, so one pane can walk the provider-error ladder while its compaction
 // succeeds, is refused, or is held past the daemon's RPC timeout.
+//
+// Each phase worker is seeded holding the task its phase's start left pending, and the root
+// architect's issue stands in accepting, because admission repairs a slotted worker that holds
+// no task by starting its phase again (internal/admit/admit.go's resumeSlottedWorkers): the
+// seed's own comment says what each of those two agrees with. Every pane answers that task
+// before the step that drives it, so what a step delivers is still the first task it reads.
 package daemon
 
 import (
@@ -234,12 +240,15 @@ type seededPane struct {
 
 // seededPanes is the four claims that run a real pane, each on an issue and a tree of its own.
 // The root architect's issue is its own tree's root, as every issue here is, so its claim is the
-// root architect claim.phase workers and architects both reach.
+// root architect claim.phase workers and architects both reach. That one stands in accepting,
+// the phase whose role is the architect and in which no phase worker runs: it is the only issue
+// here with no phase worker's claim, and in a worker's phase admission's repair of a slotted
+// worker would start the worker it names (seed).
 func (r *claimCompactionLive) seededPanes() []seededPane {
 	return []seededPane{
 		{r.ladder, "the issue whose planner the ladder holds", phase.Planning, claim.RolePlanner, ladderPaneProvider},
 		{r.notice, "the issue whose implementer keeps failing its turns", phase.Implementing, claim.RoleImplementer, noticePaneProvider},
-		{r.root, "the issue whose architect owes no task", phase.Planning, claim.RoleArchitect, rootPaneProvider},
+		{r.root, "the issue whose architect owes no task", phase.Accepting, claim.RoleArchitect, rootPaneProvider},
 		{r.refusing, "the issue whose summary the endpoint holds and then refuses", phase.Testing, claim.RoleTester, refusingPaneProvider},
 	}
 }
@@ -324,6 +333,22 @@ func (r *claimCompactionLive) overrides() overrides {
 // its lifecycle open, and that worker's claim mid-launch, which this boot relaunches. The one
 // claim that runs no pane is the Claude Code role's, seeded stopped so nothing ever launches it:
 // the compaction refuses such a claim on its backend before it reads any state at all.
+//
+// Each phase worker's claim also holds the task its phase's start left pending, because a start
+// writes the relaunch and the task together (workflow's StartOrOwe) and a slotted worker holding
+// no task at all is the state admission repairs: resumeSlottedWorkers (internal/admit/admit.go)
+// gives such a claim its phase's resume task on the first pass after boot, which would answer
+// every deliver of this driver's 409 "a delivery is already pending". A delivery of the issue's
+// own generation and phase, unconfirmed, is what that repair passes over (workflow.StartFor, the
+// delivery's StillWorked). Each pane answers that task before its step drives the claim
+// (awaitStartTaskAnswered), which leaves the claim idle and live — another state the repair
+// passes over — and gives the session the turns a compaction needs to have anything to summarize.
+//
+// The root architect's issue stands in accepting rather than in a worker phase, for the same
+// repair: it has an architect's claim and no phase worker's, and the repair would read the
+// planner a planning issue names, find no claim at all and start one. Accepting is the phase
+// whose role is the architect (workflow's RoleFor), where no phase worker runs, so the repair
+// passes over it as it passes over every architect.
 func (r *claimCompactionLive) seed() {
 	t := r.t
 	t.Helper()
@@ -350,12 +375,32 @@ func (r *claimCompactionLive) seed() {
 			t.Fatalf("open the lifecycle of %s: %v", seeded.issue, err)
 		}
 		r.seedClaim(ctx, seeded.issue, seeded.role, supervise.StateLaunching, "")
+		if seeded.role == claim.RoleArchitect {
+			continue
+		}
+		// Unconfirmed and unread: the launch this seed interrupts never put the task in front of
+		// an agent, so the relaunched pane is sent it once it reports ready.
+		token := r.token(seeded.issue, seeded.role)
+		if err := r.st.PutDelivery(ctx, token, supervise.Delivery{
+			ID: "seeded-start-" + randomSuffix(t), Task: startTask(seeded.role), Generation: 1,
+			Phase: seeded.at, QueuedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("record the task %s's start left pending: %v", token, err)
+		}
 	}
 	r.seedClaim(ctx, r.ladder, r.onClaude, supervise.StateRetired, "")
-	r.note("seeded %s (%s, %s), %s (%s, %s), %s (%s, %s) and %s (%s, %s), each with its worker mid-launch, and %s's %s stopped",
+	r.note("seeded %s (%s, %s), %s (%s, %s), %s (%s, %s) and %s (%s, %s), each with its worker mid-launch — every phase "+
+		"worker holding the task its start left pending, which is what admission's repair of a slotted worker passes "+
+		"over — and %s's %s stopped",
 		r.ladder, phase.Planning, claim.RolePlanner, r.notice, phase.Implementing, claim.RoleImplementer,
-		r.root, phase.Planning, claim.RoleArchitect, r.refusing, phase.Testing, claim.RoleTester,
+		r.root, phase.Accepting, claim.RoleArchitect, r.refusing, phase.Testing, claim.RoleTester,
 		r.ladder, r.onClaude)
+}
+
+// startTask is the task a phase worker's claim holds pending at boot: one its pane's stand-in
+// answers, since every stand-in answers a turn until a step sets it otherwise (paneStandin).
+func startTask(role claim.Role) string {
+	return "Say the word START-" + strings.ToUpper(string(role)) + " and nothing else."
 }
 
 // seedClaim records one claim of issue in state, with the prompt file every launch reads.
@@ -434,6 +479,7 @@ func (r *claimCompactionLive) operatorCompactsAPhaseWorker() {
 	t := r.t
 	token := r.token(r.ladder, claim.RolePlanner)
 	r.awaitReady(token)
+	r.awaitStartTaskAnswered(token)
 	r.answeredTurn(token, "WARM")
 	before := r.claim(token)
 	if before.Session == "" || before.SessionFile == "" {
@@ -525,6 +571,7 @@ func (r *claimCompactionLive) controllerCompactsAndIsToldTwice() {
 	t := r.t
 	token := r.token(r.notice, claim.RoleImplementer)
 	r.awaitReady(token)
+	r.awaitStartTaskAnswered(token)
 	r.answeredTurn(token, "WARM")
 	for run := 1; run <= 6; run++ {
 		r.erroredTurn(token, run)
@@ -627,6 +674,7 @@ func (r *claimCompactionLive) heldSummaryOutlastsTheTimeout() {
 	t := r.t
 	token := r.token(r.refusing, claim.RoleTester)
 	r.awaitReady(token)
+	r.awaitStartTaskAnswered(token)
 	r.answeredTurn(token, "WARM")
 	if compactHeldSummary <= r.cfg.WorkerRPCTimeout || compactHeldSummary <= ladderDelays[0] {
 		t.Fatalf("this step holds the summary for %s, which no longer outlasts worker_rpc_timeout_seconds (%s) or the ladder's first rung (%s)",
@@ -806,13 +854,20 @@ func (r *claimCompactionLive) everyRefusalGetsItsMessage() {
 // freshSessionsStartEachWorker drives `legion claims retry --fresh-session` and the controller's
 // own `fresh_session`, and reads back what each worker is given in the session it starts in: a
 // phase worker its issue's current phase task, and the root architect its catch-up.
+//
+// The phase worker is the one step 6 stopped, and the daemon starts such a worker again on its
+// own: its issue holds a slot in a worker phase and its claim owes no task, which is the state
+// admission repairs (internal/admit/admit.go's resumeSlottedWorkers). So this step asks for the
+// fresh session through retryFreshSession, which waits out a claim the daemon is in the middle
+// of starting, and what it reads back afterwards is the same either way: the fresh session is
+// the operator's, and the task in it is the one the issue's phase owes (api's
+// restartWorkedPhase).
 func (r *claimCompactionLive) freshSessionsStartEachWorker() {
 	t := r.t
 	planner := r.token(r.ladder, claim.RolePlanner)
-	stopped := r.claim(planner)
 	from := r.daemon.count()
-	r.note("`legion claims retry --claim %s --fresh-session`: %s", planner,
-		r.legionClaims("retry", "--claim", string(planner), "--fresh-session"))
+	stopped, retried := r.retryFreshSession(planner)
+	r.note("`legion claims retry --claim %s --fresh-session` on a claim that was %s: %s", planner, stopped.State, retried)
 	r.awaitLogFrom("the daemon's record of which door asked", from, time.Minute, func(record loggedRecord) bool {
 		return record.Message == "api: operator request" && record.Attrs["claim"] == string(planner) &&
 			strings.HasSuffix(fmt.Sprint(record.Attrs["route"]), "/retry")
@@ -879,6 +934,26 @@ func (r *claimCompactionLive) answeredTurn(token claim.Token, what string) {
 	})
 }
 
+// awaitStartTaskAnswered waits until the pane has answered the task its phase's start left
+// pending on the claim (seed) and the claim holds nothing. Only then is a task this step
+// delivers taken — the daemon refuses a second task while one is pending — and only then is the
+// claim idle and live, which is a state admission's repair of a slotted worker passes over
+// (workflow.StartFor).
+func (r *claimCompactionLive) awaitStartTaskAnswered(token claim.Token) {
+	r.t.Helper()
+	pane := r.pane(token)
+	task := startTask(pane.role)
+	r.await(string(token)+" to answer the task its start left pending", 4*time.Minute, func() bool {
+		held := r.claim(token)
+		return held.Pending == nil && held.State != string(supervise.StateWorking)
+	})
+	if got := pane.stand.turnsHolding(task); got == 0 {
+		r.t.Fatalf("%s's stand-in answered no turn carrying the task its start left pending, %q", token, task)
+	}
+	r.note("%s answered the task its start left pending (%q) and holds nothing, so what it is given next is this step's",
+		token, task)
+}
+
 // erroredTurn gives the claim one task its stand-in answers 529, waits for the daemon to read the
 // turn's provider error, and holds that the claim's run of such turns is now run (0 asks for
 // none). It answers the task's marker and the record the daemon wrote.
@@ -912,6 +987,35 @@ func (r *claimCompactionLive) awaitErroredTurnFrom(token claim.Token, run, from 
 		r.t.Fatalf("%s's turn counts providerErrorRun %v, want %d", token, errored.Attrs["providerErrorRun"], run)
 	}
 	return errored
+}
+
+// retryFreshSession runs `legion claims retry --claim <token> --fresh-session` — the built
+// binary against the booted daemon — and answers the claim as it stood when the command the
+// daemon accepted ran, together with what that command printed.
+//
+// It asks again while the daemon refuses: the operation reaches a claim whose agent is ready or
+// idle and one that is suspended, stopped or failed, and refuses one it is in the middle of
+// starting or one in a turn. A worker an operator stopped is one the daemon starts again by
+// itself — its issue holds a slot in a worker phase and its claim owes no task, the state
+// admission repairs (internal/admit/admit.go's resumeSlottedWorkers) — so the claim this step
+// asks about may be launching, and the refusal is the daemon's own word that it is not there
+// yet. Every refusal is printed with the failure, so a refusal for any other reason is read
+// rather than hidden behind the wait.
+func (r *claimCompactionLive) retryFreshSession(token claim.Token) (api.OperatorClaim, string) {
+	r.t.Helper()
+	deadline := time.Now().Add(paneReady)
+	for {
+		before := r.claim(token)
+		out, err := r.legionClaimsTry("retry", "--claim", string(token), "--fresh-session")
+		if err == nil {
+			return before, out
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("`legion claims retry --fresh-session` on %s was refused for %s; it is %s and the last answer was %v:\n%s",
+				token, paneReady, before.State, err, out)
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // ---- the two doors -------------------------------------------------------------------------------
@@ -1494,28 +1598,4 @@ func isSideQuestion(body string) bool {
 		return false
 	}
 	return strings.Contains(string(request.Messages[len(request.Messages)-1]), "<btw>")
-}
-
-// streamAnthropicText answers one Anthropic Messages request with a single text block, in the
-// events the plugins' own pane harness scripts (packages/pi-shared/test/omp-harness.ts:383-448,
-// `messageStream`).
-func streamAnthropicText(w http.ResponseWriter, provider, text string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-	event := func(name, data string) {
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}
-	event("message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"answered","type":"message","role":"assistant",`+
-		`"model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1000,"output_tokens":1}}}`,
-		provider+standinModelID))
-	event("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
-	event("content_block_delta", fmt.Sprintf(
-		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, text))
-	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
-	event("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":16}}`)
-	event("message_stop", `{"type":"message_stop"}`)
 }

@@ -10,7 +10,8 @@
 // retry proof's three answer by the provider name each is given in the run's models.yml, and the
 // compaction proof's four answer by what the step before them set, a turn's request apart from a
 // compaction's summary request. What they hold in common is here: the HTTP server, the bodies
-// they were sent, and the two bodies both of them answer with.
+// they were sent, and the three answers both of them write — the overloaded status, a refused
+// request, and the Messages stream of a turn that ends.
 package daemon
 
 import (
@@ -122,6 +123,30 @@ func writeInvalidRequest(w http.ResponseWriter, body string) {
 // message, which is the shape a request to an `anthropic-messages` provider is refused in.
 func anthropicRefusal(message string) string {
 	return fmt.Sprintf(`{"type":"error","error":{"type":"invalid_request_error","message":%q}}`, message)
+}
+
+// streamAnthropicText answers one Anthropic Messages request with a single text block, in the
+// events the plugins' own pane harness scripts (packages/pi-shared/test/omp-harness.ts:383-448,
+// `messageStream`).
+func streamAnthropicText(w http.ResponseWriter, provider, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	event := func(name, data string) {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, data)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	event("message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"answered","type":"message","role":"assistant",`+
+		`"model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1000,"output_tokens":1}}}`,
+		provider+standinModelID))
+	event("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+	event("content_block_delta", fmt.Sprintf(
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, text))
+	event("content_block_stop", `{"type":"content_block_stop","index":0}`)
+	event("message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":16}}`)
+	event("message_stop", `{"type":"message_stop"}`)
 }
 
 // ---- the overlays a pane is told through PI_CONFIG_FILES -------------------------------------------

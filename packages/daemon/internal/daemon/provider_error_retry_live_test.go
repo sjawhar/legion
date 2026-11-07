@@ -44,6 +44,25 @@
 // fifth out would add twelve minutes and measure the same ladder twice. With the pod's Oh My Pi
 // the whole driver runs in about eight minutes, inside the twenty-minute bound
 // scripts/e2e/lib/live-daemon-proof.sh gives it.
+//
+// What the daemon already holds when it boots. Each issue is seeded holding its tree's admission
+// slot, in a worker phase, with that worker's claim mid-launch and the task that phase's start
+// carried pending on the claim — because those two are what a start writes together (workflow's
+// StartOrOwe, the relaunch row and the task row), so a slotted worker holding no task at all is
+// not a state a start leaves. It is the state admission repairs: resumeSlottedWorkers
+// (internal/admit/admit.go) gives any such claim its phase's resume task on the first pass after
+// boot, and a seed with no pending delivery meets that repair before this driver delivers
+// anything of its own, which answers every deliver 409 "a delivery is already pending". A
+// pending delivery of the issue's own generation and phase is what the repair passes over
+// (workflow.StartFor, the delivery's StillWorked), so the seed holds one.
+//
+// The ladder's claim is seeded with the task step 1 measures, and step 1 reads the daemon's own
+// first send of it rather than making one. That also keeps the repair off the planner for the
+// whole run: a provider error takes the task back unconfirmed (supervise's takeBackPending), so
+// it is still worked at every rung and while step 5 leaves the claim stopped. The other two
+// claims are seeded with a warm-up task their stand-in answers (providerStandin.arm), so each is
+// idle and live — a state the repair passes over too — by the time its own step delivers the
+// task that step drives, exactly as those steps always have.
 package daemon
 
 import (
@@ -163,8 +182,13 @@ type providerErrorLive struct {
 	ladder, refused, failing string
 	// stands is each stand-in by its provider name.
 	stands map[string]*providerStandin
-	// ladderTask is the task step 1 gave the planner, which the ladder keeps on the claim and the
-	// operator's retry in step 5 sends to the fresh session.
+	// seeded is the three issues as the seed wrote them, built once in newProviderErrorLive so
+	// the task each claim holds pending at boot and the marker that task asks for are the same
+	// in the seed and in the step that reads them back (seededIssue).
+	seeded []seededIssue
+	// ladderTask is the task the planner holds pending from the moment the daemon boots, which
+	// step 1 measures the ladder's sends of, the ladder keeps on the claim, and the operator's
+	// retry in step 5 sends to the fresh session.
 	ladderTask string
 }
 
@@ -184,8 +208,8 @@ func TestAProviderErrorKeepsTheTaskAndTheOperatorRetriesWhatItLeavesLive(t *test
 
 // newProviderErrorLive readies everything a pane needs before the daemon boots: the `legion`
 // binary and the two plugins built from this checkout, an Oh My Pi profile of the run's own routed
-// to the three stand-ins, the three issues seeded with their phase worker mid-launch, and the
-// daemon booted over the local runtime.
+// to the three stand-ins, the three issues seeded with their phase worker mid-launch and that
+// worker's task pending on its claim (seed), and the daemon booted over the local runtime.
 func newProviderErrorLive(t *testing.T) *providerErrorLive {
 	t.Helper()
 	omp := os.Getenv(liveOmpPathEnv)
@@ -200,6 +224,18 @@ func newProviderErrorLive(t *testing.T) *providerErrorLive {
 		ladder: proof.cfg.Project + "-1", refused: proof.cfg.Project + "-2", failing: proof.cfg.Project + "-3",
 		stands: map[string]*providerStandin{},
 	}
+	r.seeded = []seededIssue{
+		{key: r.ladder, title: "the issue whose provider is overloaded", phase: phase.Planning,
+			role: claim.RolePlanner, provider: overloadedProvider, marker: "LADDER-" + randomSuffix(t)},
+		{key: r.refused, title: "the issue whose turn a content filter refuses", phase: phase.Implementing,
+			role: claim.RoleImplementer, provider: filteredProvider, marker: "WARM-IMPLEMENTER-" + randomSuffix(t)},
+		{key: r.failing, title: "the issue whose provider request is malformed", phase: phase.Testing,
+			role: claim.RoleTester, provider: malformedProvider, marker: "WARM-TESTER-" + randomSuffix(t)},
+	}
+	for i, seeded := range r.seeded {
+		r.seeded[i].task = "Say the word " + seeded.marker + " and nothing else."
+	}
+	r.ladderTask = r.seededFor(r.ladder).task
 	version, err := exec.Command(omp, "--version").Output()
 	if err != nil {
 		t.Fatalf("read the Oh My Pi version of %s: %v", omp, err)
@@ -278,8 +314,15 @@ func (r *providerErrorLive) overrides() overrides {
 
 // seed records the three issues as the daemon would hold them at the moment each one's worker
 // began: a root handed to Legion, in the phase its worker works, holding its tree's admission slot
-// with its lifecycle open, and that worker's claim mid-launch, which this boot relaunches. That
-// last one is how the proof reaches three live panes without an operator's spawn.
+// with its lifecycle open, that worker's claim mid-launch, which this boot relaunches, and the
+// task that phase's start left pending on the claim. The claim is how the proof reaches three
+// live panes without an operator's spawn, and the pending task is what keeps admission's repair
+// of a slot whose worker has no task off them: resumeSlottedWorkers (internal/admit/admit.go)
+// would otherwise give each claim its phase's resume task on the first pass after boot, and
+// every deliver this driver makes would be refused "a delivery is already pending". A delivery
+// of the issue's own generation and phase, unconfirmed, is one the repair passes over
+// (workflow.StartFor, the delivery's StillWorked), which is also what a real start leaves
+// behind: the relaunch and the task are written together (workflow's StartOrOwe).
 func (r *providerErrorLive) seed() {
 	t := r.t
 	t.Helper()
@@ -313,29 +356,49 @@ func (r *providerErrorLive) seed() {
 		}); err != nil {
 			t.Fatalf("record the unfinished launch of %s: %v", token, err)
 		}
+		// Unconfirmed and unread: the launch this seed interrupts never put the task in front of
+		// an agent, so the relaunched pane is sent it once it reports ready.
+		if err := r.st.PutDelivery(ctx, token, supervise.Delivery{
+			ID: "seeded-start-" + randomSuffix(t), Task: seeded.task, Generation: 1,
+			Phase: seeded.phase, QueuedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("record the task %s's start left pending: %v", token, err)
+		}
 		writePrompt(t, r.cfg, token)
 	}
-	r.note("seeded %s (%s, %s), %s (%s, %s) and %s (%s, %s), each with its worker mid-launch",
+	r.note("seeded %s (%s, %s), %s (%s, %s) and %s (%s, %s), each with its worker mid-launch holding the task "+
+		"its phase's start left pending, which is the state admission's repair of a slotted worker passes over",
 		r.ladder, phase.Planning, overloadedProvider, r.refused, phase.Implementing, filteredProvider,
 		r.failing, phase.Testing, malformedProvider)
 }
 
 // seededIssue is one of the proof's three issues: its key, the phase it stands in, the role that
-// works that phase, and the stand-in that role's pane talks to.
+// works that phase, the stand-in that role's pane talks to, the task the seed leaves pending on
+// that role's claim, and the word that task asks for, which tells this claim's turns from every
+// other request its stand-in answers.
 type seededIssue struct {
 	key      string
 	title    string
 	phase    phase.Phase
 	role     claim.Role
 	provider string
+	task     string
+	marker   string
 }
 
-func (r *providerErrorLive) issues() []seededIssue {
-	return []seededIssue{
-		{r.ladder, "the issue whose provider is overloaded", phase.Planning, claim.RolePlanner, overloadedProvider},
-		{r.refused, "the issue whose turn a content filter refuses", phase.Implementing, claim.RoleImplementer, filteredProvider},
-		{r.failing, "the issue whose provider request is malformed", phase.Testing, claim.RoleTester, malformedProvider},
+// issues is the three issues as newProviderErrorLive built them.
+func (r *providerErrorLive) issues() []seededIssue { return r.seeded }
+
+// seededFor is the seeded issue of key, and fails the run when the key is none of the three.
+func (r *providerErrorLive) seededFor(key string) seededIssue {
+	r.t.Helper()
+	for _, seeded := range r.issues() {
+		if seeded.key == key {
+			return seeded
+		}
 	}
+	r.t.Fatalf("this proof seeds no issue %s", key)
+	return seededIssue{}
 }
 
 // token is the claim token of role on key, as the daemon spells it.
@@ -352,20 +415,21 @@ func (r *providerErrorLive) token(key string, role claim.Role) claim.Token {
 
 // ladderWalks drives the first half of R2: the task a 529 takes back stays on the claim, goes to
 // the same session again after 30 s, 60 s and 120 s, and the claim neither fails nor loses it.
+//
+// The task is the one the planner's claim has held pending since the daemon booted, which is
+// what its phase's start left there (seed), so the first send is the daemon's own and this step
+// waits for it rather than delivering a task of its own. It is read off the delivery's read
+// mark, the instant the shim acknowledged that first prompt, which a provider error keeps
+// (supervise's takeBackPending) — so every gap below is measured from the send that began the
+// ladder and not from a later rung.
 func (r *providerErrorLive) ladderWalks() {
 	t := r.t
 	token := r.token(r.ladder, claim.RolePlanner)
 	r.awaitReady(token)
-	marker := "LADDER-" + randomSuffix(t)
-	task := "Say the word " + marker + " and nothing else."
-	r.ladderTask = task
-	status, body := r.d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
-		api.DeliverRequest{Task: task}, true)
-	if status != http.StatusOK {
-		t.Fatalf("deliver the ladder's task = %d %s, want 200", status, body)
-	}
-	sent := []time.Time{time.Now()}
-	r.note("the daemon was given the task %q for %s", task, token)
+	marker, task := r.seededFor(r.ladder).marker, r.ladderTask
+	sent := []time.Time{r.awaitFirstSend(token, task)}
+	r.note("the daemon held the task %q for %s from the moment it booted and sent it at %s",
+		task, token, sent[0].Format(time.RFC3339))
 
 	for attempt := 1; attempt < ladderSends; attempt++ {
 		delay := ladderDelays[attempt-1]
@@ -469,10 +533,16 @@ func (r *providerErrorLive) controllerIsTold() {
 // refusalGoesAgain drives the second half of R2: a turn a content filter ended carries no HTTP
 // status, so the task goes to the same session again after 30 s and nobody is told to hold the
 // issue.
+//
+// The claim answers the warm-up task its seed left pending first, so it is idle and holds
+// nothing when this step gives it the task whose turns the filter refuses, and the stand-in is
+// armed only once that is true: the refusals this step reads are this task's and no other's.
 func (r *providerErrorLive) refusalGoesAgain() {
 	t := r.t
 	token := r.token(r.refused, claim.RoleImplementer)
 	r.awaitReady(token)
+	r.awaitWarmedUp(r.refused)
+	r.stands[filteredProvider].arm()
 	marker := "FILTERED-" + randomSuffix(t)
 	task := "Say the word " + marker + " and nothing else."
 	// The log is marked before the task is given: the daemon errors and decides inside a few
@@ -536,10 +606,15 @@ func (r *providerErrorLive) refusalGoesAgain() {
 
 // cannotClearFails drives the last of R2: an HTTP 400, a client error that is none of 401, 403,
 // 408 and 429, fails the claim, and the workflow holds the issue for its architect.
+//
+// As in step 3, the claim answers the warm-up task its seed left pending before the stand-in is
+// armed, so the malformed request this step reads is the one its own task ran into.
 func (r *providerErrorLive) cannotClearFails() {
 	t := r.t
 	token := r.token(r.failing, claim.RoleTester)
 	r.awaitReady(token)
+	r.awaitWarmedUp(r.failing)
+	r.stands[malformedProvider].arm()
 	marker := "MALFORMED-" + randomSuffix(t)
 	task := "Say the word " + marker + " and nothing else."
 	from := r.daemon.count()
@@ -636,6 +711,45 @@ func (r *providerErrorLive) awaitFreshSession(token claim.Token, old string) str
 	r.note("%s was relaunched with no session to resume, registered %s (was %s), and that session was sent: %q",
 		token, now.Session, old, sent)
 	return sent
+}
+
+// awaitFirstSend waits until the claim's pending task is task and the daemon has put it in front
+// of its agent, and answers the instant it did: the delivery's read mark, which the shim's
+// acknowledgement of that first prompt set. A provider error keeps the mark while it takes the
+// task back (supervise's takeBackPending), so the instant answered here stays the first send's
+// however far the ladder climbs afterwards.
+func (r *providerErrorLive) awaitFirstSend(token claim.Token, task string) time.Time {
+	r.t.Helper()
+	var at time.Time
+	r.await(string(token)+" to be sent the task its start left pending", paneReady, func() bool {
+		held := r.claim(token)
+		if held.Pending == nil || held.Pending.Task != task || held.Pending.DeliveredAt == nil {
+			return false
+		}
+		at = *held.Pending.DeliveredAt
+		return true
+	})
+	return at
+}
+
+// awaitWarmedUp waits until the claim has answered the warm-up task its seed left pending and
+// holds nothing (seed). Only then is the claim's next task this step's own, and only then is a
+// deliver of it taken: the daemon refuses a second task while one is pending. A claim idle with
+// no task is also one admission's repair of a slotted worker passes over, since the repair
+// starts no phase whose claim is in a live state (workflow.StartFor).
+func (r *providerErrorLive) awaitWarmedUp(issue string) {
+	r.t.Helper()
+	seeded := r.seededFor(issue)
+	token := r.token(seeded.key, seeded.role)
+	r.await(string(token)+" to answer the warm-up task its start left pending", paneReady, func() bool {
+		held := r.claim(token)
+		return held.Pending == nil && held.State != string(supervise.StateWorking)
+	})
+	if got := r.stands[seeded.provider].requestsHolding(seeded.marker); got == 0 {
+		r.t.Fatalf("the %s stand-in answered no request carrying %s's warm-up task", seeded.provider, token)
+	}
+	r.note("%s answered the warm-up task its start left pending (%q) and holds nothing, so what it is given next is this step's",
+		token, seeded.task)
 }
 
 // ---- reads a proof that drives real panes makes ---------------------------------------------------
@@ -998,19 +1112,45 @@ func newPaneListener(t *testing.T) string {
 // providerStandin is one provider endpoint of this proof's own: it answers every model request
 // the way its provider name says, over the stand-in both proofs share (live_agent_proof_test.go),
 // which records each request so a step can count the ones a task reached it in.
+//
+// Until it is armed it answers a turn instead, which is how the claim it serves answers the
+// warm-up task its seed left pending and reaches the step that drives it idle, holding nothing
+// (seed, awaitWarmedUp). The overloaded one is armed from the start, because the task its claim
+// holds at boot is the ladder step 1 measures and every turn of it must end in the 529.
 type providerStandin struct {
 	*modelStandin
+
+	mu    sync.Mutex
+	armed bool
 }
 
 func newProviderStandin(t *testing.T, name string) *providerStandin {
 	t.Helper()
-	s := &providerStandin{modelStandin: &modelStandin{name: name}}
+	s := &providerStandin{modelStandin: &modelStandin{name: name}, armed: name == overloadedProvider}
 	s.serve(t, s)
 	return s
 }
 
+// arm is the step's word that every turn from now on is answered the way this stand-in's
+// provider name says.
+func (s *providerStandin) arm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armed = true
+}
+
+func (s *providerStandin) refusing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 func (s *providerStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if _, ok := s.take(w, req); !ok {
+		return
+	}
+	if !s.refusing() {
+		s.warmAnswer(w, req)
 		return
 	}
 	switch s.name {
@@ -1025,9 +1165,33 @@ func (s *providerStandin) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// warmAnswer answers one request of an unarmed stand-in with a turn that ends: the Messages
+// stream for the two `anthropic-messages` providers, a chat completion that stops for the
+// `openai-completions` one, and a token count for Oh My Pi's own count request, which is no turn
+// and which an Anthropic stream would not answer.
+func (s *providerStandin) warmAnswer(w http.ResponseWriter, req *http.Request) {
+	if s.name == filteredProvider {
+		s.streamCompletion(w, "stop")
+		return
+	}
+	if !strings.HasSuffix(req.URL.Path, "/v1/messages") {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"input_tokens":1000}`)
+		return
+	}
+	streamAnthropicText(w, s.name, "WARMED")
+}
+
 // streamContentFilter answers one OpenAI chat completion: two chunks of text, then a chunk whose
 // `finish_reason` is `content_filter`, which is what a provider's own filter leaves behind.
 func (s *providerStandin) streamContentFilter(w http.ResponseWriter) {
+	s.streamCompletion(w, "content_filter")
+}
+
+// streamCompletion answers one OpenAI chat completion of two text chunks and a last chunk
+// carrying finish: `content_filter` is the refusal step 3 reads, and `stop` the warm-up turn a
+// stand-in answers before it is armed.
+func (s *providerStandin) streamCompletion(w http.ResponseWriter, finish string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -1045,7 +1209,7 @@ func (s *providerStandin) streamContentFilter(w http.ResponseWriter) {
 	}
 	chunk(`"role":"assistant","content":"I can "`, "")
 	chunk(`"content":"start on that"`, "")
-	chunk("", "content_filter")
+	chunk("", finish)
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()

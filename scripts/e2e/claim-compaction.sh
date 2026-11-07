@@ -33,13 +33,15 @@
 # starts a pane with no tmux). Each check prints `== <name>`, what it observed and `ok <name>`; the
 # first that fails ends the run non-zero, naming it.
 #
-# The whole run took 188 s measured in a Legion worker pod (omp/18.16.0) with a cold Go build
-# cache and 164 s with a warm one, the difference being the driver's own build; the driver itself
-# took 142 s and 145 s of those. Four panes each start Oh My Pi once, and the one wait is the
-# held summary — Oh My Pi writes a split turn's summary in two passes and the stand-in holds each
-# for 35 s, so that compaction answers after about 70 s. Nothing else waits on a clock: the
-# ladder's own gaps are provider-error-retry.sh's subject and this proof never waits one out,
-# since a newer task takes the place of the one a wait stands for.
+# The whole run took 186 s measured in a Legion worker pod (omp/18.16.0) with a warm Go build
+# cache, the driver 138 s of it; a cold cache adds the driver's own build. Four panes each start
+# Oh My Pi once, and each of the three phase workers answers the task its phase's start left
+# pending on its claim — which is what keeps admission's repair of a slotted worker off these
+# claims, as the driver's seed says —
+# and the one wait is the held summary: Oh My Pi writes a split turn's summary in two passes and
+# the stand-in holds each for 35 s, so that compaction answers after about 70 s. Nothing else
+# waits on a clock: the ladder's own gaps are provider-error-retry.sh's subject and this proof
+# never waits one out, since a newer task takes the place of the one a wait stands for.
 #
 # Run it from a checkout on a Linux host with go, awk, bash, tar and bun, as
 #   LEGION_OMP_PATH=/opt/omp/bin/omp \

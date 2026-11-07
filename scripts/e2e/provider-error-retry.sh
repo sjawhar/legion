@@ -22,10 +22,13 @@
 # scripts/e2e/claim-compaction.sh's, a proof of the same shape with four panes of its own: the
 # two runs would otherwise share a wall clock.
 #
-# The whole run took 351 s measured in a Legion worker pod (omp/18.16.0), the driver 301 s of it:
+# The whole run took 317 s measured in a Legion worker pod (omp/18.16.0), the driver 300 s of it:
 # the ladder's first three gaps are waited out where they are real (30 s, 60 s and 120 s of wall
 # clock between the daemon's sends), its fourth and fifth are driven on the daemon's own clock, and
-# three panes each start Oh My Pi once.
+# three panes each start Oh My Pi once. The ladder is measured from the daemon's own first send of
+# the task the planner's claim holds from the moment it boots, which is what that phase's start
+# left pending on it; the other two panes answer a warm-up task of their own before the step that
+# drives them (the driver's seed says why each claim holds one).
 #
 # Run it from a checkout on a Linux host with go, awk, bash, tar and bun, as
 #   LEGION_OMP_PATH=/opt/omp/bin/omp \
