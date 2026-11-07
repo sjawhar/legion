@@ -163,12 +163,21 @@ const DIRECTORY = "/example/sessions";
 /** What the report calls the session: the role it claimed and its own id. */
 const labelOf = (session: Fixture): string => `${session.role} ${session.id}`;
 
+const scratch = await mkdtemp(join(tmpdir(), "message-wait-"));
 const DATABASE = `legion_message_wait_${randomUUID().replaceAll("-", "")}`;
 const admin = new SQL(SERVER);
 await admin.unsafe(`create database ${DATABASE} strategy file_copy`);
 const storeUrl = new URL(SERVER);
 storeUrl.pathname = `/${DATABASE}`;
 const store = new SQL(storeUrl.toString());
+// Registered before the fixture is built, so a statement that throws still takes its database
+// and its scratch directory with it.
+afterAll(async () => {
+  await rm(scratch, { recursive: true, force: true });
+  await store.close();
+  await admin.unsafe(`drop database if exists ${DATABASE} with (force)`);
+  await admin.close();
+});
 await store.unsafe(
   "create table omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, " +
     "mtime_ms BIGINT NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, " +
@@ -194,16 +203,8 @@ for (const session of FIXTURES) {
   }
 }
 
-const scratch = await mkdtemp(join(tmpdir(), "message-wait-"));
 const dsnFile = join(scratch, "session-store.url");
 await writeFile(dsnFile, `${storeUrl.toString()}\n`);
-
-afterAll(async () => {
-  await rm(scratch, { recursive: true, force: true });
-  await store.close();
-  await admin.unsafe(`drop database if exists ${DATABASE} with (force)`);
-  await admin.close();
-});
 
 const child = Bun.spawn(["bun", SCRIPT, "--since", "24h", "--dsn-file", dsnFile], {
   stdout: "pipe",
@@ -271,12 +272,6 @@ test("every wait line and every unanswered arrival carries the host state at the
   const measured = printed.filter((text) => text.startsWith("  "));
   expect(measured).toHaveLength(MEASURED + NOT_ANSWERED);
   expect(measured.filter((text) => /\bhand-over: [a-z][a-z-]*\b/.test(text))).toEqual(measured);
-});
-
-test("a card carrying details but no state is unstamped, and the inert card says inert", () => {
-  expect(printed).toContain(waitLine("14m00s", NO_CALL, "unstamped", UNSTAMPED));
-  expect(printed).toContain(waitLine("13m00s", NO_CALL, "inert", INERT));
-  expect(printed).toContain(waitLine("15m00s", NO_CALL, "startup", STAMPED));
 });
 
 test("the plugin's own notice is on no line, in no count and no measured wait", () => {

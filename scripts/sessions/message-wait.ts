@@ -151,7 +151,12 @@ interface SessionRecord {
   readonly type?: unknown;
   readonly customType?: unknown;
   readonly timestamp?: unknown;
-  readonly details?: unknown;
+  /** The card's own fields, which pi-envoy writes and the host persists: `localNotice` marks a
+   *  notice of the plugin's own (`LOCAL_ENVOY_NOTICE`, `packages/pi-shared/src/envoy-notice.ts`,
+   *  written by `packages/pi-envoy/extensions/envoy.ts` and `src/card-wake.ts`), and `handOver`
+   *  the host state at the hand-over. The shapes are read here, never imported: this script
+   *  imports nothing of the packages. */
+  readonly details?: { readonly localNotice?: unknown; readonly handOver?: unknown };
   readonly message?: { readonly role?: unknown; readonly toolCallId?: unknown };
   readonly data?: {
     readonly toolName?: unknown;
@@ -270,22 +275,9 @@ interface PendingArrival {
   waitMs: number | null;
 }
 
-/**
- * The plugin's own notice, which is no Envoy message another session sent. pi-envoy marks its
- * local notices, and the wake it sends itself, with this field in the `details` the host persists
- * (`LOCAL_ENVOY_NOTICE`, written in `packages/pi-shared/src/envoy-notice.ts` and handed over by
- * `packages/pi-envoy/src/card-wake.ts`). The shape is read here rather than imported, since this
- * script imports nothing of the packages.
- */
-function isLocalNotice(details: unknown): boolean {
-  if (typeof details !== "object" || details === null) return false;
-  return "localNotice" in details && details.localNotice === true;
-}
-
 /** The host state the card carries, in the shape above, or `UNSTAMPED` when it carries none. */
-function handOverState(details: unknown): string {
-  if (typeof details !== "object" || details === null) return UNSTAMPED;
-  const state = "handOver" in details ? details.handOver : undefined;
+function handOverState(details: SessionRecord["details"]): string {
+  const state = details?.handOver;
   return typeof state === "string" && SAFE_STATE.test(state) ? state : UNSTAMPED;
 }
 
@@ -336,10 +328,12 @@ function measureSession(path: string, text: string): SessionMeasurement {
       continue;
     }
     if (record.type === ARRIVAL_TYPE) {
+      // A record the plugin marked as a notice of its own is no arrival at all: it is left out of
+      // every count and every line, and it ends nobody's wait.
       if (
         record.customType === ARRIVAL_CUSTOM_TYPE &&
         !Number.isNaN(at) &&
-        !isLocalNotice(record.details)
+        record.details?.localNotice !== true
       ) {
         const arrival: PendingArrival = {
           at,

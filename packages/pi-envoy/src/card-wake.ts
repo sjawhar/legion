@@ -371,7 +371,7 @@ export class CardWake {
     // record says what this module acted on: a context with no idle state says nothing, a startup
     // card is the startup phase's whatever else holds, and the clear above means an idle host has
     // no active run, so `idle` wins over `run-active`. What is left is a busy host with no run,
-    // which is setting a prompt up or settling after one (`setup` below).
+    // which is setting a prompt up or settling after one, the `setup` the wake reads below.
     const handOver: CardHandOver =
       typeof idle !== "boolean"
         ? "unknown"
@@ -389,7 +389,7 @@ export class CardWake {
     // aside started a turn outside the latch and plan mode, and a fresh process has no latch. Plan
     // mode at startup is the one case where that wake starts a turn main did not, which
     // `AGENTS.md` states.
-    const setup = idle === false && !this.#runActive;
+    const setup = handOver === "prompt-setup";
     const wake = startup ? "startup" : setup || targetedAside ? undefined : "fold";
     const details: EnvoyCardMarker = {
       envoyCard: randomUUID(),

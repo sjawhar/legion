@@ -206,7 +206,7 @@ import { ServerClock } from "../src/server-clock";
 import { type CarriedAnswers, withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
-import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
+import { type CardDelivery, UnwrittenFrames } from "../src/unwritten-frames";
 import { type AskGateRegistration, registerAskGate } from "./askgate/askgate";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
@@ -1154,14 +1154,13 @@ export default function envoyExtension(pi: PiApi): void {
     identity: DedupeIdentity | undefined
   ): void => {
     const known = identity === undefined ? {} : replayLedgerIdentity(identity);
-    const frame = unwrittenCardKeys(known).length === 0 ? undefined : { ...known };
     if (deliverAs === "inert") {
       pi.sendMessage(
         {
           customType: "envoy-message",
           content,
           display: true,
-          details: { ...frame, handOver: INERT_HAND_OVER },
+          details: { ...known, handOver: INERT_HAND_OVER },
         },
         { deliverAs: "steer", triggerTurn: false }
       );
@@ -1172,7 +1171,7 @@ export default function envoyExtension(pi: PiApi): void {
       activeSessionContext
     );
     pi.sendMessage(
-      { customType: "envoy-message", content, display: true, details: { ...frame, ...details } },
+      { customType: "envoy-message", content, display: true, details: { ...known, ...details } },
       options
     );
   };
