@@ -421,13 +421,16 @@ func launcherBackstop(boot, bound time.Duration) time.Duration {
 
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
-// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
-// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
-// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
-// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
-// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
-// timeout waits it alone.
+// launcher starts only once every init container of the pod has finished, however many the
+// deployment gives it, and the three steps whose duration follows the repository's size —
+// workspace-fetch's whole fetch with its retries, then workspace-init's shared clone of the feed
+// and the issue's own checkout of it — may take up to ProvisionBound from the fetch's own start,
+// a sum that counts no term for the commands which keep CommandTimeout, skills-fetch's one
+// shallow clone among them (ProvisionBound, manifest.go). So until the wait
+// first sees the pod provisioning (an init container running, provisioning) it gives the pod the
+// boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw the
+// pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
@@ -495,8 +498,11 @@ func (r *Runtime) stillFetching(pod *corev1.Pod) string {
 	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
-// provisioning is whether pod is running one of its init containers, workspace-fetch or
-// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+// provisioning is whether pod is running any of its init containers, whichever they are:
+// workspace-fetch, then skills-fetch where the deployment names a skills repository, then
+// workspace-init. It names none of them, reading each status for its own state, so a pod whose
+// init containers differ needs nothing here. It is the rule the liveness mapping reads such a pod
+// alive by (evaluate).
 func provisioning(pod *corev1.Pod) bool {
 	if phaseOf(pod) != corev1.PodPending {
 		return false

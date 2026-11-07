@@ -109,8 +109,9 @@ template, and the later phases fill in their own lines:
   commit it ran at and the role that ran it.
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
-- The `after_merge` check, recorded by the implementer after the merge closes the issue, once your
-  deploy carries the change; its line reads `not yet run` until then.
+- The `after_merge` check, recorded after the merge closes the issue by the role your project's
+  `production_check` names — the tester, unless the setting is `off`, where no production check
+  opens — once your deploy carries the change; its line reads `not yet run` until then.
 - Any line your repository's own instructions derive from the paths the change touches, such as a
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
   change, the way those instructions say.
@@ -144,10 +145,13 @@ A root with work still running beneath it is the exception: its merge is recorde
 waits until the last other issue of its tree is done or parked, so no child's finished work is cut
 off, and then it closes. The architect accepted the change before that, when the reviewer approved
 it, with a comment on the issue summarizing the evidence; the daemon refuses that acceptance while
-an issue beneath it is still being worked, so a parent is accepted after its children. After the close the
-implementer checks the change in production, once your deploy carries it, and records what it saw
+an issue beneath it is still being worked, so a parent is accepted after its children. After the
+close the role your project's `production_check` names — the tester, unless the setting is `off` —
+checks the change in production and records what it saw
 as the result of the issue's `after_merge` check, with that result's line on the pull request; a
 closed issue takes a result for such a check and no other write, so look in both places.
+Each look that finds the deploy missing says when it wants to look again, and nothing else brings
+it back.
 The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
 resumes.
 
@@ -185,4 +189,4 @@ you stop the work.
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
 | `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
-| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The implementer's production check follows on the pull request; the tree lingers, then closes. |
+| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The production check your project's `production_check` opens — the tester's, unless the setting is `off` — follows on the pull request; the tree lingers, then closes. |

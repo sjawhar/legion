@@ -3569,6 +3569,21 @@ func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
 	)
 	harness.registerFanoutTarget(t, firstTarget, topic, nil)
 	harness.registerFanoutTarget(t, nextTarget, topic, nil)
+	// The fan-out reaches only what these two registries answer for, so they are read here: a
+	// registration either cache lost would otherwise show up below as a missing dedupe entry,
+	// which says nothing about where it went.
+	var matched []string
+	for _, interest := range harness.registry.Match("test-machine", topic) {
+		matched = append(matched, interest.SessionID)
+	}
+	for _, target := range []string{firstTarget, nextTarget} {
+		if !slices.Contains(matched, target) {
+			t.Fatalf("the registry matches %q on %s, want %s among them", matched, topic, target)
+		}
+		if _, state := harness.sessions.Lookup(target); state != session.Live {
+			t.Fatalf("session %s reads %s before the delivery, want live", target, state)
+		}
+	}
 	item := listenerTestEnvelope(topic, "fanout-untagged")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"}}`
 
@@ -3782,10 +3797,16 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client) listenerDeli
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
+	// Both caches are waited for here, as the listener's own start waits for them: a Put that
+	// lands after a watch fixed its initial snapshot and before the read that turns its marks on
+	// is unmarked, and the sweep that completes the read drops it, so an interest or a session
+	// registered in that window would be missing from what Match and Lookup answer.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
+	waitForSessions(t, sessions)
 	dedupeCache := dedupe.New(10 * time.Minute)
 	attemptCache := dedupe.New(5 * time.Minute)
 	t.Cleanup(dedupeCache.Stop)
