@@ -5,8 +5,6 @@ description: "Use when a session has the dispatch command, before you plan, file
 
 # Dispatch first
 
-Dispatch holds the open issues, their specs and people's answers.
-
 ## Search before you act
 
 - Before you plan, file an issue, ask, post a finding or start work, run `dispatch search`.
@@ -26,7 +24,7 @@ dispatch search --query 'reviewer threads OR review comments'
 
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
-- **Duplicate found, or a likely duplicate a create names:** read it, keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
+- **Duplicate found, or a likely duplicate a create names:** read it; fold only when it is the same work. Keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
 
 ## Research before you ask
 
@@ -35,8 +33,6 @@ dispatch search --query 'reviewer threads OR review comments'
 - Say what you searched: each part you found with its source, and each part you did not, with the queries you ran. Ask only the part no search answered.
 
 ## Reach a person only through Dispatch
-
-Reach a person through an ask, an ask block or an approval request.
 
 - The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends decisions to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
 - A result a person asked for is the same: a document or artifact notifies nobody. End that document with an ask block asking their next step, else `dispatch ask`.
