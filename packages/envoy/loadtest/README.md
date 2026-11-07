@@ -2941,8 +2941,8 @@ and to remove: no subcommand creates, resizes or removes one.
 Every subcommand needs `--config`, the deployment file (below); there is no default. After `up`,
 a subcommand takes the run named in `<root>/current` unless `--run` names another. The run
 directory is `${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>`, on the worker pod:
-`state.json` (mode 600), the run's own OS Login keypair, `cgroup.jsonl`, `steps/`, `curves/` and
-`logs/`.
+`state.json` (mode 600), the run's own OS Login keypair with the `oslogin.imported` record of
+when that key was last imported, `cgroup.jsonl`, `steps/`, `curves/` and `logs/`.
 
 | Subcommand | What it does |
 | --- | --- |
@@ -3024,9 +3024,9 @@ pod's authenticates anywhere. Before it reaches a machine, each subcommand:
 1. mints an access token for `login_service_account` — the account that holds
    `roles/compute.osAdminLogin` on the machines — at `iamcredentials`, with the pod's own metadata
    token;
-2. imports the run's public key for that account at `oslogin`, with an expiry of 24 hours: every
-   subcommand imports again at its start, so the expiry has only to outlast one subcommand's own
-   work, and no key of a finished run is left behind for long;
+2. imports the run's public key for that account at `oslogin`, with an expiry of 24 hours, and
+   records the second it did so in `oslogin.imported` beside the keypair, which is where the
+   work that follows reads how much of that life is left;
 3. reads that account's POSIX user name from its login profile;
 4. runs every ssh as `ssh -F /dev/null -i <the run's private key> -o
    StrictHostKeyChecking=accept-new -o UserKnownHostsFile=<the run directory>/known_hosts <that
@@ -3043,6 +3043,17 @@ second `up` of one run imports the key it already has. The minted token lives in
 variable and reaches no log, no command line another process can list — `curl` takes the
 `Authorization` header on its standard input — and no file the run keeps. A refusal names which of
 the four steps failed and what the endpoint answered, and `up` refuses before it starts anything.
+
+Twenty-four hours outlasts a subcommand, not a run. A `series` of hour-long steps and a `seed`
+whose embedding gate waits eight hours are each **one process** that can outlive the key it
+imported when it started, and a key that expires part way through refuses every ssh after it
+with `Permission denied (publickey)` — which `check` reads back as containers it cannot see
+rather than as a key it cannot use, which is how this was found. So every step (`run_step`) and
+every seed phase (`seed_phase`) begins by reading `oslogin.imported`, and imports the same
+public key again, with the same 24-hour expiry, when under two hours of its life is left. The
+expiry stays at 24 hours, the keypair is still made once per run, and the key is never imported
+again while it is good: the cost is one more call to the OS Login API per step or phase, at
+most, and none at all for a run that finishes inside the day.
 
 Because `vms.<name>` no longer carries a user, the file names a host and an instance alone. The
 profiling tunnel is the exception that proves it: its command runs **on the load machine**, not

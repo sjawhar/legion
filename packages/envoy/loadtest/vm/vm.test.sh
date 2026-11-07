@@ -85,7 +85,9 @@
 # are read in that order before the first ssh, every ssh runs as the user that profile named
 # with the key the run made, a second up of one run makes no second key, a refusal of any of the
 # three refuses up by name with nothing started, and no minted token reaches a command line or
-# any file the run keeps; (t) each of the eleven defects that driving this script against
+# any file the run keeps, and a step whose process imported that key long ago imports it again,
+# with the same 24-hour expiry, before its first ssh, while a step whose key has its day ahead
+# of it imports nothing; (t) each of the eleven defects that driving this script against
 # the deployment itself found -- a remote argument holding a space, a quote or a pipe arriving
 # as one argument, the run's own known_hosts under accept-new, put_file's write beside the
 # target and rename onto it, a second up that stops the stub embedder the first left holding
@@ -983,8 +985,11 @@ readonly fn_run_dir=$tmp/root/$fn_run
 # line runs main only when it is the program), the deployment file this test writes is read,
 # and the run, its directory, the OS Login user and the run's key are set as a subcommand sets
 # them before its first ssh, so a function that reaches a machine reaches the fakes. A leading
-# NAME=VALUE sets one of the script's own bounds -- which is how a poll of /healthz is given
-# ten seconds here rather than the nine hundred a subcommand gives it.
+# NAME=VALUE sets one of the script's own variables before the function runs: a bound, which is
+# how a poll of /healthz is given ten seconds here rather than the nine hundred a subcommand
+# gives it, or the run a case drives, which is how the OS Login cases run a step of the run up
+# started -- its directory, its key and the sampler's cgroup.jsonl -- rather than of this
+# function's own.
 run_fn() {
   set +e
   bash -c '
@@ -2193,6 +2198,82 @@ grep -q 'no POSIX account, so there is no user to ssh as' "$tmp/out" ||
   fail "up's refusal does not say that the login profile holds no POSIX user: $(cat "$tmp/out")"
 [ ! -s "$fake/docker.log" ] || fail "up started a container although there is no user to ssh as"
 pass "a login profile with no POSIX account refuses up by name, with nothing started"
+
+# An imported key is good for a day, and one process of this script can outlive that: a series
+# runs a dozen hour-long steps and a seed waits eight hours at its embedding gate. So the work
+# that needs ssh imports the key again at its start when under two hours of its life is left,
+# reading what is left from the record the run directory holds beside the keypair rather than
+# from Google. These cases drive run_step itself, as the step of a process that readied OS
+# Login long before this step ran: a subcommand of its own would import at its start whatever
+# that record said, which is the first import and not the renewal under test. The run, its
+# directory and its key are the ones up made above, and the sampler's cgroup.jsonl is where
+# use_run would have put it.
+reset_fake
+run_vm up --config "$config"
+((RC == 0)) || fail "up failed before the key renewal cases: see the output above"
+seeded_run
+renew_run=$(cat "$LOADTEST_VM_ROOT/current")
+renew_dir=$(run_dir)
+key=$renew_dir/oslogin
+# up's own record of its import, read before anything else can have written one.
+up_record=$(cat "$renew_dir/oslogin.imported" 2>/dev/null || true)
+cp -- "$key" "$tmp/key-before"
+cp -- "$key.pub" "$tmp/pub-before"
+
+# A step of a process whose import was 23 hours ago: under two hours of the key's day is left,
+# so the step imports it again, and before the first ssh that depends on it.
+printf '%s\n' "$(($(date -u +%s) - 23 * 3600))" >"$renew_dir/oslogin.imported"
+: >"$fake/actions.log"
+: >"$fake/import.log"
+: >"$fake/ssh.log"
+run_fn RUN="$renew_run" RUN_DIR="$renew_dir" SSH_KEY="$key" CGROUP_JSONL="$renew_dir/cgroup.jsonl" \
+  run_step stale-key 1 10m 30s
+((RC == 0)) || fail "the step of a run whose key is nearly expired failed: $(cat "$tmp/out")"
+# A step that imported nothing is the defect these cases are here for, and line_at's grep
+# answers 1 for it, which this suite's own pipefail would turn into a silent exit: each of the
+# two is read with the empty answer that failure leaves, and judged below.
+import_at=$(line_at 'importSshPublicKey' || true)
+ssh_at=$(line_at '^ssh' || true)
+[ -n "$import_at" ] ||
+  fail "a step started with under two hours of its key left imported nothing, so every ssh of this run is refused publickey once that key expires"
+[ -n "$ssh_at" ] || fail "the step of the renewal case reached no machine at all"
+((import_at < ssh_at)) ||
+  fail "the step imported the key again at action $import_at, after its first ssh at $ssh_at"
+cp -- "$fake/import.log" "$tmp/renew-import.log"
+pass "a step started with a key imported long ago imports it again before its first ssh"
+
+# What that import carried: the run's own public key rather than a second one, and the same
+# 24-hour expiry, so the key the step's ssh presents is the key the deployment now accepts.
+cmp -s "$tmp/key-before" "$key" && cmp -s "$tmp/pub-before" "$key.pub" ||
+  fail "the renewal made a second keypair rather than importing the one the run already has"
+[[ $up_record =~ ^[0-9]+$ ]] ||
+  fail "up recorded no import time beside the run's key, so no step of this run can read what is left of it: '$up_record'"
+grep -qF -- "$(cat "$key.pub")" "$tmp/renew-import.log" ||
+  fail "the renewal imported a public key that is not the run's own: $(cat "$tmp/renew-import.log")"
+expires_usec=$(sed -n 's/.*"expirationTimeUsec": *"\([0-9]*\)".*/\1/p' "$tmp/renew-import.log" | tail -n1)
+[ -n "$expires_usec" ] || fail "the renewal named no expiry: $(cat "$tmp/renew-import.log")"
+(( (expires_usec / 1000000) - $(date -u +%s) > 23 * 3600 )) ||
+  fail "the renewal's key expires in $(( (expires_usec / 1000000) - $(date -u +%s) )) s, not the 24 hours an import gives"
+# ssh.log holds a line per line of the argv it was given, and a step's load is started through
+# an sh script of several lines, so the ssh calls themselves are the lines that carry ssh_cmd's
+# own -F /dev/null.
+grep -- '-F /dev/null' "$fake/ssh.log" | grep -v -- "-i $key " | grep -q . &&
+  fail "an ssh of the step that renewed the key ran without the run's own key: $(grep -- '-F /dev/null' "$fake/ssh.log" | grep -v -- "-i $key " | head -n1)"
+[ -f "$renew_dir/steps/stale-key/meta.json" ] ||
+  fail "the step that renewed the key left no meta.json, so the work it does over ssh never finished"
+pass "the run records when its key was imported, and the renewal imports that same key again with the same 24-hour expiry, leaving the step's ssh working"
+
+# The negative control: the same step of a process whose key was imported a moment ago -- which
+# is what the renewal above left behind -- imports nothing at all.
+: >"$fake/import.log"
+run_fn RUN="$renew_run" RUN_DIR="$renew_dir" SSH_KEY="$key" CGROUP_JSONL="$renew_dir/cgroup.jsonl" \
+  run_step fresh-key 1 10m 30s
+((RC == 0)) || fail "the step of a run whose key is fresh failed: $(cat "$tmp/out")"
+[ ! -s "$fake/import.log" ] ||
+  fail "a step started with the key's whole day left imported it again: $(cat "$fake/import.log")"
+[ -f "$renew_dir/steps/fresh-key/meta.json" ] ||
+  fail "the step of the fresh-key case left no meta.json, so the work it does over ssh never finished"
+pass "a step started with a fresh key imports nothing"
 
 # ---- (o) the example deployment file is one vm.sh runs on ---------------------------------------
 

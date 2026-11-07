@@ -117,12 +117,16 @@
 # authenticates anywhere. Before it reaches a machine, each subcommand mints an access token for
 # the deployment's login_service_account (which holds roles/compute.osAdminLogin on the
 # machines) with this pod's own metadata token, imports the run's public key for that account
-# with an expiry, reads that account's POSIX user name from its login profile, and runs every
-# ssh as `ssh -F /dev/null -i <the run's private key> <that user>@<the machine's host>`. The
-# keypair is the run's own, made once under the run directory, mode 600, and copied nowhere; the
-# minted token lives in one shell variable and reaches no log, no command line another process
-# can list and no file the run collects. .vms.<name> therefore names an address and a Compute
-# instance alone: the user is OS Login's and no file names it.
+# with an expiry of a day, reads that account's POSIX user name from its login profile, and runs
+# every ssh as `ssh -F /dev/null -i <the run's private key> <that user>@<the machine's host>`.
+# A process of this script can outlive that day -- a series of hour-long steps, a seed whose
+# embedding gate waits eight hours -- so each step and each seed phase imports the same key
+# again at its start when under two hours of its life is left, reading what is left from the
+# run's own oslogin.imported (oslogin_ready). The keypair is the run's own, made once under the
+# run directory, mode 600, and copied nowhere; the minted token lives in one shell variable and
+# reaches no log, no command line another process can list and no file the run collects.
+# .vms.<name> therefore names an address and a Compute instance alone: the user is OS Login's
+# and no file names it.
 #
 # No credential of the deployment is an argument anywhere, for the same reason: `ps -eo args` on
 # this pod, and on any machine an ssh carries a command to, lists every argument of every
@@ -239,7 +243,8 @@
 #
 # The run directory is ${LOADTEST_VM_ROOT:-$TMPDIR/dispatch-loadtest-vm}/<run id>: state.json
 # (mode 600, the deployment file's values that the run was started with), the run's OS Login
-# keypair, cgroup.jsonl, steps/, curves/ and logs/. up names the run in <root>/current, and every
+# keypair with oslogin.imported, the second that key was last imported at (oslogin_ready),
+# cgroup.jsonl, steps/, curves/ and logs/. up names the run in <root>/current, and every
 # later subcommand takes that run unless --run names another.
 #
 # A step whose machine is stopped is discarded, never recorded: each machine stops itself 72
@@ -312,10 +317,20 @@ COMPUTE_DEFAULT=https://compute.googleapis.com
 IAMCREDENTIALS_DEFAULT=https://iamcredentials.googleapis.com
 OSLOGIN_DEFAULT=https://oslogin.googleapis.com
 # How long an imported OS Login key is good for. Every subcommand that reaches a machine imports
-# the run's key again at its start, so this has only to outlast one subcommand's own work -- the
-# longest of them is a series of hour-long steps or a seed with an eight-hour embedding gate --
-# and a day is that with room to spare while leaving no key of a finished run behind for long.
+# the run's key at its start, and the work that needs ssh imports it again when little of that
+# life is left (OSLOGIN_RENEW_SECONDS), so this has only to outlast one piece of such work --
+# the longest is an hour-long step or the seed's eight-hour embedding gate -- and a day is that
+# with room to spare while leaving no key of a finished run behind for long.
 OSLOGIN_KEY_SECONDS=86400
+# How much of that life the work about to start must have left over. A subcommand is one
+# process, and a series or a seed is a process that runs for days, so the import at its start is
+# not enough on its own: the key expires part way through, every ssh after it is refused
+# `Permission denied (publickey)`, and check reads that back as containers it cannot see rather
+# than as a key it cannot use, which is how it was found (dispatch://INFRA-988). So each step
+# and each seed phase imports the key again when less than this is left of it (oslogin_ready).
+# Two hours covers the longest piece of work either one starts: an hour-long step with its
+# warm-up, its slack and the collection after its load.
+OSLOGIN_RENEW_SECONDS=7200
 
 # CONTAINERS: every container of the deployment, in start order, one line each:
 #
@@ -810,6 +825,18 @@ vms_running() {
 
 # ---- OS Login -----------------------------------------------------------------------------------
 
+# oslogin_key_left: how many seconds of its expiry the run's imported key has left, read from
+# the record oslogin_ready writes beside the keypair rather than from Google -- the import
+# answers no expiry and a login profile is a call of its own. A run whose record is missing or
+# holds no number has none left, so its key is imported again: that is the reading a run
+# started before this file existed gives, and importing once more costs one call.
+oslogin_key_left() {
+  local at
+  at=$(cat -- "$RUN_DIR/oslogin.imported" 2>/dev/null || true)
+  [[ $at =~ ^[0-9]+$ ]] || { printf '0\n'; return 0; }
+  printf '%s\n' "$((at + OSLOGIN_KEY_SECONDS - $(date -u +%s)))"
+}
+
 # oslogin_ready: the one way this script reaches a machine, made ready and safe to call again.
 # The machines carry enable-oslogin and block-project-ssh-keys and this pod's Google identity is
 # a federated Kubernetes principal with no POSIX profile, so no key of the pod's authenticates
@@ -819,18 +846,30 @@ vms_running() {
 #      roles/compute.osAdminLogin on the machines, minted at iamcredentials with the pod's own
 #      metadata token;
 #   2. the run's public key imported for that account at oslogin, with an expiry of
-#      OSLOGIN_KEY_SECONDS, so a key this run imports does not outlive it by more than a day;
+#      OSLOGIN_KEY_SECONDS, so a key this run imports does not outlive it by more than a day,
+#      and the second it was imported at recorded beside the keypair (oslogin_key_left);
 #   3. that account's POSIX user name, read from its login profile;
 #   4. every later ssh as that user, with the run's private key and -F /dev/null.
 #
+# The first call of a process does all four. A later one returns at once while the key it
+# imported has more than OSLOGIN_RENEW_SECONDS of its life left, and does all four again when it
+# has not, which is why the work that needs ssh calls this at its start -- every step (run_step)
+# and every seed phase (seed_phase) -- rather than trusting the import the process began with:
+# a series or a seed runs for days in one process, and a key that expires part way through
+# refuses every ssh after it. A key that is still good costs that work nothing, and a renewal
+# costs one call to the OS Login API, at most one per step or phase.
+#
 # The keypair is made once per run and lives in the run directory alone, mode 600: a second up
-# of the same run imports the key it already has rather than making another. The minted token is
-# a local of this function, reaches no log, no command line and no file the run collects, and is
-# gone when it returns. Each refusal names which of the four steps failed and what it answered,
-# because every later command of every subcommand depends on this one.
+# of the same run, and every renewal, import the key the run already has rather than making
+# another. The minted token is a local of this function, reaches no log, no command line and no
+# file the run collects, and is gone when it returns. Each refusal names which of the four steps
+# failed and what it answered, because every later command of every subcommand depends on this
+# one.
 oslogin_ready() {
-  [ -z "$SSH_USER" ] || return 0
-  local account project key pub token answer user url body expires
+  if [ -n "$SSH_USER" ] && (($(oslogin_key_left) > OSLOGIN_RENEW_SECONDS)); then
+    return 0
+  fi
+  local account project key pub token answer user url body now expires
   account=$(cfg_valid service_account .login_service_account)
   project=$(cfg_valid name .project)
   key=$RUN_DIR/oslogin
@@ -849,12 +888,17 @@ oslogin_ready() {
   [ -n "$token" ] ||
     die "OS Login step 1 of 4: $url answered no accessToken for $account; this pod's own identity must hold roles/iam.serviceAccountTokenCreator on it"
 
-  expires=$(($(date -u +%s) + OSLOGIN_KEY_SECONDS))000000
+  # The import, and beside the keypair the second it happened at: that record is what every
+  # later step and seed phase reads the key's remaining life from (oslogin_key_left).
+  now=$(date -u +%s)
+  expires=$((now + OSLOGIN_KEY_SECONDS))000000
   url="$(cfg .oslogin "$OSLOGIN_DEFAULT")/v1/users/$account:importSshPublicKey?projectId=$project"
   body=$(jq -n --arg key "$(cat -- "$pub")" --arg expires "$expires" '{key: $key, expirationTimeUsec: $expires}') ||
     die "OS Login step 2 of 4: reading the run's public key $pub failed"
   answer=$(gcurl "$token" "$url" -X POST -H 'Content-Type: application/json' -d "$body") ||
     die "OS Login step 2 of 4: importing $pub for $account at $url failed: ${answer:-no answer}"
+  printf '%s\n' "$now" >"$RUN_DIR/oslogin.imported" ||
+    die "OS Login step 2 of 4: recording the import at $RUN_DIR/oslogin.imported failed; without it no later step can read how much of the key's life is left"
 
   url="$(cfg .oslogin "$OSLOGIN_DEFAULT")/v1/users/$account/loginProfile?projectId=$project"
   answer=$(gcurl "$token" "$url") ||
@@ -866,7 +910,7 @@ oslogin_ready() {
     die "OS Login step 3 of 4: $url gave $account the POSIX user '$user', which is not a name"
   SSH_USER=$user
   SSH_KEY=$key
-  note "OS Login: every ssh of run $RUN goes as $SSH_USER with $SSH_KEY, which $account holds for $((OSLOGIN_KEY_SECONDS / 3600)) h"
+  note "OS Login: every ssh of run $RUN goes as $SSH_USER with $SSH_KEY, which $account holds for $((OSLOGIN_KEY_SECONDS / 3600)) h from now; the work that needs ssh imports it again when under $((OSLOGIN_RENEW_SECONDS / 3600)) h of that is left"
 }
 
 # ---- the containers -----------------------------------------------------------------------------
@@ -1620,12 +1664,17 @@ cmd_check() {
 
 # ---- seed -------------------------------------------------------------------------------------------
 
-# seed_phase NAME CMD...: CMD, its wall clock appended to the run's seed record.
+# seed_phase NAME CMD...: CMD, its wall clock appended to the run's seed record. The run's OS
+# Login key is good for the phase before it runs: a seed is one process whose write phase runs
+# on the load machine for hours and whose embedding gate waits for eight, so the import the
+# subcommand began with can be older than the key's own life by the time a later phase opens an
+# ssh (oslogin_ready).
 seed_phase() {
   local name=$1 t0=$EPOCHREALTIME started rc=0
   shift
   started=$(utc_now)
   note "seed: $name"
+  oslogin_ready
   "$@" || rc=$?
   jq -n --arg name "$name" --arg started "$started" --arg ended "$(utc_now)" \
     --argjson seconds "$(elapsed_since "$t0")" --argjson rc "$rc" \
@@ -2429,6 +2478,12 @@ run_step() {
   local dir=$RUN_DIR/steps/$name work remote seconds rc=0
   [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
   [ -f "$RUN_DIR/seed.json" ] || die "no $RUN_DIR/seed.json: vm.sh seed first"
+  # The run's OS Login key, good for the whole of this step before any of it starts: a series
+  # runs a dozen steps in one process and the twelfth is days after the import that process
+  # began with, so every ssh of this step -- the reset, the tunnel, the load, the profiles and
+  # the copy back -- is refused `publickey` unless the key is imported again here
+  # (oslogin_ready, which does that only when little of its life is left).
+  oslogin_ready
   if ! vms_running; then
     note "step $name is discarded before it started: $VMS_STOPPED. A machine that Google stopped at its 72-hour run-time limit is not a Dispatch failure; start it again and run this step over."
     return 3
