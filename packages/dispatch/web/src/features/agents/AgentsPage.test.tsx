@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { realClock, tick } from "../../__tests__/fake-clock";
+import { jump, realClock, tick } from "../../__tests__/fake-clock";
 import { answerAgentStates } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
 import {
@@ -2904,7 +2904,7 @@ test("Stop trying ends a late broadcast, and Retry sends it again under the same
     await broadcastToPlanner(region, "Status?");
     const sends = screen.getByRole("region", { name: "Sends" });
     expect(within(sends).queryByRole("button", { name: "Stop trying" })).toBeNull();
-    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait, wait);
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await jump(wait);
     expect(page.createBroadcast).toHaveBeenCalledTimes(5);
     expect(within(sends).getByText(broadcastLate)).toBeTruthy();
 
@@ -2916,7 +2916,7 @@ test("Stop trying ends a late broadcast, and Retry sends it again under the same
       within(sends).getByText(`Stopped sending to 1 agent: ${new SendStoppedError().message}`)
     ).toBeTruthy();
     expect(within(sends).getByRole("button", { name: "Restore draft" })).toBeTruthy();
-    await tick(30 * 60_000, 30 * 60_000);
+    await jump(30 * 60_000);
     expect(page.createBroadcast).toHaveBeenCalledTimes(5);
 
     page.createBroadcast.mockImplementation(async (input) => ({
@@ -3701,7 +3701,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
   try {
     await sendFromLiveView("Status please");
     expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
-    await tick(1_000, 1_000);
+    await jump(1_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
 
     // Another session's live view holds nothing of Planner's: only its own empty box refuses Send.
@@ -3714,7 +3714,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
         .getByRole("button", { name: "Send" })
         .getAttribute("title")
     ).toBe("Type a message first.");
-    await tick(2_000, 2_000);
+    await jump(2_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(3);
 
     // Back on Planner: the same send, still out.
@@ -3723,10 +3723,10 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     const held = screen.getByTestId("agent-send-held");
     expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
-    await tick(4_000, 4_000);
-    await tick(8_000, 8_000);
+    await jump(4_000);
+    await jump(8_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
-    await tick(15_000, 15_000);
+    await jump(15_000);
     expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
 
     await act(async () => {
@@ -3734,7 +3734,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     });
     await tick(0);
     expect(screen.getByTestId("agent-send-error").textContent).toBe(keyedStopped);
-    await tick(30 * 60_000, 30 * 60_000);
+    await jump(30 * 60_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
     expect(
       new Set(
@@ -3765,7 +3765,7 @@ test("the session's Agents row shows a live-view send as its own turn and can st
 
   try {
     await sendFromLiveView("Status please");
-    await tick(1_000, 1_000);
+    await jump(1_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
 
     await act(async () => backToAgents());
@@ -3779,7 +3779,7 @@ test("the session's Agents row shows a live-view send as its own turn and can st
     expect(field.value).toBe("");
     expect(field.closest("fieldset")?.disabled).toBe(false);
 
-    for (const wait of [2_000, 4_000, 8_000, 15_000]) await tick(wait, wait);
+    for (const wait of [2_000, 4_000, 8_000, 15_000]) await jump(wait);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
     expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
     await act(async () => {
@@ -3787,7 +3787,7 @@ test("the session's Agents row shows a live-view send as its own turn and can st
     });
     await tick(0);
     expect(within(planner).getByTestId("agent-send-error").textContent).toBe(keyedStopped);
-    await tick(30 * 60_000, 30 * 60_000);
+    await jump(30 * 60_000);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
 
     // Retry from the row is the same message, so it goes under the same key, and lands.
@@ -3825,7 +3825,7 @@ test("the Agents row's Retry of a live-view send re-sends it as it was", async (
 
   try {
     await sendFromLiveView("Status please");
-    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait, wait);
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await jump(wait);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
@@ -4050,7 +4050,7 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     const held = screen.getByTestId("agent-send-held");
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
 
-    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait, wait);
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await jump(wait);
     expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
     expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
     expect(page.createAgentMessage.mock.calls.length).toBeGreaterThan(1);

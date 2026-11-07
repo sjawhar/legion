@@ -7,7 +7,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { installIntersectionObserver } from "../../__tests__/intersection-observer";
+import { dwellOn, installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
@@ -378,15 +378,10 @@ for (const shape of ["inline", "collapsed"] as const) {
       const newest = (await card.view.findByText("Reply reply-2")).closest("li");
       if (newest === null) throw new Error("expected the newest reply's item");
       expect(card.screen.observed()).toEqual([newest]);
-      act(() => card.screen.show(newest));
-      act(() => {
-        jest.advanceTimersByTime(1_000);
-      });
-      await waitFor(() =>
-        expect(card.mark.mock.calls).toEqual([
-          ["ask-1", { read_through: "2026-10-08T04:00:00.5Z" }, keyedAttempt],
-        ])
-      );
+      await dwellOn(card.screen, newest);
+      expect(card.mark.mock.calls).toEqual([
+        ["ask-1", { read_through: "2026-10-08T04:00:00.5Z" }, keyedAttempt],
+      ]);
     } finally {
       card.cleanup();
     }
@@ -418,13 +413,8 @@ test("an answer given after every reply is what the mark watches and reads throu
     const record = await card.view.findByTestId("ask-ask-1");
     await card.view.findByText("Reply reply-2");
     expect(card.screen.observed()).toEqual([record]);
-    act(() => card.screen.show(record));
-    act(() => {
-      jest.advanceTimersByTime(1_000);
-    });
-    await waitFor(() =>
-      expect(card.mark.mock.calls).toEqual([["ask-1", { read_through: answer.at }, keyedAttempt]])
-    );
+    await dwellOn(card.screen, record);
+    expect(card.mark.mock.calls).toEqual([["ask-1", { read_through: answer.at }, keyedAttempt]]);
   } finally {
     card.cleanup();
   }

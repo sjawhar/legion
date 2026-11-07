@@ -11,12 +11,22 @@ import { act } from "@testing-library/react";
  * (`realClock` below): a fake clock left behind stops the timers of every test after it.
  */
 export async function tick(ms: number, step = 500): Promise<void> {
+  if (step <= 0) throw new RangeError("tick's step must be above zero; use jump for a single jump");
   for (let left = ms; left >= 0; left -= step) {
     await act(async () => {
       jest.advanceTimersByTime(Math.min(step, left));
       for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
     });
   }
+}
+
+/** Moves the fake clock `ms` on in one jump, letting every promise the move released run: for a
+ *  wait that crosses one timer of the product, where no part of the span needs a round of its
+ *  own. This is the only correct way to ask for a single jump, since `tick`'s step must be above
+ *  zero, so a wait of zero - one that only lets what is already due run - takes the smallest step
+ *  there is, which is the same single round. */
+export async function jump(ms: number): Promise<void> {
+  await tick(ms, Math.max(ms, 1));
 }
 
 /** Restores the real clock a test installed `jest.useFakeTimers()` for, first running whatever a

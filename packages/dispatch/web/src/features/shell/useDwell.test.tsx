@@ -1,7 +1,8 @@
 import { afterEach, expect, jest, test } from "bun:test";
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { jump } from "../../__tests__/fake-clock";
 import { installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { useDwell } from "./useDwell";
 
@@ -154,14 +155,10 @@ test("a dwell whose write fails dwells again while the element stays on screen",
   );
   try {
     act(() => screen.show(view.getByTestId("watched")));
-    act(() => {
-      jest.advanceTimersByTime(1_000);
-    });
-    await waitFor(() => expect(calls).toBe(1));
-    act(() => {
-      jest.advanceTimersByTime(1_000);
-    });
-    await waitFor(() => expect(calls).toBe(2));
+    await jump(1_000);
+    expect(calls).toBe(1);
+    await jump(1_000);
+    expect(calls).toBe(2);
   } finally {
     view.unmount();
     screen.restore();
@@ -214,10 +211,8 @@ test("every watch on the page shares one observer, and one ending leaves the res
     view.rerender(<Pair onDwell={onDwell} showSecond={false} />);
     expect(screen.observed()).toEqual([first]);
     act(() => screen.show(first));
-    act(() => {
-      jest.advanceTimersByTime(1_000);
-    });
-    await waitFor(() => expect([dwelled, built]).toEqual([["first"], 1]));
+    await jump(1_000);
+    expect([dwelled, built]).toEqual([["first"], 1]);
   } finally {
     view.unmount();
     screen.restore();

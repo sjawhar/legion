@@ -6,7 +6,7 @@
  */
 
 import { act } from "@testing-library/react";
-import { tick } from "./fake-clock";
+import { jump } from "./fake-clock";
 
 /** How an element sits on a screen, in pixels; by default a 100 px element wholly on an 800 px
  *  screen. */
@@ -93,5 +93,5 @@ export async function dwellOn(
   placement?: Placement
 ): Promise<void> {
   act(() => control.show(element, placement));
-  await tick(1_000, 1_000);
+  await jump(1_000);
 }

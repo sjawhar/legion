@@ -19,7 +19,7 @@ import {
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { tick as clockTick, realClock } from "../../__tests__/fake-clock";
+import { jump, realClock } from "../../__tests__/fake-clock";
 import {
   errorFrame,
   type FakeLiveSocket,
@@ -679,17 +679,17 @@ test("leaving the live view leaves its send being tried, under its key", async (
 
   await onFakeClock(async () => {
     await sendFromLiveView("try the other branch");
-    await tick(1_000);
+    await jump(1_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(2);
 
     cleanup();
-    await tick(2_000);
-    await tick(4_000);
+    await jump(2_000);
+    await jump(4_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(4);
     // Dispatch is back: the send lands, and nothing is tried after it.
     createAgentMessage.mockResolvedValueOnce(message("sent", "try the other branch"));
-    await tick(8_000);
-    await tick(30 * 60_000);
+    await jump(8_000);
+    await jump(30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
   });
   expect(createAgentMessage.mock.calls.map(([, , bounds]) => bounds)).toEqual(
@@ -697,12 +697,6 @@ test("leaving the live view leaves its send being tried, under its key", async (
   );
   expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
 });
-
-/** Moves the fake clock `ms` on in one jump, letting every promise the move released run: every
- *  wait here is one product timer this file's tests cross, so no part of the span needs a round
- *  of its own. A step of zero would never end the shared helper's loop, so a zero wait takes the
- *  smallest step there is, which is the same single round. */
-const tick = (ms: number) => clockTick(ms, Math.max(ms, 1));
 
 /** The live view for SESSION, its mode settled on Send. */
 async function renderSendingView(): Promise<void> {
@@ -750,12 +744,12 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       fireEvent.click(sendButton());
     });
-    await tick(0);
+    await jump(0);
     expect(screen.getAllByTestId("agent-send-held")).toHaveLength(2);
     // In press order: the second waits while the first is being tried.
     expect(createAgentMessage).toHaveBeenCalledTimes(1);
 
-    await tick(SEND_DEADLINE_MS);
+    await jump(SEND_DEADLINE_MS);
     const [late] = screen.getAllByTestId("agent-send-held");
     expect(within(late as HTMLElement).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
     expect(within(late as HTMLElement).getByRole("button", { name: "Stop trying" })).toBeTruthy();
@@ -766,7 +760,7 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       answers[0]?.resolve(message("sent", "try the other branch"));
     });
-    await tick(0);
+    await jump(0);
     expect(createAgentMessage.mock.calls.map(([, sent]) => sent.body)).toEqual([
       "try the other branch",
       "and this",
@@ -774,7 +768,7 @@ test("Send stays open with text while an earlier send is out or late, and each p
     await act(async () => {
       answers[1]?.resolve(message("sent", "and this"));
     });
-    await tick(0);
+    await jump(0);
   });
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
   const [first, second] = sentKeys(createAgentMessage);
@@ -828,24 +822,24 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
 
   await onFakeClock(async () => {
     await sendFromLiveView("try the other branch");
-    for (const wait of [1_000, 2_000, 4_000, 8_000]) await tick(wait);
+    for (const wait of [1_000, 2_000, 4_000, 8_000]) await jump(wait);
     expect(screen.queryByRole("button", { name: "Stop trying" })).toBeNull();
-    await tick(15_000);
+    await jump(15_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
     });
-    await tick(0);
+    await jump(0);
     expect(screen.getByTestId("agent-send-error").textContent).toBe(new SendStoppedError().message);
-    await tick(30 * 60_000);
+    await jump(30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
 
     createAgentMessage.mockResolvedValueOnce(message("sent", "try the other branch"));
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     });
-    await tick(0);
+    await jump(0);
   });
   expect(createAgentMessage).toHaveBeenCalledTimes(6);
   expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
@@ -1276,14 +1270,14 @@ test("no completion is offered without a command list, for a / mid-message, or i
     const silent = await renderWithCommands();
     expect(silent.placeholder).not.toContain("/");
     type(silent, "/");
-    await tick(50);
+    await jump(50);
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
 
     cleanup();
     for (const spy of spies.splice(0)) spy.mockRestore();
     const input = await renderWithCommands(COMMANDS);
     type(input, "please /co");
-    await tick(50);
+    await jump(50);
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
 
     fireEvent.change(screen.getByRole("combobox", { name: "Delivery mode" }), {
@@ -1292,7 +1286,7 @@ test("no completion is offered without a command list, for a / mid-message, or i
     await waitFor(() => expect(input.placeholder).toContain("delivered as BTW"));
     expect(input.placeholder).not.toContain("/");
     type(input, "/co");
-    await tick(50);
+    await jump(50);
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
   } finally {
     realClock();
@@ -1697,7 +1691,7 @@ test("with an empty box Send is refused, says why on screen, and sends nothing",
     expect(shown).toHaveLength(1);
     fireEvent.click(send);
     fireEvent.keyDown(input, { key: "Enter" });
-    await tick(50);
+    await jump(50);
     expect(createAgentMessage).not.toHaveBeenCalled();
 
     type(input, "now with words");
@@ -1767,7 +1761,7 @@ test("a refusal that lands after switching sessions stays with the session that 
     await act(async () => {
       held[0]?.reject(new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused it" }));
     });
-    await tick(50);
+    await jump(50);
     expect(composerInput().value).toBe("Reviewer's own words");
     expect(screen.queryByTestId("agent-send-error")).toBeNull();
     expect(screen.queryByTestId("agent-send-held")).toBeNull();
@@ -1911,7 +1905,7 @@ test("a pending switch holds its own session's Send, and a send out on another h
     expect(within(composer()).getByText(wait)).toBeTruthy();
     expect(within(composer()).queryByText("Enter to send · Shift+Enter for a new line")).toBeNull();
     fireEvent.keyDown(composerInput(), { key: "Enter" });
-    await tick(50);
+    await jump(50);
     expect(createAgentMessage).toHaveBeenCalledTimes(1);
 
     const other = await switchTo("Reviewer");

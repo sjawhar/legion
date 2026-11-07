@@ -1,8 +1,9 @@
 import { afterEach, expect, jest, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { jump } from "../../__tests__/fake-clock";
 import { dwellOn, installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerThreadReads } from "../../__tests__/send-answers";
@@ -96,12 +97,8 @@ test("an unread thread is marked through its newest reply once that reply dwells
       jest.advanceTimersByTime(999);
     });
     expect(mark).not.toHaveBeenCalled();
-    act(() => {
-      jest.advanceTimersByTime(1);
-    });
-    await waitFor(() =>
-      expect(mark.mock.calls).toEqual([["thread-1", { read_through: first }, keyedAttempt]])
-    );
+    await jump(1);
+    expect(mark.mock.calls).toEqual([["thread-1", { read_through: first }, keyedAttempt]]);
 
     // The same reply seen again sends nothing more.
     act(() => screen.hide(newest));
