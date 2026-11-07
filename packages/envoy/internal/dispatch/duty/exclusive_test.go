@@ -47,7 +47,7 @@ func TestTheLinesAboutATickNameItsDueAndItsPeriod(t *testing.T) {
 		t.Fatalf("the first tick did not run its pass:\n%s", logs.String())
 	}
 	ran := `msg="dispatch duty: leased pass ran" lease=` + name +
-		` due=2026-11-07T12:37:19.000Z boundary=2026-11-07T12:00:00.000Z`
+		` due=2026-11-07T12:37:19.000Z period=2026-11-07T12:00:00Z`
 	if !strings.Contains(logs.String(), ran) {
 		t.Errorf("the line a tick that ran wrote does not read %q:\n%s", ran, logs.String())
 	}
@@ -60,18 +60,18 @@ func TestTheLinesAboutATickNameItsDueAndItsPeriod(t *testing.T) {
 		t.Errorf("the tick whose period was served reported running:\n%s", logs.String())
 	}
 	skipped := `msg="dispatch duty: leased pass skipped" lease=` + name +
-		` due=2026-11-07T12:57:19.000Z boundary=2026-11-07T12:00:00.000Z`
+		` due=2026-11-07T12:57:19.000Z period=2026-11-07T12:00:00Z`
 	if !strings.Contains(logs.String(), skipped) {
 		t.Errorf("the line a tick that found its period served wrote does not read %q:\n%s", skipped, logs.String())
 	}
 
-	// A pass with no period has no boundary to name, and names none.
+	// A pass with no period has none to name, and names none (servedPeriod).
 	logs.Reset()
 	if !Exclusive(ctx, leases, "delivery-consumer-delivery-jobs", due, 0, func(context.Context) {}) {
 		t.Fatalf("the periodless tick did not run its pass:\n%s", logs.String())
 	}
-	if !strings.Contains(logs.String(), `due=2026-11-07T12:37:19.000Z`) || strings.Contains(logs.String(), "boundary=") {
-		t.Errorf("the line a periodless pass wrote names a boundary, or no due:\n%s", logs.String())
+	if !strings.Contains(logs.String(), `due=2026-11-07T12:37:19.000Z`) || strings.Contains(logs.String(), "period=") {
+		t.Errorf("the line a periodless pass wrote names a period, or no due:\n%s", logs.String())
 	}
 }
 
