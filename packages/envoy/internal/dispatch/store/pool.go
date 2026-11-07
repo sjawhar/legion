@@ -774,15 +774,20 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 // begin is the guarded body both transaction entry points share: guard runs in the exported
 // method, as it does in every exported method that hands out one of this pool's connections,
 // so a refusal records the caller that asked for the transaction rather than one of this
-// pool's own frames. Every transaction it opens is a trackedTx, whether or not ctx carries a hold
-// mark, so the caller's BeforeCommit step reaches each of them.
+// pool's own frames. A transaction with nothing to do at either end - no hold mark to clear and no
+// BeforeCommit step to take - is handed on as pgx opened it: a trackedTx around it would only
+// forward its Commit and Rollback.
 func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
+	release := hold(ctx)
 	beforeCommit, _ := ctx.Value(beforeCommitKey{}).(BeforeCommit)
-	return &trackedTx{Tx: tx, release: hold(ctx), beforeCommit: beforeCommit}, nil
+	if release == nil && beforeCommit == nil {
+		return tx, nil
+	}
+	return &trackedTx{Tx: tx, release: release, beforeCommit: beforeCommit}, nil
 }
 
 // BeforeCommit is a step every transaction a request opens takes just before its COMMIT, inside

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -1152,4 +1155,231 @@ func TestARoomAppendWhoseUnlockDoesNotFreeTheLockClosesItsConnection(t *testing.
 		}
 		return !running
 	})
+}
+
+// blockingProxy forwards one Postgres connection's bytes between the client and the server, and
+// from the moment block is called it forwards nothing more on the connections it has already
+// accepted: neither side's bytes reach the other and neither socket is closed, which is what a
+// half-open link looks like to the client - a send draws no answer and no error. Connections
+// accepted after that are forwarded as before, so the room's next writer still reaches the
+// database. It is embedqueue's startPausingProxy (coverage_test.go) with the pause under the
+// test's own control rather than on the size of a row the server sends, copied because that one
+// lives in another package's test binary, which this one cannot import.
+type blockingProxy struct {
+	listener net.Listener
+	server   string
+	blocked  chan struct{}
+	released chan struct{}
+	blockOne sync.Once
+	freeOne  sync.Once
+}
+
+// startBlockingProxy listens on 127.0.0.1 and forwards what it accepts to server, the address of
+// the test database. Its cleanup lets the blocked connections go, so nothing is left parked on
+// the proxy and the backends behind them end.
+func startBlockingProxy(t *testing.T, server string) *blockingProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the proxy: %v", err)
+	}
+	proxy := &blockingProxy{listener: listener, server: server, blocked: make(chan struct{}), released: make(chan struct{})}
+	t.Cleanup(func() {
+		proxy.release()
+		_ = listener.Close()
+	})
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			// A connection accepted once the proxy is blocked is forwarded all the same: a nil
+			// channel is never ready, so its copies never park.
+			blocked := proxy.blocked
+			select {
+			case <-proxy.blocked:
+				blocked = nil
+			default:
+			}
+			go proxy.serve(client, blocked)
+		}
+	}()
+	return proxy
+}
+
+// block stops the forwarding of every connection the proxy has accepted so far.
+func (p *blockingProxy) block() { p.blockOne.Do(func() { close(p.blocked) }) }
+
+// release lets those connections go again, blocked or not.
+func (p *blockingProxy) release() { p.freeOne.Do(func() { close(p.released) }) }
+
+func (p *blockingProxy) serve(client net.Conn, blocked <-chan struct{}) {
+	defer client.Close()
+	server, err := net.Dial("tcp", p.server)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go p.forward(server, client, blocked)
+	p.forward(client, server, blocked)
+}
+
+// forward copies src to dst until either side ends, and parks on the first read it makes once the
+// proxy is blocked: neither those bytes nor the end of src's side reach dst until the release.
+func (p *blockingProxy) forward(dst, src net.Conn, blocked <-chan struct{}) {
+	buffer := make([]byte, 32*1024)
+	for {
+		read, err := src.Read(buffer)
+		select {
+		case <-blocked:
+			<-p.released
+		default:
+		}
+		if read > 0 {
+			if _, writeErr := dst.Write(buffer[:read]); writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// leaseCallBound is how long duty.LeaseCall gives one statement on a session lock's own
+// connection, read from a call of its own rather than written down twice.
+func leaseCallBound(t *testing.T) time.Duration {
+	t.Helper()
+	ctx, cancel := duty.LeaseCall()
+	defer cancel()
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		t.Fatal("duty.LeaseCall gives its statement no deadline")
+	}
+	return time.Until(deadline)
+}
+
+// A room's append that returns before its commit rolls its transaction back on its own connection
+// before it gives the document's session lock back, and that rollback runs under the bound the
+// unlock runs under (duty.LeaseCall). Unbounded, on a half-open connection it waits for the
+// kernel's retransmission limit - about fifteen minutes - and it waits holding the room's
+// in-process lock, a connection of the room-appends pool and the document's session lock, so the
+// room's next writer waits all of that out at holdRoom. Every path that returns before its commit
+// sends it: an empty run, a gate refusal, a gate read error, a failed writes batch.
+//
+// Here the gate refuses a browser's update on an issue closed longer ago than closeMargin
+// (ErrIssueClosed), and the link under the append's connection stops forwarding just before the
+// rollback (beforeAppendRollback), so the rollback meets a connection whose sends draw neither an
+// answer nor an error. The call must end at about the bound, its connection must leave the
+// room-appends pool rather than go back into it, and the room's next writer must get past
+// holdRoom - the room's in-process lock, then a connection of that pool - within the same bound.
+func TestARefusedRoomAppendsRollbackIsBoundedOnAHalfOpenLink(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "one")
+	closedAgo := closeMargin + 30*time.Second
+	if _, err := database.Pool.Exec(ctx,
+		`update issues set closed_at = now() - make_interval(secs => $2) where key = $1`, "DOC-1", closedAgo.Seconds()); err != nil {
+		t.Fatalf("close issue DOC-1 %v ago: %v", closedAgo, err)
+	}
+
+	// The appends reach Postgres through the proxy; everything the test reads for itself goes
+	// straight to the database, so the block below holds the append's connection alone.
+	config := database.Pool.Config().Copy()
+	proxy := startBlockingProxy(t, net.JoinHostPort(config.ConnConfig.Host, strconv.Itoa(int(config.ConnConfig.Port))))
+	host, port, _ := net.SplitHostPort(proxy.listener.Addr().String())
+	number, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("read the proxy's port: %v", err)
+	}
+	config.ConnConfig.Host, config.ConnConfig.Port = host, uint16(number)
+	config.ConnConfig.TLSConfig, config.ConnConfig.Fallbacks = nil, nil
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a pool through the proxy: %v", err)
+	}
+	proxied := &store.Store{Pool: store.NewPool(opened)}
+	defer func() {
+		// The link goes first: a pool whose connection is parked on the proxy cannot close.
+		proxy.release()
+		proxied.Pool.Close()
+	}()
+	appends, err := proxied.Pool.RoomAppends()
+	if err != nil {
+		t.Fatalf("open the room-appends pool: %v", err)
+	}
+	versioned := NewPgVersioned(proxied)
+	var stopped atomic.Bool
+	rollingBack := make(chan struct{})
+	versioned.beforeAppendRollback = func(room string, _ *pgxpool.Conn) {
+		if room != artifactID || !stopped.CompareAndSwap(false, true) {
+			return
+		}
+		proxy.block()
+		close(rollingBack)
+	}
+
+	// The room observed this update now, and its document's issue closed longer ago than the
+	// margin, so the gate admits none of the run and refuses it whole.
+	update := newProofHistory(t, 405).write("one\n")
+	gated := withRoomCursor(ctx, &roomCursor{through: storedHead(t, database, artifactID)})
+	refused := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := versioned.AppendUpdatesWithCredit(gated, artifactID,
+			[]BrowserUpdate{{Update: update, ContentChanged: true, Observed: time.Now()}})
+		refused <- err
+	}()
+	// The room's next writer waits on the room's in-process lock the stuck call holds, and takes
+	// its connection of the room-appends pool only once the test has read that pool. It starts
+	// once that call is rolling back, so the lock it waits on is that call's.
+	lockTaken, reading, held := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		<-rollingBack
+		_, _, release, err := versioned.holdRoom(context.Background(), artifactID, true, func(ctx context.Context) (*pgxpool.Conn, error) {
+			close(lockTaken)
+			<-reading
+			return appends.Acquire(ctx)
+		})
+		if err != nil {
+			held <- err
+			return
+		}
+		release()
+		held <- nil
+	}()
+
+	bound := leaseCallBound(t)
+	select {
+	case err := <-refused:
+		if !errors.Is(err, ErrIssueClosed) {
+			t.Fatalf("the append of an update the gate refuses = %v, want ErrIssueClosed", err)
+		}
+	case <-time.After(3 * bound):
+		t.Fatalf("the append had not returned %v after it began, three times the rollback's %v bound: it is waiting on a half-open connection, holding the room's lock, its connection and the session lock",
+			time.Since(start), bound)
+	}
+	if !stopped.Load() {
+		t.Fatal("the append returned without rolling a transaction back, so nothing here met the half-open connection")
+	}
+	select {
+	case <-lockTaken:
+	case <-time.After(3 * bound):
+		t.Fatalf("the room's next writer was still waiting at holdRoom %v after the append began, three times the rollback's %v bound", time.Since(start), bound)
+	}
+	// The connection the rollback's bound closed is destroyed rather than returned, which puddle
+	// does on a goroutine of its own, so the pool empties a moment after the call returns.
+	waitFor(t, roomWait(t), "the stuck connection to leave the room-appends pool", func() bool {
+		return appends.Stat().TotalConns() == 0
+	})
+	close(reading)
+	select {
+	case err := <-held:
+		if err != nil {
+			t.Fatalf("the room's next writer takes a connection of the room-appends pool: %v", err)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room's next writer never took a connection of the room-appends pool")
+	}
 }

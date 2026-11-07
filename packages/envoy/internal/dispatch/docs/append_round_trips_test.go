@@ -267,8 +267,9 @@ func statementLabel(sql string) string {
 
 // pipelineLabel names a pipeline by the label of its first statement: the two a room's batch
 // sends under the document's lock, the one a standing prune checkpoint costs it and the rollback
-// a failed path sends before its unlock (appendRoomTx). The unlock is no pipeline of its own: it
-// is one statement, sent through duty.FreeSessionLock, and statementLabel names it.
+// a path that returns before its commit sends before its unlock (appendRoomTx). The unlock is no
+// pipeline of its own: it is one statement, sent through duty.FreeSessionLock, and statementLabel
+// names it.
 func pipelineLabel(first string) string {
 	switch first {
 	case "pg_advisory_lock":

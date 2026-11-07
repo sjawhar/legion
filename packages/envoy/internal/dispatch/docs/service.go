@@ -105,7 +105,8 @@ type Deps struct {
 // parked bytes the same way, with no class, no credit and no settlement owed: they change nothing
 // a settlement reads (storeParked). AppendRoomUpdatesTx appends such a run inside a durable
 // writer's transaction, gated on the flush, and answers the first version it stored with how many
-// of the run it stored, since the gate stores a prefix of a browser's run and refuses the rest
+// of the run it stored, since the gate stores a prefix of a browser's run and refuses the rest; a
+// flush left short that way fails, and its transaction stores nothing of the run
 // (flushThrough). Document writes that join an API transaction use AppendUpdateTx, classifying
 // the update the way the room's update observer classifies a live one. RebuildTx replaces an
 // unreadable history inside the rebuild's transaction, through the same persistence boundary as

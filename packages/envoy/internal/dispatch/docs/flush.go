@@ -279,14 +279,17 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // browser update stored after a live write it was measured without, the ones the room's shadow
 // measures), as the one insert statement of one row per update that every append of a room writes
 // (AppendRoomUpdatesTx, appendWrites, whose UpdateCredit.take writes each credit's authors), gated
-// on that instance's cursor as any append of the room is (appendingCursor). It records on flush
-// what the append stored and no more - the gate cuts a browser's run at the first update its
-// document's closed issue no longer admits, and stores the prefix before it (gateAppend) - and
-// the transaction's commit marks those stored and lands their credits (markStored); a
-// transaction that rolls back marks nothing, and the room's persistence stores them later. The
-// refused rest is left as the room's own batch path leaves it (appendRoomTx): queued, unstored
-// and unmarked, for its own call to meet the gate again, which refuses it and closes the room
-// for its issue.
+// on that instance's cursor as any append of the room is (appendingCursor). It stores the run
+// whole or fails: the gate cuts a browser's run at the first update its document's closed issue
+// no longer admits and stores the prefix before it (gateAppend), and a flush the gate cut that
+// way answers ErrIssueClosed and records nothing on flush, so the transaction that joined this
+// flush rolls back and stores nothing of the run - neither the prefix nor the writer's own
+// update, which it would otherwise derive from a room state holding a keystroke the store
+// refused. The prefix rule is the room's own batch path's (appendRoomTx): the room stores what
+// it took in time and meets the gate again on the rest, which refuses it and closes the room for
+// its issue. A run this stores whole is recorded on flush, and the transaction's commit marks
+// those classes stored and lands their credits (markStored); a transaction that rolls back marks
+// nothing, and the room's persistence stores them later.
 //
 // Every flush runs on a transaction or a session that already holds the room's advisory lock,
 // taken before the head it is gated on was read: the room's own persistence worker holds the
@@ -311,7 +314,11 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush,
 	if err != nil {
 		return err
 	}
-	flush.appendedRun(taking[:stored], updates[:stored], first)
+	if stored < len(updates) {
+		return fmt.Errorf("%w: room %s's document belongs to a closed issue, which refused %d of the %d updates this transaction flushed",
+			ErrIssueClosed, flush.room, len(updates)-stored, len(updates))
+	}
+	flush.appendedRun(taking, updates, first)
 	return nil
 }
 

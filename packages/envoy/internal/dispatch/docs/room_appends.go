@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"sort"
 	"sync/atomic"
@@ -181,8 +180,8 @@ func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []
 //     afterAppendCommit, the room instance's cursor advanced once per version and the room's
 //     figures. credit lands before this, committed or not. Once the locks are released, a
 //     committed transaction notes its last version to the compaction queue (PgVersioned.noted).
-//     A failed path spends one trip more than the list says: the rollback of what it left open
-//     goes out ahead of the unlock.
+//     A path that returns before its commit spends one trip more than the list says: the
+//     rollback of what it left open goes out ahead of the unlock, under the unlock's own bound.
 //
 // No pg_advisory_xact_lock is taken: the session already holds the document's lock on this very
 // connection, so a second acquisition would grant what the session has (appendUpdatesTx's rule
@@ -193,9 +192,10 @@ func (p *PgVersioned) appendUpdates(ctx context.Context, room string, updates []
 // their versions once the commit lands and land, committed or not, with credit's; first is then
 // the version given's first update took. owes is whether the transaction marks the document
 // owing a settlement (appendWrites). A run that holds nothing commits nothing. Any database
-// error rolls back what is open and still gives the session lock back, as lockRoom's does, and
-// through the same duty.FreeSessionLock: a connection whose lock did not free is closed rather
-// than returned to the room-appends pool (finish).
+// error rolls back what is open, under the bound the unlock runs under (duty.LeaseCall), and
+// still gives the session lock back, as lockRoom's does and through the same freeRoomLock: a
+// connection whose lock did not free is closed rather than returned to the room-appends pool
+// (finish).
 func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit, given []BrowserUpdate, owes bool) (first persistence.Version, err error) {
 	conn, ctx, release, err := p.holdRoom(ctx, room, true, func(ctx context.Context) (*pgxpool.Conn, error) {
 		appends, err := p.store.Pool.RoomAppends()
@@ -227,52 +227,84 @@ func (p *PgVersioned) appendRoomTx(ctx context.Context, room string, flush *Room
 		trips++
 		return conn.SendBatch(ctx, batch).Close()
 	}
-	open := true
-	// finish ends the append however it ends, in this order: the call's own credit lands while
-	// the session lock is still held, whether the transaction committed or not, so no version
-	// reads the pending authors between a commit and its credits leaving the room's in-flight
-	// credits; then a transaction still open is rolled back, which is a trip of a failed path
-	// alone, since the common path's commit went out with its writes; then the session lock is
-	// given back, the one trip the common path ends with; and last the round trips spent, the
-	// unlock's among them, go to the room's figures.
-	//
-	// The unlock goes through duty.FreeSessionLock, as every other holder of a document's
-	// session lock gives one back (lockRoom): it is bounded, so a half-open connection holds
-	// neither this call nor the room's next writer until TCP gives it up, its answer is read,
-	// and a connection whose lock did not free is closed rather than handed back to the
-	// room-appends pool, where the next batch could take a lock the session already holds and
-	// unlock it twice over.
-	finish := func() {
+	open := false
+	// land ends the credits this call carries: its own and those of the updates it was given.
+	// Every return reaches it, the ones that never open a transaction included, and the call's
+	// own credit lands while the session lock is still held, whether the transaction committed or
+	// not, so no version reads the pending authors between a commit and its credits leaving the
+	// room's in-flight credits: finish lands them first, and this deferred call is what the paths
+	// that never reach finish land on (UpdateCredit.landed does nothing the second time).
+	land := func() {
 		credit.landed()
 		for _, update := range given {
 			update.Credit.landed()
 		}
+	}
+	defer land()
+	// finish ends the append however it ends, in this order: the credits land; then a transaction
+	// still open is rolled back, which is a trip of a path that returns before its commit alone,
+	// since the common path's commit went out with its writes; then the session lock is given
+	// back, the one trip the common path ends with; and last the round trips spent, the unlock's
+	// among them, go to the room's figures.
+	//
+	// The rollback runs under duty.LeaseCall, the bound the unlock after it runs under, and on
+	// neither ctx, which the caller that gave up has already ended, nor a background context: on
+	// a half-open connection an unbounded rollback waits for the kernel to give the link up,
+	// minutes of it, while this call holds the room's in-process lock, its connection of the
+	// room-appends pool and the document's session lock, so the room's next writer waits that out
+	// too. At the bound pgx closes the connection, FreeSessionLock answers ErrSessionClosed, and
+	// Postgres drops the lock with the session.
+	//
+	// The unlock goes through freeRoomLock, as every other holder of a document's session lock
+	// gives one back (lockRoom): it is bounded, so a half-open connection holds neither this call
+	// nor the room's next writer until TCP gives it up, its answer is read, and a connection whose
+	// lock did not free is closed rather than handed back to the room-appends pool, where the next
+	// batch could take a lock the session already holds and unlock it twice over.
+	finish := func() {
+		land()
 		if open {
+			if p.beforeAppendRollback != nil {
+				p.beforeAppendRollback(room, conn)
+			}
 			rollback := &pgx.Batch{}
 			rollback.Queue(`rollback`)
-			_ = send(context.Background(), rollback)
+			rollbackCtx, cancel := duty.LeaseCall()
+			_ = send(rollbackCtx, rollback)
+			cancel()
 		}
 		if p.beforeAppendUnlock != nil {
 			p.beforeAppendUnlock(room, conn)
 		}
 		// The unlock is a trip of this append like any other, counted whatever it answers.
 		trips++
-		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock(hashtext($1))`, room); err != nil && !errors.Is(err, duty.ErrSessionClosed) {
-			slog.Error("dispatch: free the document room lock", "room", room, "error", err)
-		}
+		freeRoomLock(conn, room)
 		if flush != nil {
 			flush.service.appendFigures.roundTrips.Add(uint64(trips))
 		}
 	}
-	defer finish()
 
 	opening := &pgx.Batch{}
 	opening.Queue(`select pg_advisory_lock(hashtext($1))`, room)
 	opening.Queue(`begin`)
 	gate := queueAppendGate(opening, room)
+	// The opening pipeline is what takes the session lock and opens the transaction, so the end
+	// is deferred around it rather than before it, as lockRoom defers its unlock only once its
+	// lock statement has answered. pgx answers a batch whose context has already ended without a
+	// byte leaving the client, and closes the connection where the context ends mid-flight, so on
+	// a context's error the session holds no lock this call can give back: ending there would roll
+	// back nothing, unlock a lock never taken - a false answer that logs an error and destroys a
+	// healthy connection - and count a trip never sent. Any other failure may have left the lock
+	// taken, since the lock is the pipeline's first statement and a session-level lock outlives
+	// the implicit transaction a later statement's error rolls back, so that one ends as every
+	// other path that returns before its commit does.
+	open = true
 	if err := send(ctx, opening); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			finish()
+		}
 		return 0, fmt.Errorf("begin document update: %w", err)
 	}
+	defer finish()
 	read, err := gate.result()
 	if err != nil {
 		return 0, err

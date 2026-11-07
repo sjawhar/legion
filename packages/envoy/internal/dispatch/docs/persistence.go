@@ -36,6 +36,12 @@ type PgVersioned struct {
 	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
+	// beforeAppendRollback runs on a room append's own connection, holding the document's session
+	// lock and the transaction the append left open, just before that transaction is rolled back
+	// (appendRoomTx's finish). Nil outside tests; a test stops the connection's link there, so the
+	// rollback meets a half-open connection and must end at its bound
+	// (TestARefusedRoomAppendsRollbackIsBoundedOnAHalfOpenLink).
+	beforeAppendRollback func(room string, conn *pgxpool.Conn)
 	// beforeAppendUnlock runs on a room append's own connection, holding the document's session
 	// lock, just before that lock is given back (appendRoomTx's finish). Nil outside tests; a
 	// test unlocks the room there itself, so the append's unlock answers false, which is the
@@ -736,17 +742,26 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, sour
 			return errRoomLockBusy
 		}
 	}
-	// The unlock is bounded and its answer read (duty.FreeSessionLock): fn may send nothing on
-	// this connection (passRoomLock), so nothing else bounds the wait on a half-open connection,
-	// and this room's writers queue on lock until it ends. A connection fn's cancelled statement
-	// already closed cannot run an unlock: Postgres drops its locks when the session ends. It says
-	// nothing here, since that statement's caller has its error.
-	defer func() {
-		if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock(hashtext($1))`, room); err != nil && !errors.Is(err, duty.ErrSessionClosed) {
-			slog.Error("dispatch: free the document room lock", "room", room, "error", err)
-		}
-	}()
+	// fn may send nothing on this connection (passRoomLock), so nothing else bounds the wait on a
+	// half-open connection, and this room's writers queue on lock until it ends: freeRoomLock
+	// bounds it and reads its answer.
+	defer freeRoomLock(conn, room)
 	return fn(conn)
+}
+
+// freeRoomLock gives room's session-level advisory lock back on the connection that took it, and
+// that connection back to its pool, for both of the writers that take it: the writers that hold it
+// on a connection of a shared pool (lockRoom) and a room's batch of browser updates on one of the
+// room-appends pool (appendRoomTx's finish). Through duty.FreeSessionLock, so the unlock is
+// bounded, its answer is read, and a connection whose lock did not free is closed rather than
+// returned to its pool, where the next writer could take a lock the session already holds and
+// unlock it twice over. A connection a cancelled statement already closed cannot run an unlock:
+// Postgres drops its locks when the session ends, which is why ErrSessionClosed says nothing here
+// - that statement's caller has its error.
+func freeRoomLock(conn *pgxpool.Conn, room string) {
+	if err := duty.FreeSessionLock(conn, `select pg_advisory_unlock(hashtext($1))`, room); err != nil && !errors.Is(err, duty.ErrSessionClosed) {
+		slog.Error("dispatch: free the document room lock", "room", room, "error", err)
+	}
 }
 
 // holdRoom takes what every writer of room holds before it sends a statement under the room's

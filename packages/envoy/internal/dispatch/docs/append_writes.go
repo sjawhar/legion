@@ -36,12 +36,14 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 // (Service.flushThrough states the rule and names the callers). A second acquisition would cost a
 // round trip and grant what the caller holds.
 //
-// It answers the first version the run stored and how many of the run it stored, which is what
-// the caller records (Service.flushThrough): the gate admits a prefix of a browser's run and no
-// more, cutting it at the first update its document's closed issue no longer admits (gateAppend).
-// The refused rest is left exactly as the room's own batch path leaves it (appendRoomTx): queued,
-// unstored and unmarked, for its own call to meet the gate again, which refuses it and closes the
-// room for its issue.
+// It answers the first version the run stored and how many of the run it stored, which the caller
+// judges (Service.flushThrough): the gate admits a prefix of a browser's run and no more, cutting
+// it at the first update its document's closed issue no longer admits (gateAppend), and a flush
+// left short of its run fails with ErrIssueClosed, so the transaction that joined it rolls back
+// and stores nothing of the run. The prefix rule is the room's own batch path's (appendRoomTx),
+// which stores what the room took in time and leaves the refused rest queued, unstored and
+// unmarked, for its own call to meet the gate again, which refuses it and closes the room for its
+// issue.
 func (p *PgVersioned) AppendRoomUpdatesTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, updates []BrowserUpdate) (persistence.Version, int, error) {
 	return p.appendUpdatesTx(ctx, tx, room, updates, appendBrowser, flush, true)
 }
@@ -90,7 +92,8 @@ func (p *PgVersioned) appendUpdatesTx(ctx context.Context, tx pgx.Tx, room strin
 	}
 	// A closed issue admits only the updates the room took in time, a prefix of the run
 	// (gateAppend): the rest are not stored here and are left queued, as the room's own batch
-	// path leaves them (appendRoomTx).
+	// path leaves them (appendRoomTx). A flush left short this way is failed by its caller, which
+	// rolls this prefix back with it (Service.flushThrough).
 	updates = updates[:admitted]
 	statements, _, err := p.appendWrites(ctx, room, head, updates, true)
 	if err != nil {
