@@ -7,16 +7,19 @@
  *
  * The reading is taken from the DOM the schema draws, through ProseMirror's own `DOMSerializer`,
  * and never from a walk over the document's nodes. Two things a walk cannot know decide it: the
- * element a mark draws is that mark's own `toDOM` answer, which only the schema holds, and where
- * one run of a mark is cut into several elements follows the serializer's mark ordering, not the
- * node's mark set. Measured over the corpus, a walk disagrees with the serializer three ways: on
+ * element a node or a mark draws is its own `toDOM` answer, which only the schema holds, and
+ * where one run of a mark is cut into several elements follows the serializer's mark ordering
+ * and the marks' own attributes, not the node's mark set. Measured over the corpus, such a walk
+ * - each paragraph's `textContent`, and each mark's runs from the mark sets of the text under it
+ * - disagrees with the serializer four ways: on `escaped-block-markers.md`,
  * `marks-on-hard-breaks.md`, `paragraphs.md` and `softbreak.md`, where a `<br>` adds nothing to
  * `textContent` while the `hardbreak` node's `leafText` is a line feed; on
- * `links-holding-an-autolink.md`, where the serializer draws one `<strong>` over text the walk
- * reads as three runs, and on `writer-spells-a-flanked-letter-after-a-backslash.md`, where it
- * draws one run of strikethrough as three `<del>` elements because a link mark ranks between
- * them; and on every document holding a footnote reference, whose `<sup>` label the schema draws
- * and no node carries.
+ * `links-holding-an-autolink.md` and `writer-spells-a-flanked-letter-after-a-backslash.md`,
+ * where one run of strikethrough is drawn as three `<del>` elements - there because its three
+ * pieces carry different links, here because an inline-code mark and a link mark rank outside
+ * the strikethrough; on every document holding an inline `html` node, whose `<span>` the schema
+ * fills from the node's `value` attribute, which no text under it carries; and on every document
+ * holding a footnote reference, whose `<sup>` label the schema draws and no node carries.
  */
 
 import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";

@@ -16,8 +16,9 @@ import { withAlice } from "./users";
 // writes, which `fixtures.json` pins without a browser (`pm_json`, `yjs_update_v1_b64`); the
 // comment's headless parse, with this reader of its code blocks and spreads, is
 // `web/src/features/refs/fixture-table-readings.test.ts`'s "an indented code block's whitespace
-// lines stay in the block and spread no list or item", which runs it over this document and over
-// the two the file's other rows held.
+// lines stay in the block and spread no list or item", which runs it over this document, over
+// the one a deleted row of this file held - a block ending in a whitespace line with no line
+// feed after it - and over a third no browser row has ever read.
 //
 // A paragraph reading holds none of this - a code block's own text, and the `data-spread` of each
 // list and item - so this row keeps a reader of its own. The reading it reads against is the unit

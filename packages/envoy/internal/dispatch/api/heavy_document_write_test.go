@@ -17,7 +17,7 @@ type heavyWrite struct {
 }
 
 // heavyWrites is every heavy body of pmdoc/heavybodies flattened into the writes this package
-// makes of them, the shapes grown to the body cap first and the nested bare-directive bodies
+// makes of them, the shapes grown to full size (Grow) first and the nested bare-directive bodies
 // after: the order the verdict test's subtests and BenchmarkHeavyDocumentWrite's sub-benchmarks
 // are named in, which is why both take their rows from here rather than flattening the two lists
 // apart.
@@ -36,7 +36,7 @@ func heavyWrites() []heavyWrite {
 // A document write of each heavy body gets the verdict the reader gives it: the nine shapes of
 // heavybodies.Shapes are stored or refused 400 INVALID_MARKDOWN, and both deeply nested
 // bare-directive bodies are refused the same way. The mapping from the reader's refusal to that
-// code lives in one place (writeDocumentError, server.go), and until this test no API test
+// code lives in one place (writeHandlerError, server.go), and until this test no API test
 // reached it for a body refused for how deeply it nests.
 //
 // The browser suite used to make this claim, writing the same bodies through this same route and

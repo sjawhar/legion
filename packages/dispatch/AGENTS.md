@@ -1510,10 +1510,13 @@ read them from there rather than copying one: the Go reader's tests through
 `testdata/fixtures.json`, the web unit tests and the surviving browser rows
 through `web/src/__tests__/pmdoc-fixtures.ts`. A new shape is a corpus file and
 `bun run gen` in `pmdoc/gen`, never a markdown string in a spec. Each family
-keeps one browser row, the one that reads stored markdown through the live
-editor, because the spec editor draws Go's reading (already pinned by
-`fixtures.json`) and a comment parses through the headless engine (which a web
-unit test runs).
+keeps one browser row. Where the family's markdown is stored as a document it
+is the row that reads that document back in a browser, because the spec editor
+draws Go's reading (already pinned by `fixtures.json`) and a comment parses
+through the headless engine (which a web unit test runs); for the seven
+families whose shapes the corpus holds that row reads through the live editor,
+five of them from a past version. `e2e/unknown-directive.e2e.ts` is the eighth:
+no document holds its bodies, so its one row reads the Conversation instead.
 
 Two files keep markdown of their own, each for a reason the table cannot meet.
 `packages/envoy/internal/dispatch/pmdoc/writer_spelling_test.go` copies corpus

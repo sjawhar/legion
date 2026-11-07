@@ -37,12 +37,13 @@ func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 		{"bold italic code then italic code", "Plain ***`c`**`c`*](u) end.\n\n[^a_b]: n\n", "Plain ***`c`**`c`*]\\(u) end.\n\n[^a_b]: n\n"},
 		{"a struck tilde in italic after italic", "p a*a*~*~*~ q\n", "p a*a*~~*~*~~ q\n"},
 		{"an italic bare URL before a letter", "*http\\://a.example/a*b\\)**\n", "*http\\://a.example/a*b)**\n"},
-		// The rows below are the stored spellings three parity rows of the browser suite used to
-		// assert of a document written through the API, moved here when those rows were deleted
-		// (INFRA-1404): the fixture table cannot carry them, since fixtures.json's
-		// rendered_by_milkdown is the engine's own re-serialization and render_test.go compares
-		// it only through plain(), which strips a character reference and a backslash alike.
-		// Each want below was measured here and matches the string its browser row asserted.
+		// The rows below are the stored spellings five rows of the browser suite, in the four
+		// specs named under them, used to assert of a document written through the API, moved
+		// here when those rows were deleted (INFRA-1404): the fixture table cannot carry them,
+		// since fixtures.json's rendered_by_milkdown is the engine's own re-serialization and
+		// render_test.go compares it only through plain(), which strips a character reference
+		// and a backslash alike. Each want below was measured here, and carries what its browser
+		// row asserted of the stored document: the whole of it, or the strings that row named.
 		// From strikethrough.e2e.ts: a tilde run strikes only beside a run of its own length,
 		// and an unpaired one is stored as a character reference so it reads back as text.
 		{"an unpaired tilde after a letter", "Plain ~a~~ text.\n", "Plain &#126;a&#126;&#126; text.\n"},

@@ -12,7 +12,7 @@
  * (`ci.yaml`, the `envoy-go` job's "Check pmdoc fixtures are up to date"). A shape a test needs is
  * a new corpus file and a regenerated table, never a copy of its markdown in a test file.
  *
- * The table is 3.3 MB, so it is read and parsed once for the test process and selected by name.
+ * The table is 3.7 MB, so it is read and parsed once for the test process and selected by name.
  * The same cross-package read as `web/src/__tests__/setup.ts`'s and
  * `web/src/features/refs/markdown-engine.test.ts`'s of `pmdoc/schema/blocks.json`.
  */

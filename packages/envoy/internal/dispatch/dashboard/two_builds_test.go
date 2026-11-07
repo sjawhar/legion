@@ -51,14 +51,16 @@ func newAssetRouter(t *testing.T, pool *store.Pool, distDir string, assets route
 // a reader with - a page one process served, asking another for the chunks of its own build - and
 // it is the claim the browser suite's two-process row used to make over two live servers
 // (two-builds.multiprocess.e2e.ts), made here at the seam that answers it: routes.staticHandler
-// over WebDistDir, falling back to the AssetStore (routes/assets.go) that dashboard.Publish fills
-// at boot (INFRA-1404).
+// (routes/router.go) over WebDistDir, falling back to the AssetStore (routes/assets.go) that
+// dashboard.Publish fills at boot (INFRA-1404).
 func TestEveryAssetOfBothBuildsAnswersFromEitherProcess(t *testing.T) {
 	pool := storetest.Open(t).Pool
 	ctx := context.Background()
-	// Vite hashes every asset name, so two builds share a name only where the bytes are the same;
-	// each name below carries its build's marker, and the shared runtime chunk carries neither,
-	// which is the file both builds publish under one path.
+	// Vite hashes every asset name, so two builds share a name only where the bytes are the same.
+	// Of the names below, every asset carries its build's marker but two: the shared runtime
+	// chunk, the one path both builds publish, and the font, which the first build holds alone.
+	// index.html and the favicon stand outside assets/, which is all Publish stores (listAssets)
+	// and all the rows below read.
 	shared := []byte("export const shared = true")
 	firstFiles := map[string][]byte{
 		"index.html":               page("/assets/index-a1.js", "a1"),
@@ -121,9 +123,10 @@ func TestEveryAssetOfBothBuildsAnswersFromEitherProcess(t *testing.T) {
 				t.Run(build.name+"'s "+path+" from "+process.name, func(t *testing.T) {
 					// What the row is for: where the file is not the serving build's own, that
 					// process's dist must not hold it, so the 200 below can only have come from
-					// the asset store - routes.staticHandler reads WebDistDir first and falls
-					// back to the store for what it lacks (routes/assets.go). The shared runtime
-					// chunk is in both dists, and both processes read it from their own.
+					// the asset store - routes.staticHandler (routes/router.go) reads WebDistDir
+					// first and falls back to the AssetStore (routes/assets.go) for what it
+					// lacks. The shared runtime chunk is in both dists, and both processes read
+					// it from their own.
 					if _, own := process.files[path]; !own {
 						local := filepath.Join(process.dist, filepath.FromSlash(path))
 						if _, err := os.Stat(local); !errors.Is(err, fs.ErrNotExist) {

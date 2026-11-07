@@ -35,13 +35,14 @@ function wholeText(entry: PmdocFixture): string {
   return entry.reading.paragraphs.map((paragraph) => paragraph.text).join(" ");
 }
 
-/** The bodies the parses after a refused one carry, one per markdown family of the fixture table
- *  that reads through this engine: a list (`lists`), the tilde-beside-emphasis shapes
- *  (`emphasis-beside-a-tilde`), the spelling a writer's backslash forces
- *  (`writer-spells-a-flanked-letter-after-a-backslash`), the addresses two linkifiers argue over
- *  (`email-autolinks-in-a-spec`, `bare-addresses-each-with-its-own-host`), text shaped like a
- *  directive this schema has no block for (`directive-like-text`), the mark spans a document
- *  carries (`marks`) and text outside ASCII (`unicode`). */
+/** The bodies the parses after a refused one carry: eight documents of the fixture table, one
+ *  for each markdown shape this engine must keep reading, and two for the addresses - a list
+ *  (`lists`), the tilde-beside-emphasis shapes (`emphasis-beside-a-tilde`), the spelling a
+ *  writer's backslash forces (`writer-spells-a-flanked-letter-after-a-backslash`), the
+ *  addresses two linkifiers argue over (`email-autolinks-in-a-spec`,
+ *  `bare-addresses-each-with-its-own-host`), text shaped like a directive this schema has no
+ *  block for (`directive-like-text`), the mark spans a document carries (`marks`) and text
+ *  outside ASCII (`unicode`). */
 const unrelatedBodies = [
   "lists",
   "emphasis-beside-a-tilde",

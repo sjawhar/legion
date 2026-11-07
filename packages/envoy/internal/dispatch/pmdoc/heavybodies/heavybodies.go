@@ -6,17 +6,18 @@
 // Eight of these bodies are spelled a second time in TypeScript, in packages/dispatch/e2e/heavy-bodies.ts,
 // which the browser suite draws them from; the other three are Go's alone, drawn by no browser row.
 // What reads those three is Go: internal/dispatch/api's TestHeavyDocumentWriteVerdicts writes each
-// of them through the API, pmdoc's own tests parse them, and digests_test.go beside this file only
-// hashes them. A checked-in digest table holds the two spellings to each other:
-// testdata/shared-bodies.json names every body both sides spell - by the ID each Shape and
-// NestedDirective below carries - with that body's length in bytes and the SHA-256 of those bytes,
-// and every body only one side has, with why it is alone. Both sides
-// read the table and neither may drift from it: digests_test.go here, and
-// packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there, each fail where a body of
-// their own no longer digests to its row, and where their side has gained, lost or renamed one. So
-// a shape changed on one side alone fails that side's test, instead of leaving the other comparing
-// different bytes against the same numbers (sjawhar/legion#2519). The table carries its own
-// contract in its schema field, JSON having nowhere to put a comment.
+// of them through the API, and pmdoc's own tests parse them. digests_test.go beside this file
+// hashes none of the three: it digests the bodies both sides spell and no others, and holds these
+// three only to standing in the table once each, as a body Go has alone, with why. A checked-in
+// digest table holds the two spellings to each other: testdata/shared-bodies.json names every
+// body both sides spell - by the ID each Shape and NestedDirective below carries - with that
+// body's length in bytes and the SHA-256 of those bytes, and every body only one side has, with
+// why it is alone. Both sides read the table and neither may drift from it: digests_test.go here,
+// and packages/dispatch/e2e/__tests__/heavy-bodies-digests.test.ts there, each fail where a body
+// of their own no longer digests to its row, and where their side has gained, lost or renamed
+// one. So a shape changed on one side alone fails that side's test, instead of leaving the other
+// comparing different bytes against the same numbers (sjawhar/legion#2519). The table carries
+// its own contract in its schema field, JSON having nowhere to put a comment.
 //
 // This package imports pmdoc nowhere, on purpose: pmdoc's tests are in-package, so an import of
 // pmdoc here would close a cycle. What it needs of pmdoc's bounds it carries itself, as MaxNesting,
@@ -32,8 +33,9 @@ import (
 
 // BlockCap is the longest one block of a body may be, in characters: the bound the comment,
 // message and broadcast routes refuse a longer block against (contracts.DispatchBlockUnits).
-// Every shape here is one or two blocks standing at it, so what is measured is the worst one
-// reader can be sent in a block.
+// The shapes below are grown against it - to it, but for the two runs of brackets at 30,000 -
+// so what is measured is the worst a reader can be sent in one block, however many blocks the
+// shape spells those characters as.
 const BlockCap = contracts.DispatchBlockUnits
 
 // MaxNesting is how many blocks a markdown document may open inside one another, the bound the
@@ -53,17 +55,19 @@ type Shape struct {
 	// Body is the shape carrying size characters of whatever it repeats, after its own fixed
 	// opening (a quote's first line, a nesting of items, a typed fence) where it has one.
 	Body func(size int) string
-	// Grown is how many repeated characters the shape carries at the body cap. It is also the
-	// size a growth measurement scales, so a shape whose opening is a fixed cost - the items the
-	// nested shape indents before its blank lines - is measured over the part of it that grows,
-	// not over a body two thirds of which is the same prefix at both sizes.
+	// Grown is how many repeated characters the shape carries at full size: the body cap, less
+	// the characters the shape spells around them, for all but the two runs of brackets, which
+	// stand at 30,000. It is also the size a growth measurement scales, so a shape whose opening
+	// is a fixed cost - the items the nested shape indents before its blank lines - is measured
+	// over the part of it that grows, not over a body two thirds of which is the same prefix at
+	// both sizes.
 	Grown int
 	// Refusal is what a write of the shape is refused with, under pmdoc.ErrSchema, or "" where
 	// the body is stored.
 	Refusal string
 }
 
-// Grow is the shape at the body cap: the bytes a write of it sends.
+// Grow is the shape at full size (Grown): the bytes a write of it sends.
 func (s Shape) Grow() string { return s.Body(s.Grown) }
 
 // nestedItems is depth list items, each indented one level deeper than the item before it, so the
@@ -83,11 +87,12 @@ func nestedRefusal(line int) string {
 	return fmt.Sprintf("line %d opens a block inside %d blocks", line, MaxNesting)
 }
 
-// Shapes are the bodies a reader's browser tab froze on (sjawhar/legion#2519), each at the body
-// cap: a plain list of 8,000 items, a quote and a list item each followed by lines that carry no
-// marker of their own, a run of brackets, items nested by indentation and then blank lines, 49
-// markers on one line and then blank lines, a chain of list markers on one line, and a typed
-// fence whose label opens a run of brackets.
+// Shapes are the nine bodies a reader's browser tab froze on (sjawhar/legion#2519), each at the
+// body cap of 32,000 characters, but for the marker chain at 31,999 and the two runs of brackets
+// at 30,000: a plain list of 8,000 items; a quote and a list item each followed by lines that
+// carry no marker of their own; a run of brackets; 49 items nested by indentation and then blank
+// lines, and 100 items nested the same way; 49 markers on one line and then blank lines; a chain
+// of list markers on one line; and a typed fence whose label opens a run of brackets.
 //
 // A list opener opens a list and its first item, two of the blocks MaxNesting counts, so 49 items
 // nested by indentation stand inside 98 blocks and are stored, while the 51st line of 100 such
@@ -142,10 +147,11 @@ func Shapes() []Shape {
 		{
 			// 49 markers on ONE line, not one item per line as the shape above writes them. The
 			// two nest the same 98 blocks and are stored alike, but they are not the same bytes
-			// and they cost the parser different things - one line holding 50 open blocks over
-			// 31,900 blank lines, against 49 lines of two characters each - so both are here
-			// rather than one standing in for the other (INFRA-1404). e2e/heavy-bodies.ts spelled
-			// this body too, as nested49ThenBlankLines, for the document writes the deleted
+			// and they cost the parser different things - one line holding those 98 blocks open
+			// over 31,900 blank lines, against 49 lines of 4 to 100 characters and then 29,452
+			// blank lines - so both are here rather than one standing in for the other
+			// (INFRA-1404). e2e/heavy-bodies.ts spelled this body too, as nested49ThenBlankLines,
+			// for the document writes the deleted
 			// heavy-document-writes.e2e.ts made through the API; no browser row draws it now, so
 			// testdata/shared-bodies.json lists this shape and the one above alike, as bodies only
 			// Go has. The 49-marker row heavy-bodies.e2e.ts still draws is a third body again: 49

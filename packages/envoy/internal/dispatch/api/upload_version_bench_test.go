@@ -65,7 +65,7 @@ func BenchmarkUploadVersion(b *testing.B) {
 }
 
 // BenchmarkHeavyDocumentWrite measures POST /api/v1/issues/{key}/artifacts over the heavy bodies
-// of pmdoc/heavybodies: the nine shapes at the block cap, stored or refused, and the two deeply
+// of pmdoc/heavybodies: the nine shapes at full size, stored or refused, and the two deeply
 // nested bare-directive bodies, which are refused. Each iteration writes its body under a name
 // of its own, so what is timed is a first write of such a body into a document of its own -
 // what a writer sending one of these meets - rather than another version of a growing document,
@@ -74,7 +74,7 @@ func BenchmarkUploadVersion(b *testing.B) {
 //
 // Nothing here gates: no CI step passes -bench, and none can. The listing
 // .github/scripts/go-test-step-expansion.py leaves every `Benchmark…` name out of what a step
-// runs (:56-58), because `go test` builds those functions and runs none of them, and the script
+// runs (:57-58), because `go test` builds those functions and runs none of them, and the script
 // refuses outright a step that would pass -bench (:327-329). The gate over these bodies is
 // TestHeavyDocumentWriteVerdicts (heavy_document_write_test.go); this is here to be measured by
 // hand when the reader or the write path changes.

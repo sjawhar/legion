@@ -9,11 +9,12 @@ import { asUser } from "./users";
 // A bare web address after punctuation or an escaped scheme colon is a link remark-gfm reads, and
 // a document written through the API holds the same links a comment holding the same markdown
 // does. This family has no past-version reading row of its own: its one browser row reads the
-// stored document in a browser, and what it reads is a link's name and href, which no paragraph
-// reading holds. Its document and the text of each of its paragraphs are the one fixture table's
-// `bare-addresses-each-with-its-own-host`, whose `pm_json` pins the link marks below without a
-// browser and whose paragraphs `web/src/features/refs/fixture-table-readings.test.ts` reads in a
-// DOM. The rows that held a `www.`, an uppercase scheme or a bare email are shapes of
+// stored document in a browser, and what it adds to the table's own reading is a link's name
+// and href, which no paragraph reading holds. Its document and the text of each of its
+// paragraphs are the one fixture table's `bare-addresses-each-with-its-own-host`, whose
+// `pm_json` pins the link marks below without a browser and whose paragraphs
+// `web/src/features/refs/fixture-table-readings.test.ts` reads in a DOM. The rows that held a
+// `www.`, an uppercase scheme or a bare email are shapes of
 // `testdata/corpus/bare-address-after-punctuation.md`, which the Go reader's fixture tests pin
 // against the engine's `pm_json`, link marks and all.
 

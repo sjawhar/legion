@@ -43,7 +43,7 @@ type goBody struct {
 	body string
 }
 
-// goBodies is every body this package spells, by ID: each Shape at the body cap, each nested
+// goBodies is every body this package spells, by ID: each Shape at full size (Grow), each nested
 // directive whole. Two bodies under one ID would hide one of them from the table, so that fails.
 func goBodies(t *testing.T) map[string]goBody {
 	t.Helper()

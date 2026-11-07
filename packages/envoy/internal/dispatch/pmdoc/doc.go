@@ -49,7 +49,8 @@
 // packages/dispatch/web/src/__tests__/pmdoc-fixtures.ts, and none of the three
 // keeps a copy of a shape but for two, each of which the table cannot hold:
 //
-//   - writer_spelling_test.go copies corpus markdown into its rows, because what
+//   - writer_spelling_test.go spells its rows itself - corpus blocks among
+//     them, and the bodies two deleted browser rows wrote - because what
 //     it asserts is the bytes Go stores for a shape, which the table does not
 //     carry: fixtures.json's rendered_by_milkdown is the browser engine's
 //     re-serialization of its own parse (a backslash escape) where Go stores a
@@ -62,9 +63,9 @@
 //     service does. A Conversation body is drawn by the read-only engine instead,
 //     so no corpus file can hold them.
 //
-// testdata/fixtures.json and testdata/splices.json are
-// generated, not hand-written. To add a document fixture, drop a markdown file
-// in testdata/corpus/ and regenerate:
+// testdata/fixtures.json and testdata/splices.json are generated, not
+// hand-written. To add a document fixture, drop a markdown file in
+// testdata/corpus/ and regenerate:
 //
 //	cd gen && bun run gen     # rewrite generated fixtures
 //	cd gen && bun run check   # verify they are up to date (CI)
@@ -76,8 +77,8 @@
 // ProseMirror docs as Yjs updates with y-prosemirror, and records markdown,
 // pm_json, base64 updates and the reading a reader sees of the document
 // (@legion/proof-editor/reading, the paragraphs and tables of the DOM the
-// schema draws) side by side. It also runs ProseMirror's
-// replaceRange for its documented splice cases and writes their engine JSON.
+// schema draws) side by side. It also runs ProseMirror's replaceRange for its
+// documented splice cases and writes their engine JSON.
 // Go tests decode Yjs updates with Read, compare browser fixture JSON, and
 // compare Splice with those replaceRange results; Update output is decoded
 // by the browser's y-prosemirror through gen/decode.ts.

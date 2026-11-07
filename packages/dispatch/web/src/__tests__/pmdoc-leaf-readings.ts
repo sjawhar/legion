@@ -1,13 +1,15 @@
 /**
- * What a leaf reading of a corpus document is, and what two of the corpus documents read as: the
- * types, the row constructors and the expected tables that `e2e/leaf-marks.e2e.ts` and
- * `web/src/features/refs/fixture-table-readings.test.ts` both hold the engine to, so the browser
- * row and the headless row compare against one literal rather than two copies of it.
+ * What two of the corpus documents read as, and what a leaf reading of one is: the types, the
+ * row constructors and the expected readings three files hold the engine to -
+ * `leafMarksInOneDocumentReading` by `e2e/leaf-marks.e2e.ts` and
+ * `web/src/features/refs/fixture-table-readings.test.ts`, `listsSpacedByIndentedCodeReading` by
+ * `e2e/indented-code-whitespace-lines.e2e.ts` and that same unit test - so a browser row and a
+ * headless row compare against one literal rather than two copies of it.
  *
- * Declarations and data alone live here, never the readers that produce the rows. The e2e row's
- * reader runs inside `view.locator("p").evaluateAll(…)`, whose callback Playwright serializes and
- * evaluates in the browser, where it can close over nothing this module exports; the unit test's
- * reads a happy-dom element in this process. The two stay written out, one in each file.
+ * Declarations and data alone live here, never the readers that produce the rows. An e2e row's
+ * reader runs inside an `evaluateAll(…)`, whose callback Playwright serializes and evaluates in
+ * the browser, where it can close over nothing this module exports; the unit test's reads a
+ * happy-dom element in this process. The readers stay written out, one per file.
  */
 
 /** One inline leaf a paragraph draws. */

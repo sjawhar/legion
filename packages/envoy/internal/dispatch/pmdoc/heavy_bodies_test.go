@@ -13,12 +13,15 @@ import (
 )
 
 // The bodies a reader's browser tab froze on (sjawhar/legion#2519) are read here through the
-// parser a caller's write takes, at the longest one block of a body may be: a plain list of
-// 8,000 items, a quote and a list item each followed by lines that carry no marker of their own,
-// a run of brackets, items nested by indentation and then blank lines, 49 markers on one line
-// and then blank lines, a chain of list markers on one line, and a typed fence whose label opens
-// a run of brackets. Each is stored or refused here as the browser's own suites expect it to be,
-// so the two read the same body the same way.
+// parser a caller's write takes, each at the length heavybodies grows it to - the longest one
+// block of a body may be, but for the marker chain at 31,999 characters and the two runs of
+// brackets at 30,000: a plain list of 8,000 items; a quote and a list item each followed by
+// lines that carry no marker of their own; a run of brackets; 49 items nested by indentation and
+// then blank lines, and 100 items nested the same way; 49 markers on one line and then blank
+// lines; a chain of list markers on one line; and a typed fence whose label opens a run of
+// brackets. Each is stored or refused here as it is written to be, and six
+// of the nine are the very same bytes the browser suite draws in a page (e2e/heavy-bodies.ts,
+// held to these by heavybodies/testdata/shared-bodies.json), so the two read one body, not two.
 //
 // The shapes themselves are heavybodies.Shapes (pmdoc/heavybodies), not this file: the API's own
 // test of the verdict each write gets reads the same bodies from there, and a _test.go file of
@@ -30,17 +33,20 @@ import (
 // (growsLinearly, linear_test.go) - of the parse alone, and of the parse and the encode of the
 // document a write makes of the body together.
 //
-// The Playwright spec that wrote these same shapes through the API held each write to a second
-// and to nothing about its growth: a ratio between two wall times a shared CI runner took, a
-// doubling of the body apart, cannot separate a regression from the runner's own noise, which is
-// what made that bound fail at random (INFRA-985). The growth claim is made here instead, in this
-// process's own CPU time and at an eightfold step, and the verdict each write gets is gated in
-// internal/dispatch/api (TestHeavyDocumentWriteVerdicts).
+// The Playwright spec that wrote eight of these nine shapes through the API held each write to a
+// second and to nothing about its growth: a ratio between two wall times a shared CI runner took,
+// a doubling of the body apart, cannot separate a regression from the runner's own noise, which
+// is what made that bound fail at random (INFRA-985). The growth claim is made here instead, in
+// this process's own CPU time and at an eightfold step, and the verdict each write gets is gated
+// in internal/dispatch/api (TestHeavyDocumentWriteVerdicts).
 //
 // These pass as they are written: every shape here already parses in under a second of CPU time.
-// They are the bound the browser's own parse is held to on the same bodies, and the guard over the
-// parse's own costs - the block ids a document's blocks are minted from, and the tab-indentation
-// check each open block runs on each line - which a regression would make superlinear again.
+// A second is the browser's own bound too - the longest a card's draw may hold the page's main
+// thread (longestHoldMs, packages/dispatch/e2e/main-thread-hold.ts) - and six of the nine bodies
+// here are the very bytes those rows draw; the other three reach no browser, so this bound is
+// all they have. It is the guard over the parse's own costs as well - the block ids a document's
+// blocks are minted from, and the tab-indentation check each open block runs on each line -
+// which a regression would make superlinear again.
 
 // Every shape at the block bound is stored or refused as it is, and the parse of it spends less
 // CPU time than heavyBodyCPUBudget allows.

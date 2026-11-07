@@ -1,8 +1,9 @@
 // What a heavy body costs a reader's own thread, in the surfaces that draw one: the Conversation,
-// the Inbox's ask card and a hover card. The same shapes written as documents through the API are
-// Go's, in `packages/envoy/internal/dispatch/api`'s heavy-document-write test over
-// `pmdoc/heavybodies`, whose bodies are the bytes `heavy-bodies.ts` spells - and what holds the
-// two spellings to each other is the digest table
+// the Inbox's ask card and a hover card. Six of the seven shapes drawn here are written as
+// documents through the API by Go, in `packages/envoy/internal/dispatch/api`'s
+// heavy-document-write test over `pmdoc/heavybodies`, which spells those six as the very bytes
+// `heavy-bodies.ts` does - the seventh, `nestedThenTextLines`, no Go shape spells. What holds
+// the two spellings to each other is the digest table
 // `pmdoc/heavybodies/testdata/shared-bodies.json`, read over this side by
 // `e2e/__tests__/heavy-bodies-digests.test.ts` and over Go's by `heavybodies/digests_test.go`.
 // The one surface where a body grows under a paint - the live view, where a streaming turn
