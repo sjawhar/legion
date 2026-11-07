@@ -883,11 +883,13 @@ jobs:
               # being started from the default branch alone.
               - '.github/workflows/dispatch-browser.yaml'
               - '.github/workflows/dispatch-browser-nightly.yaml'
-              # The browser suite's install steps run it and read the pinned apt list beside it
-              # (dispatch-browser.yaml), so a change to either must re-run that job, which this
-              # anchor gates through dispatch_browser.
+              # The browser suite's install steps run it and read the pinned apt list beside it,
+              # and its merge job runs the script that takes each leg's newest attempt
+              # (dispatch-browser.yaml), so a change to any of them must re-run that job, which
+              # this anchor gates through dispatch_browser.
               - '.github/scripts/playwright-deps-current.sh'
               - '.github/scripts/playwright-packages.txt'
+              - '.github/scripts/dispatch-browser-latest-blobs.sh'
               - *bun_install
               - *biome
               - 'packages/dispatch/**'

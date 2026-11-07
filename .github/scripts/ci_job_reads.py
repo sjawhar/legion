@@ -679,6 +679,7 @@ BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes
 BROWSER_MP_SIGNIN = "Browser-test a sign-in across two server processes"
 BROWSER_INSTALL = "Install the lane's Playwright browsers"
 BROWSER_MERGE_STEP = "Merge the legs' blob reports into one report"
+BROWSER_SELECT_STEP = "Take the newest attempt of each leg's blob report"
 STALL = "envoy-session-stall"
 STALL_CLIENT = "Stall test of envoy-client's NATS connection options"
 LOADTEST_RUN_STEP = "One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)"
@@ -942,6 +943,7 @@ GATES = [
         ("bun.lock", f"{at_browser('playwright-cache')} keys the browser cache on hashFiles('bun.lock'), "
          f"which pins the Playwright version whose browsers {at_browser(BROWSER_INSTALL)} downloads"),
         (".github/scripts/playwright-deps-current.sh", at_browser(BROWSER_INSTALL)),
+        (".github/scripts/dispatch-browser-latest-blobs.sh", at_browser(BROWSER_SELECT_STEP, BROWSER_MERGE)),
         (".github/scripts/playwright-packages.txt", f"{at_browser(BROWSER_INSTALL)} reads it as the apt list it installs, "
          "and the alone job's copy of that step reads the same file"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),

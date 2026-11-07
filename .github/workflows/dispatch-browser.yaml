@@ -1047,23 +1047,37 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      # Every leg's blob report and row count, merged into one directory. Each artifact holds a
+      # Every leg's blob report and row count, one directory per artifact. Each artifact holds a
       # blob-report/ and a rows/ directory, so the zips land together and the counts land beside
       # them rather than among them: `merge-reports` reads the zips of the directory it is given.
+      #
+      # No `merge-multiple`, so each artifact is extracted into a directory named for it
+      # (dispatch-browser-blob-shard-1-2/blob-report/report-shard-1.zip) and the step below can
+      # tell the attempts apart. A run's artifact list holds every attempt's artifacts and this
+      # pattern matches them all; two attempts of one leg hold the same inner paths, so merging
+      # them into one directory let one attempt overwrite the other in an order nothing fixes.
       - name: Download every leg's blob report
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: dispatch-browser-blob-*
-          merge-multiple: true
           path: ${{ runner.temp }}/blobs
+      # The newest attempt of each leg, and no other, into one directory of the shape the steps
+      # below read. A leg a failed-only re-run did not run keeps the attempt that ran it, which
+      # is what .github/scripts/ci-ok-report.sh already does with the jobs' ci-ok reports; the
+      # script's head says what two attempts of one leg did to a merged report when they were
+      # downloaded over each other. It runs from $GITHUB_WORKSPACE, this step's own directory,
+      # and its log names the attempt it took for each leg.
+      - name: Take the newest attempt of each leg's blob report
+        run: .github/scripts/dispatch-browser-latest-blobs.sh "$RUNNER_TEMP/blobs" "$RUNNER_TEMP/selected-blobs"
       - name: Merge the legs' blob reports into one report
         # The JSON report is the one packages/dispatch/e2e/tools/check-slow-rows.ts reads, and
         # this merged report is now its source: one run's rows, from every leg, in one file. The
         # HTML report is for a person; the list reporter prints the run's result into this step's
-        # own log. The three output paths are exported here rather than in an `env:` block, for
+        # own log. It reads the selected directory the step above wrote, which holds one attempt
+        # per leg. The three output paths are exported here rather than in an `env:` block, for
         # the reason the shard job's head gives.
         run: |
-          blobs="$RUNNER_TEMP/blobs/blob-report"
+          blobs="$RUNNER_TEMP/selected-blobs/blob-report"
           if [ ! -d "$blobs" ] || [ -z "$(ls -A "$blobs" 2>/dev/null)" ]; then
             echo "::error::no leg uploaded a blob report, so there is nothing to merge;" \
               "the reading below names the legs that owed one"
@@ -1100,8 +1114,8 @@ jobs:
       - name: Reading one, the rows
         if: always()
         run: |
-          blobs="$RUNNER_TEMP/blobs/blob-report"
-          counts="$RUNNER_TEMP/blobs/rows"
+          blobs="$RUNNER_TEMP/selected-blobs/blob-report"
+          counts="$RUNNER_TEMP/selected-blobs/rows"
           report="$RUNNER_TEMP/report.json"
           # The legs this lane owed: one per shard, and the three alone legs on the full lane.
           legs=""
@@ -1191,7 +1205,7 @@ jobs:
           # shard job's head gives. `actions: read` is the caller's, and ci.yaml's job that calls
           # this workflow already holds it.
           export GH_TOKEN="${{ github.token }}"
-          blobs="$RUNNER_TEMP/blobs/blob-report"
+          blobs="$RUNNER_TEMP/selected-blobs/blob-report"
           unhappy="$RUNNER_TEMP/unhappy-jobs.tsv"
           # Every job of this workflow that has concluded and did not succeed. The jobs API lists
           # the caller's jobs too, so the name is held to this workflow's four; a called
