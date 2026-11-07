@@ -421,7 +421,7 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 
 // registerReply answers a register, first waiting up to wait for the session to enroll. The wait
 // is taken when the caller asked for one and either the helper holds a launcher credential or the
-// session holds an enrollment inherited from a record that no confirmation has accepted yet. Such
+// session holds an enrollment inherited from a record whose first confirmation is in flight. Such
 // an enrollment is confirmed by a renew signed with the session's own key alone
 // (Broker.renewIdentity), which needs no launcher credential, so a session that comes back for a
 // parked identity reaches enrolled on a helper nobody logged in — and a caller that asked to wait
@@ -433,12 +433,19 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // reading decides NO_CREDENTIAL, whatever a login or a refusal changed meanwhile; the identity is
 // read once too, and only when that credential reading has not already settled the wait.
 // NO_CREDENTIAL does not say the wait was skipped, since a session confirming an inherited
-// enrollment waits with no credential held. That wait ends with the broker's REFUSAL of the
-// confirmation as surely as with the confirmation itself: nothing can confirm the id once it has
-// been refused (Session.refuseInheritedAt), so no later register waits for one again. A session
-// whose enrollment lapsed waits for its re-enrollment, since a lapse reopens its ready channel
-// (markLapsed). The reply's id, state and error come from one snapshot, so a lapse landing after
-// the wait cannot give it an id from before and a state from after.
+// enrollment waits with no credential held.
+//
+// That confirmation wait covers ONE attempt in flight and nothing more: it ends with that
+// attempt's first answer whatever the answer is — the broker keeping the enrollment, refusing
+// it, or never answering at all (a 5xx, a timeout, a transport error) — because every one of
+// them settles the channel this waits on (Session.confirmSettled). enrollLoop retries an
+// attempt that did not reach the broker, on its own schedule and for as long as the outage
+// lasts, and no register waits on a retry it did not see start: a register arriving between two
+// of them answers NO_CREDENTIAL at once, rather than spending its whole wait, on every launch,
+// for an answer the helper already has. A session whose enrollment lapsed waits for its
+// re-enrollment, since a lapse reopens its ready channel (markLapsed). The reply's id, state and
+// error come from one snapshot, so a lapse landing after the wait cannot give it an id from
+// before and a state from after.
 //
 // The wait ends early when the session is retired (its stop closes), and a retire can also land
 // just as the wait runs out, so the reply is built only after a last membership check: a session
@@ -446,9 +453,20 @@ func (s *Server) adoptSessionID(ctx context.Context, sess *Session, sessionID st
 // has.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
-	if wait > 0 && (credential || sess.identity().awaitingConfirmation()) {
+	// settled is the confirmation to wake on, and only for the wait the inherited enrollment
+	// earns: with a credential held the enroll below can still succeed, so that wait runs to
+	// ready or the deadline as it always has, and the nil channel left here blocks for ever in
+	// the select, which is exactly that.
+	var settled <-chan struct{}
+	if !credential {
+		if held := sess.identity(); held.awaitingConfirmation() {
+			settled = held.ConfirmSettled
+		}
+	}
+	if wait > 0 && (credential || settled != nil) {
 		select {
 		case <-sess.readyCh():
+		case <-settled:
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
@@ -944,12 +962,11 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 				continue
 			}
 			// confirmRefused: the broker answered that it will not honour that enrollment,
-			// so the session needs a new one. The refusal is recorded on the session because
-			// the id stays until the enroll below replaces it: without it a `register --wait`
-			// would read an unconfirmed inherited enrollment and wait out the caller's whole
-			// wait, on every call for the rest of the session's life, for a confirmation that
-			// can no longer come.
-			sess.refuseInheritedAt(pass.EnrollmentID, pass.Generation)
+			// so the session needs a new one, and the enroll below replaces the id it keeps
+			// until then. Nothing is recorded here: confirmInherited settled the wait a
+			// `register --wait` takes for that confirmation as it answered the attempt
+			// (Session.settleConfirm), refusal and unreachable broker alike, so no register
+			// burns its wait on a confirmation that is over.
 		}
 		var id string
 		var lease time.Time
@@ -1071,10 +1088,19 @@ const (
 // broker, or that the broker could not answer, says nothing about the row — so it is retried
 // with the enroll's own backoff rather than read as a refusal. A single blip between a record
 // and the broker must not cost the session the grants that record exists to keep.
+//
+// Every attempt that ends in an error ANSWERS the register that is waiting for this
+// confirmation, though, whether the broker refused the row or never answered at all: the retry
+// above lasts as long as the outage does, and a wait held across it would cost every launch its
+// whole N (Session.settleConfirm, packages/envoy/AGENTS.md:5236-5238). The generation and
+// enrollment-id guards make the call a no-op for a session that has been renamed under the
+// renew, which is what errRenamed asks for: that register is waiting on the identity it has
+// now, not on this one.
 func (s *Server) confirmInherited(ctx context.Context, sess *Session, pass identity) (time.Time, confirmation) {
 	var lease time.Time
 	outcome := confirmStopped
 	kept := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		sess.settleConfirm(pass.EnrollmentID, pass.Generation)
 		switch {
 		case errors.Is(err, errRenamed):
 			outcome = confirmMoved

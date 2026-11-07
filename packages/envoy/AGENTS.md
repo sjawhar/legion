@@ -5233,9 +5233,12 @@ SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 a
 the unit `install` writes restarts it unless systemd itself stopped it (`Restart=always`), and the restarted helper resumes its machine file.
 The helper writes these lines to stderr as slog text, so journald stores the ERROR lines at priority 6 (info), and `journalctl -p err` does not list them.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup line (`agent-secrets-helper listening`) carries the same version.
-`register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that login-status says `issued`, once the pinned release carries that answer and the helper has restarted on it;
+`register --wait N` answers at once while the helper holds no launcher credential, except for a session that came back for a parked identity, which waits, up to N, only while that identity's inherited enrollment has its first confirmation in flight;
+that confirmation is a renew the session's own key signs, which needs no launcher credential, and the wait ends with that attempt's first answer, kept, refused, or never reaching the broker.
+So the dotfiles launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that login-status says `issued`, once the pinned release carries that answer and the helper has restarted on it;
 its login-status probe stays, since it also finds a helper that does not answer.
-Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential exists.
+Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential exists;
+against this one that exception costs a launch its wait only while a confirmation attempt it found in flight is unanswered, never launch after launch for as long as an outage lasts.
 With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`, `grant.go`, dispatched by `cmdGroup` from the `commands` rows) are the operator routes from the person's own shell, under this machine's login:

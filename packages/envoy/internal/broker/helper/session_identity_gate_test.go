@@ -481,6 +481,22 @@ func reclaimedIdentityRigRefusingRenew(t *testing.T) *rig {
 	return r
 }
 
+// reclaimedIdentityRigFailingRenew is that same fixture with the broker unable to ANSWER the
+// confirming renew — 503, an outage — rather than refusing it, the one failure confirmInherited
+// retries instead of falling through to the enroll. The gate is opened here, before the register
+// that starts the enroll loop, so those attempts reach the session on their own; renewFail is
+// set far above what a row can consume, since the outage must last the whole of it and the
+// attempts come a second apart at first.
+func reclaimedIdentityRigFailingRenew(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRig(t)
+	r.fake.mu.Lock()
+	r.fake.renewFail = 1000
+	r.fake.mu.Unlock()
+	release()
+	return r
+}
+
 // requireReclaimable fails unless the identity parked for testSessionID is still whole: the
 // record, its key and its enrollment, all where the session itself can take them back.
 func requireReclaimable(t *testing.T, r *rig, key *ecdsa.PrivateKey) {

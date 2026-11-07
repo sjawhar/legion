@@ -330,10 +330,10 @@ func TestARegisterWaitWaitsForAConfirmationThatNeedsNoCredential(t *testing.T) {
 }
 
 // TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment: the broker answers
-// that it will not honour the enrollment the session took from its record, so no confirmation can
-// ever arrive for that id, and the enroll the session falls through to wants a launcher
-// credential nobody has installed. NO_CREDENTIAL is then the whole answer, and no wait can change
-// it: `register --wait N` must give it at once, or the launcher gate's unconditional `--wait 10`
+// that it will not honour the enrollment the session took from its record, so that confirmation
+// is over, and the enroll the session falls through to wants a launcher credential nobody has
+// installed. NO_CREDENTIAL is then the whole answer, and no wait can change it: `register --wait
+// N` must give it at once, or the launcher gate's unconditional `--wait 10`
 // (scripts/agent-secrets-session) stalls every launch ten seconds for the rest of the session's
 // life.
 func TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment(t *testing.T) {
@@ -345,9 +345,11 @@ func TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment(t 
 	if first := r.call(t, Request{Op: "register", SessionID: &id}); first.Code != CodeNoCredential {
 		t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
 	}
+	// The refusal is that one confirmation attempt's answer, and from it the session reads no
+	// confirmation in flight (identity.awaitingConfirmation), which is what ends the wait.
 	waitFor(t, func() bool {
 		sess := r.srv.Registry.Get(os.Getpid())
-		return sess != nil && sess.identity().ConfirmRefused
+		return sess != nil && !sess.identity().awaitingConfirmation()
 	})
 
 	// The same session again, this time asking to wait. Nothing can confirm the refused id, so the
@@ -357,4 +359,59 @@ func TestARegisterWaitAnswersAtOnceOnceTheBrokerRefusesTheInheritedEnrollment(t 
 	if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
 		t.Fatalf("register --wait 5 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the broker has refused the inherited enrollment and no confirmation can come", resp, elapsed)
 	}
+}
+
+// TestARegisterWaitAnswersAtOnceWhenNoConfirmationIsInFlight: the wait a register takes on a
+// helper holding no launcher credential is for ONE confirmation attempt, the one in flight when
+// it arrives, and a register that finds none waits for nothing. Two rows hold that line, the
+// cases either side of a wait that is earned: a session whose confirmation keeps failing to
+// reach the broker, whose attempts the enroll loop retries for as long as the outage lasts, and
+// a session that never had a record to inherit an enrollment from at all.
+func TestARegisterWaitAnswersAtOnceWhenNoConfirmationIsInFlight(t *testing.T) {
+	// The broker cannot ANSWER the confirming renew: a 503, not a refusal, so confirmInherited
+	// keeps retrying it and the session stays unconfirmed for as long as the outage lasts. A
+	// wait that covered those retries would cost every launch its whole N for all that time.
+	t.Run("the broker cannot answer the confirming renew", func(t *testing.T) {
+		r := reclaimedIdentityRigFailingRenew(t)
+
+		// The register that admits the session and starts its enroll loop, whose confirming
+		// renew the fake answers 503. With no wait asked for it answers at once.
+		id := testSessionID
+		if first := r.call(t, Request{Op: "register", SessionID: &id}); first.Code != CodeNoCredential {
+			t.Fatalf("register with no wait: %+v; want NO_CREDENTIAL", first)
+		}
+		// The first attempt's answer, read from the BROKER's side: a second renew arriving is
+		// the enroll loop having taken the first one's 503 and retried it a second later.
+		// Reading it there rather than from the session leaves the register below the only
+		// thing the settle this row pins can change, and it puts a retry of the enroll loop's
+		// own in flight while that register runs — the very attempt a register that did not
+		// see it start must not wait on.
+		waitFor(t, func() bool {
+			r.fake.mu.Lock()
+			defer r.fake.mu.Unlock()
+			return r.fake.renewAttempts >= 2
+		})
+
+		// The same session again, asking to wait. The attempt this register could have waited
+		// on has been answered; the next one is the enroll loop's own, and nothing waits on a
+		// retry it did not see start.
+		started := time.Now()
+		resp := r.call(t, Request{Op: "register", WaitSeconds: 2, SessionID: &id})
+		if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
+			t.Fatalf("register --wait 2 answered %+v after %s; want NO_CREDENTIAL well inside the wait, since the confirmation attempt in flight when it arrived has been answered and the enroll loop's retries are not waited on", resp, elapsed)
+		}
+	})
+
+	// A session with no parked record at all, the headline promise: it has no enrollment to
+	// confirm, so there is nothing a wait can shorten and every launch gets its answer at once.
+	t.Run("a session with no parked record at all", func(t *testing.T) {
+		r := newRig(t, "")
+		r.callerPID.Store(int64(os.Getpid()))
+
+		started := time.Now()
+		resp := r.call(t, Request{Op: "register", WaitSeconds: 2})
+		if elapsed := time.Since(started); elapsed > time.Second || resp.Code != CodeNoCredential {
+			t.Fatalf("register --wait 2 answered %+v after %s; want NO_CREDENTIAL at once, since the helper holds no launcher credential and this session inherited no enrollment anything could confirm", resp, elapsed)
+		}
+	})
 }
