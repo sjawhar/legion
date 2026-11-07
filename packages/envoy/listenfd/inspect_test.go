@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 const variable = "TEST_LISTEN_FD"
@@ -99,13 +101,9 @@ func TestInspectRefuses(t *testing.T) {
 			return owned(t, rawFD(t, conn.(*net.UDPConn)))
 		}, "is not a stream socket"},
 		{"unix listener", func(t *testing.T) string {
-			// A short directory, since a socket path has a length limit and t.TempDir's may pass it.
-			dir, err := os.MkdirTemp("", "lfd")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-			listener := listen(t, "unix", filepath.Join(dir, "s"))
+			// A directory of the test's own, since a socket path holds 107 bytes and
+			// t.TempDir's, which spells the test's name, can pass them.
+			listener := listen(t, "unix", testtmp.Socket(t, "s"))
 			return owned(t, rawFD(t, listener.(*net.UnixListener)))
 		}, "is a unix-domain socket"},
 		{"connected TCP socket", func(t *testing.T) string {

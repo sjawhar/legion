@@ -169,7 +169,12 @@ Playwright through `e2e/run.ts` with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on
 port, each is used as given when set and chosen by the OS when unset; the proxy starts before
 the servers, since both serve its origin, so A's and B's ports are held first (a
 `held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
-cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+cookies with one key the run generates, so a person stays signed in whichever answers.
+`DISPATCH_E2E_SERVER_BIN` runs a prebuilt `envoy-dispatch` instead of the one `run-server.sh`
+builds from this checkout, and `DISPATCH_E2E_SERVER_BIN_B` gives Dispatch B one of its own, so a
+run can put two builds of the server against the one database as `DISPATCH_E2E_WEB_DIST_B` puts
+two builds of the dashboard there; `scripts/e2e/dispatch-two-builds.sh` is the proof that uses
+them. It runs
 the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
 leaves out; arguments after `--` reach Playwright
 (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
@@ -408,16 +413,19 @@ docker rmi "ghcr.io/cybermonklabs/legion/envoy:${acceptance_image_tag}"
 The suite has eleven projects. `chromium` runs every spec except the two plain-HTTP specs and the
 three the `-alone` projects below take. `iphone`
 runs, from those same specs, only the tests tagged `@phone` (written at the end of the test's or
-its `test.describe`'s title); which tests take the tag is in `packages/dispatch/AGENTS.md`, "Phone
-acceptance". An untagged test drops out of `iphone` with no failure. The iPhone project uses
+its `test.describe`'s title); a test takes the tag when the phone viewport can change what it
+asserts, and not when it only reaches the same control by another route, which is in
+`packages/dispatch/AGENTS.md`, "Phone acceptance". An untagged test drops out of `iphone` with no
+failure, and `e2e/__tests__/row-configurations.test.ts` refuses a row that runs twice in one
+engine, viewport, origin and server-process count. The iPhone project uses
 Chromium with iPhone 13 viewport, touch, and user-agent emulation. A deployed run
 (`bun run e2e:deployed`) uses the same projects, so its `iphone` project also runs only the
-`@phone` tests. `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a
-collaborator's cursor differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since
-Firefox's own editing mishandles text typed over what follows a block's last line break; both also
-run `e2e/deep-links.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
-`e2e/keyboard-session-pickers.e2e.ts` and `e2e/offline-edits.e2e.ts`, and `firefox` runs
-`e2e/picture-link-click.e2e.ts` too. `firefox-download-navigation` runs the one row of
+`@phone` tests. `webkit` and `firefox` select by tag as well, `@webkit` and `@firefox`: each
+tagged row exercises one engine behaviour the comment above the project in
+`e2e/playwright.config.ts` names, and a comment beside the tag names which. `webkit` covers
+where a caret lands beside a collaborator's cursor, and `firefox` covers text typed over what
+follows a block's last line break, which that engine's own editing mishandles.
+`firefox-download-navigation` runs the one row of
 `e2e/shell.e2e.ts` that follows a Download link before a chunk fails. `webkit-iphone` runs the
 phone-layout rows of `e2e/agent-view.e2e.ts`, `e2e/agent-view-settings.e2e.ts` and
 `e2e/delivery-live.e2e.ts`, and the rows of `e2e/phone-conversation.e2e.ts` that check what the

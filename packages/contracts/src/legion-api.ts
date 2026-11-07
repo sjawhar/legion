@@ -224,7 +224,7 @@ const legionCheckWakeView = z.object({
 });
 
 /** `api.CheckView` — an issue's open production check, the work the project's `production_check`
- * role takes after the merge closed the issue (contract 33, contract 52): the repository, pull
+ * role takes after the merge closed the issue (contract 33, contract 53): the repository, pull
  * request and merge commit the check looks for in production (`mergeCommit` is empty for a pull
  * request merged before the daemon recorded merge commits), when it opened, the role the check
  * records as the one that works it (`role`), how many looks that role has taken and whether the
@@ -581,7 +581,7 @@ export const LegionRegisterResponse = z.object({
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+/** `claim.CapabilityReport` — what a session measured of the live capability rows: when it
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
@@ -597,8 +597,9 @@ export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
 
 /** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
  * agent has booted and can be prompted, authenticated by the registration's secret and naming the
- * launch generation it answers for. `capabilities` is the session's report of the live rows; a
- * ready without one (the controller's) reports nothing and changes no row. */
+ * launch generation it answers for. A boot's ready and a role-regain's carry no report; a claimed
+ * session sends its report on a `claims/ready` of its own, from the interval it runs while it is
+ * idle. A ready without a `capabilities` report reports nothing and changes no row. */
 export const LegionReadyRequest = z.strictObject({
   claimToken: nonEmptyString,
   sessionId: nonEmptyString,
@@ -931,7 +932,7 @@ export const LegionControllerGrantRequest = z.strictObject({
  * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
  * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
  * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
- * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 52): when the
+ * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 53): when the
  * checking agent asks to be woken for its next look, which a pending report on a look that is not
  * the check's last must name (`CHECK_WAKE_REQUIRED`) and which no other verdict and no phase
  * completion may carry (`CHECK_WAKE_UNEXPECTED`). It is a `LegionInstant`, not a `timestamp`:

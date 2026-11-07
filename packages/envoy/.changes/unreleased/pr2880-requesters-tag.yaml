@@ -1,0 +1,18 @@
+kind: Added
+body: |
+  A secret's `requesters` annotation names the people and the registered services that may ask
+  for it at all: people by their lowercase sign-in email, services by their registered name,
+  separated by spaces. The broker denies every session and pod the list does not name, with no
+  approval request and whatever the secret's owner, tier or kind would have given them, and the
+  refusal names the secret and `requester-not-listed` to the session that asked, on
+  `POST /v1/requests`, on `GET /v1/requests/{id}` and in `agent-secrets`' own output. A list that
+  drops a session ends its live grant for good at that grant's next release, and an approval of a
+  pending request the list no longer allows is recorded as that request's denial by
+  `broker:policy` rather than left on the approval page. A secret carrying the annotation must
+  also carry a `max-grant` of an hour or less. `agent-secrets secret create` and
+  `secret retag` take `--requesters LIST|none`, refusing before the write what the broker's loader
+  would refuse after, and `secret show` prints the list; the loader's three new refusal reasons
+  are `requesters-malformed`, `requesters-max-grant` and `requesters-not-owner`.
+time: 2026-11-06T19:30:00.000000000Z
+custom:
+  Issue: pr2880

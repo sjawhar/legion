@@ -180,9 +180,7 @@ var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_REPOSIT
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
 	t.Helper()
-	for _, name := range runtimeOptionalEnv {
-		unsetenv(t, name)
-	}
+	fixtureenv.Unset(t, runtimeOptionalEnv...)
 	for name, value := range v.env {
 		t.Setenv(name, value)
 	}
@@ -195,17 +193,9 @@ func (v *issueVolume) fetch(t *testing.T) {
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	code, _, stderr := runWorkspaceInitHere(v.fetchArgs())
-	unsetenv(t, "LEGION_PROVISION_TOKEN_FILE")
+	fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE")
 	if code != 0 {
 		t.Fatalf("workspace-init fetch: exit %d, stderr %q", code, stderr)
-	}
-}
-
-func unsetenv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	if err := os.Unsetenv(name); err != nil {
-		t.Fatal(err)
 	}
 }
 

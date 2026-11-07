@@ -57,6 +57,7 @@ Each item below names a task and where its code is, then notes on it.
   This list and the Legion daemon's `repository_renames` in `legion.yaml` (`packages/daemon/internal/ghrepo/renames.go`) are two lists an operator keeps in step:
   they are separate Go modules, and the listener's pod mounts no `legion.yaml`.
   The daemon's list is read-side only and two-way, while this one is publish-side and one-way.
+  Dispatch keeps a third list of its own, `repo_projects.renamed_to`, the name a mapping's repository is called today, which an operator sets through `PUT /api/v1/settings/repo-projects/{owner}/{repo}` and every comparison Dispatch makes of a repository canonicalises through (`packages/envoy/cmd/dispatch/README.md`, migration `20261105075455_repo_projects_renamed_to`).
   A pair can be removed once no live session names the former repository in a topic, which Envoy's session list answers in one read (`GET /v1/sessions`).
 
 - **Listener behavior**: `cmd/listener/main.go`
@@ -196,6 +197,15 @@ Each item below names a task and where its code is, then notes on it.
   `embed`'s `TestEveryWindowFitsTheEmbedder` holds those windows to `MaxInputRunes`.
   `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain - and are all a window kind takes, since the indexers own which windows exist - and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search")
 
+- **Model loop**: `agentloop/`
+
+  the one model loop the Legion daemon and Dispatch share, and this module's only import of Grafana's AI SDK for Go:
+  `Run` makes one run of a model and the tools it calls, on anthropic-messages, openai-responses, openai-chat or azure-anthropic, and `Decide` puts one set of System One questions.
+  It is the engine and nothing more:
+  it reads no base URL, no credential and no header from the environment, so every endpoint, model, token and bound arrives in the caller's request (`doc.go`).
+  Its live proof makes one real model call per protocol and one real decision, so it sits behind the `modellive` build tag and CI only vets it:
+  `go test -count=1 -tags modellive ./agentloop/ -run TestLive -v` runs it from this directory, and each test skips unless the operator set its own inputs, which are `AGENTLOOP_LIVE_BASE_URL`, `AGENTLOOP_LIVE_KEY_FILE` and `AGENTLOOP_LIVE_MODEL` for the three runs, and `AGENTLOOP_LIVE_SYSTEMONE_BASE_URL`, `AGENTLOOP_LIVE_SYSTEMONE_KEY_FILE` and `AGENTLOOP_LIVE_SYSTEMONE_MODEL` for the decision
+
 - **Document tree (Proof schema)**: `internal/dispatch/pmdoc/`
 
   render/parse/diff of Proof documents; fixtures from the fork's headless engine
@@ -256,6 +266,14 @@ Each item below names a task and where its code is, then notes on it.
   the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;
   an `after_merge` or `default_branch` result while the repository's default branch carries its commit (`default_branch_commits`, the App's answer cached: a yes for good, a no for five minutes);
   `unknown` when the check's issue resolves to no repository or the App cannot read it.
+  A pull request is attributed to the first issue its five ranked sources name that resolves to the pull request's own repository, not to the first key they name (`attributionCandidates`, `attributionHeld` in `delivery/attribution.go`):
+  a title naming another repository's issue first therefore does not cost the pull request its own, and a pull request no candidate of which resolves to its repository is attributed to nobody, as is one whose head branch is in another repository (`headInOwnRepository`).
+  The hold is the server's own repository-resolution rule spliced into the statement that reads the candidates (`refs.IssueRepoTerms` through `attributionCandidatesQuery`), so an attribution can never disagree with the issue page;
+  one pull request's best 25 candidates are the ones read (`attributionCandidateBound`).
+  Two names of one repository are one repository: six sites go through the canonical name the repository is called today (`refs.CanonicalRepo`, `refs.CanonicalRepoSQL`), which is the `renamed_to` of the old name's `repo_projects` row — both sides of that hold, the repository the results read asks GitHub about, the key every writer of a `pull_request_heads` row uses, the settings route's refusal of a target that is itself renamed, and the CI reconcile, which reads every mapping under the name its repository has now (`internal/dispatch/cireconcile`, `Reconciler.mapped`), so no pass asks GitHub about a name it cannot read;
+  an operator declares that pair through `PUT /api/v1/settings/repo-projects/{owner}/{repo}`, and Dispatch never reads it from GitHub, which answers 404 for the installation of a name a repository was renamed away from.
+  The read of an issue's results also teaches Dispatch a pull request nothing ever told it of:
+  a `before_merge` result whose commit heads no attributed row sends one `GET /repos/{owner}/{repo}/commits/{sha}/pulls` of its own and writes the heads GitHub names (`delivery.ReadThroughCommitPulls`, `currencyReader.readThroughHead`), at most once per repository and commit every `delivery.CommitPullReadStaleAfter` (five minutes), so a result recorded before its own pull request opened stops reading `older`.
   `GET /api/v1/issues/{key}/coverage` answers what each `requirement` block of the issue's spec lacks, counting the `check` and `plan_task` blocks of the issue and of its descendants;
   the same lines end `dispatch read --issue` and the answer to an approval request.
   Shapes: `IssueCheckResults`, `RecordCheckResultInput`, `IssueCoverage` in `packages/contracts/src/dispatch-api.ts`
@@ -1616,7 +1634,7 @@ Migration 0121 marks every document owed;
 and 0123-0125's triggers put each comment, ask and issue message (one with an `issue_key`) whose text holds `#b-` into `block_grammar_owed`, which 0126 seeds with those already stored, since a build that predates the block grammar indexes such a text without it;
 0143-0144's triggers set `owed_at` on the `comment_block_state` or `message_block_state` row of every comment (on insert and on an edit of its body) and every message (on insert, direct messages included) any build writes, and 20261101143212's `asks_item_blocks_owed` sets it on the `ask_block_state` row of every ask any build writes (on insert and on an update of its question, its options or its answer, the three columns its parts are read from), which a block-aware writer's own index clears in the same transaction, and each seeds a row for every item already stored.
 `cmd/dispatch` runs `docs.Service.RunBlockIndexReconciliation` under the lease `block-index`:
-each tick indexes up to 20 owed documents, by a keyset cursor, up to 200 owed items, oldest first, and then up to 200 comments, messages and asks owed their own blocks, oldest `owed_at` first (`refs.OwedItemBlocks`, one arm per kind), every 2 s while a batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`, `item_blocks=`, `owed_documents=`, `owed_items=`, `owed_item_blocks=` and `live_ahead=`.
+each tick indexes up to 20 owed documents, by a keyset cursor, up to 200 owed items, oldest first, then up to 200 comments, messages and asks owed their own blocks, oldest `owed_at` first (`refs.OwedItemBlocks`, one arm per kind), and last up to 200 sources owed an index with the whole grammar, oldest first, every 2 s while a batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`, `item_blocks=`, `texts=`, `owed_documents=`, `owed_items=`, `owed_item_blocks=`, `owed_texts=` and `live_ahead=`.
 It reads a document (`TextWithBlocks`) with no transaction held, then, under the document's owner lock, indexes it only while its latest version and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the event that recorded the version (`stampVersionEvent`).
 A document that owes a settlement and whose live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed, except on a closed issue, which no settlement runs on:
 its latest version's own rendering is indexed, with only the blocks the index's stored rows or the live document also hold, each under its stored row's id or its live id (`closedVersionBlocks`), while its pending settlement's `marked_at` is still the one the tick listed.
@@ -1634,8 +1652,8 @@ A stored row whose text the version does not hold (indexed at an older version t
 A live block only an unsettled edit made is not indexed until the reopen's settlement writes the version that holds it, so block history names only versions that hold a block's text.
 The loop remembers a skipped document only when its listing read the issue open, and counts it again without reading it while its latest version and its pending settlement's `marked_at` (which every update append moves) stay as they were, the listing still reads the issue open, and this server holds no room for it:
 the listing reads the issue with no lock while the skip is decided under the owner lock, a close can leave the version, the mark and the room as they were, and a closed issue's document is indexed, not skipped.
-An item is re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a new edge taking the time its text was written and no `source_seq`;
-its owed row is deleted only while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item owed.
+An item is re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwed` on `refs.BlockGrammarOwed`), a new edge taking the time its text was written and no `source_seq`;
+its owed row is deleted before its text is written and only while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item owed with nothing written for it, for the next tick to read and index.
 That re-index indexes a comment's or issue message's blocks and an ask's parts too (`refs.IndexAskParts`, read from the ask row it locked), so the batch of items owed their own blocks runs after it and finds such an item no longer owed.
 A comment, message or ask owed its blocks is indexed in a transaction of its own (`refs.IndexOwedItemBlocks`) that takes the item row `for no key update`, then its state row, and never an owner row, and indexes it only while it is still owed (`refs.IndexItemIfOwed`, which reaches an ask through `indexAskIfOwed`):
 its blocks - an ask's question, its options and the answer it holds - and the mentions each holds, and for a comment or an issue message its own refs, at the time its body was written (a comment's and an ask's `coalesce(edited_at, created_at)`, a message's `created_at`); a direct message writes no mention, and an ask's own `refs` rows, which hold its question's links, are left to its writers.
@@ -1643,6 +1661,16 @@ An item deleted since it was listed took its state row with it.
 A build without item blocks runs none of this batch and counts no item-block row, so a rollback leaves what it writes owed until this build returns.
 `rebuild-refs` marks every document owed and prints `blocks_owed=`, and marks every comment, message and ask owed its blocks (inserting a missing state row owed) and prints `items_owed=`;
 it leaves `block_grammar_owed` alone, since it has just re-read every item itself.
+
+Text an earlier build indexed without the whole grammar - the bare issue keys, the `#id`s naming a document's question blocks and the short ids it resolves (`refs.Mentions`) - is owed a re-index of its own, in `refs_grammar_owed` (migrations `20261103205037`-`20261103205042`, `cmd/dispatch/README.md`), a queue separate from `block_grammar_owed` because a server of the previous release drains that one and would consume its rows.
+Its triggers owe a row on every write any build makes that changes what the index reads - the text, and the columns that say which document a `#id` in it resolves against (`refs.ScopeOf`) - whatever that text says, since no SQL predicate finds a bare key, a `#id` or a short id; an anchor refresh, which moves a quote and no edge, owes nothing.
+Its seed owes one for every comment, ask, issue message and document with a markdown version already stored, so those links and edges appear with no edit and no command run.
+A `scope` row names a document rather than a source: a `#id` written before its question settles resolves to nothing at its own write, so every ask that gains or changes its question block and every document version owes that document's scope, and draining it re-indexes each source `refs.ScopeSources` names whose text writes a `#id` at all (`refs.HoldsQuestionCandidate`, the grammar's own reading), which costs a source without one no write.
+A write this build makes settles its own row in the write's transaction (`refs.replaceRefs`), so only an earlier build's write is left owed, and `rebuild-refs` clears each source's row as it re-indexes it and the `scope` rows enqueued before it started.
+The drain is the tick's fourth batch, after the item blocks and before the embedding windows (`windowDrift`) and the retirement of the whole-text rows those windows replaced (`retireWholeText`), so an item either queue holds is indexed once by each rather than twice by one: a comment, ask or issue message goes through `refs.ReindexOwed` on `refs.RefsGrammarOwed`, the one list, settle and re-index pair both queues are drained by (`refs.ListOwed`, `refs.SettleOwed`), which takes the source row `for no key update`, settles the owed row only while it holds the `enqueued_at` the tick listed - a write that lands meanwhile leaves the row owed and nothing written, the one order both queues are drained in - and re-indexes the text and its blocks, at the time that text was written;
+a document is owed a block index instead (`document_block_versions.version` null, settled in the same transaction), which is that document's whole re-index - its mentions, its blocks' mentions and their excerpts - written by the batch that owns a document's index, in this tick when an older build's version write had already left it owed and in the next otherwise;
+and a `scope` row goes through its document's sources, each read with no lock first (`refs.SourceText`) and locked only where its text holds a `#id` candidate at all, so the sources the drain passes over - most of a scope - never wait behind an edit nor hold one up, settled once they are all re-read.
+A row the drain cannot index is logged and left owed without holding back its batch.
 
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies` (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock.
@@ -2275,7 +2303,9 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   one walk climbs the parent chains of every issue the read answers for at once — its `subjects` term, which is a listing's page, a listing's whole match or the one issue a read names — and each issue takes the nearest issue on its chain (itself first) whose own `repo` is set, else its project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`, read for every project of the read in one join), else null.
   A chain stops at the first issue that names a repository or at `refs.IssueDepthCap` (32) links, the most any issue sits below its root (`api`'s `parentDepthCap` is that same number), so it costs at most 33 rows per issue;
   a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default, and a paged listing walks its own page alone, so such a chain fails the page it is on and no other.
-  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, for the results route and the pull-request head attribution, so neither can name a repository the issue page does not show.
+  `refs.IssueRepository` runs those same terms over a `subjects` term of one key, which the results route reads for the issue of a check, so it starts from the repository the issue page shows;
+  the route then takes that repository's canonical name before it asks GitHub anything (`refs.CanonicalRepo`, `currencyReader.repositoryOf`), so an issue recorded under a name its repository was renamed away from is read under the name GitHub answers for.
+  Delivery's pull-request attribution splices those terms over one pull request's candidate keys instead (`attributionCandidatesQuery`), holding a candidate only where the walk finished and `refs.IssueRepoResolved` is the repository the pull request is in, each side put through that same renaming rule first (`attributionHeld`, `refs.IssueRepoTooDeep`, `refs.CanonicalRepoSQL`), so one walk resolves every candidate and that attribution parts from the page only where an operator has recorded that two names are one repository.
 
 - An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop:
   its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running).
@@ -2547,52 +2577,18 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 - `GET /api/v1/issues/{key}/summary` and `GET /api/v1/projects/{key}/artifacts/{slug}/summary` (`api/issue_summary.go`, any authenticated caller) answer what a rendered `dispatch://` reference shows, at a cost a page linking a hundred items can pay on every event that touches them:
   the issue's `{key, project, title, status, documents}`, each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read lists its artifacts (`primary` marks the spec, which a reference to a block of the spec names, so a pinned spec block's link opens that version under the spec's own slug without the full read), from one query for the issue and one for its artifacts (`latest_version` a `max(number)` probe of `artifact_versions` per artifact), and a project document's `{id, project, slug, name, kind, latest_version}`, its slug or unambiguous filename resolved as the project document read resolves it (`resolveDocumentReference`).
   Neither reads a version body, an approval, a child, an open ask or a route roster, as the full reads do.
-- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches,
-  one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has
-  prepared their statements (pgx prepares a statement it has not cached in a round trip of its own
-  before the batch, as it does before a single query), where it once spent a statement per part of
-  the answer: six, two more when the issue has documents, two more when it has open asks, and one
-  per artifact. Batch 1 is everything keyed on the issue key alone: the issue row with its progress
-  (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open
-  asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own
-  `referenced_by_count` (`refs.QueueBacklinkCounts`). A key no issue carries is recorded by the
-  issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404
-  NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close`
-  answers an error in that connection's statement and description caches
-  (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the
-  connection the read's whole prepared statements on every 404, and the other callbacks, which run
-  against an issue with no row, answer empty lists the read drops. Batch 2 is what only batch 1's
-  answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement
-  (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the
-  documents' latest reviews and open approval requests (`latestReviewsStatement`,
-  `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`),
-  backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip. Each
-  batch's results are closed before anything else reads, because a batch holds its connection until
-  then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire`
-  exists to stop. The pool would not refuse it here: `store.Pool.SendBatch` checks the request's
-  mark when the batch is sent but sets none while the batch is open, so no callback of either batch
-  reads the database. A routed issue's reach is read after both (`routeRosterOrUnknown`): one
-  statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener
-  fetch only when that answer is stale. One
-  queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`)
-  for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and
-  open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and
-  `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids —
-  queued beside this read's other statements here and sent as a batch of their own by the loaders
-  every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
-  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by
-  `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval
-  cost one round trip after that lookup, and `attachApprovals`, which the approval-request route
-  (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it
-  opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of
-  its own, one round trip too. `api/issue_read_batch_test.go` holds the batched body byte for byte
-  to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`,
-  `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`,
-  `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two
-  queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer
-  together, not the detail statements themselves. The same file counts the read's round trips with a
-  pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one
-  request its context marks.
+
+- `GET /api/v1/issues/{key}` (`getIssue`, `api/issue_queries.go`) reads the database in two batches, one round trip each on one pooled connection (`store.Pool.SendBatch`) once that connection has prepared their statements (pgx prepares a statement it has not cached in a round trip of its own before the batch, as it does before a single query), where it once spent a statement per part of the answer: six, two more when the issue has documents, two more when it has open asks, and one per artifact.
+  Batch 1 is everything keyed on the issue key alone: the issue row with its progress (`issueRowStatement`), its external links, its artifacts (`issueArtifactsStatement`), its open asks (`listIssueAsksQueryOpen`), its children (`issueChildrenStatement`) and its own `referenced_by_count` (`refs.QueueBacklinkCounts`).
+  A key no issue carries is recorded by the issue row's callback, which returns no error, and answered as that row's `pgx.ErrNoRows` — `404 NOT_FOUND` — once the batch has closed: pgx invalidates every statement of a batch whose `Close` answers an error in that connection's statement and description caches (`invalidateCachesOnBatchResultsError`), so a callback that returned the error would cost the connection the read's whole prepared statements on every 404, and the other callbacks, which run against an issue with no row, answer empty lists the read drops.
+  Batch 2 is what only batch 1's answers name: every artifact's versions in one `artifact_id = any($1::uuid[])` statement (`artifactVersionsStatement`, each artifact's own versions still in `order by v.number`), the documents' latest reviews and open approval requests (`latestReviewsStatement`, `openApprovalAsksStatement`), and the open asks' identity events (`events.QueueOpenedEventIDs`), backlink counts and the part ids of their options and answers (`refs.QueueAskPartIDs`); an issue with no artifact and no open ask makes no second round trip.
+  Each batch's results are closed before anything else reads, because a batch holds its connection until then, and a second connection taken while it is held is the nesting `store.ErrNestedAcquire` exists to stop.
+  The pool would not refuse it here: `store.Pool.SendBatch` checks the request's mark when the batch is sent but sets none while the batch is open, so no callback of either batch reads the database.
+  A routed issue's reach is read after both (`routeRosterOrUnknown`): one statement more for the listener's stored answer (`storedRouteRoster`), and a shared listener fetch only when that answer is stale.
+  One queue-and-apply serves every read of the same thing — `queueArtifactDetails` (`api/artifacts.go`) for a list of artifacts' versions, which it queues itself, and their documents' latest reviews and open approval requests, which it nests `queueApprovals` (`api/reviews.go`) for, and `queueAskDetails` (`api/ask_rows.go`) for a list of asks' identity events, backlink counts and part ids — queued beside this read's other statements here and sent as a batch of their own by the loaders every other route calls (`loadArtifactDetails`, `loadAskDetails`), so the two paths cannot drift.
+  One artifact's read is that list of one: `loadArtifactRow` (the lookup by id and the one by `ref_key`) sends `loadArtifactDetails` for the row it scanned, so its versions and its approval cost one round trip after that lookup, and `attachApprovals`, which the approval-request route (`requestArtifactApproval`, through `attachApproval`) calls on its transaction before and after it opens or renews the ask, and which loads no versions, sends `queueApprovals`'s pair as a batch of its own, one round trip too.
+  `api/issue_read_batch_test.go` holds the batched body byte for byte to one built from the loaders the other routes call (`loadIssueWithProgress`, `loadArtifacts`, `queryOwnerAsks` with `issueOpenAsksOf`, `issueChildrenStatement` with `scanIssueChildren`, `refs.BacklinkCounts`); since `loadArtifacts` and `queryOwnerAsks` send the same two queue-and-applies, that comparison checks how `readIssue` puts its batches and its answer together, not the detail statements themselves.
+  The same file counts the read's round trips with a pgx tracer on the server's pool (`storetest.Traced`), counting only the statements of the one request its context marks.
 
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target.
   Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write:
@@ -2754,8 +2750,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   it is not introduced here and is not fixed here, because normalising them needs a backfill of rows that already exist.
   `user_ask_snooze` has none to back-fill:
   the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login
-  — (`store/migrations/0048_user_ask_snooze.up.sql`);
-  a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`;
+  — (`store/migrations/0048_user_ask_snooze.up.sql`).
+
+- What the snooze routes answer for the id they are given.
+  An id written short (8 characters or more of the hex digits and hyphens an id starts with) names the one ask that carries it, is `409 ID_AMBIGUOUS` where two or more do, and is the route's own answer for an ask it does not hold where none does — `404 NOT_FOUND` on the `PUT`, and the `DELETE`'s own `400 ASK_ID_INPUT`, that one route answering no 404 for an ask it does not hold (`idRoutes`, `api/id_prefix.go`);
+  any other non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`;
   the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency).
   `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there.
   Neither write touches the ask or reaches any other login: a snooze is one viewer's view state.
@@ -2836,7 +2835,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a credential without the `person` scope sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`);
   one that holds it — a person's browser cookie, or a token of theirs — may add or remove any session and sends no body, since putting another session on an ask is the person's act, and that write is recorded as the person with the agent beside them.
   A credential acting as the path session itself follows or unfollows it as it always did, recorded as that session with no act, whether the session is the one a broker-issued token proved or the one its body names: that is its own act and no person's.
-  A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
+  An ask id written short names the one ask that carries it and is `409 ID_AMBIGUOUS` where two or more do, as it is on every route that takes an ask (`idRoutes`); any other non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
 
 - A reply joins its thread the same way on both write paths.
   `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`;
@@ -2849,7 +2848,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Do not add DB introspection or harness-specific hidden coupling unless there is no API path.
 
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts;
-  `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`);
+  `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` resolve an id written short to the one item of that kind which carries it before the handler runs, answer `409 ID_AMBIGUOUS` where two or more do and their own `404 NOT_FOUND` where none does, and answer any other non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`, behind `api/id_prefix.go`);
   a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks, a `# Title` quote selects a heading, and a quote opening with a list marker (`- x`, `5. x`, a task box `[ ]` or `[x]` allowed after it) that matches no text as written selects an item of that kind of list whose text starts with the rest, its number not matched and its box matching only a task item in that state (`pmdoc.ParseListItemQuote`, `listItemQuoteMatches`), a miss saying what the marker means and quoting the text without it;
   a quote written as a table row's cells, its ` | ` the boundary between cells rather than text a cell holds, names instead the run of one row's cells its parts match (`tableRowQuoted`), and a quote reaching from one table cell into another names both cells, a move anchor included, which is refused as an insert anchor is.
   The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
@@ -3426,6 +3425,36 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   A read kvwatch's own idle wait ended is read again 5 s later (`rereadDelay`), so a timed-out warm-up cannot leave the view refusing for good.
   Within one read epoch every update is fenced by revision (`setOwnRoleHolder` and `forgetRoleHolder`, `internal/store/roles.go`, the two writers of that view), the registry's own claim writes included, so none undoes a later one, and a read of a recreated bucket starts a new epoch rather than emptying the view under the old one.
 
+- A deregistration (`store.Registry.Remove` with no topics, which `DELETE /v1/interests/<session_id>` and `POST /v1/interests/unsubscribe` with an empty topic list reach) releases the session's role claims from two sources, in this order:
+  the role topics of its own interest record (`releaseRoleClaims`), then the roles the role claim view names it the holder of (`releaseAllRoleClaims`).
+  The view is read rather than the bucket because `RolesHeldBy` makes no bucket call, so a deregistration costs the roles its session holds and not the bucket's size:
+  listing every key and reading each claim back was one pass over the whole bucket per deregistration, which at the fleet's role count ran out the route's own budget and answered 503 (`read role <role>'s claim: context deadline exceeded`, dispatch://INFRA-1383).
+  Every release the record pass makes leaves the view (`forgetRoleHolder`), so the sweep behind it reads no claim twice.
+  A view that cannot be served falls back to that scan (`releaseAllRoleClaimsByScan`), whose one streamed read of the bucket is bounded by the request (`bus.Bounded(ctx, …)` over `roleClaimsUntil`, which ends the abandoned scan at the next key rather than reading the bucket on for a caller that is gone, as `kvwatch.ScanExistingKeys` of itself does), which logs one INFO line per deregistration naming the view's reason and goes past a claim it cannot read.
+  What it went past it counts rather than warns about per claim, and writes after the loop as one summary line per class, logged only when that class's count is not zero:
+  the fallback runs only while the view cannot be served — the outage itself — and once per deregistration, so a line per claim over a bucket of thousands, under a fleet deregistering, would amplify what it reports.
+  Each line carries the session, how many claims it left and the first one it met with that claim's error, and the two classes keep a line each because their remedies differ:
+  a key no call of any build can read (`bus.ErrRefused`, named by its `key_bytes`, which the role reaper deletes), and a record no build can decode (`ErrMalformedRoleClaim`, named by its `role`, which the role reaper only counts `skipped`).
+  That scan carries every record's value and revision, so the sweep makes no read per key at all and sends past it only the deletes it owes, each conditional on the revision the scan read.
+  It fails on two things: a listing that did not answer or failed, and a delete of a claim the session holds.
+  The per-key read that once failed it after the request's context had ended went with the per-key reads themselves, so a spent budget now reaches the route as the listing's wording or the delete's rather than as `read role <role>'s claim: context deadline exceeded`.
+  A claim in neither source — one another listener wrote that this listener's watch has not delivered, or a copy within the stale bound behind — is left to the role claim reaper (`ReapRoleClaims`), which releases it once its holder is gone, and a session that deregisters and goes on heartbeating (an unsubscribe-all, which `packages/claude-envoy/scripts/smoke-clear-rebind.sh` drives) never becomes a gone holder, so a claim missed there stands for the rest of that session's life, where the bucket scan this view replaced released it at the deregistration.
+  Reading from the scan leaves the reaper one more claim, and only one more:
+  a claim the leaving session wins after the scan has delivered that key is seen at its older value and left standing, where a read after the listing would have found it and released it.
+  That moves the exposure earlier rather than narrowing it: a per-key read fixed the key's value at its own `Get`, after the whole listing had finished, so a claim won while the listing ran was still caught, and the scan fixes it at that key's delivery instead, so the interval runs from there to the end of the sweep and is logically the wider of the two.
+  In wall clock it is about twenty times shorter — a 503 at 3.5 s became a 204 in 188 ms over 20,002 claims — and nothing closes it, so such a claim stands for that session's life by the rule just above, what a fallback that runs only while the view cannot be served costs.
+
+- The role claim reaper's own pass (`ReapRoleClaims`) is one streamed read of the role bucket, then per role only the deletes it owes:
+  a stored record this build cannot decode (`ErrMalformedRoleClaim`), a release that failed, and a delete that failed for any reason but the key itself each cost that one role, logged in a line of their own and counted `skipped`.
+  A claim stored under a key it cannot read is deleted rather than released, and counted `reaped` when that delete lands, or counted nowhere when no KV call can make it, since no later pass can make it either.
+  Two failures do end the pass:
+  that one read, because a pass over part of the bucket is not the pass over every role its counts would claim it was, and a bucket call that failed once the reaper loop's own context has ended (the shutdown's `kvLoopsCancel`), which ends the pass with that error in one line carrying what it had reached, rather than a WARN for each of the thousands of roles behind it.
+  The shutdown waits for that loop to return, up to its shared 10 s shutdown bound, before it drains the bus, so a pass that returns inside that bound fails each call it had left on the ended context alone, against a bus that is still answering.
+  That line is `role claim reaper cycle ended with its loop` at INFO when the loop's own context has ended, because a SIGTERM is an ordered shutdown and not a failure, and `role claim reaper cycle failed` at ERROR for every other failure.
+  The level reads the loop's context rather than the error's identity because neither direction of that identity holds: a scan the shutdown cut short answers the scan's own idle bound when nothing was delivered to it, and a bus too slow for the per-call deadline inside that scan answers `context.DeadlineExceeded` while the loop runs on.
+  The release and the delete of a key it cannot read are the calls an ended context can fail, so they are the arms that read it, each under `bus.Bounded` and each ending the pass where it failed on an ended context: a record this build cannot decode is no call at all and warns once per malformed record however the pass ends.
+  Its `role claim reaper cycle` line carries `skipped` beside `reaped`.
+
 - Each listener collects the interest bucket's delete markers, because nothing else does:
   every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).
   A pass reads the stream (read 1), runs one MetaOnly scan of the bucket, takes the **floor** = the lowest revision that scan delivered as a PUT, reads the stream again (read 2), and sends one unfiltered `STREAM.PURGE` of everything below the floor.
@@ -3604,7 +3633,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
-  A clustered nats-server (v2.10.29, the Go tests' server, among them) records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message and keeps that record on the stream's leader for the 72-hour window, a purge notwithstanding, when the full stream refuses it, so a retry under the id is acknowledged `{"seq":0,"duplicate":true}` though nothing was stored (`bus.ErrNotStored`, `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`; `notStored`).
+  A clustered nats-server up to the v2.11 line (v2.10.29, the Go tests' server before v2.15.1, among them) records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message (`server/jetstream_cluster.go:7993-7996`, "For now we stage with zero") and keeps that record on the stream's leader for the 72-hour window, a purge notwithstanding, when the full stream refuses it, so a retry under the id is acknowledged `{"seq":0,"duplicate":true}` though nothing was stored (`bus.ErrNotStored`, `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`; `notStored`).
+  v2.15.1, the server the Go tests run and the hub runs, never stages a zero: it records an id only with the sequence the message was stored at (`server/jetstream_cluster.go:13962`, `server/stream.go:7279`) and answers a duplicate only for a non-zero sequence (`server/jetstream_cluster.go:13192`, `server/stream.go:7030`), so that acknowledgement does not arise on it, and the branch below is dead code a pull request of its own removes.
   `publishJetStream` and a window's send (`sendJetStream`) answer that acknowledgement by sending the same envelope once more without its `Nats-Msg-Id`, which no record matches:
   stored, the publish succeeds, so a refused message is stored as soon as the stream has room, with no leader step-down;
   refused, the publish fails with an error wrapping `bus.ErrNotStored` and the send's own error (`..., and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), never a success, and every publisher retries it as it does `bus.ErrStreamFull` (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
@@ -3701,11 +3731,11 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   Dispatch's server, which connects in the background (`bus.WithConnectInBackground`), reconciles on its first connection, so the same refusal leaves it serving and logs that error as the reconnect hooks' own report (the bullet above):
   the WARN `envoy nats reconnect hook failed; it is retried` under `bus.RepairGrace` (a minute) and the ERROR `envoy nats reconnect hooks have not succeeded` at or past it;
   a refused bucket raise also names the bucket's stream, `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded`, and a grant without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds.
-  With one of three clustered servers stopped, nats-server v2.15.1 creates a new stream at 3 copies (one offline peer assigned) and the start succeeds;
-  v2.10.29, the Go tests' server, refuses that create.
+  With one of three clustered servers stopped, nats-server v2.15.1, the Go tests' server, creates a new stream or bucket at 3 copies (one offline peer assigned) and the start succeeds, and the stopped member catches up once it starts (`TestOneServerStoppedACreateAtThreeCopiesLandsAndTheStoppedMemberCatchesUp`);
+  v2.10.29, the server the tests ran before it, refused that create.
 
 - Two programs updating the stream, or one bucket's stream, at once can each get an answer that comes of the other's write rather than of their own:
-  nats-server can leave one of two replica changes proposed at once unanswered (seen with v2.10.29), and every nats-server before v2.12.5 (every v2.10 and v2.11 release included) can refuse the later of two updates of one stream as overlapping an existing stream, the stream itself (`nats: subjects overlap with an existing stream`), when the other update lands while the server checks this one (nats-server commit `cb1afd68d014` skips the stream by name from v2.12.5).
+  nats-server can leave one of two replica changes proposed at once unanswered (seen with v2.10.29), and every nats-server before v2.12.5 (every v2.10 and v2.11 release included, so no longer the tests' own server) can refuse the later of two updates of one stream as overlapping an existing stream, the stream itself (`nats: subjects overlap with an existing stream`), when the other update lands while the server checks this one (nats-server commit `cb1afd68d014` skips the stream by name from v2.12.5).
   Neither answer stops a start or fails a keeper pass while the stream, read again, holds what the program asked for, and the refused update is sent again while it does not, up to five sends (`updateStream`, `internal/bus/stream.go`), so a stream another stream really does overlap is still refused, after the fifth send, and a refusal of a setting, such as more copies than the cluster has servers, still fails the listener's start naming that setting, while Dispatch's server, which reconciles in the background, keeps serving with the refusal logged.
 
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
@@ -4811,13 +4841,17 @@ A machine's own session is its fleet's service's and no person's: its credential
 `cmd/broker`'s `serviceNames` registers both settings' services with the policy loader, so a secret a machine service owns is served rather than refused `owner-tag-malformed`.
 The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without the alarm, and a failed reload keeps the last set;
 a reload cut short because `NewCurrent`'s context ended (the broker shutting down) is no failed load and logs nothing.
-`Set.Version`, the SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is recorded on every request.
+`Set.Version`, the SHA-256 of every served secret's name, owner, tier, source, max grant, GitHub owners and requesters, is recorded on every request.
 A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read back by `policy.ParseKindSource`).
 A grant ends for good when a release finds its secret's kind changed (a moved source) or its lifetime over the current max-grant (`Machine.endGrant`);
 a change reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
 `policy.Kinds`, `ValidKind`, `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES` separates its entries, a form an AWS tag value and a Secret Manager annotation both hold;
 a comma is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`) the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and `agent-secrets secret` create and retag all apply.
-The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential) and `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`).
+`policy.TagRequesters` and `policy.ParseRequesters` are the one statement of who may ask for a secret at all (people by their lowercase sign-in email and services by the name the deployment registers, separated by white space as `github-owners` is, answered sorted and de-duplicated;
+a comma is refused `ErrRequestersComma`, a list naming nobody `ErrRequestersMissing`, and an entry that is neither `ErrRequestersEntry`), and `policy.RequesterRules` the one statement of what such a list demands of the secret's other tags (`requesters-max-grant`: a max grant, of an hour at most;
+`requesters-not-owner`: a `google-service-account` secret's list is exactly its own person owner), which the loader and `agent-secrets secret` create and retag all apply.
+`Set.Evaluate` reads the list before owner and tier and denies a requester it does not name `policy.ReasonRequesterNotListed`, which the request row keeps as its `decision_detail` (`<NAME>: requester-not-listed`, several joined with `"; "`) and the request routes answer as `detail`.
+The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential), `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`) and `google-service-account` (`secrets.GoogleServiceAccount`, in `internal/broker/secrets/googleserviceaccount.go`: an access token for the one service account the stored value names, minted by impersonating it with the broker's own Google credential through the IAM Service Account Credentials API, and served to the one person the secret's requesters name).
 An Azure login stores only `{"tenant_id":"<tenant>","client_id":"<client>"}` and releases JSON with those ids, `federated_token` and `expires_at` (RFC3339 UTC from the JWT `exp`).
 `BROKER_AZURE_LOGIN_SECRET` selects the only agent-secret name allowed to release that token; unset (the default), every Azure login release is refused.
 `AzureLogin.Mint` also requires that secret to be human tier in the policy snapshot checked for the release, so retagging another secret to `azure-login`, or the configured secret to agent tier, cannot bypass approval.
@@ -5406,7 +5440,7 @@ A bad credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `account
 — the credential is good and it is the broker's list that refuses
 — and `ACCOUNT_LACKS_POWER`, for a listed caller reaching a route its name does not carry, naming that caller and that route.
 No refusal repeats the token.
-Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`) or `relaysDecisions` (the eleven routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows and the two person sign-in rows among them), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
+Each `accountAuth` row declares the power it needs, `readsTokensBack` (`POST /v1/oauth/introspect`), `relaysDecisions` (the eleven routes Dispatch's server relays a person's decisions, ends one of the broker's tokens and reads through, the two decide rows and the two person sign-in rows among them) or `readsGrantLog` (`GET /v1/grant-log` alone, the caller `access-review`'s, which a quarterly review reads a closed period's audit rows through and which neither `dispatch` nor `listener` carries), `accountPowers` says which powers each caller name carries, and `authenticate` checks the two before the handler runs, so listing an account for introspection alone never gives it approval or revocation authority (`TestEveryAccountRouteDeclaresItsPower` fails on an `accountAuth` row that declares none).
 The two `accountAuthAfterRecordKind` rows declare `relaysDecisions` as well, and `decideRecord` checks it against that same table once it has read the record's kind and authenticated its own caller, since `authenticate` reads no credential for them; that test passes over them, being no `accountAuth` rows, and `cmd/broker/account_powers_test.go` is what pins them, driving each as the `listener` caller and reading `403 ACCOUNT_LACKS_POWER`.
 `accountCaller` is the check a daemon's token login makes (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy, and it takes a Google identity token as well as a Kubernetes one, judged by whichever verifier the token's own issuer names (`BROKER_API_ACCOUNTS`, above));
 `serviceAuth` is that same check, taken as the whole of a route's authentication:
@@ -5693,6 +5727,11 @@ Audit rows never carry secret values: `audit()` takes only `kind`, `enrollment_i
 The actor is what authenticated the change:
 `human:<login>` for one Dispatch relays from its signed-in person, `session:<enrollment id>` for a session's own, `launcher:<credential id>` for one a machine login's own proof made (an enrollment its launcher revoked, or a machine login or grant its operator ended through `/v1/operator/*`), and `broker` for what the broker ends on its own (a lapsed lease);
 `RevokeCredential` and `RevokeByApprover` take theirs from their caller, and record it on every row they write (`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row).
+`internal/broker/store/grantlog.go` is the one definition of a grant-log event: `store.GrantLogEvent` is its shape, the audit row joined to the session, the person, the service the broker verified, the secrets and the decision; `store.ReadGrantLog` is the one read of those rows, which `GET /v1/grant-log` answers a closed period of in id order; and `store.LogGrantEvent` writes one INFO line, `store.GrantLogMessage` (`broker: grant log`), for each request decision and each grant end, and none for a release or an enrollment row.
+The line carries only what its own writer had in hand, which is why the route and not the line is the whole record: the kind, the actor, whichever of the enrollment, request and grant ids the row names, and `raw` (the audit row's own detail) are always there;
+a `request.created` line adds the session, the person, the verified service, the claimed service, the secrets, the state, the approver, the lifetime, the reason and the detail; a decision line (`request.granted`, `request.denied`) adds the same but the verified service and the secrets, plus who decided; a cancel and an expiry add the state, the detail and, for a cancel, who decided; and a grant end (`grant.revoked`, `grant.withheld`) adds nothing more, but for the session's person when a person's revoke ended it (`RevokeByApprover`).
+Nothing carries the audit id or its time, which the row holds and the log stamps itself.
+`TestGrantLogLineAndTheRoutesEventSayTheSameThing` (`requests/grantlog_test.go`) pins the `request.created` lines of a person's session and of a service's pod, and a person's `request.granted` line, against the route's event for the same row.
 The granted value itself is read fresh from the `secrets.Store` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request:

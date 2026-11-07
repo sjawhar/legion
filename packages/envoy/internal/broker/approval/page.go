@@ -435,7 +435,9 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 // POST decided it: an approval or a denial the broker applied now, which is what the sign-in
 // status's last decision counts. A record already decided, expired, gone, or one login may not
 // decide, is decided by nobody here. A machine login is never decided here, whatever a form says:
-// its typed code is decided on Dispatch's page.
+// its typed code is decided on Dispatch's page. An approval the broker recorded as a denial
+// answers with that decision's own detail, so the person who pressed approve reads which secret
+// refused it and why rather than one fixed sentence.
 func (p *Page) decide(ctx context.Context, id string, approve bool, login string) (string, bool) {
 	kind, err := p.cfg.Machine.RecordKind(ctx, id)
 	switch {
@@ -449,8 +451,8 @@ func (p *Page) decide(ctx context.Context, id string, approve bool, login string
 	}
 	decision, err := p.cfg.Machine.ApplyDecision(ctx, id, approve, login)
 	switch {
-	case err == nil && decision.State == "denied" && approve:
-		return "denied: the requesting enrollment is no longer live", true
+	case err == nil && decision.State == "denied" && approve && decision.Detail != "":
+		return "denied: " + decision.Detail, true
 	case err == nil:
 		return decision.State, true
 	case errors.Is(err, requests.ErrExpired):

@@ -248,8 +248,9 @@ approved: the daemon compares the two
 on GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything
 but a commit under `docs/solutions/` changed since the approval, so that change goes back to
 review. The one other change it lets
-through is the removal of files under `.legion/`, where handoffs were committed before they moved
-to Dispatch: `legion handoffs import` makes that commit once on each branch in flight at the move.
+through is a change whose every path is under `.legion/`, where handoffs were committed before
+they moved to Dispatch: nothing writes or reads a path there now, so nobody reviews one, whatever
+GitHub says the change did to it.
 
 ## Review signalling
 

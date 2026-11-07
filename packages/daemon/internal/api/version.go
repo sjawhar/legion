@@ -573,7 +573,7 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 52: INFRA-809 -- the project decides whether a merge that closes an issue opens a production
+// 53: INFRA-809 -- the project decides whether a merge that closes an issue opens a production
 // check and who works it (`projects.<KEY>.production_check`, `off` or `tester`), and the checking
 // agent names its own next look. `api.CheckView` gains `role`, the role the check records as the
 // one that works it, always emitted; its `nextWakeAt` is now the time the **next look** is due —
@@ -591,10 +591,12 @@ package api
 // look is neither, and is refused `CHECK_LOOK_NOT_SERVED` rather than being read as a phase
 // completion missing its commit. The settings body loses its `projects.<KEY>.deploys` block, with every
 // path by which the daemon guessed that production carried a merge; a plugin reads the settings
-// loosely, so that loss alone changes no strictly parsed shape. A 51 plugin's strict reader
-// refuses a state whose check views carry `role`, and its `handoff_complete` sends no `wakeAt`,
-// which this daemon requires of a pending report, so the boot gate and `legion probe-image`
-// refuse the mixed pair. (This branch took 50 while main stood at 49; sjawhar/legion#2731,
-// dispatch://INFRA-1077, holds 50 on its own branch and main has since landed the admission
-// cap at 51, so this branch takes the number above them both, as the collision note says.)
-const DaemonAPIVersion = 52
+// loosely, so that loss alone changes no strictly parsed shape. A plugin below this contract has
+// a strict reader that refuses a state whose check views carry `role`, and its `handoff_complete`
+// sends no `wakeAt`, which this daemon requires of a pending report, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 50 while main stood at 49;
+// sjawhar/legion#2731, dispatch://INFRA-1077, holds 50 on its own branch, main has since landed
+// the admission cap at 51 and then 52 (sjawhar/legion#2839), and sjawhar/legion#2805, approved
+// and merging before this one, declares 52 as well, so this branch takes the number above them
+// all, as the collision note says.)
+const DaemonAPIVersion = 53
