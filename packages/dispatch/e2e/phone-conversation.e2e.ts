@@ -781,6 +781,62 @@ test("on a phone, the shell's status corner covers none of Jump to latest @phone
   }
 });
 
+// Both foot controls at once, which is the reader's ordinary case while the live socket is down:
+// the shell's status corner shows and the docked composer sits under it. `Jump to latest` is
+// placed above the reach the corner publishes (`--foot-status-inset`, `useFootInset`), and that
+// reach is measured only when the corner's own box or the screen changes size - never when
+// `--foot-composer-inset` moves the corner. So a corner shown before the composer published its
+// reach (the socket refused while the page loads, below), and one the composer's growth moved
+// afterwards (a refusal's Retry row), both leave the pill placed against a reach the corner has
+// left: it drops down the screen into the docked composer and takes the taps meant for Send,
+// Retry and the draft.
+test("on a phone, Jump to latest covers none of the docked composer while the status corner shows @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pill over the composer" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    // The socket alone is down, as a server's restart or a proxy leaves it: the page loads over
+    // HTTP and the corner shows its pill from the page's first attempt, before the Conversation
+    // has drawn the composer the corner then rides above.
+    await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+      await route.close({ code: 1006, reason: "the network is down" });
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const pill = page.getByTestId("connection-pill");
+    await expect(pill).toHaveText("Reconnecting…");
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const jump = page.getByTestId("jump-to-latest");
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+
+    // The other order: the corner is on the page before the composer grows under it, and the
+    // refusal's row raises the composer by its own height.
+    const comments = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, comments);
+    await form.getByLabel("Comment").fill("Kept through every refusal");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+  } finally {
+    await alice.close();
+  }
+});
+
 // The shell's connection pill floats at the foot of the screen, where a phone's docked composer
 // sits and grows upward with a refusal's row. While the page is offline the live socket is let go
 // and the pill reads `Reconnecting…`; it sits above the composer, on the narrowest phone and a
