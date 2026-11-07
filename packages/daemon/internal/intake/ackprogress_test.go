@@ -547,3 +547,60 @@ func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
 		}
 	}
 }
+
+// heldFactLine is the line consumeMessage writes for a fact whose handling outlived the
+// acknowledgement window, which the row below is here for.
+const heldFactLine = "an intake fact outlived its acknowledgement window and was held in progress while it ran"
+
+// This line is the only thing in the daemon that reports how long a fact took: nothing else times
+// one, and the consumer-lag warning beside it (lagWatch) speaks five minutes late and names no
+// duration. The issue's after-merge check reads the line in production
+// (dispatch://INFRA-1530), so a change that dropped it, or that left its attributes behind, would
+// go unnoticed until that deploy; hence a row of its own, under the name the check selects.
+func TestAFactHeldPastItsAcknowledgementWindowSaysSoOnceWithHowLongItTook(t *testing.T) {
+	pool := migratedPool(t)
+	js, stream := testJetStream(t)
+	logs := &lockedBuffer{}
+	spec := consumerSpec(logs)
+	// Far above the hold below, so the limit cuts nothing: a cut handler is the warn line beside
+	// this one, and that is the row above's claim.
+	spec.HandlerLimit = time.Minute
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	// One fact, so the one line the row counts is the one fact's.
+	publishIssueEvent(t, js, "CAPTURE-340", 1)
+
+	held := newHeldOnce()
+	defer runConsumers(t, consumers, handlerFunc(func(ctx context.Context, _ pgx.Tx, _ Fact) (Result, error) {
+		held.hold(ctx)
+		return Result{}, nil
+	}))()
+	// The hold the rows above put on the same window: three of them, so the handling outlasts the
+	// window by a margin no scheduling delay closes. releaseAfter returns once the fact is held,
+	// so the delivery has happened by the time the waits below start.
+	held.releaseAfter(t, 3*spec.AckWait)
+
+	// consumeMessage writes the line between the handler's end and the one acknowledgement, so a
+	// consumer with nothing left to acknowledge has written it. Waiting on the line itself would
+	// turn a dropped line into a timeout instead of the failure below.
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+
+	written := logs.String()
+	line := logLine(written, heldFactLine)
+	if line == "" {
+		t.Fatalf("no line says a fact outlived its acknowledgement window, and one was held for %s of a %s window, in:\n%s",
+			3*spec.AckWait, spec.AckWait, written)
+	}
+	if said := strings.Count(written, heldFactLine); said != 1 {
+		t.Errorf("%d lines say a fact outlived its acknowledgement window, want one for the one fact: the line is the fact's, not the progress keeper's tick's, in:\n%s", said, written)
+	}
+	// How long it took is a measurement, so the row asks that it is reported and not what it
+	// reads.
+	for _, attribute := range []string{"consumer=", "event_id=", "delivered=", "took="} {
+		if !strings.Contains(line, attribute) {
+			t.Errorf("the held fact's line carries no %s, which is what an operator reads it for: %s", attribute, line)
+		}
+	}
+}
