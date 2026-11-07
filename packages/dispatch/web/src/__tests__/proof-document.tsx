@@ -94,6 +94,25 @@ export function decisionsAndReadMarkHandlers(): RequestHandler[] {
 }
 
 /**
+ * `GET /api/v1/artifacts/:id` answered from `recordOf`, with the API's own answer for an artifact
+ * nobody has where that finds none. Each file keeps its own lookup - this module's one artifact,
+ * or the set a stubbed issue carries - and the not-found answer stays in one place.
+ */
+export function artifactRecordHandler(
+  recordOf: (id: string) => Artifact | undefined
+): RequestHandler {
+  return http.get("/api/v1/artifacts/:id", ({ params }) => {
+    const record = recordOf(String(params.id));
+    return record === undefined
+      ? Response.json(
+          { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
+          { status: 404 }
+        )
+      : Response.json(record);
+  });
+}
+
+/**
  * The reads the document surface makes of its own record, blocks and read mark, and of the
  * issue's asks and decisions: the three handlers above, and the three this adds to them. An id
  * this module's artifact does not carry is answered as the API answers an artifact nobody has.
@@ -109,14 +128,7 @@ export function documentSurfaceHandlers({
   asks?: () => IssueAskRow[];
 } = {}): RequestHandler[] {
   return [
-    http.get("/api/v1/artifacts/:id", ({ params }) =>
-      params.id === artifact.id
-        ? Response.json(artifact)
-        : Response.json(
-            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
-            { status: 404 }
-          )
-    ),
+    artifactRecordHandler((id) => (id === artifact.id ? artifact : undefined)),
     http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
     http.get("/api/v1/issues/:key/asks", () => Response.json(asks())),
     ...decisionsAndReadMarkHandlers(),

@@ -12,7 +12,11 @@ import { userOnFakeClock } from "./__tests__/user";
 import { ApiError, api, NetworkError } from "./api/client";
 import { liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
-import { SIGN_OUT_SETTLE_MS, type UnsentChange } from "./features/shell/sign-in-channel";
+import {
+  OTHER_TABS_ANSWER_MS,
+  SIGN_OUT_SETTLE_MS,
+  type UnsentChange,
+} from "./features/shell/sign-in-channel";
 import { plainWrite, writesOf } from "./features/writes/write-store";
 
 /** A message the tabs of this browser post to each other, naming `login`, from whichever tab. */
@@ -677,7 +681,12 @@ test("a 401 with no other tab's sign-out holding the writes keeps them", async (
 // browser first, over the sign-in channel, and lists what each of them would discard beside this
 // tab's own. A tab it knows of that does not answer within 300 ms is named as such.
 test("the sign-out question names every tab's unsent changes, and says when a tab did not answer", async () => {
-  const user = userEvent.setup();
+  // On the fake clock, so the window the question waits out for the silent tab is moved past in
+  // the test's own steps rather than waited through in real time, and the `started` below reads
+  // that clock: a loaded machine moves it no further than this test does. The clock is installed
+  // before the user, which captures the timers it will advance (dispatch://INFRA-1505).
+  jest.useFakeTimers();
+  const user = userOnFakeClock();
   const answer = false;
   const app = renderApp({
     confirm: () => answer,
@@ -709,7 +718,7 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
       const started = Date.now();
       await user.click(screen.getByRole("button", { name: "Sign out" }));
       await waitFor(() => expect(app.asked).toHaveLength(2));
-      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(OTHER_TABS_ANSWER_MS);
       expect(app.asked[1]).toBe(
         "Sign out and discard 3 unsent changes, and any unsent changes in your other Dispatch tabs?\n\n• CORE-1 set to done\n• CORE-4 set to backlog\n• Labels of CORE-4"
       );
@@ -719,6 +728,7 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
     expect(app.logout).not.toHaveBeenCalled();
     expect(writesOf(app.queryClient).rows()).toHaveLength(1);
   } finally {
+    realClock();
     second.close();
     app.teardown();
   }
@@ -729,7 +739,12 @@ test("the sign-out question names every tab's unsent changes, and says when a ta
 // same changes. A tab that did not answer the last question is taken for gone, so the next one
 // neither waits for it nor says the other tabs may hold more, until it speaks again.
 test("the sign-out question names a duplicated tab's copies once, and forgets a tab that missed it", async () => {
-  const user = userEvent.setup();
+  // On the fake clock, so the span the second question does not wait out is the clock this test
+  // moves: read under the real one, a loaded machine can spend the whole window on scheduling
+  // and fail a question that waited for nothing (dispatch://INFRA-1505). The clock is installed
+  // before the user, which captures the timers it will advance.
+  jest.useFakeTimers();
+  const user = userOnFakeClock();
   const app = renderApp({
     confirm: () => false,
     whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
@@ -759,18 +774,25 @@ test("the sign-out question names a duplicated tab's copies once, and forgets a 
     const started = Date.now();
     await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(app.asked).toHaveLength(2));
-    expect(Date.now() - started).toBeLessThan(250);
+    expect(Date.now() - started).toBeLessThan(OTHER_TABS_ANSWER_MS);
     expect(app.asked[1]).toBe(`Sign out and discard ${named}?${listed}`);
 
+    const beforeHello = tabs[2]?.told.length ?? 0;
     tabs[2]?.say({ hello: true });
+    // The app's answer to this hello, not the one it gave when the tab opened: until the app has
+    // heard the tab speak again it is still forgotten, and the question below would be the
+    // question above.
     await waitFor(() =>
-      expect(tabs[2]?.told).toContainEqual(expect.objectContaining({ here: true }))
+      expect(tabs[2]?.told.slice(beforeHello)).toContainEqual(
+        expect.objectContaining({ here: true })
+      )
     );
     await user.click(screen.getByRole("button", { name: "Sign out" }));
     await waitFor(() => expect(app.asked).toHaveLength(3));
     expect(app.asked[2]).toBe(`Sign out and discard ${named}${elsewhere}?${listed}`);
     expect(app.logout).not.toHaveBeenCalled();
   } finally {
+    realClock();
     for (const other of tabs) other.close();
     app.teardown();
   }

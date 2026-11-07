@@ -1359,7 +1359,13 @@ whichever test is running then.
 An interaction is performed with `@testing-library/user-event`, never dispatched with
 `fireEvent`: a `user.click` focuses what it clicks, leaves the pointer over it and refuses a
 disabled control, as a person's press does.
-The root `biome.json` refuses a new `fireEvent` import under `packages/dispatch/web/src`.
+The root `biome.json` refuses a new `fireEvent` import under `packages/dispatch/web/src`: the name
+`fireEvent` imported from `@testing-library/react` or from `@testing-library/dom`, which are the
+two packages that export it.
+What it does not see is a namespace import — `import * as dom from "@testing-library/react"` and
+then `dom.fireEvent` passes, because the rule reads the names an import binds and a namespace
+binds one name for the whole module — so that shape is a thing to catch in review rather than at
+the linter.
 Where user-event has no form for what a row proves — a form's own `submit`, a `blur`, a `scroll`,
 a picture's `error`, a `drop` or a paste of files, a pointer gesture that carries a
 `pointerType`, a held button or a `relatedTarget`, two presses inside one task, or a press on a

@@ -48,8 +48,18 @@ expect.extend(jestDomMatchers);
 // failed and names what it waited for rather than as a bare test timeout. Bun's own per-test
 // default is 5 s, which the same runs pass, so the deadline is raised with it.
 //
+// Under `jest.useFakeTimers()` the same budget is 10 s of *fake* time, not of the machine's:
+// Testing Library advances the held clock by its polling interval until the wait succeeds or the
+// deadline passes, so a wait that does not succeed now moves that clock ten times as far as it
+// did. That cannot turn a row green that was red - a product timer the longer advance reaches
+// could only make a wait succeed that used to give up - and the 21 files that install a clock and
+// wait were green before this budget and are green after it, so no row's claim rested on the old
+// 1000 ms. What it does cost is a failing wait under a held clock reporting ten times slower.
+//
 // cybermonklabs/legion#2894 (dispatch://INFRA-1505) sets these same two budgets at these same two
-// numbers in this same file: whichever of the two merges second keeps one copy of them.
+// numbers in this same file: whichever of the two merges second keeps one copy of them, and that
+// copy is #2894's, which carries the per-call measurements that sized them, plus the two sentences
+// here that it does not say - this paragraph, and the 13-of-30 measurement above.
 jest.setTimeout(30_000);
 configure({ asyncUtilTimeout: 10_000 });
 
@@ -130,8 +140,8 @@ afterEach(resetOutstandingAnswers);
 // store outlives its test and would go on retrying into the tests and files after it
 // (`watchWriteStores`). Without this, one process running every file leaves writes retrying into
 // later files - sends to an agent session (`POST /api/v1/agents/<session>/messages`) and asks'
-// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - each answered
-// by nothing (`network.ts`) in whichever test is running then, and every such run fails. So is
+// answers (`POST /api/v1/asks/<id>/answer`), in numbers that vary from run to run - and each is
+// a request no handler answers (`network.ts`), which fails whichever test is running then. So is
 // the issue state the last pin answered let go, which the next pin would otherwise write over.
 const madeStores = new Set<Writes>();
 watchWriteStores((store) => madeStores.add(store));

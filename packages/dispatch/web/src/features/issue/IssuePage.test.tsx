@@ -11,7 +11,10 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerRequests } from "../../__tests__/network";
-import { decisionsAndReadMarkHandlers } from "../../__tests__/proof-document";
+import {
+  artifactRecordHandler,
+  decisionsAndReadMarkHandlers,
+} from "../../__tests__/proof-document";
 import { answerIssuePatches } from "../../__tests__/send-answers";
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
@@ -255,17 +258,8 @@ function answerIssuePageReads(): void {
         summary: null,
       } satisfies ArtifactVersionText)
     ),
-    // The document the page re-reads is the one the stubbed issue carries; an id that issue does
-    // not hold is the API's own answer for an artifact nobody has.
-    http.get("/api/v1/artifacts/:id", ({ params }) => {
-      const artifact = stubbedIssue.artifacts.find((each) => each.id === params.id);
-      return artifact === undefined
-        ? Response.json(
-            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
-            { status: 404 }
-          )
-        : Response.json(artifact);
-    }),
+    // The document the page re-reads is the one the stubbed issue carries.
+    artifactRecordHandler((id) => stubbedIssue.artifacts.find((each) => each.id === id)),
     ...decisionsAndReadMarkHandlers()
   );
 }

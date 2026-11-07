@@ -424,11 +424,16 @@ test("arrow keys move aria-activedescendant and Enter navigates to the active hr
 
   try {
     const input = await searchFor(user, "astrolabe");
-    const options = screen.getAllByRole("option");
-    expect(input).toHaveAttribute("aria-activedescendant", options[0]?.id);
+    // Named rather than indexed with `?.`: `toHaveAttribute` given an `undefined` value checks
+    // that the attribute is present and not what it holds, so an option the palette failed to
+    // list would pass the two rows below rather than failing them.
+    const [first, second] = screen.getAllByRole("option");
+    if (first === undefined || second === undefined)
+      throw new Error("the palette listed fewer than two options");
+    expect(input).toHaveAttribute("aria-activedescendant", first.id);
 
     await user.keyboard("{ArrowDown}");
-    expect(input).toHaveAttribute("aria-activedescendant", options[1]?.id);
+    expect(input).toHaveAttribute("aria-activedescendant", second.id);
 
     await user.keyboard("{ArrowUp}");
     await user.keyboard("{Enter}");
