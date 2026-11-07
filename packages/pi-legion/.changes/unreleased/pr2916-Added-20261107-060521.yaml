@@ -1,0 +1,5 @@
+kind: Added
+body: 'The worker skill gains a reference on making a download fail in a pod and reading which part of one failed: the pod''s own `no_proxy=*`, which variable each of curl, bun, gh, git and node reads, a CONNECT proxy rig, why `curl --retry` retries an origin 504 but not a failed tunnel and exits 0 on either, `--max-time` being per attempt, bun''s own 1.7-second retry, the image module cache the Go command reads first, and the absent `make`.'
+time: 2026-11-07T06:05:21.824125124Z
+custom:
+    Issue: pr2916
