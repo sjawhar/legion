@@ -120,9 +120,9 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 			args = append(args, "--github-owners", "Ada  acme-org")
 		}
 		if kind == policy.KindGoogleServiceAccount {
-			// The kind is served to the one person who owns the secret, and a secret whose
-			// requesters are listed bounds its grants to an hour (policy.RequesterRules), so the
-			// retag names both, the max grant as the secret already holds it.
+			// The kind is served to the one person who owns the secret, and such a secret bounds
+			// its grants to an hour (policy.TagRules), so the retag names both, the max grant as
+			// the secret already holds it.
 			args = append(args, "--requesters", "ada@example.com", "--max-grant", "30m")
 		}
 		if _, stderr, code = runSecret(args...); code != 0 {
@@ -177,7 +177,7 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	}
 	// The requesters list and the rules it brings with it, each refused before anything is
 	// written: the broker's own reading of the list (policy.ParseRequesters), and its cross-tag
-	// rules (policy.RequesterRules), named as the broker names them.
+	// rules (policy.TagRules), named as the broker names them.
 	for _, tc := range []struct {
 		want string
 		args []string
@@ -185,8 +185,7 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		{"spaces, not commas", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com,builder", "--max-grant", "1h"}},
 		{"at least one person or service", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "  ", "--max-grant", "1h"}},
 		{"lowercase sign-in email", []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "Ada@Example.com", "--max-grant", "1h"}},
-		{policy.ReasonRequestersMaxGrant, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com"}},
-		{policy.ReasonRequestersMaxGrant, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--requesters", "ada@example.com", "--max-grant", "2h"}},
+		{policy.ReasonRequestersNotOwner, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h", "--requesters", "builder"}},
 		{policy.ReasonRequestersNotOwner, []string{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleServiceAccount, "--max-grant", "1h"}},
 	} {
 		_, stderr, code := runSecret(tc.args...)
@@ -326,12 +325,13 @@ func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T
 	})
 }
 
-// TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing: the requesters rules
-// (policy.RequesterRules) hold on retag as on create, against the tags the secret will hold once
-// the write lands, so no retag leaves a secret the broker then refuses for who may ask for it:
-// dropping or lengthening a listed secret's max grant is refused, as is making a secret a
-// google-service-account one whose requesters are not exactly its own person owner. The list is
-// written as the broker reads it, and --requesters none removes it.
+// TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing: the cross-tag rules
+// (policy.TagRules) hold on retag as on create, against the tags the secret will hold once the
+// write lands, so no retag leaves a secret the broker then refuses for who may ask for it: making
+// a secret a google-service-account one whose requesters are not its own person owner is refused,
+// whether the list names a service or the owner is no person at all, as is dropping the list from
+// a secret that already holds that kind. The list is written as the broker reads it, and
+// --requesters none removes it.
 func TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing(t *testing.T) {
 	listed := policytest.Secret("LISTED_KEY", "ada@example.com", policy.TierAgent, "value")
 	listed.Tags[policy.TagRequesters] = "ada@example.com"
@@ -344,8 +344,6 @@ func TestARetagThatLeavesASecretUnservableToItsRequestersWritesNothing(t *testin
 		want string
 		args []string
 	}{
-		{policy.ReasonRequestersMaxGrant, []string{"retag", "LISTED_KEY", "--max-grant", "none"}},
-		{policy.ReasonRequestersMaxGrant, []string{"retag", "LISTED_KEY", "--max-grant", "2h"}},
 		{policy.ReasonRequestersNotOwner, []string{"retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--requesters", "builder"}},
 		{policy.ReasonRequestersNotOwner, []string{"retag", "LISTED_KEY", "--kind", policy.KindGoogleServiceAccount, "--owner", policy.OwnerShared}},
 	} {

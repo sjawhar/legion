@@ -45,7 +45,7 @@ var googleServiceAccountEmail = regexp.MustCompile(`^[a-z0-9-]{6,30}@[a-z0-9-]+\
 // MintRequest holds no lifetime, and Google's generateAccessToken bounds the token itself, so a
 // shorter grant stops the broker releasing the token again rather than cutting short the token
 // already released. The policy makes that bearable by serving this kind to the one person the
-// secret's requesters tag names (policy.RequesterRules).
+// secret's requesters tag names, for grants of an hour at most (policy.TagRules).
 type GoogleServiceAccount struct {
 	BaseURL string
 	HTTP    *http.Client

@@ -59,9 +59,10 @@ const (
 	aditya = "aditya@example.com"
 	sami   = "sami@example.com"
 
-	// The four secrets of the spec's own table. The first three list who may ask for them and so
-	// must bound their grants to an hour (policy.RequesterRules); requesterOpenSecret lists
-	// nobody, which is the negative control: it behaves exactly as it did before the change.
+	// The four secrets of the spec's own table. The first three list who may ask for them, and
+	// each bounds its grants to an hour (policy.TagRules demands that of the google-service-account
+	// one); requesterOpenSecret lists nobody, which is the negative control: it behaves exactly as
+	// it did before the change.
 	requesterGCloudSami = "GCLOUD_SAMI"
 	requesterAzureAdmin = "AZURE_ADMIN"
 	requesterDevAditya  = "DEV_ADITYA"
@@ -656,7 +657,7 @@ func newRequesterStore(t *testing.T) *requesterStore {
 			policy.TagMaxGrant:   requesterMaxGrant,
 		}),
 		// A google-service-account secret is served to the one person who owns it, so its
-		// requesters are exactly that person (policy.RequesterRules), and its stored value names
+		// requesters are exactly that person (policy.TagRules), and its stored value names
 		// the account the broker impersonates.
 		requesterRow(requesterDevAditya, aditya, policy.TierAgent, `{"service_account":"`+requesterServiceAccount+`"}`, map[string]string{
 			policy.TagKind:       policy.KindGoogleServiceAccount,

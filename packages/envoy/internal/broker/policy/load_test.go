@@ -571,10 +571,12 @@ func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 // TestRequestersLoad pins what the loader makes of a requesters tag, each refusal logged as the
 // one line the deployment's alarm filters on, with its own reason: a list it cannot read at all
 // is requesters-malformed, an entry naming a service this deployment does not register included;
-// a listed secret whose grants are unbounded, or bounded past an hour, is requesters-max-grant;
-// and a google-service-account secret whose requesters are not exactly its owner is
-// requesters-not-owner, a missing list included. The well-tagged secret beside them is served,
-// so the rules refuse these secrets and not every secret.
+// a google-service-account secret whose grants are unbounded, or bounded past an hour, is
+// max-grant-required, the cap its kind demands; and one whose requesters are not its own person
+// owner is requesters-not-owner, a missing list included. The well-tagged secret beside them is
+// served, so the rules refuse these secrets and not every secret. A secret that merely lists its
+// requesters is held to no cap of its own: SERVED_KEY carries one, but dropping it would leave
+// the secret served.
 func TestRequestersLoad(t *testing.T) {
 	const (
 		sami   = "sami@theorem.dev"
@@ -609,10 +611,10 @@ func TestRequestersLoad(t *testing.T) {
 	refuse("UNKNOWN_SERVICE", policy.ReasonRequestersMalformed, func(s *secrets.LocalSecret) {
 		s.Tags[policy.TagRequesters] = "dispatch"
 	})
-	refuse("NO_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+	refuseKind("ACCOUNT_NO_MAX_GRANT", policy.ReasonMaxGrantRequired, func(s *secrets.LocalSecret) {
 		delete(s.Tags, policy.TagMaxGrant)
 	})
-	refuse("LONG_MAX_GRANT", policy.ReasonRequestersMaxGrant, func(s *secrets.LocalSecret) {
+	refuseKind("ACCOUNT_LONG_MAX_GRANT", policy.ReasonMaxGrantRequired, func(s *secrets.LocalSecret) {
 		s.Tags[policy.TagMaxGrant] = "2h"
 	})
 	refuseKind("ACCOUNT_NO_LIST", policy.ReasonRequestersNotOwner, func(s *secrets.LocalSecret) {

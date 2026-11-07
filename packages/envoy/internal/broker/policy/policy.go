@@ -55,7 +55,11 @@ const (
 	// KindGoogleServiceAccount mints a Google access token for the one service account its stored
 	// value names, {"service_account": "<id>@<project>.iam.gserviceaccount.com"}. The token acts
 	// as that account, which no person's sign-in bounds, so the kind is served only to the one
-	// person the secret's requesters tag names (RequesterRules).
+	// person the secret's requesters tag names, beside the registered services that tag lists at
+	// human tier, and only for grants of an hour at most (TagRules). The stored value does not
+	// choose the account alone: the deployment's BROKER_SERVICE_ACCOUNT_SECRETS binds each such
+	// secret to one account email, and a mint for any other account is refused, so a value
+	// rewritten to name another account releases no token.
 	KindGoogleServiceAccount = "google-service-account"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
@@ -71,9 +75,27 @@ const (
 	// TagRequesters lists who may ask for the secret at all: people by lowercase email and
 	// registered services by name, separated by white space (ParseRequesters). A session or pod
 	// the list does not name is denied before owner and tier are read (ReasonRequesterNotListed),
-	// so the tag narrows who may ask and never widens it. A secret carrying it must bound its
-	// grants to an hour as well (RequesterRules).
+	// so the tag narrows who may ask and never widens it. It bounds no grant by itself: the
+	// hour-long cap is the business of TagAdmin and of the google-service-account kind, each of
+	// which demands one (TagRules).
 	TagRequesters = "requesters"
+	// TagScopes lists the OAuth scope names of the token a google-service-account secret mints,
+	// separated by white space, each the part of a Google scope that follows
+	// https://www.googleapis.com/auth/ (ParseScopes, Secret.ScopeURLs puts the prefix back). A
+	// google-service-account secret without it mints the cloud-platform scope alone, which is
+	// what every such secret minted before the tag existed. The names are short because the
+	// broker's AWS store keeps its annotations as AWS tags, an AWS tag value holds at most 256
+	// characters, and five full scope URLs are longer than that. The tag on a secret of any
+	// other kind is refused (ReasonScopesKind), since no other minter reads it.
+	TagScopes = "scopes"
+	// TagAdmin marks a secret whose grant is an administrator's: "true" is the only value the
+	// loader accepts, and anything else is refused (ReasonAdminMalformed). The broker cannot tell
+	// such a secret from its kind — an admin console password and a personal API key are both
+	// stored strings — so the program that declares the secret says so. An admin secret must be
+	// human tier, carry a requesters list and carry a max-grant of an hour or less, so every
+	// release of it is approved by a person, asked for by someone it names, and short enough to
+	// be reviewed while it is live (TagRules).
+	TagAdmin = "admin"
 	// kindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	kindSourcePrefix = "mint:"
@@ -192,6 +214,69 @@ func ParseGitHubOwners(raw string) (string, error) {
 	return strings.Join(slices.Compact(owners), " "), nil
 }
 
+// ErrScopesMissing is a scopes tag that names no scope: a tag that narrowed the token to nothing
+// would mint a token good for no API at all, which is a mistake rather than a policy. A secret
+// that wants the default mints it by carrying no scopes tag (TagScopes).
+var ErrScopesMissing = errors.New("scopes names at least one OAuth scope")
+
+// ErrScopesComma is a scopes tag that holds a comma: its names are separated by spaces, as
+// github-owners' and requesters' entries are, since an AWS tag value takes a space and no comma.
+var ErrScopesComma = errors.New(`scopes separates its names with spaces, not commas ("<scope> <scope>")`)
+
+// ErrScopesEntry is a scopes entry that is not a scope name: one that does not start with a
+// lowercase ASCII letter or digit, or that holds anything but lowercase ASCII letters, digits,
+// '.', '_' and '-'. A whole https://www.googleapis.com/auth/… URL is the mistake a reader makes
+// here, and fails the pattern on its slashes and colon; an upper-case name fails it too, rather
+// than being lowercased, since a Google scope name holds no upper case at all and one written
+// that way was written by hand.
+var ErrScopesEntry = errors.New("scopes names the part of a Google scope after https://www.googleapis.com/auth/, in lowercase")
+
+// ErrScopesDuplicate is a scopes tag that names one scope twice. ParseGitHubOwners quietly
+// compacts a repeated login, since two spellings of one account list are one policy; a repeated
+// scope is refused instead, because the value is short enough to read whole and a name written
+// twice is a mistake rather than a second spelling of the same list.
+var ErrScopesDuplicate = errors.New("scopes names each scope once")
+
+// googleScopeName is what the part of a Google OAuth scope after googleScopePrefix can be: a
+// lowercase ASCII letter or digit, then lowercase ASCII letters, digits, '.', '_' and '-'
+// ("cloud-platform", "devstorage.read_only", "bigquery"). It is matched against the entry as
+// written, so neither a full scope URL (its slashes and colon) nor an upper-case name passes.
+var googleScopeName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// googleScopePrefix opens every Google OAuth scope a scopes tag names (Secret.ScopeURLs puts it
+// back before the minter asks Google for the token). The tag holds the part after it alone so
+// that a list of five scopes still fits an AWS tag value's 256 characters (TagScopes).
+const googleScopePrefix = "https://www.googleapis.com/auth/"
+
+// ParseScopes reads a scopes tag: the names of the OAuth scopes a google-service-account secret's
+// token carries, separated by white space, each the part of a Google scope that follows
+// googleScopePrefix. It refuses a comma anywhere (ErrScopesComma), a list that names no scope
+// (ErrScopesMissing), an entry that is not a scope name (ErrScopesEntry, which a whole scope URL
+// and an upper-case name each land on), and a name given twice (ErrScopesDuplicate). It answers
+// them sorted and joined by single spaces, so a Secret holding them stays comparable, two
+// spellings of one list are one policy, and the value is one that both stores hold: an AWS tag
+// value and a Secret Manager annotation both take a space, which a scope name never holds.
+func ParseScopes(raw string) (string, error) {
+	if strings.Contains(raw, ",") {
+		return "", ErrScopesComma
+	}
+	var scopes []string
+	for _, entry := range strings.Fields(raw) {
+		if !googleScopeName.MatchString(entry) {
+			return "", fmt.Errorf("%w, not %q", ErrScopesEntry, entry)
+		}
+		if slices.Contains(scopes, entry) {
+			return "", fmt.Errorf("%w, not %q twice", ErrScopesDuplicate, entry)
+		}
+		scopes = append(scopes, entry)
+	}
+	if len(scopes) == 0 {
+		return "", ErrScopesMissing
+	}
+	slices.Sort(scopes)
+	return strings.Join(scopes, " "), nil
+}
+
 // ErrRequestersMissing is a requesters tag that names nobody: a tag that let no one ask would
 // serve the secret to no session at all, which is a mistake rather than a policy.
 var ErrRequestersMissing = errors.New("requesters names at least one person or service")
@@ -266,25 +351,102 @@ func parseRequesters(raw string, services []string, registered bool) (string, er
 	return strings.Join(slices.Compact(requesters), " "), nil
 }
 
-// RequesterRules is the one statement of what a requesters tag demands of the rest of a secret's
-// tags, which the loader applies to every secret it reads and `agent-secrets secret` create and
-// retag apply before they write (so it asks for no registered service list of its own). It
-// answers "" for a secret the rules allow, and otherwise the load reason that refuses it:
+// devServiceAccount is the id, the part before the @, of a service account the deployment binds
+// to one person: it binds each person's DEV_<NAME> secret to their own dev-<name> account, whose
+// token therefore goes to that person and to nobody else. TagRules reads it to refuse a service
+// entry on such a secret's requesters list.
+var devServiceAccount = regexp.MustCompile(`^dev-[a-z0-9-]+$`)
+
+// TagSet is one secret's tags as TagRules weighs them: the values the loader read from the store
+// (Loader.secret) or the values `agent-secrets secret create` and `retag` will write, beside the
+// one thing that is no tag at all, BoundAccount.
+type TagSet struct {
+	// Kind is the secret's kind tag, "" for a stored secret; Owner its owner tag; Tier its tier
+	// tag; Requesters its requesters tag as ParseRequesters or ParseRequesterShapes answered it,
+	// "" for a secret that lists nobody; Scopes its scopes tag as ParseScopes answered it, "" for
+	// a secret that names none.
+	Kind, Owner, Tier, Requesters, Scopes string
+	// BoundAccount is the account email the deployment's BROKER_SERVICE_ACCOUNT_SECRETS binds to
+	// this secret, and "" when it binds none. It is "" as well for a caller that does not hold
+	// the setting — `agent-secrets`, which never sees it, exactly as it never sees BROKER_SERVICES
+	// and so calls ParseRequesterShapes rather than ParseRequesters — so the rule it feeds, the
+	// one refusing a service entry on a secret bound to a dev-<name> account, is the broker's to
+	// apply on the write's reread.
+	BoundAccount string
+	// Admin is true when the secret carries admin: "true" (TagAdmin).
+	Admin bool
+	// MaxGrant is the secret's max-grant tag as ParseMaxGrant answered it, and 0 when it sets
+	// none.
+	MaxGrant time.Duration
+}
+
+// TagRules is the one statement of what a secret's tags demand of each other, which the loader
+// applies to every secret it reads and `agent-secrets secret` create and retag apply before they
+// write (so it asks for no registered service list of its own). It takes a TagSet rather than a
+// positional list because the rules now weigh eight tags, six of them strings, which no caller
+// could pass in order without mistaking one for another. It answers "" for a secret the rules
+// allow, and otherwise the load reason that refuses it:
 //
-//   - ReasonRequestersMaxGrant: a secret whose requesters are listed sets no max-grant, or one
-//     longer than an hour. A list says who may ask for an admin or personal credential, and such
-//     a grant is reviewed while it is live, so it lasts an hour at most.
-//   - ReasonRequestersNotOwner: a google-service-account secret whose requesters are not exactly
-//     its own owner — no list, more than one entry, or one entry naming someone else. The token
-//     it mints acts as a service account, which the requirement gives to the one person who owns
-//     the secret, so a secret owned by shared or by a service can carry no such kind: neither is
-//     a person, and neither can be that one requester.
-func RequesterRules(kind, owner, requesters string, maxGrant time.Duration) string {
-	if requesters != "" && (maxGrant == 0 || maxGrant > time.Hour) {
-		return ReasonRequestersMaxGrant
+//   - ReasonScopesKind: a secret that is not a google-service-account one carries a scopes tag.
+//     No other minter reads it, so the tag would narrow nothing and say that it had.
+//   - ReasonAdminTier: an admin secret is not human tier. An administrator's credential is
+//     released only by a person's approval, which agent tier does not ask for.
+//   - ReasonAdminRequesters: an admin secret carries no requesters tag. Who may ask for an
+//     administrator's credential is named, never left to owner and tier alone.
+//   - ReasonMaxGrantRequired: an admin secret, or a google-service-account one, sets no
+//     max-grant or one longer than an hour. Such a grant is reviewed while it is live, so it
+//     lasts an hour at most. A secret that merely lists its requesters keeps its own cap, or
+//     none.
+//   - ReasonRequestersNotOwner: a google-service-account secret whose requesters are not its own
+//     person owner, once — no list, no owner entry, more than one, or one naming someone else —
+//     or which lists a service at agent tier. The token it mints acts as a service account,
+//     which the requirement gives to the one person who owns the secret, so a secret owned by
+//     shared or by a service can carry no such kind: neither is a person, and neither can be
+//     that one requester. A human-tier secret may name registered services beside its owner,
+//     each of whose pods a person still approves.
+//   - ReasonRequestersNotOwner again: a secret the deployment binds to a dev-<name> account
+//     (BoundAccount, devServiceAccount) lists a service, at either tier. Such a token is one
+//     person's own, so no service may ask for it.
+func TagRules(t TagSet) string {
+	if t.Scopes != "" && t.Kind != KindGoogleServiceAccount {
+		return ReasonScopesKind
 	}
-	if kind == KindGoogleServiceAccount && (!ValidPersonOwner(owner) || requesters != owner) {
-		return ReasonRequestersNotOwner
+	if t.Admin && t.Tier != TierHuman {
+		return ReasonAdminTier
+	}
+	if t.Admin && t.Requesters == "" {
+		return ReasonAdminRequesters
+	}
+	if (t.Admin || t.Kind == KindGoogleServiceAccount) && (t.MaxGrant == 0 || t.MaxGrant > time.Hour) {
+		return ReasonMaxGrantRequired
+	}
+	// Each entry's own shape is ParseRequesters' and ParseRequesterShapes' business, and they
+	// answer the entries sorted and separated by single spaces, so the rules below read only the
+	// @ that tells a person from a service.
+	if t.Kind == KindGoogleServiceAccount {
+		owners := 0
+		for _, entry := range strings.Fields(t.Requesters) {
+			switch {
+			case !strings.Contains(entry, "@"):
+				if t.Tier != TierHuman {
+					return ReasonRequestersNotOwner
+				}
+			case !ValidPersonOwner(t.Owner) || entry != t.Owner:
+				return ReasonRequestersNotOwner
+			default:
+				owners++
+			}
+		}
+		if owners != 1 {
+			return ReasonRequestersNotOwner
+		}
+	}
+	if id, _, bound := strings.Cut(t.BoundAccount, "@"); bound && devServiceAccount.MatchString(id) {
+		for _, entry := range strings.Fields(t.Requesters) {
+			if !strings.Contains(entry, "@") {
+				return ReasonRequestersNotOwner
+			}
+		}
 	}
 	return ""
 }
@@ -419,6 +581,14 @@ type Secret struct {
 	// that carries none, which every session and pod may ask for. A string, not a slice, for the
 	// same reason as MaxGrant.
 	Requesters string
+	// Scopes is a google-service-account secret's scopes tag as ParseScopes answers it, and "" for
+	// a secret that carries none, whose token the minter asks for with the cloud-platform scope
+	// alone (TagScopes, Secret.ScopeURLs). A string, not a slice, for the same reason as MaxGrant.
+	Scopes string
+	// Admin is true when the secret carries admin: "true" (TagAdmin): its grant is an
+	// administrator's, which the rules hold to human tier, a requesters list and an hour's cap
+	// (TagRules).
+	Admin bool
 	// SessionDefault is true when the secret's default-grant tag is "session": a request naming
 	// no lifetime gets a grant that lasts until its session ends instead of DefaultGrantLifetime.
 	SessionDefault bool
@@ -441,6 +611,21 @@ func (secret Secret) GitHubOwnerLogins() []string {
 		return nil
 	}
 	return strings.Fields(secret.GitHubOwners)
+}
+
+// ScopeURLs is Scopes as the list of whole Google OAuth scope URLs the minter asks Google for,
+// each name under googleScopePrefix, and nil when it is "" — a secret that names none, for which
+// the minter chooses its own default rather than reading an empty list as no scope at all.
+func (secret Secret) ScopeURLs() []string {
+	if secret.Scopes == "" {
+		return nil
+	}
+	names := strings.Fields(secret.Scopes)
+	urls := make([]string, 0, len(names))
+	for _, name := range names {
+		urls = append(urls, googleScopePrefix+name)
+	}
+	return urls
 }
 
 // requesterNames is Requesters as a list of the emails and service names it holds, nil when it
@@ -487,21 +672,23 @@ func (secret Secret) approver() string {
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
 	// Version is the SHA-256 of every served secret's name, owner, tier, source, max-grant,
-	// github-owners and requesters: equal versions are equal policies. A request records the
-	// version it was decided under, so a live grant is re-evaluated only once the policy changed.
+	// github-owners, requesters, scopes and admin: equal versions are equal policies. A request
+	// records the version it was decided under, so a live grant is re-evaluated only once the
+	// policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets. A secret with no max-grant, no github-owners and no requesters
-// writes the pre-kind digest bytes, "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind
-// is in its Source); one with any of them adds the first two, as a fifth field (time.Duration's
-// form, 0s for none) and a sixth (empty for none), and a secret with requesters ends its line
-// with "\trequesters=<list>". Entries are ascending by the secret's name in the store (the slug)
-// — the exact order Load wrote before NewSet existed, so deployed plain-secret digests do not
-// shift. (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so
-// "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
+// (keyed by Name) as its Secrets. A secret with no max-grant, no github-owners, no requesters, no
+// scopes and no admin tag writes the pre-kind digest bytes,
+// "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its Source); one with any of
+// them adds the first two, as a fifth field (time.Duration's form, 0s for none) and a sixth
+// (empty for none), and then ends its line with "\trequesters=<list>", "\tscopes=<list>" and
+// "\tadmin=true", in that order, for each of those three it carries. Entries are ascending by the
+// secret's name in the store (the slug) — the exact order Load wrote before NewSet existed, so
+// deployed plain-secret digests do not shift. (Sorting by the uppercased Name would NOT be
+// equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
 func NewSet(secrets map[string]Secret) *Set {
 	type bySlug struct {
 		slug   string
@@ -518,15 +705,23 @@ func NewSet(secrets map[string]Secret) *Set {
 		if s.secret.Requesters != "" {
 			requesters = "\trequesters=" + s.secret.Requesters
 		}
-		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault && s.secret.Requesters == "" {
+		scopes := ""
+		if s.secret.Scopes != "" {
+			scopes = "\tscopes=" + s.secret.Scopes
+		}
+		admin := ""
+		if s.secret.Admin {
+			admin = "\tadmin=true"
+		}
+		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault && s.secret.Requesters == "" && s.secret.Scopes == "" && !s.secret.Admin {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
 			continue
 		}
 		if s.secret.SessionDefault {
-			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters)
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session%s%s%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters, scopes, admin)
 			continue
 		}
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters)
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s%s%s%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters, scopes, admin)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }

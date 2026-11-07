@@ -22,14 +22,14 @@ import (
 // an empty answer.
 const listedValue = "listed-v1"
 
-// anHour is the lifetime every request below signs. A listed secret must bound its grants to an
-// hour (policy.RequesterRules), and a request signing longer is refused before the policy decides
-// it at all (overMaxGrant), which is this file's last case rather than its premise.
+// anHour is the lifetime every request below signs. Every secret here carries a max-grant of an
+// hour (policytest.ListedSecret), and a request signing longer is refused before the policy
+// decides it at all (overMaxGrant), which is this file's last case rather than its premise.
 const anHour = 3600
 
 // listedSecret is policytest.ListedSecret holding the one value this file releases: a namespace
-// secret whose requesters tag names requesters, carrying the max-grant every listed secret must
-// set for the loader to serve it.
+// secret whose requesters tag names requesters, carrying a max-grant of an hour so that the
+// requests below sign for exactly as long as the secret allows.
 func listedSecret(name, owner, tier, requesters string) secrets.LocalSecret {
 	return policytest.ListedSecret(name, owner, tier, requesters, listedValue)
 }
@@ -249,9 +249,10 @@ func TestRequestersAnApprovalAfterTheDropIsRecordedAsADenial(t *testing.T) {
 	}
 }
 
-// TestRequestersAListedSecretGrantsForAnHourAtMost: the hour a listed secret's grants are bounded
-// to is enforced where every other max-grant is, before the policy decides the request — a two
-// hour request is refused and names the bound, and the hour one is granted for the hour.
+// TestRequestersAListedSecretGrantsForAnHourAtMost: the hour this listed secret's max-grant tag
+// bounds its grants to is enforced where every other max-grant is, before the policy decides the
+// request — a two hour request is refused and names the bound, and the hour one is granted for
+// the hour.
 func TestRequestersAListedSecretGrantsForAnHourAtMost(t *testing.T) {
 	ctx := context.Background()
 	m, enr, key, _ := newFixture(t)

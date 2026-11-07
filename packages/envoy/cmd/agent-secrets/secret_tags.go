@@ -135,27 +135,33 @@ func checkRequesters(list string, orNone bool) (string, error) {
 	return parsed, nil
 }
 
-// checkRequestersFor applies the broker's cross-tag requesters rule (policy.RequesterRules) to the
-// kind, owner, requesters and max grant a secret will hold once a write lands, so create and retag
-// refuse, before any write, a secret the broker would then refuse as requesters-max-grant or
-// requesters-not-owner, each named as the broker names it and each said as the flag that fixes it.
-// named says the command itself named --requesters, so a refusal speaks of the flag rather than of
-// the tag the secret already holds. maxGrant is the tag's own string, which ParseMaxGrant reads
-// here rather than a second --max-grant rule: a malformed one is no duration at all, which the
-// flag's own rule (checkMaxGrant) refused for a command that named it, and which the broker
-// refuses as max-grant-malformed before it reads the requesters at all.
+// checkRequestersFor applies the broker's cross-tag rules (policy.TagRules) to the kind, owner,
+// requesters and max grant a secret will hold once a write lands, so create and retag refuse,
+// before any write, a secret the broker would then refuse as requesters-not-owner, named as the
+// broker names it and said as the flag that fixes it. named says the command itself named
+// --requesters; no refusal below reads it, since the one rule this check still speaks for names
+// the kind and the owner rather than the tag's source. maxGrant is the tag's own string, which
+// ParseMaxGrant reads here rather than a second --max-grant rule: a malformed one is no duration
+// at all, which the flag's own rule (checkMaxGrant) refused for a command that named it, and
+// which the broker refuses as max-grant-malformed before it reads the requesters at all. The tags
+// this CLI writes carry no scopes and no admin, and it never sees the deployment's
+// BROKER_SERVICE_ACCOUNT_SECRETS, so those three are empty here exactly as the registered service
+// list is (ParseRequesterShapes); it reads no tier either, so a google-service-account secret
+// whose list names a service is refused here whatever tier the write leaves it at, and the
+// broker's own reading of the written tags is what serves the human-tier secret that may hold
+// one.
 func checkRequestersFor(kind, owner, requesters, maxGrant string, named bool) error {
 	duration, _ := policy.ParseMaxGrant(maxGrant)
-	listed := "the secret's requesters tag"
-	if named {
-		listed = "--requesters"
-	}
-	switch policy.RequesterRules(kind, owner, requesters, duration) {
-	case policy.ReasonRequestersMaxGrant:
-		if duration == 0 {
-			return usageErr{fmt.Errorf("%s lists who may ask for this secret, and such a secret bounds its grants to an hour: name one with --max-grant 1h or less, or the broker refuses it as %s", listed, policy.ReasonRequestersMaxGrant)}
-		}
-		return usageErr{fmt.Errorf("%s lists who may ask for this secret, and such a secret bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", listed, maxGrant, policy.ReasonRequestersMaxGrant)}
+	switch policy.TagRules(policy.TagSet{
+		Kind:         kind,
+		Owner:        owner,
+		Tier:         "",
+		Requesters:   requesters,
+		Scopes:       "",
+		BoundAccount: "",
+		Admin:        false,
+		MaxGrant:     duration,
+	}) {
 	case policy.ReasonRequestersNotOwner:
 		switch {
 		case !policy.ValidPersonOwner(owner):
