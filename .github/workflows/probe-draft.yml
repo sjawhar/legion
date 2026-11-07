@@ -1,0 +1,18 @@
+name: probe-draft
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+permissions: {}
+jobs:
+  ci-ok:
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a draft pull request
+        if: ${{ github.event.pull_request.draft }}
+        run: |
+          echo "::error::ci-ok is failure while this pull request is a draft: no job of the run tested it, so mark the pull request ready for review, which starts a run that selects by the same diff and concludes a real verdict."
+          exit 1
+      - name: Judge every job of this run
+        run: echo "the verdict step, reached only once the refusals above let the run through"
