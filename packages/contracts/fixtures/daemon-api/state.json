@@ -64,6 +64,15 @@
         "reviewDecision": "approved",
         "fixAttempts": 0
       },
+      "gatedSteps": [
+        {
+          "step": "spec",
+          "artifactId": "0c7e5a31-9d84-4b26-a0f3-5e81c2d47b90",
+          "currentVersion": 4,
+          "approvedVersion": 4,
+          "status": "approved"
+        }
+      ],
       "check": {
         "repo": "acme/widgets",
         "pullRequest": 1239,
@@ -180,6 +189,15 @@
         "currentVersion": 7,
         "approvedVersion": 6
       },
+      "gatedSteps": [
+        {
+          "step": "spec",
+          "artifactId": "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+          "currentVersion": 7,
+          "approvedVersion": 6,
+          "status": "waiting"
+        }
+      ],
       "slot": {
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
@@ -218,7 +236,14 @@
           },
           "rounds": 1
         }
-      }
+      },
+      "gatedSteps": [
+        {
+          "step": "spec",
+          "approvedVersion": null,
+          "status": "unregistered"
+        }
+      ]
     },
     "LEGION-212": {
       "key": "LEGION-212",
@@ -229,6 +254,16 @@
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {},
+      "gatedSteps": [
+        {
+          "step": "spec",
+          "artifactId": "b71f0a94-6c3e-4d28-85af-19c7d0e3b462",
+          "currentVersion": 2,
+          "approvedVersion": null,
+          "status": "changes_requested",
+          "changesReason": "name the rollback path for the schema change"
+        }
+      ],
       "waitingOn": {
         "kind": "ask",
         "ask": "9a8fd348-55d5-4d72-a793-3cd037f75f13",
@@ -586,7 +621,8 @@
         "memory": {
           "config_files": []
         },
-        "production_check": "tester"
+        "production_check": "tester",
+        "deploys": []
       },
       "WIDGETS": {
         "merge_queue_role": "merge-queue",
@@ -600,11 +636,14 @@
         "memory": {
           "config_files": []
         },
-        "production_check": "off"
+        "production_check": "off",
+        "deploys": []
       }
     },
     "gates": {
-      "design": "root-issues"
+      "design": [
+        "spec"
+      ]
     },
     "github_apps": {
       "implement": {

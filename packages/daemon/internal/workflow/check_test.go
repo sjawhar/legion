@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -46,7 +47,7 @@ func newCheckRig(t *testing.T) checkRig {
 	pool := migratedPool(t)
 	clock := &checkClock{now: checkOpened}
 	logged := &bytes.Buffer{}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: checkBound, ProductionCheckRole: claim.RoleTester, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, ProductionCheckBound: checkBound, ProductionCheckRole: claim.RoleTester, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	return checkRig{pool: pool, engine: engine, clock: clock, logged: logged, apply: applyFacts(t, pool, engine)}
 }

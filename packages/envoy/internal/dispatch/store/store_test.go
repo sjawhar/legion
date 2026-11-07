@@ -17,10 +17,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/internal/testpg"
 	"github.com/sjawhar/envoy/migrationid"
 )
 
@@ -52,48 +52,7 @@ func openEmptyTestStore(t *testing.T) *Store {
 	}
 	adminURL := *baseURL
 	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	// A copy of template1's files, as storetest makes every database (its package comment says why).
-	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		// `with (force)` terminates whatever is still connected, which needs pg_signal_backend:
-		// a login that is only the database's owner is refused `permission denied to terminate
-		// process`. The pool above is closed first (cleanups are LIFO), but Postgres tears a
-		// backend down after its client has closed the socket, so a drop inside that window
-		// finds a connection and cannot clear it. So the drop is tried plainly and tried again
-		// while Postgres says the database is in use (SQLSTATE 55006, object_in_use, which is
-		// what the drop answers however the server words it), as storetest.dropDatabase does;
-		// this package is storetest's own dependency, so the rule is written twice rather than
-		// imported.
-		deadline := time.Now().Add(15 * time.Second)
-		var err error
-		for {
-			if _, err = admin.Exec(context.Background(), "drop database "+databaseName); err == nil {
-				return
-			}
-			if !isSQLState(err, "55006") || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		// The forced drop is what ended the cleanup, so its error is the one reported; the plain
-		// drop's says what the force was for.
-		if _, forced := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); forced != nil {
-			t.Errorf("drop isolated database: %v, after the plain drop answered: %v", forced, err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	store, err := Open(ctx, testURL.String())
+	store, err := Open(ctx, testpg.DatabaseOn(t, adminURL.String(), "dispatch_test"))
 	if err != nil {
 		t.Fatalf("open isolated database: %v", err)
 	}

@@ -27,6 +27,7 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -257,8 +258,9 @@ func pluginsLine(cfg config.Config) string {
 // files they name before it writes anything (daemon.CheckStart, the reads boot's own prepare
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
-// names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed.
+// names a mise tool. The OK line names the design-gate steps the file resolved to, in the order
+// it named them (`design-gate-steps=`, `none` for a deployment that gates none), and each NATS
+// nkey seed's public key when there is one, never the seed.
 // Right after it comes one line per loader warning (config.Config.Warnings) — a key the file
 // still sets that this daemon no longer reads — so a deprecation is the first thing an operator
 // reads, and the exit stays 0, since such a key is ignored and never refused.
@@ -295,7 +297,7 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	ok := "Config OK: project=" + cfg.Project
+	ok := "Config OK: project=" + cfg.Project + " design-gate-steps=" + designGateSteps(cfg.Gates.Steps())
 	if paneNatsUser != "" {
 		ok += " nats-nkey-user=" + paneNatsUser
 	}
@@ -331,6 +333,16 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, pluginsLine(cfg))
 	}
 	return 0
+}
+
+// designGateSteps is the deployment's design-gate steps as the OK line names them: the step
+// names in the order the file resolved them to, comma-separated, and `none` where the
+// deployment gates no step.
+func designGateSteps(steps []record.DesignStep) string {
+	if len(steps) == 0 {
+		return "none"
+	}
+	return strings.Join(record.StepNames(steps), ",")
 }
 
 // productionCheckLine is `--check-config`'s line for one project's `production_check`: the word

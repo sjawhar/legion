@@ -80,7 +80,7 @@ func keptCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root st
 		if err != nil || stored == nil {
 			return fmt.Errorf("read %s: %w", root, err)
 		}
-		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, launch, now, time.Time{})
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, launch, now, time.Time{})
 	}); err != nil {
 		t.Fatalf("queue the catch-up of %s for launch %d: %v", root, launch, err)
 	}
@@ -214,7 +214,7 @@ func TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, 2, now, time.Time{})
+			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, 2, now, time.Time{})
 		})
 	}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,

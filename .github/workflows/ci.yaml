@@ -283,6 +283,8 @@ jobs:
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
               - 'packages/envoy/internal/testnats/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
               # The reasons the listener refuses a publish to a role no session holds, which the
@@ -961,6 +963,8 @@ jobs:
               - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
               - 'packages/envoy/internal/ratelimit/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
@@ -1233,6 +1237,8 @@ jobs:
               - 'packages/envoy/internal/pgmigrate/*'
               - 'packages/envoy/internal/ratelimit/*'
               - 'packages/envoy/internal/redact/*'
+              # storetest's DatabaseURL makes a test's own database with internal/testpg.
+              - 'packages/envoy/internal/testpg/*'
               - 'packages/envoy/migrationid/*'
               # The step takes the multiprocess tag's test list from this script at run time.
               - '.github/scripts/go-tagged-tests.sh'
@@ -3291,8 +3297,8 @@ jobs:
     # plain race-impossible step's three 10-minute runs, which is 31; after that step's measured
     # 2 minutes the unit step's own 20 is 23; after the unit step, which runs strictly fewer
     # packages than the 35 minutes it measured before the race lane's left it and so cannot
-    # exceed that, natslive's default 10 is 48, and the shell tests' 7 and the integration step's
-    # 5 are less.
+    # exceed that, natslive's default 10 and the bus matrix's own 5 are 53, and the shell tests'
+    # 7 and the integration step's 5 are less.
     timeout-minutes: 60
     services:
       postgres:
@@ -3405,16 +3411,28 @@ jobs:
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
       # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
-      # behind the natslive tag, and this step is where it runs (INFRA-250). It runs only the
-      # tests that tag adds: `-tags natslive ./internal/testnats/` would re-run the package's
-      # untagged tests, which the unit step above already ran, so the -run comes from
-      # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time. The
-      # assignment is a line of its own: under bash -e it carries the script's exit status, so an
-      # empty or refused list fails the step instead of running -run "", which matches every test.
+      # behind the natslive tag, and this step is where it runs (INFRA-250). internal/bus has one
+      # test of its own on that matrix: the module links nats-server v2.15.1 in process, which
+      # caps a stream that sets no cap at a default of its own and takes a change of MaxConsumers
+      # on a stream that already exists, so the raise of an uncapped ENVOY_NOTIFICATIONS to the
+      # consumer cap this binary compiles and the keeper's restore of a cap an operator lowered or
+      # unset are proved in process. What is left for a real image is the pair of 2.10 cases - the
+      # stream with no cap the binary must leave alone, and the refusal of the raise of a lower
+      # cap, naming the field, the cap and the first server taking the change - and the hub's own
+      # reconcile on the nats:2.15.1-alpine image the deployment runs (INFRA-1384). Each
+      # package runs only the tests its tag adds: `-tags natslive ./pkg` would re-run the
+      # package's untagged tests, which already run elsewhere - internal/testnats in the unit step
+      # above, and internal/bus in envoy-go-race, which the unit step's grep -Ev leaves out - so
+      # the -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the
+      # source at run time, and no test name is spelled here. Each assignment is a line of its
+      # own: under bash -e it carries the script's exit status, so an empty or refused list fails
+      # the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
         run: |
-          pattern=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
-          go test -count=1 -tags natslive -run "$pattern" ./internal/testnats/
+          rig=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
+          go test -count=1 -tags natslive -run "$rig" ./internal/testnats/
+          cap=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/bus)
+          go test -count=1 -timeout 5m -tags natslive -run "$cap" -v ./internal/bus/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh

@@ -471,8 +471,16 @@ What each part is for:
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
   `private_key_command` (a command whose output is the PEM) or `private_key_secret`. The daemon
   finds each App's installations itself; `installations` (owner to installation id) is optional.
-- **`gates.design`**: `root-issues` asks a person to approve every root issue's spec before any
-  phase starts; `off` skips the approval. There is no other way past the gate.
+- **`gates.design`**: the design gate steps, a list naming `decisions` (the root issue's decisions
+  document), `criteria` (its Verification document) and `spec` (its primary document), in the
+  order a person approves them. No phase of the tree starts, no released child starts and no
+  merger's READY is accepted until a person has approved the document of every step listed. The
+  default is `[spec]`, which the word `root-issues` also means; the empty list `[]` skips the
+  approval, which the word `off` also means. A list naming one step twice, and any other word,
+  is refused at load. There is no other way past the gate. `legion state --json` answers the
+  resolved list at `settings.gates.design`, and the daemon publishes it onto the project's row in
+  Dispatch, which `GET /api/v1/projects` answers as
+  `gated_steps`.
 - **`instructions`** (optional) names a Markdown file of your standing rules (required checks,
   deploy and smoke commands, scope) that is appended to every agent's system prompt. It must hold no
   secret.
@@ -669,7 +677,7 @@ command or writing a file:
 
 ```sh
 legion start --config legion.yaml --check-config
-# Config OK: project=WIDGETS
+# Config OK: project=WIDGETS design-gate-steps=spec
 ```
 
 Then start it:
@@ -980,7 +988,9 @@ Closing the terminal leaves the project without one, and the daemon logs
   `--json` prints everything the daemon records: `admission` (`cap`, `active` the issues holding a slot, `waiting` the issues in the line, `trees` the roots of the live trees, and `blocked`), each
   issue under `issues` with its `phase`, `status`, `tree` (the root of its tree), `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) with `gatedSteps` beside it
+  (one entry per gated step: `step`, `artifactId`, `currentVersion`, `approvedVersion`, `status`
+  — `unregistered`, `waiting`, `approved` or `changes_requested` — and `changesReason`), for a root in `awaiting_person`
   `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
   `answeredAt` with `answeredBy` once it was answered) and, for a closed
   issue whose
@@ -1006,7 +1016,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   broker is configured:
 
   ```sh
-  legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'
+  legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate, gatedSteps}'
   ```
 
 - **The daemon's log** (standard error) names every launch, death, refusal and relaunch; the lines

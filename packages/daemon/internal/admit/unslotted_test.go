@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -42,7 +43,7 @@ func TestAWaitingRootMovedToARunningTreesStatusLeavesTheWorkflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-1", "A")
 			seedWaiting(t, pool, "LEGION-5", "B")
 			waiting := issue(t, pool, "LEGION-5")
@@ -145,7 +146,7 @@ func TestTheBootReadReleasesARootThatHeldNoSlotAndWaitedForNone(t *testing.T) {
 func TestReleaseAppliesAHeldRunningStatusBeforeUnslottedRepair(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedWaiting(t, pool, "LEGION-HELD", "A")
 	waiting := issue(t, pool, "LEGION-HELD")
 	waiting.LastDispatchSeq = 1
@@ -184,7 +185,7 @@ func TestReleaseAppliesAHeldRunningStatusBeforeUnslottedRepair(t *testing.T) {
 func TestReleasingAnUnslottedRootDropsTheStatusWritesQueuedBeforeIt(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, "LEGION-RUN", "A")
 	seedWaiting(t, pool, "LEGION-CLEANUP", "B")
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -215,7 +216,7 @@ func TestReleasingAnUnslottedRootDropsTheStatusWritesQueuedBeforeIt(t *testing.T
 func TestAnUnknownStatusDoesNotReleaseAnUnslottedRoot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	stranded := record.Issue{Key: "LEGION-UNKNOWN", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "unknown status", Tree: "LEGION-UNKNOWN",
 		Phase: phase.Admitted, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1}
 	putIssue(t, pool, stranded)
