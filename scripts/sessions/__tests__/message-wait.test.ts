@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -166,56 +166,69 @@ const labelOf = (session: Fixture): string => `${session.role} ${session.id}`;
 const scratch = await mkdtemp(join(tmpdir(), "message-wait-"));
 const DATABASE = `legion_message_wait_${randomUUID().replaceAll("-", "")}`;
 const admin = new SQL(SERVER);
-await admin.unsafe(`create database ${DATABASE} strategy file_copy`);
 const storeUrl = new URL(SERVER);
 storeUrl.pathname = `/${DATABASE}`;
 const store = new SQL(storeUrl.toString());
-// Registered before the fixture is built, so a statement that throws still takes its database
-// and its scratch directory with it.
+// The fixture is built in the `beforeAll` below, which Bun follows with this hook even when it
+// throws, so a create or an insert that fails still takes the database and the scratch directory
+// with it.
 afterAll(async () => {
   await rm(scratch, { recursive: true, force: true });
   await store.close();
   await admin.unsafe(`drop database if exists ${DATABASE} with (force)`);
   await admin.close();
 });
-await store.unsafe(
-  "create table omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, " +
-    "mtime_ms BIGINT NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, " +
-    "byte_len BIGINT)"
-);
-await store.unsafe(
-  "create table omp_session_files_parts (path TEXT NOT NULL, start_offset BIGINT NOT NULL, " +
-    "content TEXT NOT NULL, PRIMARY KEY (path, start_offset))"
-);
-for (const session of FIXTURES) {
-  // Every session opens with the claim of the role a message was delivered to.
-  const claim = { type: "custom", customType: "envoy-role-claim", data: { role: session.role } };
-  const records = [line(0, claim), ...session.lines];
-  const text = `${records.join("\n")}\n`;
-  const head = session.tailInPart === true ? `${records.slice(0, -1).join("\n")}\n` : text;
-  const tail = text.slice(head.length);
-  const path = `${DIRECTORY}/${STAMP}_${session.id}.jsonl`;
-  await store`insert into omp_session_files (path, content, mtime_ms, byte_len)
-    values (${path}, ${head}, ${LAST_WRITE_MS}, ${Buffer.byteLength(text)})`;
-  if (tail !== "") {
-    await store`insert into omp_session_files_parts (path, start_offset, content)
-      values (${path}, ${Buffer.byteLength(head)}, ${tail})`;
+
+/** What the spawned run printed: its exit code, its stderr, and its stdout line by line. */
+let code = -1;
+let stderr = "";
+let printed: string[] = [];
+
+// Creating the database, writing the fixture and spawning the script take longer than the five
+// seconds a hook is given by default, whenever the server answers slowly.
+beforeAll(async () => {
+  await admin.unsafe(`create database ${DATABASE} strategy file_copy`);
+  await store.unsafe(
+    "create table omp_session_files (path TEXT PRIMARY KEY, content TEXT NOT NULL, " +
+      "mtime_ms BIGINT NOT NULL, title TEXT, title_source TEXT, title_updated_at TEXT, " +
+      "byte_len BIGINT)"
+  );
+  await store.unsafe(
+    "create table omp_session_files_parts (path TEXT NOT NULL, start_offset BIGINT NOT NULL, " +
+      "content TEXT NOT NULL, PRIMARY KEY (path, start_offset))"
+  );
+  for (const session of FIXTURES) {
+    // Every session opens with the claim of the role a message was delivered to.
+    const claim = { type: "custom", customType: "envoy-role-claim", data: { role: session.role } };
+    const records = [line(0, claim), ...session.lines];
+    const text = `${records.join("\n")}\n`;
+    const head = session.tailInPart === true ? `${records.slice(0, -1).join("\n")}\n` : text;
+    const tail = text.slice(head.length);
+    const path = `${DIRECTORY}/${STAMP}_${session.id}.jsonl`;
+    await store`insert into omp_session_files (path, content, mtime_ms, byte_len)
+      values (${path}, ${head}, ${LAST_WRITE_MS}, ${Buffer.byteLength(text)})`;
+    if (tail !== "") {
+      await store`insert into omp_session_files_parts (path, start_offset, content)
+        values (${path}, ${Buffer.byteLength(head)}, ${tail})`;
+    }
   }
-}
 
-const dsnFile = join(scratch, "session-store.url");
-await writeFile(dsnFile, `${storeUrl.toString()}\n`);
+  const dsnFile = join(scratch, "session-store.url");
+  await writeFile(dsnFile, `${storeUrl.toString()}\n`);
 
-const child = Bun.spawn(["bun", SCRIPT, "--since", "24h", "--dsn-file", dsnFile], {
-  stdout: "pipe",
-  stderr: "pipe",
-});
-const [stdout, stderr, code] = await Promise.all([
-  new Response(child.stdout).text(),
-  new Response(child.stderr).text(),
-  child.exited,
-]);
-const printed = stdout.split("\n");
+  const child = Bun.spawn(["bun", SCRIPT, "--since", "24h", "--dsn-file", dsnFile], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, failures, exited] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  printed = stdout.split("\n");
+  stderr = failures;
+  code = exited;
+}, 60_000);
 
 /** One printed wait line: the wait, the arrival, what held it, the host state and the session. */
 const waitLine = (wait: string, held: string, state: string, session: Fixture): string =>
@@ -234,6 +247,8 @@ const UNHELD_OVER = MEASURED - HELD_OVER;
 const NOT_ANSWERED = 1;
 
 const EXPECTED: string[] = [
+  // The plugin's own notice is in no count: the session that carries it is one of the seven
+  // launched, and the sessions that took a message are the other six.
   `${SESSIONS} sessions launched within ${WINDOW} of now; ${WITH_ARRIVALS} of them took an ` +
     "Envoy message",
   "each line below: the wait, the arrival, the calls open at the arrival (the calls the " +
@@ -242,21 +257,31 @@ const EXPECTED: string[] = [
     "wake are in no count and on no line, and a card written before the plugin stamped the " +
     "state prints unstamped",
   "",
+  // The group the verdict turns on, and the one wait in it: the bash call opened a minute before
+  // the arrival and closed eighteen minutes after it, so it was open when the message arrived.
   `waits of ${THRESHOLD} or more with a bash or task call open (the verdict fails on these): ` +
     `${HELD_OVER}`,
-  // The call opened a minute before the arrival and closed eighteen minutes after it.
   waitLine("23m00s", "open: bash  longest call in the wait bash 18m00s", "run-active", HELD),
   "",
   `waits of ${THRESHOLD} or more with no bash or task call open: ${UNHELD_OVER}`,
+  // Every reported wait carries the host state at the hand-over: the stamped card prints the
+  // state it carries, the card whose `details` hold a replay frame and no state prints
+  // `unstamped`, and the inert card prints `inert`.
   waitLine("15m00s", NO_CALL, "startup", STAMPED),
   waitLine("14m00s", NO_CALL, "unstamped", UNSTAMPED),
   waitLine("13m00s", NO_CALL, "inert", INERT),
   waitLine("12m00s", NO_CALL, "idle", UNHELD),
   "",
+  // One unanswered arrival, not two: the notice is in this count no more than in the one above,
+  // though nothing answered it either.
   `arrivals no assistant message answered (no measured wait): ${NOT_ANSWERED}`,
+  // The unanswered arrival carries the state at the hand-over as well, and the notice is on no
+  // line: a line for it would read 43m00s, the time its session ran on after it.
   `  38m00s to the session's last record  ${ARRIVAL}  ${NO_CALL}  hand-over: prompt-setup  ` +
     labelOf(UNANSWERED),
   "",
+  // The verdict counts the five arrivals an assistant message answered, the notice left out, and
+  // fails on the one held wait above.
   `verdict: ${MEASURED} arrivals measured, ${MEASURED} waited ${THRESHOLD} or more, ` +
     `${HELD_OVER} of those with a bash or task call open. ` +
     "The measurement passes only while that last count is 0.",
@@ -266,43 +291,4 @@ const EXPECTED: string[] = [
 test("the run reports the fixture's waits, line by line", () => {
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
   expect(printed).toEqual(EXPECTED);
-});
-
-test("every wait line and every unanswered arrival carries the host state at the hand-over", () => {
-  const measured = printed.filter((text) => text.startsWith("  "));
-  expect(measured).toHaveLength(MEASURED + NOT_ANSWERED);
-  expect(measured.filter((text) => /\bhand-over: [a-z][a-z-]*\b/.test(text))).toEqual(measured);
-});
-
-test("the plugin's own notice is on no line, in no count and no measured wait", () => {
-  expect(stdout).not.toContain(LOCAL_NOTICE.id);
-  expect(stdout).not.toContain(LOCAL_NOTICE.role);
-  // Its session is one of the seven, and the only one no Envoy message reached.
-  expect(printed[0]).toBe(
-    `${SESSIONS} sessions launched within ${WINDOW} of now; ${WITH_ARRIVALS} of them took an ` +
-      "Envoy message"
-  );
-  // A counted arrival there would have been a 43m00s unanswered line.
-  expect(stdout).not.toContain("43m00s");
-  expect(printed).toContain(
-    `arrivals no assistant message answered (no measured wait): ${NOT_ANSWERED}`
-  );
-  expect(printed.at(-2)).toBe(
-    `verdict: ${MEASURED} arrivals measured, ${MEASURED} waited ${THRESHOLD} or more, ` +
-      `${HELD_OVER} of those with a bash or task call open. ` +
-      "The measurement passes only while that last count is 0."
-  );
-});
-
-test("the wait a bash call held is the group the verdict turns on", () => {
-  const group = printed.indexOf(
-    `waits of ${THRESHOLD} or more with a bash or task call open (the verdict fails on these): ` +
-      `${HELD_OVER}`
-  );
-  expect(group).toBeGreaterThan(0);
-  expect(printed[group + 1]).toBe(
-    waitLine("23m00s", "open: bash  longest call in the wait bash 18m00s", "run-active", HELD)
-  );
-  expect(printed[group + 2]).toBe("");
-  expect(printed.at(-2)).toContain(`${HELD_OVER} of those with a bash or task call open.`);
 });
