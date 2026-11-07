@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/ratelimit"
 )
@@ -315,14 +316,20 @@ func TestARestartLogsInAgainAndKeepsItsOneCredential(t *testing.T) {
 }
 
 // TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods: a machine login belongs to the pod
-// whose token made it (migration 0029), so a replaced pod of the same account gets a credential of
-// its own rather than taking the old pod's over, which is what lets several pods of one account
-// hold logins at the same time. It still ends the enrollments its predecessor made, because they
-// are the same launcher: the same ServiceAccount, the same service, and pods of an account
-// BROKER_SERVICES binds to that service. Without it, one deploy would leave every enrollment the
-// launcher pods before it made running to its lease with nothing able to revoke it.
+// whose token made it, so a replaced pod of the same account gets a credential of its own rather
+// than taking the old pod's over, which is what lets several pods of one account hold logins at
+// the same time. It still ends the enrollments its predecessor made, because they are the same
+// launcher: the same ServiceAccount, the same service, and pods of an account BROKER_SERVICES
+// binds to that service. Without it, one deploy would leave every enrollment the launcher pods
+// before it made running to its lease with nothing able to revoke it.
+//
+// Migration 0029 keeps 0015's one-credential-per-subject index so a roll serves both broker
+// generations against one database, so this drives the schema the release after this one leaves
+// (storetest.PerPodLoginSchema); TestOneSubjectHoldsOneLoginOnThisReleasesSchema drives the
+// other side of the same staging.
 func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) {
 	ts := newTestServer(t)
+	storetest.PerPodLoginSchema(t, ts.Store)
 	firstKey := newSigningKey(t)
 	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
 	if status != http.StatusOK {
@@ -358,6 +365,42 @@ func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) 
 	}
 }
 
+// TestOneSubjectHoldsOneLoginOnThisReleasesSchema is the other side of migration 0029's staging,
+// and what this release ships: while 0015's launcher_credentials_live_subject is still there — a
+// roll of the broker serves the previous generation beside this one, and that generation's own
+// upsert resolves against no other index — a subject holds one live credential whatever its pod,
+// so a replaced pod takes the account's row over exactly as the previous broker leaves it. The
+// per-pod login of TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods starts at the
+// release that drops that index.
+func TestOneSubjectHoldsOneLoginOnThisReleasesSchema(t *testing.T) {
+	ts := newTestServer(t)
+	firstKey := newSigningKey(t)
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, firstKey))
+	if status != http.StatusOK {
+		t.Fatalf("the first pod's token login = %d %s, want 200", status, body)
+	}
+	first := decode[wireTokenLogin](t, body)
+
+	nextKey := newSigningKey(t)
+	replacementPod := uuid.NewString()
+	status, body = ts.tokenLogin(t, ts.accountToken(t, daemonAccount, replacementPod, time.Hour), ts.daemonRequest(t, nextKey))
+	if status != http.StatusOK {
+		t.Fatalf("the replacement pod's token login = %d %s, want 200", status, body)
+	}
+	if next := decode[wireTokenLogin](t, body); next.CredentialID != first.CredentialID {
+		t.Fatalf("the replacement pod's credential = %s, want the account's one row %s until the index is dropped", next.CredentialID, first.CredentialID)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials where subject=$1 and revoked_at is null`, daemonAccount); !slices.Equal(got, []string{"1"}) {
+		t.Fatalf("live credentials of the account = %v, want the account's one", got)
+	}
+	if got := ts.column(t, `select coalesce(pod_uid,'') from launcher_credentials where id=$1`, first.CredentialID); !slices.Equal(got, []string{replacementPod}) {
+		t.Fatalf("the row's pod = %v, want the pod that logged in last, %s: a pod's own login still enrols that pod alone", got, replacementPod)
+	}
+	if status, body := ts.enrollPodWith(t, firstKey, first.CredentialID); status != http.StatusUnauthorized {
+		t.Fatalf("the first pod's key after the replacement = %d %s, want 401: the row moved to the replacement's key", status, body)
+	}
+}
+
 // TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow is the upgrade itself: migration 0028
 // adds pod_uid and writes nothing into it, so the credential a running daemon's pod made before
 // the upgrade is a live row of its subject carrying no pod. Its next renewal, with the key it
@@ -368,6 +411,10 @@ func TestAReplacedPodGetsALoginOfItsOwnAndEndsItsPredecessorsPods(t *testing.T) 
 // leaving the daemon unable to enrol or revoke a worker until a person intervened.
 func TestAPodBoundLoginFromBeforeTheUpgradeRenewsOnItsOwnRow(t *testing.T) {
 	ts := newTestServer(t)
+	// The per-pod conflict target is what cannot match such a row, so this is the schema of the
+	// release after this one; on this release's the login's target is (subject) and the row is
+	// its own match already.
+	storetest.PerPodLoginSchema(t, ts.Store)
 	key := newSigningKey(t)
 	daemonPod := uuid.NewString()
 	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, daemonPod, time.Hour), ts.daemonRequest(t, key))

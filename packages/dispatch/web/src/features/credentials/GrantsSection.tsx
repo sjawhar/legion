@@ -14,17 +14,24 @@ function grantedBy(grant: CredentialGrant): string {
 }
 
 /**
- * Why nobody may revoke this grant, or null where somebody may. A grant the policy gave without
- * asking, on a session nobody operates, belongs to no person: the broker's revoke allows the
- * grant's approver or its session's operator and this row has neither, so it would refuse every
- * signed-in person `NOT_APPROVER`. Such a grant is listed to everyone so that what a pod took is
- * on somebody's page, and it ends when the service's machine login that enrolled that session is
- * revoked, which ends every session under it, or when it expires.
+ * Why nobody may revoke this grant, or null where somebody may. This is the broker's `mayRevoke`
+ * condition, which is why it reads the two fields that decide it rather than `granted`: the
+ * broker allows the grant's approver or its session's operator, and refuses a grant that names
+ * neither — one the policy gave without asking, on a session nobody operates — to every
+ * signed-in person, `NOT_APPROVER`. Such a grant is listed to everyone so that what a pod took
+ * is on somebody's page, and it ends when the service's machine login that enrolled that session
+ * is revoked, which ends every session under it, or when it expires.
+ *
+ * The wire says "nobody" two ways and both arrive here: an absent approver is `null`
+ * (`approverGrantResp.Approver` is a `*string`), and an enrollment with no operator is `""`
+ * (`recordEnrollmentResp.Operator` is a Go `string`, so it is never null), which Dispatch relays
+ * unchanged. `mayRevoke` reads both as nobody, since a login that canonicalizes to the empty
+ * string matches no person, so this reads both as nobody too.
  */
 function unrevocable(grant: CredentialGrant): string | null {
-  return grant.granted === "automatic" && grant.enrollment.operator === null
-    ? "Ends with its machine login"
-    : null;
+  const approver = (grant.approver ?? "").trim();
+  const operator = (grant.enrollment.operator ?? "").trim();
+  return approver === "" && operator === "" ? "Ends with its machine login" : null;
 }
 
 const columns: readonly RevocableColumn<CredentialGrant>[] = [

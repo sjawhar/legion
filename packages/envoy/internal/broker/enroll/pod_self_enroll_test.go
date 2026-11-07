@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
@@ -48,6 +50,18 @@ func newPodRig(t *testing.T) podRig {
 	svc.ServiceLogins = map[string]string{selfAccount: podLoginService, launcherAccount: podLoginService}
 	svc.ServicesByAccount = map[string]string{workerPodAccount: podLoginService}
 	return podRig{svc: svc, issuer: issuer, key: key}
+}
+
+// newPerPodRig is newPodRig on the schema the release after this one leaves: migration 0029
+// keeps 0015's one-credential-per-subject index so a roll serves both broker generations, and
+// until the follow-up migration drops it a subject holds one live credential whatever its pod
+// (storetest.PerPodLoginSchema, IssueTokenLoginTx). Every row that drives the per-pod login
+// takes its rig from here.
+func newPerPodRig(t *testing.T) podRig {
+	t.Helper()
+	r := newPodRig(t)
+	storetest.PerPodLoginSchema(t, r.svc.Store)
+	return r
 }
 
 // token is account's projected token, bound to pod podUID ("" for a token bound to no pod).
@@ -152,8 +166,10 @@ func TestAPodsOwnLoginEnrolsItsOwnPodAlone(t *testing.T) {
 // TestEveryPodOfAnAccountHoldsItsOwnLoginAtOnce: several pods run as one self-enrolling account at
 // the same time, so each holds a machine login of its own, with its own key and its own pod, and
 // one pod's login never takes another's over. Each enrols its own pod and is refused the other's.
+// On the schema of the release after this one, which is where the per-pod login starts
+// (newPerPodRig).
 func TestEveryPodOfAnAccountHoldsItsOwnLoginAtOnce(t *testing.T) {
-	r := newPodRig(t)
+	r := newPerPodRig(t)
 	first := r.login(t, selfAccount, "pod-uid-one")
 	second := r.login(t, selfAccount, "pod-uid-two")
 	if first.ID == second.ID {
@@ -304,8 +320,10 @@ func (r podRig) revoked(t *testing.T, enrollmentID string) bool {
 // replaces every launcher at once, leaving every enrollment they made to run to its lease with
 // nothing able to revoke it. The new credential ends them at once: same ServiceAccount, same
 // service, and a pod of an account BROKER_SERVICES binds to that service.
+// Each launcher pod holds a login of its own only on the schema of the release after this one
+// (newPerPodRig); until then the replacement takes the account's row over and needs no rule.
 func TestAReplacedLauncherPodEndsItsPredecessorsEnrollments(t *testing.T) {
-	r := newPodRig(t)
+	r := newPerPodRig(t)
 	ctx := context.Background()
 	first := r.login(t, launcherAccount, "pod-uid-daemon-one")
 	worker, err := r.enroll(t, first, workerPodAccount, "pod-uid-worker")
@@ -347,7 +365,9 @@ func TestALauncherStillEndsItsOwnEnrollments(t *testing.T) {
 // binds no pod account, so one session pod can never end another's enrollment, whichever of them
 // logged in last. This is what keeps the replaced-launcher rule to launchers.
 func TestASelfEnrolledPodEndsNoOtherPodsEnrollment(t *testing.T) {
-	r := newPodRig(t)
+	// Two session pods hold two logins at once only on the schema of the release after this
+	// one (newPerPodRig).
+	r := newPerPodRig(t)
 	ctx := context.Background()
 	first := r.login(t, selfAccount, "pod-uid-session-one")
 	mine, err := r.enroll(t, first, selfAccount, "pod-uid-session-one")
@@ -384,5 +404,42 @@ func TestATokenLoginEndsNoEnrollmentOfAnotherServicesPods(t *testing.T) {
 	}
 	if r.revoked(t, pod.ID.String()) {
 		t.Fatalf("enrollment %s ended, want it untouched", pod.ID)
+	}
+}
+
+// TestThePreviousBrokersTokenLoginStillRunsOnTheMigratedSchema is the rolling upgrade. The
+// broker runs more than one pod and a roll serves the previous generation beside this one
+// against one database (docs/site/.../broker/operate.md, "Running more than one pod";
+// cmd/broker/multiprocess_test.go), and the previous generation's own upsert names
+// `on conflict (subject) where subject is not null and revoked_at is null`, which Postgres
+// resolves against 0015's launcher_credentials_live_subject and against neither index migration
+// 0029 adds. Dropping that index in 0029 would therefore fail every token login and every
+// machine token exchange on the pods still serving, 42P10, for the length of every roll. So
+// 0029 drops nothing and this runs the previous statement, word for word, against the schema
+// 0029 leaves.
+//
+// Its counterpart is storetest.PerPodLoginSchema: once the release after this one drops that
+// index the statement here stops resolving, which is exactly why the drop waits for the release
+// whose pods no longer run it.
+func TestThePreviousBrokersTokenLoginStillRunsOnTheMigratedSchema(t *testing.T) {
+	r := newPodRig(t)
+	key := newLoginKey(t)
+	var id string
+	// The statement as origin/main's IssueTokenLoginTx writes it, with that release's columns:
+	// no pod_uid, and the conflict target it names.
+	if err := r.svc.Store.Pool.QueryRow(context.Background(),
+		`insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
+		values ($1, null, $2, $3, $4, $5, null, $6, $7)
+		on conflict (subject) where subject is not null and revoked_at is null
+		do update set operator=excluded.operator, service=excluded.service, host=excluded.host,
+			key_thumbprint=excluded.key_thumbprint, public_jwk=excluded.public_jwk,
+			expires_at=excluded.expires_at
+		returning id`,
+		uuid.New(), podLoginService, "legion/"+selfAccount, key.thumbprint, key.jwk, selfAccount,
+		time.Now().Add(time.Hour)).Scan(&id); err != nil {
+		t.Fatalf("the previous broker's token-login upsert on the migrated schema: %v; it must still resolve its conflict target, or every roll of the broker fails that generation's logins with 42P10", err)
+	}
+	if id == "" {
+		t.Fatal("the previous broker's upsert wrote no credential")
 	}
 }

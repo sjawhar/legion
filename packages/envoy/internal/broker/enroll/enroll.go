@@ -289,51 +289,69 @@ func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.U
 // and the access token that names it together or not at all
 // (oauth.ExchangeConfig.MachineCredentials).
 //
-// A machine login is per pod, not per account (migration 0029): a login a pod's own projected
-// token made belongs to that pod, so every pod of an account may hold one at the same time, each
-// with its own key, and a login from a token bound to no pod — a launcher's, which names no pod
-// of its own, a machine's and a person's sign-in — is its subject's one such credential. Either
-// way the credential is created at its first login and each later login of the same pod, or of
-// the same subject from no pod, moves it to that login's key, person and expiry under the same
-// id, so a login proving the key the credential already holds changes only its expiry and every
-// session enrolled under it stays there. A machine's subject names that one machine
+// A machine login becomes per pod rather than per account over two releases, and this reads
+// which of the two schemas it is on and names the conflict target that schema has, so both
+// generations of the broker are right on either while a roll serves them together
+// (migration 0029, and legacySubjectIndex below).
+//
+// While 0015's launcher_credentials_live_subject is still there — this release — one subject
+// holds one live credential, and every login of that subject moves it: that is what the previous
+// broker does, and what the previous broker's own upsert needs the index for. The login's pod is
+// written to the row all the same (migration 0028), which is what lets a pod's own login enrol
+// that pod and no other (podUnderTokenLogin).
+//
+// Once the release after this one has dropped that index, a login a pod's own projected token
+// made belongs to that pod, so every pod of an account may hold one at the same time, each with
+// its own key, and a login from a token bound to no pod — a launcher's, which names no pod of
+// its own, a machine's and a person's sign-in — is its subject's one such credential. A pod
+// whose credential predates that release carries no pod on its row, so the per-pod conflict
+// target cannot match it; such a pod claims that row for itself on its next login, by its
+// subject and the key the login signed with, and keeps its id, rather than being refused its own
+// key for as long as the row lives.
+//
+// Either way the credential is created at its first login and each later login of the same pod,
+// or of the same subject, moves it to that login's key, person and expiry under the same id, so
+// a login proving the key the credential already holds changes only its expiry and every session
+// enrolled under it stays there. A machine's subject names that one machine
 // (exchange.MachineSubject) and a sign-in's names one person on one box
 // (exchange.PersonSubject), so each machine of a fleet, and each person signed in on each of its
 // boxes, holds a credential of its own and no login moves another's. Its host and its pod are
-// login's. A pod whose credential predates the upgrade — migration 0028 added pod_uid empty, so
-// that row carries no pod and the per-pod conflict target cannot match it — claims that row for
-// itself on its next login, by its subject and the key the login signed with, and keeps its id,
-// so a daemon running across the upgrade renews on the row it already holds rather than being
-// refused its own key for as long as that row lives. Each login writes a
-// launcher_credential.token_login audit row naming the subject, the pod the token is bound to,
-// the key, and both expiries. A key another live credential holds is a unique violation
-// (store.IsUniqueViolation), and nothing is written.
+// login's. Each login writes a launcher_credential.token_login audit row naming the subject, the
+// pod the token is bound to, the key, and both expiries. A key another live credential holds is
+// a unique violation (store.IsUniqueViolation), and nothing is written.
 func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenLogin) (uuid.UUID, error) {
 	var operator *string
 	if login.Operator != "" {
 		operator = new(record.CanonicalLogin(login.Operator))
 	}
-	// Postgres takes one conflict target, so the login's own index is named: a pod's login
-	// matches the row of that subject and pod, a pod-less login the row of that subject with no
-	// pod. Neither can match the other's row, which is what lets several pods of an account hold
-	// logins at once without one taking another's over.
-	conflict := `(subject) where subject is not null and pod_uid is null and revoked_at is null`
-	if login.PodUID != "" {
+	// Postgres resolves one conflict target against one index, so which index the schema has
+	// decides which target this names. perPodLogins is false while 0015's index is still there,
+	// and the statement is then the previous broker's exactly.
+	perPod, err := perPodLogins(ctx, tx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	conflict := `(subject) where subject is not null and revoked_at is null`
+	switch {
+	case !perPod:
+	case login.PodUID == "":
+		conflict = `(subject) where subject is not null and pod_uid is null and revoked_at is null`
+	default:
 		conflict = `(subject, pod_uid) where subject is not null and pod_uid is not null and revoked_at is null`
-		// Migration 0028 added pod_uid empty, so the credential a pod's token made before the
-		// upgrade is a live row of that subject carrying no pod, which the conflict target
-		// just named cannot match. Left alone, the insert below would collide with that row
-		// on launcher_credentials_live_key -- the key is the one the running daemon is
-		// renewing with -- and be refused 409 KEY_HOLDS_LIVE_CREDENTIAL for as long as the
-		// row exists, which expiry does not end, since that index covers expired rows too.
-		// So the pod the token just proved claims the row first, found by its subject and by
-		// the very key this login signed with: only the holder of that key can, and the
-		// holder is the pod that made it. The row keeps its id, so the upsert then finds it
-		// through (subject, pod_uid) and moves it as any later login of that pod, and every
-		// session enrolled under it stays there. Nothing is claimed when the pod already
-		// holds a live row of its own -- a pod presenting a second key -- which would be a
-		// (subject, pod_uid) collision of its own; the upsert decides that login as it
-		// decides any other whose key a live credential holds.
+		// Migration 0028 added pod_uid empty, so the credential a pod's token made before
+		// the per-pod schema is a live row of that subject carrying no pod, which the
+		// conflict target just named cannot match. Left alone, the insert below would
+		// collide with that row on launcher_credentials_live_key -- the key is the one the
+		// running daemon is renewing with -- and be refused 409 KEY_HOLDS_LIVE_CREDENTIAL
+		// for as long as the row exists, which expiry does not end, since that index covers
+		// expired rows too. So the pod the token just proved claims the row first, found by
+		// its subject and by the very key this login signed with: only the holder of that
+		// key can, and the holder is the pod that made it. The row keeps its id, so the
+		// upsert then finds it through (subject, pod_uid) and moves it as any later login of
+		// that pod, and every session enrolled under it stays there. Nothing is claimed when
+		// the pod already holds a live row of its own -- a pod presenting a second key --
+		// which would be a (subject, pod_uid) collision of its own; the upsert decides that
+		// login as it decides any other whose key a live credential holds.
 		if _, err := tx.Exec(ctx, `update launcher_credentials set pod_uid=$1
 			where subject=$2 and key_thumbprint=$3 and pod_uid is null and revoked_at is null
 			  and not exists (select 1 from launcher_credentials held
@@ -361,6 +379,30 @@ func (s *Service) IssueTokenLoginTx(ctx context.Context, tx pgx.Tx, login TokenL
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// legacySubjectIndex is 0015's one-live-credential-per-subject index, which migration 0029
+// deliberately leaves in place and the release after it drops. While it exists the previous
+// broker is still able to serve: its upsert names `on conflict (subject) where subject is not
+// null and revoked_at is null`, which Postgres resolves against this index and against neither
+// index 0029 adds, and a roll of the broker serves both generations at once.
+const legacySubjectIndex = "launcher_credentials_live_subject"
+
+// perPodLogins reports whether the schema tx runs on gives each pod of a subject a launcher
+// credential of its own, which it does once legacySubjectIndex is gone: that index allows one
+// live credential per subject whatever its pod, so while it is there a second pod's row cannot
+// exist at all and naming a per-pod conflict target would only turn that into a unique
+// violation. It is read per login rather than once at start because the index goes while this
+// process is running — the next release's own pod migrates the database at its boot, with this
+// one still serving — and a cached answer would name a conflict target the schema no longer has
+// and fail with 42P10, which is the failure this whole staging exists to avoid. One catalog
+// lookup on a route a service reaches a few times an hour.
+func perPodLogins(ctx context.Context, tx pgx.Tx) (bool, error) {
+	var legacy bool
+	if err := tx.QueryRow(ctx, `select to_regclass($1) is not null`, legacySubjectIndex).Scan(&legacy); err != nil {
+		return false, err
+	}
+	return !legacy, nil
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
