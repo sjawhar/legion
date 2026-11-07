@@ -773,50 +773,62 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// over a sample it had compared no success in: this is the check that would have said so on
 	// the day it landed.
 	//
-	// A floor on the pairs could never fail by itself, since ranTexts is filled where ran is
-	// counted and the pairs are never the smaller number, so the floor below is on the different
-	// statements. The pairs are bounded from ABOVE instead, which is a question of their own: this
-	// leg asks every text once per entry of settings, so a sweep that lost a setting asks the
-	// same one twice and every statement the server runs it runs under both asks, making the
-	// pairs exactly twice the statements. A correct sweep cannot reach that, because the corpus
-	// itself builds texts the two settings answer differently - a statement
-	// standard_conforming_strings makes the server run under one and refuse under the other.
-	// Measured on 2026-11-07: 6,264 pairs over 3,431 statements, which is 2,833 statements run
-	// under both settings and 598 run under exactly one, so the bound's margin is 598 pairs,
-	// 8.7 per cent below where it fires.
-	//
-	// That premise lives in the corpus's own reach, not in the fixed set: 597 of those 598 are
-	// texts the corpus built, so the bound keeps its reason with any fixed statement removed.
-	// What would move it is an alphabet or depth change that stops the two settings disagreeing,
-	// which the per-class tally below would show as well.
-	//
-	// What else catches a lost setting, forced both ways rather than argued: losing off (6,796
-	// pairs over 3,398) fails the fixed-text assertion and the per-class tally, since U&'zqz'
-	// stops raising its class and that class's generated count falls to 0, and the lost-marker
-	// and refusal checks below with them; losing on (5,732 over 2,866) fails those two checks
-	// ALONE, since U&'zqz' still raises its class under off. The per-connection check of
-	// standard_conforming_strings fires on neither, comparing as it does against the same
-	// settings array: what it catches is a connection that did not take the option it was asked
-	// for. So a lost on is caught by two checks rather than four, which is why this bound is
-	// worth its line. Those readings were taken before the bound existed; with it here the bound's
-	// own Fatalf stops the run first, so a reader driving either sweep sees this line and not
-	// them - which is worth knowing, since a red attributed to the wrong assertion is how a claim
-	// about these guards went wrong once already.
-	if ran >= 2*len(ranTexts) {
-		t.Fatalf("the server ran %d (text, setting) pairs over %d different statements, exactly twice or more: every statement it ran it ran under both asks, which two different settings cannot do while the corpus builds texts they answer differently - 598 of them at the head this was measured at", ran, len(ranTexts))
-	}
-	// And the floor itself, on the corpus's own reach, measured in the same run as the counts
-	// above. Four of the sample's own statements are ones the server runs rather than texts the
+	// The floor is on the different statements rather than on the pairs: a floor on the pairs
+	// could never fail by itself, since ranTexts is filled where ran is counted and the pairs are
+	// never the smaller number. Measured on 2026-11-07: 3,431 different statements over 6,264
+	// pairs. Four of the sample's own statements are ones the server runs rather than texts the
 	// corpus built: the three seeded for that purpose, and U&'zqz'. The other eighteen fixed
 	// statements are refusals under both settings by construction, which is what they are for, so
 	// this floor stands on the corpus's own reach but for those four.
 	//
-	// Which question each number answers, since none of the three is a measure of quality: this
-	// one is diversity of texts and the one above is collapse, while shape is the per-class tally
-	// below. 3,431 different statements could still be one shape built from different pieces, and
-	// no count tells that apart.
+	// Which question each number answers, since none of the four is a measure of quality: this
+	// one is diversity of texts, the floor above it is collapse, the bound below it is a sweep
+	// that compared each text against itself, and shape is the per-class tally below. 3,431
+	// different statements could still be one shape built from different pieces, and no count
+	// tells that apart.
 	if len(ranTexts) < 1_000 {
 		t.Fatalf("the server ran %d different statements of this sample over %d (text, setting) pairs, under this floor of 1,000 statements, where the sample reached 3,431 over 6,264 when the floor was set: the successes this leg compared are too few a set of texts to say anything about the reading", len(ranTexts), ran)
+	}
+	// And the pairs bounded from ABOVE, after both floors rather than before them, so that a leg
+	// which compared almost nothing is told that by the floors in their own words instead of
+	// being told a setting was lost. Every text the server ran it ran under one ask or both, so
+	// the pairs can never pass twice the statements, and this bound fires on exactly one state:
+	// every statement that ran, ran under both asks, and none ran under exactly one. Reaching it
+	// at all now means ran and the statements are both past 1,000, so the vacuous 0 >= 0 that a
+	// leg comparing nothing produces cannot arrive here.
+	//
+	// That state has more than one cause, so the message names what was seen and leaves the cause
+	// to its reader. A sweep that lost a setting is one: this leg asks every text once per entry
+	// of settings, so a duplicated array asks the same setting twice and every statement the
+	// server runs it runs under both asks. A reading that takes the server's successes for
+	// refusals is another, and it arrives with settings holding both values.
+	//
+	// A correct sweep cannot reach it, because the corpus itself builds texts the two settings
+	// answer differently - a statement standard_conforming_strings makes the server run under one
+	// and refuse under the other. Measured on 2026-11-07: 6,264 pairs over 3,431 statements,
+	// which is 2,833 statements run under both settings and 598 run under exactly one, so the
+	// bound's margin is 598 pairs, 8.7 per cent below where it fires. That premise lives in the
+	// corpus's own reach, not in the fixed set: 597 of those 598 are texts the corpus built, so
+	// the bound keeps its reason with any fixed statement removed. What would move it is an
+	// alphabet or depth change that stops the two settings disagreeing, which the per-class tally
+	// below would show as well.
+	//
+	// It reports rather than stops, so a reader of a red here sees every other check that fires
+	// with it. Measured at this head by driving each fault and reading the set of checks the red
+	// names, by name rather than by line, since a reorder renames every line below it: a sweep
+	// that loses off (6,796 pairs over 3,398) is caught by this bound, the lost-marker check
+	// below with 419 lost, the fixed-text assertion with one class unraised and the per-class
+	// tally with one class unformed, since U&'zqz' stops raising its class under off; a sweep
+	// that loses on (5,732 over 2,866) is caught by this bound and the lost-marker check alone,
+	// with 17 lost, since U&'zqz' still raises its class under off; and a reading that takes the
+	// server's successes for refusals (3,484 over 1,742, with settings holding both values) is
+	// caught by this bound ALONE. The refusal check fires on none of the three, and neither does
+	// the per-connection check of standard_conforming_strings, which compares against the same
+	// settings array: what that one catches is a connection that did not take the option it was
+	// asked for. So one of the three faults is this bound's alone and another has one other
+	// check, which is why it is worth its line.
+	if ran >= 2*len(ranTexts) {
+		t.Errorf("the server ran %d (text, setting) pairs over %d different statements, exactly twice or more: no statement of this sample ran under one setting only, where the corpus gives 598 of them at the head this was measured at. A sweep that lost a setting does that, and so does a reading that takes the server's successes for refusals", ran, len(ranTexts))
 	}
 	var unformed, unraised, byName, byStride []string
 	t.Logf("a fixed statement is asked under both settings, so it contributes exactly two hits where it raises its class under both and one where only one setting raises it; a class whose hits are its fixed statement's alone is a class the corpus never formed, which is its generated count below reading 0")
