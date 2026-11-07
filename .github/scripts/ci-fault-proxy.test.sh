@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for `ci-fault-proxy.py`: each of its three modes over plain HTTP and over CONNECT, and a
-# host outside --hosts passed on in every one of them.
+# Tests for `ci-fault-proxy.py`: each of its three modes over plain HTTP and over CONNECT, a
+# host outside --hosts passed on in every one of them, and --bind.
 #
 # Nothing here touches the real internet. The host that is passed on is an origin this test
 # starts, a `python3 -m http.server` on a loopback port, and the host that is faulted is either
@@ -63,7 +63,7 @@ fi
 echo "measured: the origin listens on 127.0.0.1:$origin_port"
 
 # start_proxy <name> <arguments...>: starts the proxy on a free port, waits for its port file and
-# sets $proxy. Its pid joins the list the trap kills.
+# sets $proxy and $proxy_port. Its pid joins the list the trap kills.
 start_proxy() {
   local name=$1
   shift
@@ -84,6 +84,7 @@ start_proxy() {
     cat "$work/$name.log" >&2
     exit 1
   fi
+  proxy_port=$port
   proxy="http://127.0.0.1:$port"
 }
 
@@ -160,6 +161,21 @@ run_curl --max-time 10 -x "$proxy" "http://localhost:$origin_port/hello.txt"
 check "a host outside --hosts reaches the origin over plain HTTP" "$(is "$out" 'the origin answered')"
 run_curl --max-time 10 -x "$proxy" --proxytunnel "http://localhost:$origin_port/hello.txt"
 check "and through CONNECT" "$(is "$out" 'the origin answered')"
+
+echo "case: --bind listens on another address, which is how a docker build reaches the proxy"
+# 127.0.0.2 stands in for the docker bridge gateway: a second address of this machine that the
+# default 127.0.0.1 does not answer on, so the case proves both halves of the option — the proxy
+# serves where --bind says, and nowhere else. Every Linux kernel routes the whole 127.0.0.0/8 to
+# loopback, so this needs no interface of its own.
+start_proxy bind --mode fail --hosts fetch.invalid --bind 127.0.0.2
+run_curl -x "http://127.0.0.2:$proxy_port" -o /dev/null -w '%{http_code}' http://fetch.invalid/tool.tar.gz
+echo "  measured: the proxy on 127.0.0.2:$proxy_port answered $out, curl exit $status"
+check "a request to the bound address is served" "$(is "$out" 504)"
+run_curl --max-time 5 -x "http://127.0.0.1:$proxy_port" -o /dev/null -w '%{http_code}' http://fetch.invalid/tool.tar.gz
+echo "  measured: the same port on 127.0.0.1 gave curl exit $status: $out"
+check "and 127.0.0.1 is not listening, which curl reports as exit 7" "$(is "$status" 7)"
+check "the proxy's first line names the address it bound" \
+  "$(contains "$(cat "$work/bind.log")" "^ci-fault-proxy: mode=fail bind=127\.0\.0\.2 port=$proxy_port ")"
 
 echo "case: the proxy logs what it did, and fetched nothing of its own"
 fail_log=$(cat "$work/fail.log")

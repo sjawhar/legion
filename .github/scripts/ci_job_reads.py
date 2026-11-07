@@ -67,6 +67,16 @@ CI_RETRY = ".github/scripts/ci-retry.sh"
 # `mod` is not one of the verbs ci_filter_coverage.py's GO_COMMAND matches, so the step claims no
 # Run of its own.
 GO_DOWNLOAD_STEP = "Download the Go modules this job builds"
+# The two jobs that prove the retry against the fault it answers (dispatch://INFRA-1545, T7):
+# the fault, the rig that puts one in front of one step or one image build at a time, and the
+# steps their gates cite.
+FAULT_PROXY = ".github/scripts/ci-fault-proxy.py"
+RETRY_RIG = ".github/scripts/download-retry-proof.sh"
+RETRY_JOB = "download-retry"
+IMAGES_JOB = "download-retry-images"
+RETRY_FIRST_PROXY = "Start the recovering fault for install-changie"
+RETRY_FIRST_REPORT = "What install-changie's curl did under the recovering fault"
+RETRY_GO_STEP = "Download packages/envoy's Go modules under the recovering fault"
 
 
 def targets(path: str, key: str) -> list:
@@ -1165,6 +1175,37 @@ GATES = [
         (".github/scripts/ci_images.py", "both scripts read a row's upstream with it"),
         (".github/actions/install-crane/**", at("ci-images", "./.github/actions/install-crane")),
         (CI_RETRY, f"{at('ci-images', COPY_STEP)}: mirror-ci-images.sh sources it for every registry read that has to succeed"),
+    ) + CI_SELF),
+
+    # The two jobs that prove the retry rather than the build (dispatch://INFRA-1545, T7):
+    # download-retry runs each real site under .github/scripts/ci-fault-proxy.py, and
+    # download-retry-images builds the three Dockerfiles under the same fault. Each gate
+    # declares what those downloads read — the retry, the fault, the rig, the actions and the
+    # pins and manifests the sites themselves read — and nothing of what the downloads later
+    # build: worker-image and envoy-smoke prove the builds, these two prove that a download
+    # survives a faulting host, and no source file changes that behaviour.
+    gate("download_retry", "download-retry", reads=reads(
+        (FAULT_PROXY, f"{at(RETRY_JOB, RETRY_FIRST_PROXY)} and every other proxy step of the job run it"),
+        (RETRY_RIG, f"{at(RETRY_JOB, RETRY_FIRST_PROXY)} starts the proxy with it and "
+                    f"{at(RETRY_JOB, RETRY_FIRST_REPORT)} reads its log with it"),
+        (".github/actions/install-changie/**", at(RETRY_JOB, "./.github/actions/install-changie")),
+        (".github/actions/install-claude-code/**", at(RETRY_JOB, "./.github/actions/install-claude-code")),
+        (".claude-code-pin", ".github/actions/install-claude-code/action.yml:16 pin=$(<.claude-code-pin)"),
+        ("go.work", f"{at(RETRY_JOB, RETRY_GO_STEP)}: the download runs in the root workspace"),
+        ("go.work.sum", f"{at(RETRY_JOB, RETRY_GO_STEP)}: the root workspace's sums"),
+        (f"{DAEMON}/go.mod", f"{at(RETRY_JOB, RETRY_GO_STEP)}: go.work binds it, so its requirements move what comes down"),
+        (f"{DAEMON}/go.sum", f"{at(RETRY_JOB, RETRY_GO_STEP)}: go.work binds it"),
+        (f"{ENVOY}/go.sum", f"{at(RETRY_JOB, RETRY_GO_STEP)}: the module whose download is faulted"),
+    ) + bun_job(RETRY_JOB) + install_jj(RETRY_JOB) + install_omp(RETRY_JOB)
+      + setup_go(RETRY_JOB, f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("download_retry_images", "download-retry-images", reads=reads(
+        (f"{DAEMON}/docker/worker.Dockerfile", f"{at(IMAGES_JOB, 'Build the worker image under the recovering fault')} builds it"),
+        (f"{ENVOY}/docker/Dockerfile", f"{at(IMAGES_JOB, 'Build the Envoy image under the recovering fault')} builds it, and "
+                                       f"{at(IMAGES_JOB, 'Build the smoke image the held-port wrapper takes as its base, with no proxy')} builds it unfaulted first"),
+        (f"{ENVOY}/infra/host/heldportwrapper/Dockerfile", f"{at(IMAGES_JOB, 'Build the held-port image under the recovering fault')} builds it"),
+        (FAULT_PROXY, f"{at(IMAGES_JOB, 'Start the recovering fault for the worker image build')} runs it, bound to the docker bridge"),
+        (RETRY_RIG, f"{at(IMAGES_JOB, 'Build the worker image under the recovering fault')} builds through it"),
     ) + CI_SELF),
 ]
 

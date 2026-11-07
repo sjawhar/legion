@@ -22,6 +22,13 @@ the proxy, reads the port and sets http_proxy and https_proxy for the step under
 is written whole, by rename, so a reader never sees half a port; the recovery window starts the
 moment it appears, which is the first moment a caller can use the proxy.
 
+--bind is the address it listens on, 127.0.0.1 by default. A `RUN` of a docker build runs in a
+network namespace of its own, where 127.0.0.1 is the build container and not the runner, so a
+build reaches this proxy only on an address the container can route to: the docker bridge
+gateway, which .github/workflows/ci.yaml's download-retry-images job binds to and passes into
+the build as http_proxy. Nothing else changes: a caller that names no --bind listens where it
+always did.
+
 It makes no fetch of its own: every byte it sends upstream is one a client sent it. It is Python
 3 from the runner image, with nothing to install.
 """
@@ -247,13 +254,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds of 504s before --mode recover passes requests on, counted from the port file")
     parser.add_argument("--stall-seconds", type=float, default=600.0,
                         help="how long --mode stall holds one connection open before dropping it")
+    parser.add_argument("--bind", default="127.0.0.1",
+                        help="the address to listen on; a docker build reaches it on the bridge gateway, not on 127.0.0.1")
     parser.add_argument("--port", type=int, default=0, help="0 takes a free port from the kernel")
     parser.add_argument("--port-file", default="", help="where to write the port it listens on")
     args = parser.parse_args(argv)
 
     hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
     Handler.stall_seconds = args.stall_seconds
-    server = Proxy(("127.0.0.1", args.port), Handler)
+    server = Proxy((args.bind, args.port), Handler)
     port = server.server_address[1]
     if args.port_file:
         write_port_file(args.port_file, port)
@@ -261,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     # request is served: between bind and serve_forever a connection waits in the backlog, so no
     # request can be answered out of the window it belongs to.
     Handler.fault = Fault(args.mode, hosts, args.recover_after)
-    log(f"mode={args.mode} port={port} hosts={','.join(hosts) or 'every host'} pid={os.getpid()}")
+    log(f"mode={args.mode} bind={args.bind} port={port} hosts={','.join(hosts) or 'every host'} pid={os.getpid()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
