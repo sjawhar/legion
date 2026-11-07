@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -124,12 +125,19 @@ func catchUpClock() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time
 // client, with admission at cap: what the boot catch-up runs on.
 func catchUpRig(t *testing.T, client dispatch.Client, cap int) (*pgxpool.Pool, *workflowRuntime) {
 	t.Helper()
+	return catchUpRigLogging(t, client, cap, quietLogger())
+}
+
+// catchUpRigLogging is catchUpRig writing the runtime's and admission's own lines to log, for a
+// test that reads what the daemon logged rather than what the store holds.
+func catchUpRigLogging(t *testing.T, client dispatch.Client, cap int, log *slog.Logger) (*pgxpool.Pool, *workflowRuntime) {
+	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, quietLogger())
-	admission := admit.New(records, engine, cap, "CAPTURE", quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: catchUpClock}, log)
+	admission := admit.New(records, engine, cap, "CAPTURE", log)
 	return pool, &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, log: quietLogger(), bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
+		handlers: []intake.Handler{engine, admission}, log: log, bootID: "boot-1", catchUpRetryDelay: time.Millisecond}
 }
 
 // bootCatchUp runs the boot's catch-up as the boot does: every root it reads is held in the
@@ -213,6 +221,9 @@ func TestCatchUpReadsAnAdmittedRootsAsksFromItsLastHandout(t *testing.T) {
 			return err
 		}
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
 			return err
 		}
 		return seedCaptureArchitect(ctx, tx, true)
@@ -604,6 +615,11 @@ func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
 		if err := records.PutIssue(ctx, tx, captureRoot(phase.AwaitingPerson, &record.Awaiting{GateVersion: 3, Artifact: "artifact-root", Since: record.EventMark{Seq: 10}})); err != nil {
 			return err
 		}
+		// The root's tree was opened when it was admitted: that row, not a slot, is what says
+		// it runs, and the resume's own first phase is started from the line of a live tree.
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
+			return err
+		}
 		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3})
 	})
 	if err := bootCatchUp(t, w); err != nil {
@@ -714,6 +730,9 @@ func slottedCapture(t *testing.T, pool *pgxpool.Pool, gate *record.DesignGate, c
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
 			return err
 		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
+			return err
+		}
 		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-200", Tree: "CAPTURE-200", Project: "CAPTURE", Title: "next", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", LastDispatchSeq: 1}); err != nil {
 			return err
@@ -789,6 +808,66 @@ func TestTheFirstBootAfterTheUpgradeReplaysNothing(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// The boot's catch-up reads an admitted root only while the root's own architect is the worker
+// at work: it holds the slot that work takes and its design gate has never opened
+// (record.CanWaitOnPerson). Both ends matter, and this seeds a root that fails each one.
+//
+// CAPTURE-100's gate has opened, so under the children-first rule it is waiting for its
+// children rather than working, and ReconcileAwaiting can start no wait on a person for it
+// (workflow's decideAwait, rule 0); the slot it still holds is one admission's next pass takes
+// back. CAPTURE-200 waits in line for its first slot, so its architect has never run and has
+// handed nothing back. Reading either one's event log would hold it out of admission for a
+// window that can decide nothing, and replay, for the root that never ran, history older than
+// the handout its own admission will be.
+func TestTheCatchUpReadsNoRootWhoseArchitectDoesNotHoldTheWork(t *testing.T) {
+	cursor := catchUpHandout
+	opened := &record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3, ApprovedVersion: new(3),
+		ApprovedMark: record.EventMark{Seq: 5}}
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
+		events: []json.RawMessage{askOpened(7, "ask-q1"), askClosed(9, "answered", "ask-q1", "question", alice)}}
+	pool, w := catchUpRig(t, client, 1)
+	slottedCapture(t, pool, opened, &cursor)
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if len(client.afters) != 0 {
+		t.Fatalf("event log read after %v, want no read: neither root's own architect holds its tree's work", client.afters)
+	}
+	assertCaptureKeptItsSlot(t, pool)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
+		if err != nil || !set || got != cursor {
+			t.Fatalf("catch-up cursor = %d (set %t, %v), want the cursor %d a root the boot passed over keeps", got, set, err, cursor)
+		}
+		return nil
+	})
+}
+
+// A root a person parked, iceboxed or closed has left the workflow, so ReconcileAwaiting moves
+// it nowhere however long its slot row outlives that act — admission releases the row in its
+// next pass, and the workflow records the linger. The catch-up reads the roots that pass can
+// move (record.CanWaitOnPerson), so it opens no Dispatch window for such a root either: the
+// window could decide nothing, and the hold would keep the root out of the admission pass that
+// is there to take its slot back.
+func TestTheCatchUpReadsNoRootThatLeftTheWorkflow(t *testing.T) {
+	cursor := catchUpHandout
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 9},
+		events: []json.RawMessage{askOpened(7, "ask-q1")}}
+	pool, w := catchUpRig(t, client, 1)
+	slottedCapture(t, pool, nil, &cursor)
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		parked := captureRoot(phase.Admitted, nil)
+		parked.Status, parked.DispatchStatus = "backlog", "backlog"
+		return records.PutIssue(ctx, tx, parked)
+	})
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("catch up: %v", err)
+	}
+	if len(client.afters) != 0 {
+		t.Fatalf("event log read after %v, want no read: the root has left the workflow", client.afters)
+	}
 }
 
 // A question its architect opened and a person answered while the daemon was down is applied at
@@ -913,6 +992,9 @@ func TestADelayedRegistrationDoesNotStrandARootAcrossASeedAndABoot(t *testing.T)
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: time.Now()}); err != nil {
 			return err
 		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
+			return err
+		}
 		return records.PutGate(ctx, tx, record.DesignGate{Issue: "CAPTURE-100", ArtifactID: "artifact-root", LatestVersion: 3})
 	})
 	ctx := context.Background()
@@ -1010,6 +1092,9 @@ func TestARootRecordedBeforeTheCursorGetsOneAtItsFirstHandout(t *testing.T) {
 			return err
 		}
 		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "CAPTURE-100", Index: 0, AdmittedAt: catchUpClock()}); err != nil {
+			return err
+		}
+		if err := openTreeTx(ctx, tx, "CAPTURE", "CAPTURE-100"); err != nil {
 			return err
 		}
 		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-200", Tree: "CAPTURE-200", Project: "CAPTURE", Title: "next", Phase: phase.Admitted,

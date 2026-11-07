@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/dispatchbody"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -1116,9 +1119,8 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 		t.Fatalf("close facts = %#v", got)
 	}
 
-	// A child is not the root, a sub-architect of the tree is not the root's architect though it
-	// names the root, a phase worker is not the architect, and a reason too long for one message
-	// would never post.
+	// A child is not the root, a sub-architect of the tree is not the root's architect, and a
+	// phase worker is not the architect.
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
 	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
@@ -1130,10 +1132,84 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": worker.grant(t), "issue": "LEGION-208", "reason": "moot",
 	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
-	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
-		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": strings.Repeat("x", record.MessagePostLimit),
+
+	// The close posts the reason as a message before it writes the status, so a reason whose one
+	// block passes Dispatch's bound is refused here, naming the bound and how far over it is.
+	// Nothing is recorded: no fact reached the intake, so no outbox row carries the close.
+	overBlock := strings.Repeat("x", dispatchbody.BlockUnits)
+	refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": overBlock,
 	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("refused closes applied facts %#v", got[1:])
+	if want := "block 1 (text) is 48 characters over the 32000-character block limit"; !strings.Contains(refusal, want) {
+		t.Fatalf("refusal = %q, want it naming %q", refusal, want)
 	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("the refused close applied %#v, want nothing beyond the first close recorded", got[1:])
+	}
+	if rows := outboxRowsOf(t, h, "LEGION-208"); rows != 0 {
+		t.Fatalf("outbox rows after the refused close = %d, want none", rows)
+	}
+
+	// The bound is on a block, not on the reason: one written as blocks Dispatch takes is applied
+	// whole, however long it is.
+	long := strings.TrimSuffix(strings.Repeat(strings.Repeat("y", 6665)+"\n\n", 6), "\n\n")
+	closedLong := h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": long,
+	}, nil)
+	if closedLong.Code != http.StatusOK {
+		t.Fatalf("close with a reason of six blocks = %d: %s", closedLong.Code, closedLong.Body)
+	}
+	if got := facts.recorded(); len(got) != 2 || got[1] != (intake.CloseRoot{Issue: "LEGION-208", Reason: long}) {
+		t.Fatalf("close facts = %#v, want the 40,000-character reason applied whole", got)
+	}
+}
+
+// The outbox posts a close reason as the row's message with the row's own marker after it
+// (record.MessagePost.Posted), so the route measures that post and not the reason alone. Two
+// reasons Dispatch takes on their own make a post it refuses: one of exactly as many lines as
+// Dispatch holds a body to blocks, where the marker is one block more, and one ending inside an
+// open code fence, where the marker is code inside the last block and carries it over the unit
+// bound. Each is refused at the call, naming the bound, and records nothing: no fact and no
+// outbox row, so the architect's shortened close is applied.
+func TestAnArchitectsCloseIsRefusedWhereTheOutboxsMarkerPassesTheBound(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, tc := range []struct{ name, reason, want string }{
+		{"a reason of as many lines with text in them as Dispatch holds a body to blocks",
+			strings.TrimSuffix(strings.Repeat("y\n\n", dispatchbody.ItemBlocks), "\n\n"),
+			fmt.Sprintf("body is 1 blocks over the %d-block limit", dispatchbody.ItemBlocks)},
+		{"a reason that ends inside an open code fence",
+			"see log\n\n```\n" + strings.Repeat("y", 31980),
+			fmt.Sprintf("block 2 (code_block) is 28 characters over the %d-character block limit", dispatchbody.BlockUnits)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fact := intake.CloseRoot{Issue: "LEGION-208", Reason: tc.reason}
+			if over := dispatchbody.Check(fact.Message()); over != nil {
+				t.Fatalf("the reason on its own = %v, want a body Dispatch takes: the post is what passes the bound", over)
+			}
+			refusal := refused(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+				"grantId": architect.grant(t), "issue": "LEGION-208", "reason": tc.reason,
+			}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
+			if !strings.Contains(refusal, tc.want) {
+				t.Fatalf("refusal = %q, want it naming %q", refusal, tc.want)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("the refused close applied %#v, want nothing recorded", got)
+			}
+			if rows := outboxRowsOf(t, h, "LEGION-208"); rows != 0 {
+				t.Fatalf("outbox rows after the refused close = %d, want none", rows)
+			}
+		})
+	}
+}
+
+// outboxRowsOf is how many rows the outbox holds for issue.
+func outboxRowsOf(t *testing.T, h *harness, issue string) int {
+	t.Helper()
+	var rows int
+	if err := h.store.Pool().QueryRow(context.Background(), "select count(*) from outbox where issue = $1", issue).Scan(&rows); err != nil {
+		t.Fatalf("count the outbox rows of %s: %v", issue, err)
+	}
+	return rows
 }

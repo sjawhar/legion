@@ -200,7 +200,9 @@ func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 // catch-up is not queued again behind it. A tree with no architect to hear it — no record, no
 // tree root, lingering, out of the workflow, or waiting in `todo` for its slot — is written
 // nothing, and what it is owed waits KEPT for its next start or ready to name, since a catch-up
-// queued for nobody would only be dropped by the ready that follows.
+// queued for nobody would only be dropped by the ready that follows. No catch-up of a hand-over
+// is paced: it answers a person who is waiting, and it reaches an architect the daemon did not
+// wake, so it is due at once (the zero moment QueueCatchUp reads as now).
 func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, trees []string, now time.Time) error {
 	launches, err := store.ArchitectLaunches(ctx, tx, trees)
 	if err != nil {
@@ -221,7 +223,7 @@ func CatchUpTheTreesOwed(ctx context.Context, tx pgx.Tx, store record.Store, gat
 		if !hears {
 			continue
 		}
-		if err := QueueCatchUp(ctx, tx, store, gate.OrDefault(), *root, launches[key], now); err != nil {
+		if err := QueueCatchUp(ctx, tx, store, gate.OrDefault(), *root, launches[key], now, time.Time{}); err != nil {
 			return err
 		}
 	}

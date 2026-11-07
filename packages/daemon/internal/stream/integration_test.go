@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/testtmp"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -57,11 +58,21 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fakeOMPEnv) == "1" {
 		os.Exit(fakeOMP())
 	}
-	code := m.Run()
-	if legionDir != "" {
-		os.RemoveAll(legionDir)
-	}
-	os.Exit(code)
+	os.Exit(runRemovingTheBuiltLegion(m))
+}
+
+// runRemovingTheBuiltLegion runs the package's tests and removes the directory the built
+// `legion` sits in afterwards. The build happens during a test, not here, so the deferred call
+// reads legionDir when it runs rather than taking its value now, when it is still empty. Being
+// deferred, the removal also runs when setup here panics. A run killed by a signal still keeps
+// the directory, which nothing here can help.
+func runRemovingTheBuiltLegion(m *testing.M) int {
+	defer func() {
+		if legionDir != "" {
+			os.RemoveAll(legionDir)
+		}
+	}()
+	return m.Run()
 }
 
 // fakeOMP speaks the RPC frames the listener sends as Oh My Pi does — the negotiation answered, a
@@ -396,12 +407,7 @@ func TestTheRealShimBridgesAFakeOMPToTheRealListener(t *testing.T) {
 		t.Run(family, func(t *testing.T) {
 			addr := "tcp://127.0.0.1:0"
 			if family == "unix" {
-				dir, err := os.MkdirTemp("", "lit")
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { os.RemoveAll(dir) })
-				addr = "unix://" + filepath.Join(dir, "worker-stream.sock")
+				addr = "unix://" + testtmp.Socket(t, "worker-stream.sock")
 			}
 			bridge(t, legion, addr)
 		})

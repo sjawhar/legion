@@ -95,6 +95,16 @@ type workflowRuntime struct {
 	controllerWake time.Duration
 	// controllerFirstWake replaces firstControllerTick in a test; zero is the production delay.
 	controllerFirstWake time.Duration
+	// idlePeriod is how long an issue pod must have had no turn in progress and no turn due
+	// before the daemon releases it (runtime.kubernetes.idle_release.idle_minutes); zero turns
+	// release off, as `idle_minutes: 0` and every runtime but Kubernetes do. idleStore is the
+	// daemon's store, which holds the idle view and the release's mark, and idleImages the
+	// runtime's reading of an issue pod's image; both nil when release is off. idleTick is the
+	// tick's period, zero being idleTickInterval; a test shortens it.
+	idlePeriod time.Duration
+	idleStore  *store.Store
+	idleImages issuePodImages
+	idleTick   time.Duration
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
@@ -145,6 +155,11 @@ type workflowRuntime struct {
 	releaseWaits      map[string]map[string]releaseWait
 	recoveryHeldSince time.Time
 	recheckAfter      func(time.Duration) <-chan time.Time
+	// commitIssueTrailerRepos is the project's `commit_issue_trailer_repos`, the repositories
+	// whose commits a pane stamps with the issue key, as the file names them. The boot's mapping
+	// load says of each one the project does not serve that it stamps nothing
+	// (logUnservedCommitIssueTrailerRepos); nothing else in the daemon reads it.
+	commitIssueTrailerRepos []ghrepo.Repository
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -278,7 +293,13 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
 // written before the record carried its repository. build is the daemon's own build (Build), which
 // the engine and the boot fact compare against the open production checks.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (opened *workflowRuntime, _ error) {
+//
+// reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
+// and before supervision, which reserves its launches from the same one): the moment the one
+// wake the engine causes may run, the catch-up a start writes in place of a launch (workflow's
+// claimReady), and nil while the operator paces nothing, which is the engine's reading of the
+// pacing off — the catch-up is then due at once, as it always was.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build, reserve func(time.Time) time.Time) (opened *workflowRuntime, _ error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -312,7 +333,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
-		defaultBranches: newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
+		defaultBranches:         newDefaultBranches(tokens, repos, githubAPI, defaultBranchTTL, time.Now),
+		commitIssueTrailerRepos: cfg.Projects[cfg.Project].CommitIssueTrailerRepos,
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
 	if err := w.loadMapping(ctx); err != nil {
@@ -336,9 +358,23 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
 	engineCfg := engineConfig(cfg, reviewAppLogin, build)
+	// The engine reads and writes the pod tables of the idle release through the store's own
+	// view of this project (store.Store.PodRecordsOf), which derives the claim token's spelling
+	// of the project the tables are keyed by.
+	if engineCfg.Pods, err = st.PodRecordsOf(cfg.Project); err != nil {
+		return nil, err
+	}
 	engineCfg.Repositories, engineCfg.NoteUnread = w, w.noteUnread
+	// The one wake the engine causes is the catch-up a start writes in place of a launch
+	// (workflow's claimReady), and it is paced with the launches it stands among, from the one
+	// limiter run built for both lanes. A deployment that paces nothing passes no reserve at all,
+	// which is the pacing off: the engine then writes that catch-up due at once, as it always did.
+	engineCfg.Reserve = reserve
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	// The project's `memory` block decides what each tree admission opens is drawn: a project the
+	// file names no entry for is the zero block, which is off.
+	w.admission.UseMemory(cfg.Projects[cfg.Project].Memory)
 	// The mirror runs before both deciders, and that order is load-bearing. The engine decides
 	// whether to start a child and admission whether to admit a root inside this same
 	// transaction, from the mirror's rows, so the row an event carries must already be written
@@ -791,14 +827,38 @@ func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, paylo
 	return nil
 }
 
+// attach gives the workflow what only supervision has: the outbox, built on its supervisor and
+// its runtime. The pace a paced catch-up's wake line names is the supervisor's own
+// (supervise.WakePace, the rate and the burst the machines are held to), which the outbox reads
+// through that supervisor where it writes the line (wakeRan); the limiter both lanes reserve
+// from was built before either of them (run).
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design,
+		w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		w.repositories, supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
-	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.supervisor.OnDurableState(w.claimDurableState)
 	supervision.enqueue = w.enqueueOutbox
+	w.attachIdleRelease(supervision)
+}
+
+// attachIdleRelease wires the idle tick, and leaves it off unless the deployment releases pods:
+// `runtime: kubernetes` with a non-zero idle_minutes, over a runtime that can say whether an
+// issue's pod runs the image the configuration names.
+func (w *workflowRuntime) attachIdleRelease(supervision *supervision) {
+	k := supervision.cfg.Runtime.Kubernetes
+	if supervision.cfg.Runtime.Name != "kubernetes" || k == nil || !k.IdleRelease.Releases() {
+		return
+	}
+	images, ok := supervision.supervisor.deps.Runtime.(issuePodImages)
+	if !ok {
+		w.log.Warn("idle release: the runtime reads no pod image, so no pod is released")
+		return
+	}
+	w.idlePeriod, w.idleStore, w.idleImages = k.IdleRelease.Idle(), supervision.supervisor.store, images
+	w.outbox.backstop = k.IdleRelease.Backstop()
 }
 
 // replayTerminal applies the ready or failure fact of every stored claim in either state that no
@@ -927,6 +987,17 @@ func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState
 	}
 }
 
+// claimDurableState is the daemon's one durable-state callback, because a supervisor keeps one
+// (supervisor.OnDurableState): a claim's ready and its failure are workflow facts (terminal), and
+// the same transitions measure a released pod's resume — its replacement pod is up at the first
+// ready, and the woken role took its work at the first turn (podResume).
+func (w *workflowRuntime) claimDurableState(c supervise.Claim, state supervise.ClaimState) {
+	w.podResume(c, state)
+	if state == supervise.StateReady || state == supervise.StateFailed {
+		w.terminal(c, state)
+	}
+}
+
 // applyTerminal applies a claim's ready or failure as a workflow fact. The daemon's own controller
 // (`controller: daemon`) holds a claim on no issue, so neither is a workflow fact for it: its
 // relaunch is the controller keeper's (controllerKeeper).
@@ -989,6 +1060,14 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.tickController(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickIdle(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.tickWakes(running)
 		return nil
 	})
 	group.Go(func() error {

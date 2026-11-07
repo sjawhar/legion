@@ -3,7 +3,7 @@
 // characters, so a long open-asks summary or answers list sharing a command with the skill could
 // push it out.
 //
-// open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
+// open-asks (every SessionStart: startup, resume, clear, compact, fork). Four jobs:
 // 1. Name Claude Code as the `dispatch` command's host and hand on the session's envoy.json:
 //    append `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the file
 //    Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set) to
@@ -12,12 +12,32 @@
 //    reads the file ENVOY_CONFIG_FILE names whenever DISPATCH_HOST is set. A subagent's Bash can
 //    lack what that file holds (anthropics/claude-code#46696); the `dispatch` command it runs then
 //    takes host `claude` from `CLAUDE_CODE_CHILD_SESSION=1` and reads `CLAUDE_CONFIG_DIR` itself.
-//    The path is single-quoted, the one form Claude Code's PowerShell
-//    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
+//    The path is single-quoted (`singleQuoted`, whose doc gives what Claude Code's
+//    PowerShell bridge reads of that form). The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
 //    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
-// 2. Record the CURRENT session id for this Claude process so the channel
+// 2. For a Legion pane (`LEGION_STATE_DIR` set), write the pane's jj attribution overlay under
+//    that directory and hand on the jj config chain it layers over: `export JJ_CONFIG='<chain>'`
+//    in the same file, so every jj commit a Bash command of the session makes carries an
+//    `Omp-Session: <id>` trailer, and a `Dispatch: <KEY>` line too for a pane whose environment
+//    names an issue key, scoped to that pane's own workspace — which of the pane's variables say
+//    so, and how, is `paneAttributionOptions`
+//    (`exportJjSessionAttribution`, `@legion/pi-shared/jj-attribution`). The
+//    hook writes it, not the claim boot: that boot is the MCP server Claude Code spawns as a
+//    child, and a child cannot change its parent's environment. This line replaces an earlier one
+//    rather than joining it: exactly one `export JJ_CONFIG=` stands however many times the hook
+//    runs, since a resume or a compaction of the same session id runs it again over the file it
+//    already wrote and the chain it resolves can differ, and two such lines in one sourced file
+//    would leave which overlay wins to the order they were written in. A session that is no
+//    Legion pane gets nothing, and an overlay that could not be written (no jj, or a jj that
+//    never answers inside its 3 s) costs the session that one export and nothing else: a line an
+//    earlier run of this same id wrote is left as it stands, since `CLAUDE_ENV_FILE` is
+//    `<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+//    2.1.311 — one file per session id, so a `/clear`, which gives the session a new id, gets a
+//    new and empty one — and a line already there names this same session's own overlay, still on
+//    disk and still correct.
+// 3. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 3. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
+// 4. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
 //    line for each file the read found and did not read (a checkout's `.opencode/envoy.json`,
 //    naming its rename), as the other plugins' start notices and the `dispatch` command name it.
 // Plain stdout becomes context; it always exits 0 so a Dispatch outage never
@@ -87,6 +107,11 @@ import {
   sessionDispatchSettings,
   sessionDispatchUrl,
 } from "@legion/envoy-client/session-settings"
+import {
+  exportJjSessionAttribution,
+  paneAttributionOptions,
+  userConfigChain,
+} from "@legion/pi-shared/jj-attribution"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -149,18 +174,73 @@ const RefreshOutcome = z.object({
 const ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE"
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
+/** What an overlay export line starts with: the one line of the env file this hook replaces
+ *  rather than adds to. */
+const JJ_CONFIG_EXPORT = "export JJ_CONFIG="
+/** The bound on resolving jj's own user config chain for the overlay, inside the 20 s hooks.json
+ *  gives this hook: 3 s of jj and then 3 s of the Dispatch read (`OPEN_ASKS_TIMEOUT_MS`) still
+ *  leave the session its summary. Not `JJ_CONFIG_PATH_TIMEOUT_MS`, which is the Oh My Pi lane's
+ *  bound inside the 30 s that harness gives its session-start handler. A jj that never answers
+ *  costs the session the export and nothing else. */
+const JJ_BASE_CHAIN_TIMEOUT_MS = 3_000
+
+/** `value` as a single-quoted shell word: Claude Code sources this file before every bash command
+ *  of the session, so a path or a config chain holding a space, a quote or a `$` must reach the
+ *  shell as one word. A single quote inside the value ends the quoting, is passed as an escaped
+ *  quote of its own, and opens it again. Claude Code's PowerShell bridge reads the single-quoted
+ *  form of a value holding no quote; the `'\''` escape is POSIX `sh`'s, and that bridge's value
+ *  grammar, read on the pinned 2.1.311, does not take it, so a line carrying one is no line the
+ *  bridge can read — which costs the whole file there, and costs a Legion pane nothing, since
+ *  Legion panes are not on Windows. */
+function singleQuoted(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/** What the env file holds, and "" when it does not exist yet: Claude Code names the file before
+ *  any hook has written it. */
+function envFileText(envFile: string): string {
+  try {
+    return readFileSync(envFile, "utf8")
+  } catch (error) {
+    if (!hasErrnoCode(error, "ENOENT")) throw error
+    return ""
+  }
+}
+
+/** Appends `line` to the env file as a line of its own, `written` being what `envFileText` read:
+ *  a file not ending in a newline gets one first, so the line never joins the last one. */
+function appendLine(envFile: string, written: string, line: string): void {
+  const separator = written === "" || written.endsWith("\n") ? "" : "\n"
+  appendFileSync(envFile, `${separator}${line}\n`)
+}
 
 /** Appends `line` to the env file, once: every SessionStart of the session runs this. */
 function appendOnce(envFile: string, line: string): void {
-  let written = ""
-  try {
-    written = readFileSync(envFile, "utf8")
-  } catch (error) {
-    if (!hasErrnoCode(error, "ENOENT")) throw error
-  }
+  const written = envFileText(envFile)
   if (written.split("\n").includes(line)) return
-  const separator = written === "" || written.endsWith("\n") ? "" : "\n"
-  appendFileSync(envFile, `${separator}${line}\n`)
+  appendLine(envFile, written, line)
+}
+
+/** Writes `line` to the env file as the only line starting with `prefix`, replacing an earlier
+ *  one in its place and appending when there is none: a resume or a compaction of the same
+ *  session id runs the hook again over the file it already wrote, and the chain it resolves can
+ *  differ, where two `export JJ_CONFIG=` lines in one sourced file would leave which overlay wins
+ *  to the order they were written in. Every other line keeps its text and its place.
+ *  A replacement is written through a temporary file and a rename, so a process that dies
+ *  mid-write leaves the shell the whole old file, never a truncated one; with no earlier line it
+ *  appends, as `appendOnce` does (`appendLine`), rather than rewriting what another hook may be
+ *  appending to. */
+function replaceOnce(envFile: string, prefix: string, line: string): void {
+  const written = envFileText(envFile)
+  const lines = written.split("\n")
+  const at = lines.findIndex((existing) => existing.startsWith(prefix))
+  if (at === -1) {
+    appendLine(envFile, written, line)
+    return
+  }
+  if (lines[at] === line) return
+  lines[at] = line
+  writeAtomically(envFile, lines.join("\n"))
 }
 
 async function openAsks(raw: unknown): Promise<void> {
@@ -172,7 +252,34 @@ async function openAsks(raw: unknown): Promise<void> {
   if (envFile) {
     appendOnce(envFile, DISPATCH_HOST_LINE)
     if (chosen.path !== null) {
-      appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
+      appendOnce(envFile, `export ENVOY_CONFIG_FILE=${singleQuoted(chosen.path)}`)
+    }
+    const stateDir = process.env["LEGION_STATE_DIR"]
+    if (stateDir) {
+      try {
+        // The pane's own key and workspace, by the rule both harnesses read those two variables
+        // by (`paneAttributionOptions`).
+        const chain = await exportJjSessionAttribution(input.session_id, stateDir, {
+          ...paneAttributionOptions(process.env),
+          resolveBase: () => userConfigChain(JJ_BASE_CHAIN_TIMEOUT_MS),
+        })
+        // An overlay that could not be written leaves the file as it is: no line written, and
+        // none removed. `CLAUDE_ENV_FILE` is
+        // `<config>/session-env/<session id>/sessionstart-hook-<n>.sh` on the pinned Claude Code
+        // 2.1.311, so the file belongs to this session id alone: an `export JJ_CONFIG=` line
+        // already in it was written by an earlier run of this same id — a resume or a compaction
+        // — and names this same session's own overlay, still on disk and still correct. Removing
+        // it after a jj that did not answer would leave the session with neither trailer, where
+        // keeping it leaves the session the trailer it already had.
+        if (chain !== undefined) {
+          replaceOnce(envFile, JJ_CONFIG_EXPORT, `${JJ_CONFIG_EXPORT}${singleQuoted(chain)}`)
+        }
+      } catch (error) {
+        // The overlay writer swallows its own failures, but replacing a line writes a temporary
+        // file beside the env file, which needs its directory writable where appending
+        // above did not: attribution must cost the session neither its exports nor its summary.
+        process.stderr.write(`envoy: could not export the jj attribution — ${messageFor(error)}\n`)
+      }
     }
   }
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
@@ -195,13 +302,14 @@ async function openAsks(raw: unknown): Promise<void> {
   )
   const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
     cwd: directory,
+    session: input.session_id,
   })
   for (const warning of warnings) process.stdout.write(`envoy: ${warning}\n`)
   if (dispatch.enabled) {
     try {
       const snapshot = await new DispatchClient(
         dispatch.url,
-        dispatch.token,
+        dispatch.credential,
         fetch,
         AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       ).openAsks(input.session_id)
@@ -372,7 +480,11 @@ async function answersMessage(
   by: number,
 ): Promise<{ readonly text: string | undefined; readonly notice?: string | undefined }> {
   const file = sessionConfigFile("claude", process.env)
-  let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
+  let { dispatch } = sessionDispatchSettings(file, process.env, {
+    cwd,
+    commands: "kept",
+    session,
+  })
   let dispatchUrl: string | undefined
   if (!dispatch.enabled && dispatch.error !== null) {
     // The configured URL alone, no command run. With none (envoy.json unreadable, Dispatch off or
@@ -466,7 +578,7 @@ async function answersRefresh(session: string, cwd: string): Promise<never> {
       // hook carries what it read, and when the token command fails, the hook for the same URL
       // carries this refresher's failure line naming why.
       const dispatchUrl = sessionDispatchUrl(file, process.env, { cwd }) ?? null
-      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd })
+      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd, session })
       const read = await readSessionAnswers({
         session,
         dispatch,

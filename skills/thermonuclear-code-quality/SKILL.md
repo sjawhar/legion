@@ -8,6 +8,11 @@ disable-model-invocation: true
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
+Make your own scratch with `mktemp -d` and delete only the paths you made, each by its exact
+path. Never delete by a glob in a shared directory: every role of this issue writes into the same
+`$TMPDIR` on the issue's volume, so a sweep like `rm -rf "$TMPDIR"/tmp.*` deletes directories
+another role has open.
+
 This is a maintainability review of one diff: the current branch's changes, or the range you are given. Every remedy keeps behavior the same and removes code or concepts, or moves code where a reader finds it without reading the rest of the file, because a behavior change is work for `skill://thermonuclear-deep-review`, not a cleanup. The table's last two rows change ordering or failure behavior: say so in the finding.
 
 ## Report
@@ -53,3 +58,13 @@ Then one entry per finding: `path:line`, the smell, the cost it adds, and the re
 - A structural regression, a hacky or magic abstraction, a boundary leak, or a missed obvious decomposition blocks whatever the PR says, because no evidence makes the code easier to change.
 - Every other finding blocks, and the verdict is CHANGES, unless the PR gives evidence that the simpler form fails: a caller it breaks, a measured cost, or a constraint outside the diff that the PR names with `path:line` or a link. "It works" and "tests pass" are no such evidence, because this review judges structure, not behavior.
 - State a blocking finding as blocking, directly and without rudeness. A "maybe" or "consider" finding reads as optional and gets skipped.
+
+## A reviewer rates, a lead decides
+
+- Rate each finding; the lead disposes of it. Put on the must-fix list only a finding that has to
+  be fixed before this change ships, because a list that mixes those with the rest gets filtered
+  by nobody.
+- The four dispositions the lead gives a finding are act on, consider, noted and dismissed. Write
+  each finding so the lead can place it: the evidence, the cost, and what it depends on.
+- Do not review a diff you wrote. A reviewer that grades its own work reports no finding against
+  it, so hand the diff to a session that did not write it.

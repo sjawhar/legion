@@ -45,6 +45,7 @@ describe("omp.skills / prepack manifest contract", () => {
 
     test("are exactly this plugin's partition: the Dispatch and Envoy skills every session uses", () => {
       expect(readdirSync(staged).sort()).toEqual([
+        "agent-secrets",
         "asd-ste100",
         "dispatch",
         "dispatch-first",
@@ -52,6 +53,8 @@ describe("omp.skills / prepack manifest contract", () => {
         "envoy",
         "outside-message",
         "plain-words",
+        "thermonuclear-code-quality",
+        "thermonuclear-deep-review",
       ]);
     });
   });

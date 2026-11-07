@@ -23,7 +23,6 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
-	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleKeepWindow is how old a kept copy may be and still be forwarded to the role's next holder.
@@ -237,24 +236,18 @@ func (g *roleKeepGuards) tryHold(role string) (func(), bool) {
 }
 
 // roleKeepable reports whether a resolution that found no live holder for a role is one the
-// listener keeps a copy for: a role nobody claims, and a lapsed claim the release dropped or
-// found already absent. A lapsed claim the listener retained is the restart grace
-// (store.ExpiredRoleClaimRetained): that holder keeps its claim and re-registers inside the
-// session TTL without writing a new one, so no POST /v1/roles/set and no drain follow it, and a
-// copy kept for it would wait for a claim that never comes. Both give-up paths read it - the
-// publish route's noHolder and the role lane's resolveCoreRoleHolder - so a retained claim keeps
-// nothing and is answered as it was before the kept lane: the route's 404 holder_lapsed, the
-// lane's delivery_failed. The publish route's own attempts already read a retained claim that way,
-// as an attempt that failed rather than a give-up (sendToRole).
-func roleKeepable(result roleHolderResult) bool {
-	switch result.state {
-	case roleHolderUnclaimed:
-		return true
-	case roleHolderLapsed:
-		return result.claimRelease != store.ExpiredRoleClaimRetained
-	default:
-		return false
-	}
+// listener keeps a copy for: a role nobody claims. A lapsed claim is never one, because no
+// resolution of this build releases a claim (dispatch://INFRA-392): a holder that stopped
+// answering keeps its role until the session reaper finds it gone, re-registers inside the gone
+// horizon without writing a new claim, and is handed the messages the stream kept for it, so no
+// POST /v1/roles/set and no drain follow it and a copy kept for it would wait for a claim that
+// never comes. That is main's restart grace (store.ExpiredRoleClaimRetained) widened to every
+// lapsed claim, so the two give-up paths keep nothing for one and answer it as they did before
+// the kept lane: the route's 404 holder_lapsed, the lane's delivery_failed. The publish route's
+// own attempts already read a lapsed claim that way, as an attempt that failed rather than a
+// give-up (sendToRole).
+func roleKeepable(result roles.Resolution) bool {
+	return result.State == roles.Unclaimed
 }
 
 // keepRoleMessage stores item on role's kept lane, the copy the role's next holder is handed when
@@ -316,7 +309,7 @@ func keepForNextHolder(cfg listenerDeliveryHandlerConfig, role string, item cont
 // roleKeptDeliveryStatus and publishes no delivery exception: the message is not lost, the role's
 // next holder is handed it. A keep that kept nothing is reported false, and the caller's own
 // give-up - its exception, its metric and its line - stands exactly as it was.
-func keepRoleLaneMessage(cfg listenerDeliveryHandlerConfig, role, holder string, item contracts.Envelope, state roleHolderState) bool {
+func keepRoleLaneMessage(cfg listenerDeliveryHandlerConfig, role, holder string, item contracts.Envelope, state roles.State) bool {
 	if !keepForNextHolder(cfg, role, item) {
 		return false
 	}
@@ -424,8 +417,8 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // sweepKeptRoleLanes).
 //
 // Each pass opens by reading the role's kept lane and its drain cursor (readKeptLaneHead) within
-// roleKeepDrainWindow, resolves the role's holder by role delivery's own rule (resolveRoleHolder
-// with laneHolderFresh) within roleKeepHolderWindow only when that lane holds copies its cursor
+// roleKeepDrainWindow, resolves the role's holder as every other read of this build does
+// (roles.ResolveHolder) within roleKeepHolderWindow only when that lane holds copies its cursor
 // has not reached, and walks the lane for the holder it found, handing that walk the head it
 // read (walkKeptRole). The lane is read before the holder, so a pass that finds the lane empty
 // ends the handover with no resolution at all: every claim of a role starts a handover and most
@@ -436,7 +429,7 @@ func drainKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role 
 // its budget on a session that no longer holds the role, which the walk's own check cannot
 // catch (roleKeepDrainHolds reads an unclaimed role as no evidence). A resolution that finds no
 // live holder ends the handover there, which is what the keep that stored a copy for a role
-// nobody holds wants: a role nobody claims comes back roleHolderUnclaimed with no error at all.
+// nobody holds wants: a role nobody claims comes back roles.Unclaimed with no error at all.
 //
 // One walk of the lane is bounded - roleKeepDrainMax forwards, roleKeepScanMax copies read,
 // roleKeepDrainWindow of time - and nothing but a claim, a keep or a sweep ever starts a handover.
@@ -537,7 +530,7 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 			return ended()
 		}
 		holderCtx, cancelHolder := context.WithTimeout(ctx, roleKeepHolderWindow)
-		resolved, holderErr := resolveRoleHolder(holderCtx, cfg.registry, cfg.sessions, role, laneHolderFresh)
+		resolved, holderErr := roles.ResolveHolder(holderCtx, cfg.registry, roleHolderSessions{cfg.sessions}, role)
 		cancelHolder()
 		if holderErr != nil {
 			if !retry("listener kept role message could not resolve the role's holder", holderErr) {
@@ -545,12 +538,12 @@ func handOverKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, ro
 			}
 			continue
 		}
-		if resolved.state != roleHolderLive {
+		if resolved.State != roles.Live {
 			return ended()
 		}
-		holder := resolved.holder
+		holder := resolved.Holder
 		var result roleKeepDrainResult
-		result, err = walkKeptRole(ctx, cfg, role, holder, resolved.entry, head, now)
+		result, err = walkKeptRole(ctx, cfg, role, holder, resolved.Entry, head, now)
 		// A walk the listener's shutdown cancelled is as quiet as a read it cancelled (retry),
 		// unless it left a copy it forwarded unconfirmed, which the next walk forwards again.
 		if err != nil && !result.unconfirmed && errors.Is(ctx.Err(), context.Canceled) {
@@ -771,7 +764,7 @@ func walkKeptRole(ctx context.Context, cfg listenerDeliveryHandlerConfig, role, 
 		// The forward is named as the lane's own forward of this message to this holder is
 		// (roleForward.msgID), so the stream keeps one copy of it for this holder however many
 		// walks forward it.
-		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout)
+		forwarded := cfg.forwardAndWait(subject, forward, handed.msgID(subject), roleReceiptTimeout, false)
 		if forwarded != nil && !errors.Is(forwarded, bus.ErrReceiptTimeout) {
 			// This walk is ending with the copy claimed and unforwarded, so it releases the
 			// claim: the cursor goes back to what it was before the claim, and the role's next

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -174,12 +175,17 @@ func owningArchitect(project string, tree map[string]record.Issue, issue record.
 	}
 }
 
-// earlierNoticeFor is the id of the oldest of tree's earlier notices that goes to architect as the
-// claims run now, or 0 when there is none. Each earlier notice's architect is resolved again rather
-// than recorded when it was held, since a sub-architect can start or end while it waits. An earlier
-// row whose architect cannot be resolved is no architect's, so it holds back no later notice; it
-// finishes on its own attempt (notice).
-func earlierNoticeFor(tree treeSnapshot, architect claim.Token, runs func(claim.Token) bool) int64 {
+// earlierNoticeFor is the oldest of tree's earlier notices that goes to architect as the claims
+// run now — its id and the moment it is due — or 0 and the zero moment when there is none. Each
+// earlier notice's architect is resolved again rather than recorded when it was held, since a
+// sub-architect can start or end while it waits. An earlier row whose architect cannot be
+// resolved is no architect's, so it holds back no later notice; it finishes on its own attempt
+// (notice).
+//
+// The moment is what the row behind it waits for: an earlier row the wake pacing holds is due
+// minutes out, and the row behind it runs once, then (deliverNotice's wait.Until), rather than
+// climbing its backoff to it.
+func earlierNoticeFor(tree treeSnapshot, architect claim.Token, runs func(claim.Token) bool) (int64, time.Time) {
 	for _, other := range tree.earlier {
 		payload, err := record.DecodeOutboxPayload(other)
 		if err != nil {
@@ -194,10 +200,10 @@ func earlierNoticeFor(tree treeSnapshot, architect claim.Token, runs func(claim.
 			continue
 		}
 		if owner, err := owningArchitect(tree.project, tree.issues, issue, notice.Kind, runs); err == nil && owner == architect {
-			return other.ID
+			return other.ID, other.NextAt
 		}
 	}
-	return 0
+	return 0, time.Time{}
 }
 
 // claimRuns is whether a claim in state runs, or is on its way back to running: it has not ended,
@@ -211,7 +217,16 @@ func claimRuns(state supervise.ClaimState) bool {
 // Stopping) — a suspension, a failure, a release. The routing reads it, so no notice is routed to
 // a sub-architect whose session is being stopped; it goes on up the tree, as it will once the stop
 // returns.
+//
+// A released claim is the one suspended claim that keeps its role. Its pod was released while it
+// was idle and its session, its phase and its task are all as it left them: the notice is still
+// its owner's, and the wake is what brings the owner back for it (outbox.wakeForDelivery). Were
+// it to lose its role here, a notice for a released sub-architect would walk up to the architect
+// above it, which owns neither the issue nor the answer.
 func holdsRole(held supervise.ClaimView) bool {
+	if held.Released() {
+		return !held.Stopping
+	}
 	return claimRuns(held.State) && !held.Stopping
 }
 

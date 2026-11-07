@@ -40,8 +40,9 @@ type RegisterResponse struct {
 // ReadyRequest says the agent has finished booting and can be prompted. It is a separate call
 // from the registration because registration is the plugin's first act and readiness is its last:
 // the role claim on Envoy, the session attribution, and the tool gate all happen in between.
-// Capabilities is what the session measured of the live capability rows while it booted
-// (LEGION-663); the controller's ready carries none.
+// Capabilities is a report a claimed session sends after its boot, from the interval it runs
+// while it is idle (LEGION-663, INFRA-927); a boot's ready and a role-regain's carry none, and
+// the controller sends no report either.
 type ReadyRequest struct {
 	ClaimToken   Token             `json:"claimToken"`
 	SessionID    string            `json:"sessionId"`
@@ -50,7 +51,7 @@ type ReadyRequest struct {
 	Capabilities *CapabilityReport `json:"capabilities,omitempty"`
 }
 
-// CapabilityReport is what a session measured of the live capability rows at boot (LEGION-663):
+// CapabilityReport is what a session measured of the live capability rows (LEGION-663):
 // when it measured, how long the measuring took, and one row per capability it checked. The
 // daemon normalises the rows (capabilities.Normalize) before it keeps them.
 type CapabilityReport struct {
@@ -96,6 +97,43 @@ type ExitRequest struct {
 	Secret     string `json:"secret"`
 	Generation uint64 `json:"generation"`
 	Reason     string `json:"reason"`
+}
+
+// ActivityRequest is a live role's session reporting what it is doing, after each of its turns
+// and whenever the report's content changes, so the idle rule can decide whether the session's
+// pod may be released (INFRA-945). It carries no generation: it decides nothing about the claim,
+// and a relaunch mints a secret of its own, so the secret the registration issued is the whole
+// fence. A claim with no report after its last turn is never released, which is what makes a host
+// that cannot report safe.
+type ActivityRequest struct {
+	ClaimToken Token           `json:"claimToken"`
+	SessionID  string          `json:"sessionId"`
+	Secret     string          `json:"secret"`
+	Activity   SessionActivity `json:"activity"`
+}
+
+// SessionActivity is one reading of what a session is doing: when it read it, the background work
+// of its own that was running, and its phase reminder's armed wake.
+type SessionActivity struct {
+	At             time.Time      `json:"at"`
+	BackgroundWork BackgroundWork `json:"backgroundWork"`
+	Phase          PhaseActivity  `json:"phase"`
+}
+
+// BackgroundWork is whether work of the session's own was running and what kinds the session
+// found (`async-job`, `subagent`, `claude-background-task`), sorted and de-duplicated by the
+// session, so the reason a hold records reads the same every time.
+type BackgroundWork struct {
+	Running bool     `json:"running"`
+	Kinds   []string `json:"kinds"`
+}
+
+// PhaseActivity is when the reminder armed for the session's phase is due; NextReminderAt is null
+// when no armed reminder is still live, which a session whose phase has closed always reports.
+// Whether the phase is open is the daemon's own reading of the record (workflow's idlePhaseOpen),
+// not the session's to state.
+type PhaseActivity struct {
+	NextReminderAt *time.Time `json:"nextReminderAt"`
 }
 
 // Refusal is one of the ways a claim route says no: the status it answers with and the sentence

@@ -39,6 +39,11 @@ const winitHelper = workspace.GitHubCredentialHelper
 // the pod's feed just before) opens the directory's `release` fifo, writes its pid to its `held`
 // fifo, waits on `release` until the test closes its end there, and exits without initializing. A
 // fresh provisioning's first jj command is that init, so a process held there is mid-provisioning.
+// With WINIT_CHECKOUT_DELAY set, the issue's checkout sleeps that many seconds before it runs and
+// then records the sleep as one more log line, so a case can make the checkout outlive a
+// provisioning budget shorter than it; the checkout is `jj sparse reset -R <workspace>`, whose
+// `sparse reset` is "$1 $2" once the pin is stripped. Both variables are empty for every other
+// case, which therefore holds and sleeps nowhere.
 const fakeJJ = `#!/bin/sh
 pin=
 case "$1" in --config=*) pin=$1; shift ;; esac
@@ -48,6 +53,10 @@ if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git init --colocate" ]; then
 	printf '%s' "$$" > "$WINIT_HOLD/held"
 	read _ <&3
 	exit 1
+fi
+if [ -n "$WINIT_CHECKOUT_DELAY" ] && [ "$1 $2" = "sparse reset" ]; then
+	sleep "$WINIT_CHECKOUT_DELAY"
+	printf '%s slept %ss before %s\n' "$WINIT_TAG" "$WINIT_CHECKOUT_DELAY" "$*" >> "$WINIT_JJ_LOG"
 fi
 PATH="${PATH#*:}" exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
@@ -121,6 +130,7 @@ func newIssueVolume(t *testing.T) *issueVolume {
 		"WINIT_CLONE_FAILURES": "",
 		"WINIT_TAG":            "",
 		"WINIT_HOLD":           "",
+		"WINIT_CHECKOUT_DELAY": "",
 		"JJ_USER":              "Legion test",
 		"JJ_EMAIL":             "legion-test@example.invalid",
 		"XDG_CONFIG_HOME":      filepath.Join(dir, "config"),
@@ -180,9 +190,7 @@ var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_REPOSIT
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
 	t.Helper()
-	for _, name := range runtimeOptionalEnv {
-		unsetenv(t, name)
-	}
+	fixtureenv.Unset(t, runtimeOptionalEnv...)
 	for name, value := range v.env {
 		t.Setenv(name, value)
 	}
@@ -195,17 +203,9 @@ func (v *issueVolume) fetch(t *testing.T) {
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	code, _, stderr := runWorkspaceInitHere(v.fetchArgs())
-	unsetenv(t, "LEGION_PROVISION_TOKEN_FILE")
+	fixtureenv.Unset(t, "LEGION_PROVISION_TOKEN_FILE")
 	if code != 0 {
 		t.Fatalf("workspace-init fetch: exit %d, stderr %q", code, stderr)
-	}
-}
-
-func unsetenv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	if err := os.Unsetenv(name); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -254,16 +254,46 @@ func (v *issueVolume) jj(t *testing.T, args ...string) string {
 
 func (v *issueVolume) git(t *testing.T, args ...string) string {
 	t.Helper()
+	return v.gitInput(t, "", args...)
+}
+
+// gitInput is v.git with input on the command's standard input, which the plumbing that writes a
+// tree reads its entries from (git mktree).
+func (v *issueVolume) gitInput(t *testing.T, input string, args ...string) string {
+	t.Helper()
 	command := exec.Command(v.env["WINIT_REAL_GIT"], args...)
-	// Every call names the repository it reads with --git-dir, which is not a working directory:
-	// the helper runs in the volume's root rather than wherever the test process stands.
+	// Every call names the repository it works on with --git-dir, which is not a working
+	// directory: the helper runs in the volume's root rather than wherever the test process
+	// stands.
 	command.Dir = v.root
 	command.Env = fixtureenv.Isolated(t.TempDir())
+	command.Stdin = strings.NewReader(input)
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// commitAddingAFile commits name, holding content, onto parent's tree in the repository whose git
+// directory is gitDir, and points ref at that commit. It runs git plumbing alone and writes no
+// working copy: a pod's shared clone is cloned with --no-checkout and its sparse patterns cleared
+// (workspace.feedClone), so it has no working tree to write a file into and a jj snapshot of it
+// would record none.
+func (v *issueVolume) commitAddingAFile(t *testing.T, gitDir, parent, ref, name, content string) {
+	t.Helper()
+	dir := "--git-dir=" + gitDir
+	file := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries := v.git(t, dir, "ls-tree", parent)
+	if entries != "" {
+		entries += "\n"
+	}
+	blob := v.git(t, dir, "hash-object", "-w", file)
+	tree := v.gitInput(t, entries+"100644 blob "+blob+"\t"+name+"\n", dir, "mktree")
+	v.git(t, dir, "update-ref", ref, v.git(t, dir, "commit-tree", tree, "-p", parent, "-m", "adds "+name))
 }
 
 // Every refusal `provision` makes happens before anything touches the volume or runs a tool
@@ -465,13 +495,11 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if origin := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "remote", "get-url", "origin"); origin != "https://github.com/acme/widgets" {
 		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
-	read := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper")
-	// --git-dir is not a working directory: the read runs in the clone provisioning just made,
-	// never in the directory the test process happens to have.
-	read.Dir = v.clone()
-	helpers, err := read.Output()
-	if err != nil || !strings.HasSuffix(string(helpers), "\n"+winitHelper+"\n") {
-		t.Fatalf("the clone's credential helpers are %q (%v), want the named helper last", helpers, err)
+	// -z, because v.git trims its output and the first of the clone's two values is the empty
+	// reset: with newline separators that value is a leading newline, which the trim takes away.
+	// NUL separators keep it, so the pair reads whole, the reset first and the named helper last.
+	if helpers := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "-z", "--get-all", "credential.helper"); helpers != "\x00"+winitHelper+"\x00" {
+		t.Fatalf("the clone's credential helpers are %q, want the empty reset and then %q", helpers, winitHelper)
 	}
 
 	for _, dir := range []string{"worker-bin", "bin", "gh"} {
@@ -510,6 +538,50 @@ func TestWorkspaceInitProvisionsAtADefaultBranchWithASlash(t *testing.T) {
 	if bookmark, at := v.jj(t, "log", "-r", "legion/LEGION-42", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", v.clone()),
 		v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); bookmark != at {
 		t.Fatalf("legion/LEGION-42 is on %s, want the workspace's working copy %s", bookmark, at)
+	}
+}
+
+// The issue's checkout (`jj sparse reset`) writes every file of the repository's tree, so it runs
+// under workspace.CheckoutTimeout rather than provisionBudget (workspace.Provision,
+// Request.CheckoutBound; workspace.CommandTimeout names which commands carry a bound of their
+// own): a pod whose checkout outlasts that budget provisions all the same, rather than exiting 1
+// on a killed checkout and spending one of the claim's launches (INFRA-1265). Here the volume's
+// jj holds the checkout eight seconds and the budget is five, which no other command of the run
+// comes near.
+func TestWorkspaceInitProvisionsThroughACheckoutLongerThanTheBudget(t *testing.T) {
+	const delay = 8 * time.Second
+	v := newIssueVolume(t).withRemote(t, "main")
+	// The checkout is what puts the tree in the workspace, so the remote's default branch carries
+	// a file for it to write there.
+	v.commitAddingAFile(t, v.env["WINIT_REMOTE"], "refs/heads/main", "refs/heads/main", "tree.txt", "tree\n")
+	v.env["WINIT_CHECKOUT_DELAY"] = strconv.Itoa(int(delay.Seconds()))
+	v.fetch(t)
+	// `provision` runs in this process, so the budget it reads is shortened here and put back
+	// after; the case takes no t.Parallel, as no case of this package does.
+	provisionBudget = 5 * time.Second
+	t.Cleanup(func() { provisionBudget = workspace.CommandTimeout })
+
+	started := time.Now()
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+	elapsed := time.Since(started)
+	if code != 0 {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	provisionedWorkspace := v.workspace("LEGION-42")
+	if want := "workspace-init: " + provisionedWorkspace + " on legion/LEGION-42 from main\n"; stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	if _, err := os.Stat(filepath.Join(provisionedWorkspace, "tree.txt")); err != nil {
+		t.Fatalf("the workspace after provisioning: %v, want the tree the checkout writes", err)
+	}
+	// The delay is the point of the case, so the run proves it ran: the stub records the sleep it
+	// finished, and the whole provisioning took at least as long as it.
+	slept := " slept 8s before sparse reset -R " + provisionedWorkspace
+	if calls := strings.Join(v.jjCalls(t), "\n"); !strings.Contains(calls, slept) {
+		t.Fatalf("the volume's jj recorded %q, want a checkout holding %q", calls, slept)
+	}
+	if elapsed < delay {
+		t.Fatalf("provisioning took %s, want at least the checkout's own %s", elapsed, delay)
 	}
 }
 
@@ -558,11 +630,11 @@ func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {
 	v.provisioned(t, "LEGION-42")
 	// The working copy is rebased from outside the workspace onto a commit carrying a file, so the
 	// next provisioning's update-stale checks out a new tree, which rewrites the worktree's index.
-	if err := os.WriteFile(filepath.Join(v.clone(), "added.txt"), []byte("added\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	v.jj(t, "describe", "-m", "adds a file", "-R", v.clone())
-	v.jj(t, "rebase", "-r", "legion-42@", "-d", "@", "--ignore-working-copy", "-R", v.clone())
+	v.commitAddingAFile(t, filepath.Join(v.clone(), ".git"), "HEAD", "refs/heads/added", "added.txt", "added\n")
+	// jj reaches that commit only once it has imported the ref git wrote: a rebase onto `added`
+	// before the import fails with "Revision `added` doesn't exist".
+	v.jj(t, "git", "import", "-R", v.clone())
+	v.jj(t, "rebase", "-r", "legion-42@", "-d", "added", "--ignore-working-copy", "-R", v.clone())
 	lock := filepath.Join(v.clone(), ".git", "worktrees", "legion-42", "index.lock")
 	staleLock(t, lock, 31*time.Minute)
 
@@ -710,7 +782,7 @@ func TestWorkspaceInitReportsAFailedProvisioning(t *testing.T) {
 	v.setenv(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-	if code != 1 || !strings.Contains(stderr, "git clone --quiet "+filepath.Join(v.feed, "acme", "widgets.git")) || stdout != "" {
+	if code != 1 || !strings.Contains(stderr, "git clone --quiet --no-checkout "+filepath.Join(v.feed, "acme", "widgets.git")) || stdout != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q; want 1 naming the failed clone", code, stdout, stderr)
 	}
 }

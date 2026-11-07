@@ -1,0 +1,68 @@
+-- packages/envoy/internal/broker/store/migrations/0027_session_carry.up.sql
+-- What a session's grants and pending requests follow when the box under the session is replaced:
+-- the session's name under one principal. A helper restarts, a machine is rebuilt, a person signs
+-- in on a second box, a Legion pod is replaced: each of those enrols the same session name again,
+-- under a row of its own, and until now the grant a person approved stayed with the row the old
+-- box made and was revoked when that row ended.
+--
+-- carry_principal is the identity this enrollment belongs to: the fleet's Google account for a
+-- machine's own session, the person for a sign-in's, the service account for a pod's. It is the
+-- half of the pair that keeps one session name from reaching another principal's grant, and it is
+-- written when the enrollment is created, never changed afterwards. Null on every row this
+-- migration finds, and a null carries nothing: an enrollment the broker recorded no principal for
+-- is adopted by nobody.
+--
+-- dormant_since is when an ended enrollment was left holding what it held. An enrollment that ends
+-- while a live grant or a pending request hangs off it, and that names a session, is marked
+-- revoked and dormant instead of having its grants revoked and its requests cancelled
+-- (enroll.endEnrollment): the session is on another box by then, or is about to be, and what it
+-- holds is the session's rather than the box's. The row is dead for every proof from that moment,
+-- since revoked_at is set and every live-enrollment predicate reads it. The column returns to null
+-- once the row holds nothing for anyone: the carry sweep sets it back when
+-- BROKER_SESSION_CARRY_SECONDS has passed with no successor, revoking the grants and cancelling
+-- the requests then (enroll.Service.EndCarried), as does the next enrollment of the same name under
+-- the same principal when it adopts them. So "dormant_since is not null" is exactly "this ended row
+-- still holds something a session may take".
+--
+-- The carry index is deliberately not unique. A unique partial index would refuse to apply on a
+-- production broker that already holds two live enrollments sharing a session id, which is a shape
+-- the broker allowed until now and a migration must not refuse to run against. Uniqueness buys
+-- nothing here either: the adoption moves what every predecessor of the pair holds, under one
+-- lock, rather than assuming there is one.
+--
+-- The three indexes beside it serve the three statements this change added to a hot path:
+--
+--   * enrollments_dormant serves the carry sweep's batch query, which runs every
+--     BROKER_SWEEP_SECONDS (5 by default, so 17,280 times a day) and reads
+--     "dormant_since is not null and dormant_since <= now() - ... order by dormant_since"
+--     (enroll.endCarriedBatch). Nothing ever deletes an enrollments row, so without this index
+--     every sweep reads the whole table: measured on 100,000 enrollments, a sequential scan of
+--     1818 buffers and 51.3 ms to find nothing, against 1 buffer and 0.05 ms with it. It is
+--     partial on the same predicate the sweep uses, since the rows that are not dormant are the
+--     vast majority and no query of this column wants them.
+--
+--   * grants_enrollment and requests_enrollment serve the adoption's row moves
+--     (enroll.adopt): "update grants set enrollment_id=$2 where enrollment_id=$1" and the same
+--     for requests. The partial indexes these tables already carry — grants_enrollment_live and
+--     requests_pending — cannot serve them, because the adoption moves EVERY row of a
+--     predecessor, the revoked grants and the decided requests included, so that the predecessor
+--     is left holding nothing at all; a partial index holds only the live and the pending rows
+--     and so answers for part of the move. Measured at 100,000 rows: the grants update 30.5 ms
+--     to 0.6 ms, the requests update 49.8 ms to 0.2 ms. The move runs inside the enrolment's own
+--     transaction, on the API path, holding the credential row and every predecessor, so every
+--     box move and every pod replacement pays it and its cost grows with the broker's whole
+--     history.
+--
+-- All four are a plain create index, which holds off writes to its table while it builds: the
+-- runner applies every migration in one transaction, where CONCURRENTLY is refused
+-- (0008_lookup_indexes.up.sql and 0011_credential_requests_approver.up.sql take the same approach
+-- for the same reason).
+--
+-- Both columns are additive and nullable, so this rewrites no row and is safe on a fresh or an
+-- already-migrated database.
+alter table enrollments add column if not exists carry_principal text;
+alter table enrollments add column if not exists dormant_since timestamptz;
+create index if not exists enrollments_carry on enrollments (carry_principal, session_id);
+create index if not exists enrollments_dormant on enrollments (dormant_since) where dormant_since is not null;
+create index if not exists grants_enrollment on grants (enrollment_id);
+create index if not exists requests_enrollment on requests (enrollment_id);

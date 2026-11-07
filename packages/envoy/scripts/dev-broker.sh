@@ -45,9 +45,13 @@
 # five-second drain exists to outlast a Kubernetes EndpointSlice propagation nothing here has, so
 # here it would be pure delay on every Ctrl-C and every restart.
 #
-# The helper a second shell runs keeps its socket, sessions file and log in WORK_DIR too: the
-# printed exports name WORK_DIR's helper.sock and operator file (written here), so a walk through
-# the stack leaves nothing in the caller's directory.
+# The helper a second shell runs keeps its socket, records file and log in WORK_DIR too: the
+# printed exports name WORK_DIR's helper.sock, operator file (written here), machine file and
+# sessions.json, so a walk through the stack leaves nothing in the caller's directory and
+# nothing of an installed helper's. The records file is named outright
+# (AGENT_SECRETS_STATE_FILE): the helper keeps its records beside its machine login by default,
+# and an export that named only the socket would leave this helper writing the records of the
+# helper installed under this HOME, whose named sessions' signing keys are in them.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -193,7 +197,7 @@ DISPLAY_URL="$(printf '%s' "$POSTGRES_URL" | sed -E 's#^(postgres(ql)?://[^:/@?]
 echo "dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
 mkdir -p "$BIN_DIR"
 for cmd in broker dev-oidc-issuer agent-secrets agent-secrets-helper agent-secrets-devrelay; do
-  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.27.1 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
+  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.27.3 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
 done
 
 # --- Fake Secrets Manager: one agent-tier secret its owner's sessions get without asking, one
@@ -355,6 +359,7 @@ dev-broker: ready.
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
   export AGENT_SECRETS_MACHINE_FILE=$WORK_DIR/machine.json
+  export AGENT_SECRETS_STATE_FILE=$WORK_DIR/sessions.json
   export DEV_BROKER_DIR=$WORK_DIR
   export PATH=$BIN_DIR:\$PATH
 

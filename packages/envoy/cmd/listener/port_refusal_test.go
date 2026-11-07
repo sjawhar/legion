@@ -65,6 +65,13 @@ func TestARegistrationWithAPortIsAnswered400NamingThePortField(t *testing.T) {
 // port 0 too, and the host the registration carried, which nothing dials, as it came.
 func TestARegistrationWithNoPortIsAcceptedAndListedAtPortZero(t *testing.T) {
 	rig := newSessionConsumerRig(t)
+	// The list is joined from the interest copy and the session copy, and each answers the
+	// refilling 503 rather than a list that could be missing a live agent until it has completed
+	// a read of its bucket (sessionsHandler). Both reads are waited out here, before the
+	// registration below, so the registration is written into copies that follow their buckets
+	// and the list read at the end is one the route serves.
+	waitForRegistry(t, rig.harness.registry)
+	waitForSessions(t, rig.harness.sessions)
 	const sessionID = "ses_a1_accepted"
 	const host = "example-host:80"
 

@@ -8,13 +8,15 @@ import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { MachineLoginRoute } from "./features/credentials/MachineLoginRoute";
 import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
-import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
+import { MarginColumn } from "./features/margin/MarginColumn";
 import { MarginProvider } from "./features/margin/margin-context";
+import { DEFAULT_MARGIN_WIDTH } from "./features/margin/margin-width";
 import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { TextAskCard } from "./features/refs/markdown-cards";
 import { RefPreviewHost } from "./features/refs/RefPreview";
@@ -33,7 +35,6 @@ import {
 } from "./features/refs/routes";
 import { useRepliesCount } from "./features/replies/useRepliesCount";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
-import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import {
@@ -141,16 +142,15 @@ const DeliveryPage = lazy(() =>
 const PipelinePage = lazy(() =>
   import("./features/delivery/PipelinePage").then((module) => ({ default: module.PipelinePage }))
 );
-const MachineLoginPage = lazy(() =>
-  import("./features/credentials/MachineLoginPage").then((module) => ({
-    default: module.MachineLoginPage,
-  }))
-);
+
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
 );
 const RepliesPage = lazy(() =>
   import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./features/settings/SettingsPage").then((module) => ({ default: module.SettingsPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -830,7 +830,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<InboxPage />} path="/credentials/*" />
-                <Route element={<MachineLoginPage />} path="/credentials/machine" />
+                <Route element={<MachineLoginRoute />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
                 <Route element={<PipelinePage />} path="/pipeline" />
@@ -840,7 +840,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </ErrorBoundary>
         </main>
         <ErrorBoundary region="the margin" resetKey={location.pathname}>
-          <Margin
+          <MarginColumn
             collapsed={marginHidden}
             onCollapsedChange={setMarginHidden}
             onWidthChange={setMarginWidth}

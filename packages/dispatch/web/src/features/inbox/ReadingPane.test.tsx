@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import type { ChangeDecorations } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -6,6 +6,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
 import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
@@ -455,6 +456,49 @@ test("an approved document shows the approval it follows in place of the actions
   }
 });
 
+test("an approval draws the request's own question above the document, inside the scroller", async () => {
+  await warmMarkdownRenderer();
+  const latest = "# Plan\n\nThe plan ships behind a canary today.\n";
+  const { view } = renderPane({
+    ask: approvalAsk(),
+    seed: (client) =>
+      seedDocument(
+        client,
+        document({ approval: { latest_version: 4, state: "awaiting" }, versions: [version(4)] }),
+        { 4: latest }
+      ),
+  });
+
+  try {
+    // The block is drawn before the document's own reads land, so it is on screen beside the
+    // skeleton as well as beside the version.
+    const block = await screen.findByTestId("pane-approval-question");
+    expect(block.textContent).toContain("Approve spec.md at version 4?");
+    const drawn = await screen.findByLabelText("Document version 4");
+    expect(block.compareDocumentPosition(drawn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeGreaterThan(
+      0
+    );
+    // Inside the one scroller, so the document holds the whole column again once the reader
+    // has scrolled past the question.
+    expect(screen.getByTestId("inbox-pane-scroller").contains(block)).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an approval that falls back to the card draws the question once, as the card's own", async () => {
+  const { view } = renderPane({ ask: approvalAsk() });
+
+  try {
+    // `getArtifact` is refused by default, so the column never reads a version to show.
+    expect(await screen.findByRole("article", { name: "Urgency: Medium" })).toBeDefined();
+    expect(screen.queryByTestId("pane-approval-question")).toBeNull();
+    expect(screen.getAllByText("Approve spec.md at version 4?")).toHaveLength(1);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("an anchored question is today's card", async () => {
   const { opened, view } = renderPane({
     ask: issueAsk({
@@ -587,6 +631,9 @@ test("a document the editor is refused admission to leaves the column on the car
 });
 
 test("a selection changed twice inside the settle opens the second document alone", async () => {
+  // On the fake clock from the first render, so the settle of the first selection is a timer this
+  // test moves the clock past rather than a wait of its own.
+  jest.useFakeTimers();
   const { opened, rerender, runtime, view } = renderPane({
     ask: decisionAsk({ id: "ask-1" }),
     seed: (client) => {
@@ -606,9 +653,10 @@ test("a selection changed twice inside the settle opens the second document alon
     await waitFor(() => expect(opened).toEqual(["artifact-2"]));
     await waitFor(() => expect(runtime.connections).toHaveLength(1));
     // Long past the settle, the first selection has still opened nothing.
-    await Bun.sleep(SETTLE_MS * 2);
+    await tick(SETTLE_MS * 2);
     expect(opened).toEqual(["artifact-2"]);
   } finally {
+    realClock();
     view.unmount();
   }
 });

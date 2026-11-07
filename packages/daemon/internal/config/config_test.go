@@ -115,6 +115,8 @@ func defaultsFor(port int) Config {
 		LaunchFailureLimit:                      3,
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
+		WorkerWakesPerMinute:                    8,
+		WorkerWakeBurst:                         1,
 		EnvoyURL:                                "http://127.0.0.1:9020",
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
@@ -178,6 +180,8 @@ controller_wake_interval_seconds: 900
 launch_failure_limit: 5
 prompt_failure_limit: 6
 prompt_retire_limit: 7
+worker_wakes_per_minute: 12
+worker_wake_burst: 3
 operator_token_file: tokens/OPERATOR_TOKEN
 envoy_url: http://127.0.0.1:19020
 nats_urls: [nats://127.0.0.1:4222, nats://127.0.0.1:4223, nats://127.0.0.1:4222]
@@ -213,6 +217,8 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.LaunchFailureLimit = 5
 	want.PromptFailureLimit = 6
 	want.PromptRetireLimit = 7
+	want.WorkerWakesPerMinute = 12
+	want.WorkerWakeBurst = 3
 	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
 	want.EnvoyURL = "http://127.0.0.1:19020"
 	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped, first
@@ -519,6 +525,86 @@ func TestLoadRefusesProjectDeploys(t *testing.T) {
 				t.Fatal("the fixture's projects block was not replaced")
 			}
 			_, err := Load(writeConfigFile(t, body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A project's commit_issue_trailer_repos are the repositories whose commits a pane stamps with
+// the issue key, each a parsed repository, kept in the file's order. A project that names none,
+// or names an empty list, has none. The key only selects among the project's repositories, so
+// two projects may each name one side of a configured rename, which is two projects' own
+// selections and not one list naming one repository twice.
+func TestLoadReadsProjectCommitIssueTrailerRepos(t *testing.T) {
+	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
+		"  DEMO:\n    commit_issue_trailer_repos: [acme/widgets, acme/infra]\n"+
+		"  ONE: { commit_issue_trailer_repos: [acme/gadgets] }\n"+
+		"  OTHER: {}\n"+
+		"  EMPTY: { commit_issue_trailer_repos: [] }\n", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project commit_issue_trailer_repos: %v", err)
+	}
+	want := []ghrepo.Repository{ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("acme/infra")}
+	if got := cfg.Projects["DEMO"].CommitIssueTrailerRepos; !reflect.DeepEqual(got, want) {
+		t.Errorf("DEMO commit_issue_trailer_repos = %#v, want %#v", got, want)
+	}
+	if got := cfg.Projects["ONE"].CommitIssueTrailerRepos; !reflect.DeepEqual(got, []ghrepo.Repository{ghrepo.MustParse("acme/gadgets")}) {
+		t.Errorf("ONE commit_issue_trailer_repos = %#v, want acme/gadgets alone", got)
+	}
+	for _, key := range []string{"OTHER", "EMPTY"} {
+		if got := cfg.Projects[key].CommitIssueTrailerRepos; got != nil {
+			t.Errorf("%s commit_issue_trailer_repos = %#v, want nil", key, got)
+		}
+	}
+
+	pair := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n",
+		"projects:\n  DEMO: { commit_issue_trailer_repos: [acme/widgets] }\n"+
+			"  OTHER: { commit_issue_trailer_repos: [acme/gadgets] }\n", 1) +
+		"repository_renames: [{from: acme/widgets, to: acme/gadgets}]\n"
+	if _, err := Load(writeConfigFile(t, pair), noEnv); err != nil {
+		t.Errorf("Load the pair's two names, one in each project: %v", err)
+	}
+}
+
+// The loader refuses a commit_issue_trailer_repos entry it could stamp no commit for, or that
+// names one repository the list already names: a value that is no owner and name, one repository
+// twice, a repeat differing only in case — GitHub compares a name without case — and a repeat a
+// configured repository_renames pair makes one repository, which readCommitIssueTrailerRepos
+// cannot see because a project is read before the renames settle (checkCommitIssueTrailerRenames).
+func TestLoadRefusesProjectCommitIssueTrailerRepos(t *testing.T) {
+	for _, tc := range []struct{ name, repos, renames, want string }{
+		{
+			name:  "a value that is no owner and name",
+			repos: "[widgets]",
+			want:  `projects.DEMO.commit_issue_trailer_repos[0] must be "owner/name" (got "widgets")`,
+		},
+		{
+			name:  "one repository twice",
+			repos: "[acme/widgets, acme/widgets]",
+			want:  "projects.DEMO.commit_issue_trailer_repos names acme/widgets twice",
+		},
+		{
+			name:  "one repository twice in two cases",
+			repos: "[acme/widgets, Acme/Widgets]",
+			want:  "projects.DEMO.commit_issue_trailer_repos names Acme/Widgets twice",
+		},
+		{
+			name:    "the two names of a configured rename",
+			repos:   "[acme/widgets, Acme/Gadgets]",
+			renames: "repository_renames: [{from: acme/widgets, to: acme/gadgets}]\n",
+			want: "projects.DEMO.commit_issue_trailer_repos[0] (acme/widgets) and projects.DEMO.commit_issue_trailer_repos[1] (Acme/Gadgets) name one repository: " +
+				"repository_renames makes acme/widgets and Acme/Gadgets one repository, so the list names it twice; name it once",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n  DEMO:\n    commit_issue_trailer_repos: "+tc.repos+"\n", 1)
+			if body == minimalFile {
+				t.Fatal("the fixture's projects block was not replaced")
+			}
+			_, err := Load(writeConfigFile(t, body+tc.renames), noEnv)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("Load error = %v, want %q", err, tc.want)
 			}
@@ -1289,6 +1375,41 @@ func TestLoadReadsAdmissionCapFromTheEnvironment(t *testing.T) {
 	}
 }
 
+// A rate of 0 turns the pacing off, so it is the one wake pacing value the loader takes at zero:
+// the burst is how many wakes may leave at once, and a burst of none would release nothing.
+func TestLoadAcceptsAWakeRateOfZero(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_wakes_per_minute: 0\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerWakesPerMinute != 0 {
+		t.Errorf("WorkerWakesPerMinute = %d, want 0: the file turns the pacing off", cfg.WorkerWakesPerMinute)
+	}
+}
+
+// Every refused wake pacing value names its own key, which is what an operator reading
+// `legion start --check-config` needs: which of the two the daemon would not take. The assertion
+// is on the key's name rather than the sentence, so rewording a refusal is no test change.
+func TestLoadRefusesAWakePacingValueNamingItsKey(t *testing.T) {
+	for _, tc := range []struct{ name, line, key string }{
+		{"a rate below zero", "worker_wakes_per_minute: -1", "worker_wakes_per_minute"},
+		{"a rate that is not a whole number", "worker_wakes_per_minute: 2.5", "worker_wakes_per_minute"},
+		{"a burst of zero", "worker_wake_burst: 0", "worker_wake_burst"},
+		{"a burst below zero", "worker_wake_burst: -1", "worker_wake_burst"},
+		{"a burst that is not a whole number", "worker_wake_burst: 2.5", "worker_wake_burst"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+tc.line+"\n"), noEnv)
+			if err == nil {
+				t.Fatalf("Load succeeded, want a refusal naming %s", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Load error = %q, want it to name %s", err.Error(), tc.key)
+			}
+		})
+	}
+}
+
 func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1311,8 +1432,8 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 }
 
 // Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
-// #1494) plus the new postgres_dsn, and the class it is in. No shipped key may fall through to the
-// typo refusal, and none is accepted without being modelled.
+// #1494) plus the new postgres_dsn and the wake pacing's two keys, and the class it is in. No
+// shipped key may fall through to the typo refusal, and none is accepted without being modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled  = "modelled"
@@ -1356,6 +1477,8 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "nats_daemon_nkey_seed_file", line: "nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED", class: modelled},
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
+		{key: "worker_wakes_per_minute", line: "worker_wakes_per_minute: 8", class: modelled},
+		{key: "worker_wake_burst", line: "worker_wake_burst: 1", class: modelled},
 
 		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: modelled},
 		{key: "dispatch_token_file", line: "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN", class: modelled},
@@ -1374,7 +1497,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			wantPrefix: "unknown key worker_idle_retire_seconds: ",
+			want: "unknown key worker_idle_retire_seconds: an idle window retires no worker: it releases the worker's issue pod, and the key for it is runtime.kubernetes.idle_release (idle_minutes, backstop_minutes), which suspends every claim of the released pod with the source released and brings them back on the next wake (INFRA-945)",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,
