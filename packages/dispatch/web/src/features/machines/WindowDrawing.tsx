@@ -373,6 +373,42 @@ function PaneBoxes({
   );
 }
 
+/** One pane as a row: the row both the pane list and the unnamed panes below a drawing are made
+ *  of, which differ only in the test id each is read by. A row whose pane holds no session - one
+ *  the layout names and no report does - takes the recessed surface, since there is nothing in
+ *  it to read. */
+function PaneRow({
+  counts,
+  now,
+  pane,
+  paneId,
+  paneIndex,
+  testId,
+}: {
+  counts: PaneCounts;
+  now: number;
+  pane: MachinePane | undefined;
+  paneId: string;
+  paneIndex: number;
+  testId: string;
+}): ReactNode {
+  return (
+    <li
+      className={`flex flex-wrap items-center gap-2 rounded-lg p-2 text-xs ${
+        pane === undefined
+          ? `${surfaceRecessedBg} ${textMutedOnSurface}`
+          : `${surfaceMutedBg} ${textMutedOnSurfaceMuted}`
+      }`}
+      data-agent={pane?.session.session_id}
+      data-pane={paneId}
+      data-pane-index={paneIndex}
+      data-testid={testId}
+    >
+      <PaneBody compact={true} counts={counts} now={now} pane={pane} paneIndex={paneIndex} />
+    </li>
+  );
+}
+
 /** The window as a list of its panes, and why it is not a drawing. */
 function PaneList({
   counts,
@@ -400,26 +436,15 @@ function PaneList({
       </p>
       <ol className="flex flex-col gap-1">
         {rows.map((row) => (
-          <li
-            className={`flex flex-wrap items-center gap-2 rounded-lg p-2 text-xs ${
-              row.pane === undefined
-                ? `${surfaceRecessedBg} ${textMutedOnSurface}`
-                : `${surfaceMutedBg} ${textMutedOnSurfaceMuted}`
-            }`}
-            data-agent={row.pane?.session.session_id}
-            data-pane={row.paneId}
-            data-pane-index={row.paneIndex}
-            data-testid="window-pane-row"
+          <PaneRow
+            counts={counts}
             key={row.paneId}
-          >
-            <PaneBody
-              compact={true}
-              counts={counts}
-              now={now}
-              pane={row.pane}
-              paneIndex={row.paneIndex}
-            />
-          </li>
+            now={now}
+            pane={row.pane}
+            paneId={row.paneId}
+            paneIndex={row.paneIndex}
+            testId="window-pane-row"
+          />
         ))}
       </ol>
     </div>
@@ -444,22 +469,15 @@ function UnnamedPanes({
       </p>
       <ol className="flex flex-col gap-1">
         {panes.map((pane) => (
-          <li
-            className={`flex flex-wrap items-center gap-2 rounded-lg p-2 text-xs ${surfaceMutedBg} ${textMutedOnSurfaceMuted}`}
-            data-agent={pane.session.session_id}
-            data-pane={pane.paneId}
-            data-pane-index={pane.paneIndex}
-            data-testid="window-unnamed-pane-row"
+          <PaneRow
+            counts={counts}
             key={pane.paneId}
-          >
-            <PaneBody
-              compact={true}
-              counts={counts}
-              now={now}
-              pane={pane}
-              paneIndex={pane.paneIndex}
-            />
-          </li>
+            now={now}
+            pane={pane}
+            paneId={pane.paneId}
+            paneIndex={pane.paneIndex}
+            testId="window-unnamed-pane-row"
+          />
         ))}
       </ol>
     </div>

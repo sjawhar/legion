@@ -1,3 +1,5 @@
+import { TMUX_LAYOUT_MAX } from "@legion/contracts";
+
 /**
  * tmux's `window_layout` string, read into the boxes it names.
  *
@@ -159,11 +161,18 @@ function collectPanes(cell: TmuxLayoutCell, into: TmuxLayoutPane[]): void {
 /**
  * Reads a `window_layout` string into its root cell and its panes, or answers undefined for a
  * string this grammar does not cover whole — a truncated or unbalanced one, a cell that is
- * neither a pane nor a split, anything after the root cell. A caller then has a window it cannot
- * draw rather than one it would draw wrongly.
+ * neither a pane nor a split, anything after the root cell — and for one longer than
+ * `TMUX_LAYOUT_MAX`, whatever it holds. A caller then has a window it cannot draw rather than
+ * one it would draw wrongly.
  */
 export function parseTmuxLayout(layout: string): TmuxLayout | undefined {
-  if (!CHECKSUM.test(layout)) {
+  // The cap is read here and not taken on trust from the sender. A session's client drops a
+  // longer layout before it registers one, but the listener stores whatever a session sends and
+  // Dispatch answers it unchanged, so a client with a session bearer could register a string
+  // nested about one level per eight characters - and `readCell`/`readChildren` recurse once per
+  // level, which would overflow the stack of every reader of that machine's page. A refused
+  // layout costs that window its drawing and nothing else: it falls back to its list of panes.
+  if (layout.length > TMUX_LAYOUT_MAX || !CHECKSUM.test(layout)) {
     return undefined;
   }
   const cursor: Cursor = { at: 5, text: layout };

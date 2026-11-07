@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { TMUX_LAYOUT_MAX } from "@legion/contracts";
 
 import { parseTmuxLayout, type TmuxLayoutPane } from "./tmux-layout";
 
@@ -136,4 +137,26 @@ test("the empty string is no layout", () => {
 test("a string without tmux's checksum, or with anything after the root cell, is no layout", () => {
   expect(parseTmuxLayout("80x24,0,0,5")).toBeUndefined();
   expect(parseTmuxLayout("b262,80x24,0,0,5]")).toBeUndefined();
+});
+
+/** A layout of `levels` splits, each holding the next, with one pane at the bottom: eleven
+ *  characters a level, which is how cheaply a sender can buy a level of recursion in the
+ *  parser. */
+function nested(levels: number): string {
+  return `b262,${"80x24,0,0[".repeat(levels)}80x24,0,0,0${"]".repeat(levels)}`;
+}
+
+test("a layout past the cap the sender's own client holds to is no layout, however it nests", () => {
+  const inside = nested(180);
+  const past = nested(181);
+  expect(inside.length).toBeLessThanOrEqual(TMUX_LAYOUT_MAX);
+  expect(past.length).toBeGreaterThan(TMUX_LAYOUT_MAX);
+
+  // The two strings differ by one split, so what refuses the longer one is its length and not
+  // its shape: a page draws a window from whatever a session registered, and nothing between
+  // the sender and the page applies this cap on the parser's behalf.
+  expect(parseTmuxLayout(inside)?.panes).toEqual([
+    { height: 24, kind: "pane", paneId: "%0", width: 80, x: 0, y: 0 },
+  ]);
+  expect(parseTmuxLayout(past)).toBeUndefined();
 });

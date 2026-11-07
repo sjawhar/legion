@@ -25,12 +25,14 @@ import { relativeTimeLabel } from "../refs/Timestamp";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import {
+  chosenWindowId,
   type MachineTmuxServer,
   type MachineWindow,
   machineDrawingAge,
   machineGrouping,
   serverKey,
   sessionCountSentence,
+  windowChoice,
 } from "./machine-model";
 import { type PaneCounts, WindowDrawing } from "./WindowDrawing";
 
@@ -78,8 +80,10 @@ export function MachinePage(): ReactNode {
 function MachineView({ host }: { host: string }): ReactNode {
   useDocumentTitle(`${host} · Machines · Dispatch`);
   const { agents, error, isError, isPending } = useAgents(true, true);
-  // The picked window rides the address (`?window=<window id>`), so the picker is a link, the
-  // back button means something across a window change, and one window is deep-linkable.
+  // The picked window rides the address (`?window=<socket>:<pid>:<window id>`), so the picker
+  // is a link, the back button means something across a window change, and one window is
+  // deep-linkable. The server is in the value because tmux numbers windows per server, so a
+  // bare `@1` would name a window on every server of the machine at once (`windowChoice`).
   const [picked] = useCappedSearchParam("window");
   // What the viewer is owed, read once for the page from the two queries the shell already
   // makes - never once per pane - so a pane that needs them reads `needs-you`, the first of
@@ -186,9 +190,11 @@ function ServerPart({
   server: MachineTmuxServer;
 }): ReactNode {
   const windows = stripWindows(server);
-  // An absent or unknown `?window=` draws the server's first window, so every server draws one
-  // whichever window the address names.
-  const drawn = windows.find((entry) => entry.window.windowId === picked) ?? windows[0];
+  // Each part reads only the choice that names its own server: an absent one, or one naming
+  // another server or a window this server does not hold, draws this server's first window, so
+  // every server draws one whichever window the address names.
+  const chosen = chosenWindowId(picked, server.socket, server.serverPid);
+  const drawn = windows.find((entry) => entry.window.windowId === chosen) ?? windows[0];
 
   // No box around the drawing: a border or a padding of the server's own would take the
   // drawing's width off the page's, and R6 holds the drawing to the width of the page.
@@ -224,7 +230,9 @@ function ServerPart({
                 data-picked={current ? "true" : "false"}
                 data-testid="window-pick"
                 data-window={entry.window.windowId}
-                to={`?${new URLSearchParams({ window: entry.window.windowId })}`}
+                to={`?${new URLSearchParams({
+                  window: windowChoice(server.socket, server.serverPid, entry.window.windowId),
+                })}`}
               >
                 {entry.sessionName}:{entry.window.windowIndex} {entry.window.windowName}
               </Link>

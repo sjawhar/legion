@@ -2,7 +2,7 @@
 // registration, so Dispatch can draw a machine's tmux layout and say which pane runs which
 // session. One bounded call per reading: a busy shared tmux server must not hold up a heartbeat.
 
-import type { TmuxPlace } from "@legion/contracts";
+import { TMUX_LAYOUT_MAX, type TmuxPlace } from "@legion/contracts";
 
 import { type ExecFn, TMUX_PANE_LOOKUP_MS, tryExec } from "./dispatch-cwd";
 import { isAncestor } from "./process-ancestry";
@@ -52,11 +52,6 @@ const PLACE_FORMAT = [
 /** How many fields `PLACE_FORMAT` asks for; an answer with any other count is from a tmux that
  *  expanded it differently, and nothing in it can be trusted to be what it looks like. */
 const PLACE_FIELDS = 10;
-
-/** The longest `window_layout` sent. A layout grows with every split, and a pathological window
- *  would make every heartbeat carry kilobytes the layout drawing can do without; past this the
- *  place is still reported, without it. */
-const MAX_LAYOUT_LENGTH = 2_000;
 
 /** The variables a reading consults, over whatever else the environment holds. */
 type TmuxEnvironment = {
@@ -124,7 +119,9 @@ export async function readTmuxPlace(
       window_name: windowName,
       pane_id: paneId,
       pane_index: index,
-      ...(layout.length > MAX_LAYOUT_LENGTH ? {} : { layout }),
+      // Past the contract's `TMUX_LAYOUT_MAX` the place is still reported, without its layout:
+      // the one cap this client and the page that parses a layout both hold to.
+      ...(layout.length > TMUX_LAYOUT_MAX ? {} : { layout }),
       zoomed: zoomedFlag === "1",
     },
   };

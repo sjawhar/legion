@@ -2,10 +2,10 @@ import type { Agent, TmuxPlace } from "../../api/types";
 
 /**
  * The model the machine pages draw, built from the agent list alone: `/machines` lists what
- * `machineList` returns, `/machines/<machine>` draws what `machineGrouping` returns and dates it
- * by what `machineDrawingAge` says; `machineModel` is the two together, which is how the model's
- * own test reads it. All of them are pure — nothing here fetches, and nothing knows React — so
- * the page is a drawing of these values and the rules below are tested without a browser.
+ * `machineList` returns, and `/machines/<machine>` draws what `machineGrouping` returns and
+ * dates it by what `machineDrawingAge` says. All of them are pure — nothing here fetches, and
+ * nothing knows React — so the page is a drawing of these values and the rules below are tested
+ * without a browser.
  */
 
 /**
@@ -94,11 +94,6 @@ export interface MachineGrouping {
   readonly sharedName: boolean;
 }
 
-export interface MachineModel extends MachineGrouping {
-  /** Absent when the model drew no pane, since nothing was drawn to be behind. */
-  readonly age?: MachineDrawingAge;
-}
-
 /** The one sentence both machine pages say about a machine: how many sessions name it, and how
  *  many of those are in a pane. */
 export function sessionCountSentence(summary: MachineSummary): string {
@@ -147,6 +142,41 @@ function groupBy<T>(rows: readonly T[], key: (row: T) => string): Map<string, T[
  */
 export function serverKey(socket: string, serverPid: string): string {
   return `${socket}\u0000${serverPid}`;
+}
+
+/**
+ * The address's `?window=` value for one window: the server it is on and its id together, as
+ * `<socket>:<server pid>:<window id>`.
+ *
+ * tmux numbers windows per server — `@0`, `@1`, … on each — so a person's own server and a
+ * Legion daemon's beside it both hold a `@1`, and a bare id in the address would pick a window
+ * on every server at once. One parameter still carries one window and not one per server: a
+ * machine page draws every server's first window until the reader picks one, and the pick names
+ * the one window they chose, so the address says exactly what was picked and the back button
+ * undoes exactly that. A value per server would grow with the machine and would be cut by the
+ * address's own cap on a machine with many servers.
+ *
+ * The value is read back by `chosenWindowId`, which tests it against the prefix its own server
+ * builds, so a socket path holding `/`, `,` or even `:` is never split wrongly: nothing is
+ * split at all. `URLSearchParams` percent-encodes every one of those characters and gives them
+ * back as they were, so the value round-trips through the address exactly.
+ */
+export function windowChoice(socket: string, serverPid: string, windowId: string): string {
+  return `${socket}:${serverPid}:${windowId}`;
+}
+
+/** The window `choice` names on this server, or undefined where it names another server's
+ *  window or no window at all. Each server's part reads only its own choice, so the server that
+ *  was not picked goes on drawing the window it was drawing. */
+export function chosenWindowId(
+  choice: string,
+  socket: string,
+  serverPid: string
+): string | undefined {
+  const prefix = `${socket}:${serverPid}:`;
+  return choice.startsWith(prefix) && choice.length > prefix.length
+    ? choice.slice(prefix.length)
+    : undefined;
 }
 
 function buildWindow(
@@ -286,13 +316,4 @@ export function machineGrouping(agents: readonly Agent[], host: string): Machine
     sharedName: new Set(onMachine.map((agent) => agent.dir)).size > 1,
     summary: { host, inTmux: placed.length, sessions: onMachine.length },
   };
-}
-
-/**
- * One machine's whole model: its grouping and the age of the drawing that grouping makes, read
- * against `now`. `now` is an argument so the age is the caller's clock and the model stays pure.
- */
-export function machineModel(agents: readonly Agent[], host: string, now: number): MachineModel {
-  const grouping = machineGrouping(agents, host);
-  return { ...grouping, age: machineDrawingAge(grouping, now) };
 }

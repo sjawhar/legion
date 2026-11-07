@@ -9,11 +9,12 @@ import { asUser } from "./users";
  * The machine pages (`/machines` and `/machines/<machine>`), which draw a machine's tmux layout
  * from the `tmux_place` each `Agent` of `GET /api/v1/agents` carries. One `test.describe` per
  * check of dispatch://INFRA-883/artifact/verification-md, each carrying that check's grep tag:
- * `@machines-draw` is k5, `@machines-honesty` k7, `@machines-readonly` k8 and `@machines-width`
- * k9. The width check is two cases, because `packages/dispatch/AGENTS.md` refuses the `@phone`
- * tag to a case that starts at a desktop width and narrows itself: one untagged case at 1440 px
- * in `chromium`, one `@phone` case at the `iphone` project's own width, each measured against
- * the ratios this file computes from the same seeded layout string.
+ * `@machines-draw` is k5, `@machines-honesty` k7, `@machines-readonly` k8, `@machines-width` k9
+ * and `@machines-two-servers-one-window-id` k12. The width check is two cases, because
+ * `packages/dispatch/AGENTS.md` refuses the `@phone` tag to a case that starts at a desktop
+ * width and narrows itself: one untagged case at 1440 px in `chromium`, one `@phone` case at
+ * the `iphone` project's own width, each measured against the ratios this file computes from
+ * the same seeded layout string.
  */
 
 /** A box of a tmux window, in terminal cells, as the layout string states it. The spec writes
@@ -368,7 +369,11 @@ test.describe("@machines-draw", () => {
 
       // Picking the second window draws that window instead.
       await strip.nth(1).click();
-      await expect(page).toHaveURL(/[?&]window=%402/);
+      // The address names the server as well as the window (k12): tmux numbers windows per
+      // server, so a bare `@2` would name a window on each server of this machine.
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("window"))
+        .toBe(`${PERSON_SOCKET}:4242:@2`);
       await expect(drawn).toHaveAttribute("data-window", "@2");
       await expect(drawn).toHaveAttribute("data-window-name", "builds");
       await expect(strip.nth(1)).toHaveAttribute("data-picked", "true");
@@ -998,6 +1003,192 @@ test.describe("@machines-accounts-for-every-session", () => {
         accounted.sort(),
         "the page counts five sessions in a pane and must account for all five"
       ).toEqual([...Object.values(undrawnIds)].sort());
+    } finally {
+      await alice.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// k12: a window is addressed by its server and its id together, never by a bare id that repeats
+// across servers.
+// ---------------------------------------------------------------------------------------------
+
+const REPEATED_HOST = "sami-twoservers";
+
+const repeatedIds = {
+  builds: "019a1e11-0000-7000-8000-000000000004",
+  daemon: "019a1e11-0000-7000-8000-000000000003",
+  editor: "019a1e11-0000-7000-8000-000000000002",
+  shell: "019a1e11-0000-7000-8000-000000000001",
+} as const;
+
+/**
+ * One machine running two tmux servers, the person's own and a Legion daemon's, each holding a
+ * window `@0` and a window `@1`: tmux numbers windows from `@0` on each server it starts, so
+ * the ids repeat across the two and `@1` alone names no window on this machine. Each window
+ * holds one pane, and each pane's number is its own, so which window was drawn is read off the
+ * pane in it.
+ */
+async function seedTwoServers(now: number): Promise<void> {
+  await setLiveSessions([
+    machineSession(repeatedIds.shell, "Shell", {
+      host: REPEATED_HOST,
+      lastSeen: now - 30_000,
+      place: tmuxPlace({
+        layout: onePaneLayout(0),
+        pane_id: "%0",
+        pane_index: 0,
+        window_id: "@0",
+        window_index: 0,
+        window_name: "shell",
+      }),
+    }),
+    machineSession(repeatedIds.editor, "Editor", {
+      host: REPEATED_HOST,
+      lastSeen: now - 30_000,
+      place: tmuxPlace({
+        layout: onePaneLayout(1),
+        pane_id: "%1",
+        pane_index: 0,
+        window_id: "@1",
+        window_index: 1,
+        window_name: "agents",
+      }),
+    }),
+    machineSession(repeatedIds.daemon, "Legion daemon", {
+      host: REPEATED_HOST,
+      lastSeen: now - 30_000,
+      place: tmuxPlace({
+        layout: onePaneLayout(9),
+        pane_id: "%9",
+        pane_index: 0,
+        server_pid: "9001",
+        session_name: "legion",
+        socket: DAEMON_SOCKET,
+        window_id: "@0",
+        window_index: 0,
+        window_name: "daemon",
+      }),
+    }),
+    machineSession(repeatedIds.builds, "Builds", {
+      host: REPEATED_HOST,
+      lastSeen: now - 30_000,
+      place: tmuxPlace({
+        layout: onePaneLayout(8),
+        pane_id: "%8",
+        pane_index: 0,
+        server_pid: "9001",
+        session_name: "legion",
+        socket: DAEMON_SOCKET,
+        window_id: "@1",
+        window_index: 1,
+        window_name: "builds",
+      }),
+    }),
+  ]);
+}
+
+test.describe("@machines-two-servers-one-window-id", () => {
+  test("picking a window id two servers share draws the window of the server it was picked on, and leaves the other server where it was", async ({
+    browser,
+  }) => {
+    await seedTwoServers(Date.now());
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      await openMachine(page, REPEATED_HOST);
+
+      const servers = page.locator('[data-testid="machine-server"]');
+      await expect(servers).toHaveCount(2);
+      // In socket order: the person's own server first, the Legion daemon's second. Each part
+      // names its server by its socket, in its heading and in `data-socket`.
+      const person = servers.nth(0);
+      const daemon = servers.nth(1);
+      await expect(person).toHaveAttribute("data-socket", PERSON_SOCKET);
+      await expect(person.getByRole("heading", { level: 2 })).toHaveText(PERSON_SOCKET);
+      await expect(daemon).toHaveAttribute("data-socket", DAEMON_SOCKET);
+      await expect(daemon.getByRole("heading", { level: 2 })).toHaveText(DAEMON_SOCKET);
+
+      // Both servers hold a `@0` and a `@1`, and the same id in the two strips is two links:
+      // each names the server its window is on.
+      const personPicks = person.locator('[data-testid="window-pick"]');
+      const daemonPicks = daemon.locator('[data-testid="window-pick"]');
+      for (const picks of [personPicks, daemonPicks]) {
+        expect(await picks.evaluateAll((all) => all.map((pick) => pick.dataset.window))).toEqual([
+          "@0",
+          "@1",
+        ]);
+      }
+      expect(await personPicks.nth(1).getAttribute("href")).not.toBe(
+        await daemonPicks.nth(1).getAttribute("href")
+      );
+
+      // With nothing in the address, each server draws its own first window.
+      const personDrawing = person.locator('[data-testid="window-drawing"]');
+      const daemonDrawing = daemon.locator('[data-testid="window-drawing"]');
+      await expect(personDrawing).toHaveAttribute("data-window", "@0");
+      await expect(daemonDrawing).toHaveAttribute("data-window", "@0");
+
+      await personPicks.nth(1).click();
+
+      // The address names the server and the window together, never the bare `@1`, which on
+      // this machine would name a window on each of the two servers.
+      await expect
+        .poll(() => new URL(page.url()).searchParams.get("window"))
+        .toBe(`${PERSON_SOCKET}:4242:@1`);
+
+      // The person's server draws its own `@1`: the one pane that window holds and no other.
+      await expect(personDrawing).toHaveAttribute("data-window", "@1");
+      await expect(personDrawing).toHaveAttribute("data-window-name", "agents");
+      const personPanes = personDrawing.locator('[data-testid="window-pane"]');
+      await expect(personPanes).toHaveCount(1);
+      await expect(personPanes.first()).toHaveAttribute("data-pane", "%1");
+      await expect(personPanes.first()).toHaveAttribute("data-agent", repeatedIds.editor);
+      await expect(personPicks.nth(1)).toHaveAttribute("data-picked", "true");
+
+      // The daemon's server is where it was: its drawing is still its own `@0`, holding its own
+      // pane, and its strip still highlights that window.
+      await expect(daemonDrawing).toHaveAttribute("data-window", "@0");
+      await expect(daemonDrawing).toHaveAttribute("data-window-name", "daemon");
+      const daemonPanes = daemonDrawing.locator('[data-testid="window-pane"]');
+      await expect(daemonPanes).toHaveCount(1);
+      await expect(daemonPanes.first()).toHaveAttribute("data-agent", repeatedIds.daemon);
+      await expect(daemonPicks.nth(0)).toHaveAttribute("data-picked", "true");
+      await expect(daemonPicks.nth(1)).toHaveAttribute("data-picked", "false");
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test("a deep link to one server's window draws that window and leaves the other server at its first", async ({
+    browser,
+  }) => {
+    await seedTwoServers(Date.now());
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const choice = encodeURIComponent(`${DAEMON_SOCKET}:9001:@1`);
+      await page.goto(`/machines/${encodeURIComponent(REPEATED_HOST)}?window=${choice}`);
+      await expect(page.getByRole("heading", { level: 1, name: REPEATED_HOST })).toBeVisible();
+
+      const servers = page.locator('[data-testid="machine-server"]');
+      // The link names the daemon's server, so the daemon's `@1` is drawn and the person's
+      // server - which holds a `@1` of its own - is at its first window.
+      await expect(servers.nth(1).locator('[data-testid="window-drawing"]')).toHaveAttribute(
+        "data-window",
+        "@1"
+      );
+      await expect(
+        servers.nth(1).locator('[data-testid="window-drawing"] [data-testid="window-pane"]')
+      ).toHaveAttribute("data-agent", repeatedIds.builds);
+      await expect(servers.nth(0).locator('[data-testid="window-drawing"]')).toHaveAttribute(
+        "data-window",
+        "@0"
+      );
+      await expect(
+        servers.nth(0).locator('[data-testid="window-drawing"] [data-testid="window-pane"]')
+      ).toHaveAttribute("data-agent", repeatedIds.shell);
     } finally {
       await alice.close();
     }

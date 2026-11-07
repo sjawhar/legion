@@ -931,7 +931,9 @@ function AgentFilterBar({
   onFilters: (filters: AgentFilters) => void;
   searchInputRef: RefObject<HTMLInputElement | null>;
 }): ReactNode {
-  const { machines, roles } = filterOptions(agents);
+  // The options carry the machine the filter names even when no live session reports it, so the
+  // control shows the filter in force and `All machines` can clear it (`filterOptions`).
+  const { machines, roles } = filterOptions(agents, filters.machine);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
   return (
     <fieldset className="mb-3 flex flex-wrap items-center gap-2">

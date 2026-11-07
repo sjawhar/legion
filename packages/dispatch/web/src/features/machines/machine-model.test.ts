@@ -2,11 +2,14 @@ import { expect, test } from "bun:test";
 
 import type { Agent, TmuxPlace } from "../../api/types";
 import {
+  chosenWindowId,
   DRAWING_STALE_AFTER_MS,
-  type MachineModel,
+  type MachineGrouping,
   type MachinePane,
+  machineDrawingAge,
+  machineGrouping,
   machineList,
-  machineModel,
+  windowChoice,
 } from "./machine-model";
 import { parseTmuxLayout } from "./tmux-layout";
 
@@ -48,7 +51,7 @@ function session(overrides: Partial<Agent> & { session_id: string }): Agent {
   };
 }
 
-function panesOf(model: MachineModel): MachinePane[] {
+function panesOf(model: MachineGrouping): MachinePane[] {
   return model.servers.flatMap((server) =>
     server.sessions.flatMap((tmuxSession) => tmuxSession.windows.flatMap((window) => window.panes))
   );
@@ -68,7 +71,7 @@ test("the machine list counts each machine's sessions and how many of them are i
 });
 
 test("two tmux servers on one machine are two groups, named by socket and by pid where they share one", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({ session_id: "first", tmux_place: place({ pane_id: "%1", server_pid: "100" }) }),
       session({ session_id: "second", tmux_place: place({ pane_id: "%1", server_pid: "200" }) }),
@@ -77,8 +80,7 @@ test("two tmux servers on one machine are two groups, named by socket and by pid
         tmux_place: place({ server_pid: "300", socket: "/tmp/tmux-1000/other" }),
       }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(model.servers.map((server) => [server.socket, server.serverPid, server.showPid])).toEqual([
@@ -111,7 +113,7 @@ test("a pane two sessions name is drawn by the one heard from most recently, whi
     tmux_place: place({ pane_id: "%3" }),
   });
 
-  const panes = panesOf(machineModel([older, newer], "devbox", NOW));
+  const panes = panesOf(machineGrouping([older, newer], "devbox"));
 
   expect(panes).toHaveLength(1);
   expect(panes[0].session.session_id).toBe("newer");
@@ -134,12 +136,12 @@ test("two sessions heard from in the same millisecond settle on session id, so t
     [first, second],
     [second, first],
   ]) {
-    expect(panesOf(machineModel(agents, "devbox", NOW))[0].session.session_id).toBe("aaa");
+    expect(panesOf(machineGrouping(agents, "devbox"))[0].session.session_id).toBe("aaa");
   }
 });
 
 test("a server's windows are ordered by window index, its tmux sessions by name", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({
         session_id: "third",
@@ -158,8 +160,7 @@ test("a server's windows are ordered by window index, its tmux sessions by name"
         tmux_place: place({ pane_id: "%4", session_name: "admin", window_id: "@4" }),
       }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(
@@ -174,7 +175,7 @@ test("a server's windows are ordered by window index, its tmux sessions by name"
 });
 
 test("a window is drawn from the layout of the session in it heard from most recently that carries one", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({
         last_seen: NOW - 10_000,
@@ -192,21 +193,19 @@ test("a window is drawn from the layout of the session in it heard from most rec
         tmux_place: place({ layout: "b262,80x24,0,0,5", pane_id: "%2" }),
       }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(model.servers[0].sessions[0].windows[0].layout).toBe(LAYOUT);
 });
 
 test("a window whose every session dropped its layout carries none, so the page lists its panes", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({ session_id: "one", tmux_place: place({ pane_id: "%0", pane_index: 0 }) }),
       session({ session_id: "two", tmux_place: place({ pane_id: "%1", pane_index: 1 }) }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
   const window = model.servers[0].sessions[0].windows[0];
 
@@ -226,24 +225,24 @@ test("the drawing's age is the oldest pane it drew, and over three minutes it is
     session({ last_seen: NOW - 86_400_000, session_id: "outside" }),
   ];
 
-  expect(machineModel(agents, "devbox", NOW).age).toEqual({
+  const grouping = machineGrouping(agents, "devbox");
+  expect(machineDrawingAge(grouping, NOW)).toEqual({
     oldestSeen: NOW - 200_000,
     stale: true,
   });
   expect(DRAWING_STALE_AFTER_MS).toBe(180_000);
-  expect(machineModel(agents, "devbox", NOW - 100_000).age?.stale).toBe(false);
+  expect(machineDrawingAge(grouping, NOW - 100_000)?.stale).toBe(false);
 });
 
 test("a machine whose sessions all report no place says so instead of drawing a tmux server", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [session({ session_id: "one" }), session({ last_seen: NOW, session_id: "two" })],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(model.noneInTmux).toBe(true);
   expect(model.servers).toEqual([]);
-  expect(model.age).toBeUndefined();
+  expect(machineDrawingAge(model, NOW)).toBeUndefined();
   expect(model.summary).toEqual({ host: "devbox", inTmux: 0, sessions: 2 });
 });
 
@@ -254,19 +253,18 @@ test("a machine whose sessions report two directories is marked as a name many h
   ];
   const twoDirectories = [sameDirectory[0], { ...sameDirectory[1], dir: "/src/other" }];
 
-  expect(machineModel(sameDirectory, "devbox", NOW).sharedName).toBe(false);
-  expect(machineModel(twoDirectories, "devbox", NOW).sharedName).toBe(true);
+  expect(machineGrouping(sameDirectory, "devbox").sharedName).toBe(false);
+  expect(machineGrouping(twoDirectories, "devbox").sharedName).toBe(true);
 });
 
 test("the model names a pane as the layout parser does, so a drawing can match the two", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({ session_id: "top", tmux_place: place({ layout: LAYOUT, pane_id: "%0" }) }),
       session({ session_id: "left", tmux_place: place({ pane_id: "%1", pane_index: 1 }) }),
       session({ session_id: "right", tmux_place: place({ pane_id: "%2", pane_index: 2 }) }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
   const window = model.servers[0].sessions[0].windows[0];
 
@@ -276,13 +274,12 @@ test("the model names a pane as the layout parser does, so a drawing can match t
 });
 
 test("a session in another machine's panes is no part of this machine's model", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({ session_id: "here", tmux_place: place() }),
       session({ host: "laptop", session_id: "there", tmux_place: place({ pane_id: "%7" }) }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(panesOf(model).map((pane) => pane.session.session_id)).toEqual(["here"]);
@@ -290,13 +287,12 @@ test("a session in another machine's panes is no part of this machine's model", 
 });
 
 test("a pane carries the zoomed flag of the session drawn in it", () => {
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({ session_id: "plain", tmux_place: place({ pane_id: "%0" }) }),
       session({ session_id: "zoomed", tmux_place: place({ pane_id: "%1", zoomed: true }) }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
 
   expect(panesOf(model).map((pane) => [pane.paneId, pane.zoomed])).toEqual([
@@ -310,7 +306,7 @@ test("a pane the layout the window is drawn from does not name is still one of t
   // carry a layout older than the window: here the three-pane string, read before the split
   // that made `%7`. The window is drawn from that string, and the model still holds `%7`, so
   // the page has the session to name (dispatch://INFRA-883, k11).
-  const model = machineModel(
+  const model = machineGrouping(
     [
       session({
         last_seen: NOW,
@@ -333,8 +329,7 @@ test("a pane the layout the window is drawn from does not name is still one of t
         tmux_place: place({ layout: SPLIT_LAYOUT, pane_id: "%7", pane_index: 3 }),
       }),
     ],
-    "devbox",
-    NOW
+    "devbox"
   );
   const window = model.servers[0].sessions[0].windows[0];
 
@@ -377,7 +372,7 @@ test("every session the model counts in a pane is a pane's own session or one of
     }),
     session({ session_id: "outside-tmux" }),
   ];
-  const model = machineModel(agents, "devbox", NOW);
+  const model = machineGrouping(agents, "devbox");
 
   const accounted = panesOf(model).flatMap((pane) => [
     pane.session.session_id,
@@ -391,4 +386,36 @@ test("every session the model counts in a pane is a pane's own session or one of
     "top",
   ]);
   expect(accounted).toHaveLength(model.summary.inTmux);
+});
+
+test("a window choice names its own server, so one window id on two servers picks one window", () => {
+  // The machine the spec describes: a person's own server and a Legion daemon's beside it,
+  // each with a window `@1` of its own, because tmux numbers windows per server.
+  const person = windowChoice(SOCKET, "100", "@1");
+  const daemon = windowChoice("/var/run/legion/tmux-daemon.sock", "200", "@1");
+
+  expect(person).not.toBe(daemon);
+  expect(chosenWindowId(person, SOCKET, "100")).toBe("@1");
+  // The other server reads no choice of its own from it, so it draws what it was drawing.
+  expect(chosenWindowId(person, "/var/run/legion/tmux-daemon.sock", "200")).toBeUndefined();
+  // Two servers on one socket are told apart by their pids here too.
+  expect(chosenWindowId(person, SOCKET, "200")).toBeUndefined();
+});
+
+test("a window choice survives the address, socket path and all, and anything else names no window", () => {
+  // A socket path holds `/`, and may hold a comma or a colon; the value is written and read
+  // back through the address, so what the page compares is what the link wrote.
+  const socket = "/tmp/tmux-1000/odd,name:2";
+  const choice = windowChoice(socket, "4242", "@11");
+  const roundTripped = new URLSearchParams(`?${new URLSearchParams({ window: choice })}`).get(
+    "window"
+  );
+
+  expect(roundTripped).toBe(choice);
+  expect(chosenWindowId(roundTripped ?? "", socket, "4242")).toBe("@11");
+  // An absent choice, one of another shape, and one naming the server but no window: each
+  // leaves the server to draw its first window.
+  for (const value of ["", "@11", `${socket}:4242:`, `${socket}:4242`]) {
+    expect(chosenWindowId(value, socket, "4242")).toBeUndefined();
+  }
 });

@@ -204,3 +204,35 @@ test("a search shows a matching session that only a closed fold holds, and clear
     await alice.close();
   }
 });
+
+test("a ?machine= no live session reports hides every row honestly, and the Machine control it is shown in clears it", async ({
+  browser,
+}) => {
+  await seed();
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // The address a machine whose sessions have all ended leaves behind: an old link, or
+    // `/machines/<machine>`'s own "Agents on this machine", which that page offers even when no
+    // live session reports the machine.
+    await page.goto("/agents?machine=ended-host");
+    await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
+    const machine = page.getByRole("combobox", { name: "Machine" });
+    const titles = shownAgentRows(page).locator("h2");
+
+    // The filter is in force and the list is honestly empty - and the control says which filter
+    // emptied it, rather than reading "All machines" over a list with nothing in it.
+    await expect(machine).toHaveValue("ended-host");
+    await expect(titles).toHaveText([]);
+    await expect(page.getByText("No agent matches these filters.")).toBeVisible();
+
+    // So the one control that shows the filter can clear it: picking "All machines" is a change
+    // of value, and every session comes back.
+    await machine.selectOption("");
+    await expect(titles).toHaveText(["Scrum planning", "Release notes", "Archivist"]);
+    expect(new URL(page.url()).searchParams.get("machine")).toBeNull();
+  } finally {
+    await alice.close();
+  }
+});

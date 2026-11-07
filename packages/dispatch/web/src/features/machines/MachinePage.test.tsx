@@ -145,9 +145,11 @@ test("picking a window puts it in the address and draws it", async () => {
   try {
     const picks = await screen.findAllByTestId("window-pick");
 
+    // The address names the server as well as the window: the socket, the server's pid and the
+    // window id, form-encoded.
     expect(picks.map((pick) => pick.getAttribute("href"))).toEqual([
-      "/machines/sami-devbox?window=%401",
-      "/machines/sami-devbox?window=%402",
+      "/machines/sami-devbox?window=%2Ftmp%2Fa-socket%3A4242%3A%401",
+      "/machines/sami-devbox?window=%2Ftmp%2Fa-socket%3A4242%3A%402",
     ]);
     expect(picks.map((pick) => pick.getAttribute("data-picked"))).toEqual(["true", "false"]);
 
@@ -159,6 +161,84 @@ test("picking a window puts it in the address and draws it", async () => {
     expect(
       screen.getAllByTestId("window-pick").map((pick) => pick.getAttribute("data-picked"))
     ).toEqual(["false", "true"]);
+  } finally {
+    machine.close();
+  }
+});
+
+test("a window id two servers both hold picks one window, on the server whose strip it was picked in", async () => {
+  // Each server holds a `@0` and a `@1`, which is what tmux gives: it numbers windows per
+  // server, so the ids of a person's own server and of a Legion daemon's beside it repeat.
+  const machine = renderMachine([
+    session(id("a"), {
+      ...PLACE,
+      layout: "b262,80x24,0,0,0",
+      pane_id: "%0",
+      window_id: "@0",
+      window_index: 0,
+      window_name: "shell",
+    }),
+    session(id("b"), {
+      ...PLACE,
+      layout: "b262,80x24,0,0,1",
+      pane_id: "%1",
+      window_id: "@1",
+      window_index: 1,
+      window_name: "agents",
+    }),
+    session(id("c"), {
+      ...PLACE,
+      layout: "b262,80x24,0,0,9",
+      pane_id: "%9",
+      server_pid: "9001",
+      session_name: "daemon",
+      socket: SOCKET_B,
+      window_id: "@0",
+      window_index: 0,
+      window_name: "daemon",
+    }),
+    session(id("d"), {
+      ...PLACE,
+      layout: "b262,80x24,0,0,8",
+      pane_id: "%8",
+      server_pid: "9001",
+      session_name: "daemon",
+      socket: SOCKET_B,
+      window_id: "@1",
+      window_index: 1,
+      window_name: "builds",
+    }),
+  ]);
+  try {
+    const servers = await screen.findAllByTestId("machine-server");
+    const [person, daemon] = servers;
+    expect(servers.map((server) => server.getAttribute("data-socket"))).toEqual([
+      SOCKET_A,
+      SOCKET_B,
+    ]);
+    // With nothing in the address, each server draws its own first window.
+    expect(within(person).getByTestId("window-drawing").getAttribute("data-window")).toBe("@0");
+    expect(within(daemon).getByTestId("window-drawing").getAttribute("data-window")).toBe("@0");
+
+    fireEvent.click(within(person).getAllByTestId("window-pick")[1]);
+
+    // The person's server draws its own `@1`: the pane that window holds, and no other.
+    await waitFor(() =>
+      expect(within(person).getByTestId("window-drawing").getAttribute("data-window")).toBe("@1")
+    );
+    expect(
+      within(person)
+        .getAllByTestId("window-pane")
+        .map((box) => box.getAttribute("data-pane"))
+    ).toEqual(["%1"]);
+    // The daemon's server is where it was: its own `@1` was not picked, and its first window
+    // is still drawn and still the highlighted one.
+    expect(within(daemon).getByTestId("window-drawing").getAttribute("data-window")).toBe("@0");
+    expect(
+      within(daemon)
+        .getAllByTestId("window-pick")
+        .map((pick) => pick.getAttribute("data-picked"))
+    ).toEqual(["true", "false"]);
   } finally {
     machine.close();
   }

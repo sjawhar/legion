@@ -39,7 +39,7 @@ import type { AgentPart } from "../refs/AgentName";
 import { KEYED_SEND_ATTEMPT_MS, SendStoppedError } from "../writes/keyed-write";
 import { resetWriteStorage } from "../writes/write-storage";
 import { orderAgents, partitionAgents } from "./AgentsPage";
-import { matchesFilters, searchWords } from "./agent-search";
+import { filterOptions, matchesFilters, searchWords } from "./agent-search";
 import {
   type BroadcastRoster,
   broadcastPlan,
@@ -676,6 +676,29 @@ test("matchesFilters narrows by machine and role exactly, free text besides", ()
   expect(
     matchesFilters(planner, { machine: "build-host", role: "reviewer" }, searchWords(""), [])
   ).toBe(false);
+});
+
+test("filterOptions offers the machines the live sessions occupy, and the one the filter names besides", () => {
+  const live = [
+    session({ host: "build-host", roles: ["planner"], session_id: "one", title: "One" }),
+    session({ host: "archive-host", roles: [], session_id: "two", title: "Two" }),
+  ];
+
+  expect(filterOptions(live, "")).toEqual({
+    machines: ["archive-host", "build-host"],
+    roles: ["planner"],
+  });
+
+  // A `?machine=` naming a host no live session reports - an old link, or a machine whose
+  // sessions have ended - is an option of its own, in machine order with the rest, so the
+  // control shows the filter that is hiding every row and `All machines` can clear it.
+  expect(filterOptions(live, "ended-host").machines).toEqual([
+    "archive-host",
+    "build-host",
+    "ended-host",
+  ]);
+  // A machine the live sessions do report is offered once, not twice.
+  expect(filterOptions(live, "build-host").machines).toEqual(["archive-host", "build-host"]);
 });
 
 test("Agents orders who needs you before Dispatch recency before liveness, folds silent sessions, and keeps a re-poll stable", async () => {
