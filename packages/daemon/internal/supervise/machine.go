@@ -441,6 +441,13 @@ type Timeouts struct {
 	// (relaunchAfterFailure) — one that died, or was retired at its registration deadline. The
 	// daemon sets it to its launchBackoffFirst.
 	LaunchBackoff time.Duration
+	// ClaimWrite bounds each claim and delivery write a decision makes while it holds the machine's
+	// lock, so a database that has stopped answering cannot hold that lock for as long as the
+	// connection's own patience: every other event for the claim queues behind the decision in
+	// flight, and a machine whose lock is held through an outage decides nothing at all. No
+	// setting names it, because the bound answers a question about the write rather than about a
+	// deployment, and no caller in internal/daemon sets it. Zero takes defaultClaimWrite.
+	ClaimWrite time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -589,6 +596,26 @@ func (d Deps) podUpdateRetask() time.Duration {
 	return d.PodUpdateRetask
 }
 
+// defaultClaimWrite is the claim-write bound a Deps that names none takes, which in production is
+// every one of them. Five seconds is chosen for what such a write is: one claim row, and at most
+// one delivery row beside it, written to a Postgres on this cluster, which a healthy database
+// answers in single-digit milliseconds. Five seconds is therefore hundreds of times a healthy
+// write — so no write that was going to land is ever cut short by it — and still a small fraction
+// of any outage worth the name, so a database that has stopped answering holds the machine's lock
+// for five seconds rather than for the length of the outage. The write it does cut short is not
+// lost: a bare context deadline is a write the server never answered, which writeOwed owes, so
+// the claim write is marked and made again at the claim's next decision (owes, repair).
+const defaultClaimWrite = 5 * time.Second
+
+// claimWrite is Deps.Timeouts.ClaimWrite, or defaultClaimWrite when it names none. It is a
+// fallback rather than a check, so a Deps built without it still writes under the deadline.
+func (d Deps) claimWrite() time.Duration {
+	if d.Timeouts.ClaimWrite <= 0 {
+		return defaultClaimWrite
+	}
+	return d.Timeouts.ClaimWrite
+}
+
 // RefusedError is a request the claim does not allow — the answer an API route gives its caller
 // instead of pretending the request happened. A refusal the transition table makes is the claim's
 // state refusing the request, and says which state and why (Reason). One an action makes is about
@@ -672,6 +699,17 @@ type Machine struct {
 	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
 	// it again, with the claim, before the next decision (saved).
 	unsaved bool
+	// owedWrite is the claim write a decision made and the store did not take, nil for none: the
+	// mark that the stored row is behind what memory holds, and that the write is to be made
+	// again at the head of the claim's next decision (owes, repair). It is a mark of its own
+	// rather than unsaved, which says the same of the pending delivery, because unsaved is
+	// cleared by writes that say nothing about the claim write owed: queue and retirePending both
+	// set it false when their own write lands, so a claim write marked with it would be dropped
+	// without a word. It is memory only, as unsaved is: a daemon that stops with a write owed
+	// loses the mark, and the next boot builds the machine from the stored row — the row the
+	// failed write left unchanged — which is the same claim a crash between a decision and its
+	// write has always left behind.
+	owedWrite *owedClaimWrite
 	// sentThrough is the registration sequence of the newest connection a prompt was sent through
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
@@ -816,6 +854,9 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
+	// The write a decision owes is made before anything reads or writes the claim again: settle
+	// can retire a delivery, and the repair must write what the failed decision left.
+	m.repair(ctx)
 	// Settle first, so the fence judges the task the row will find: a settle after the fence could
 	// retire the very task it let the event through for.
 	if err := m.settle(ctx); err != nil {
@@ -861,6 +902,8 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // relaunch then meets: a refused admission leaves both queued. A release the store does not take
 // is undone, the claim left launch_uncertain in both. A stop between the release and the launch's
 // own write leaves the claim stored queued at that generation, which ReleasedLaunch tells apart.
+// Because that undo puts the state back, the write goes through putClaim and leaves nothing owed:
+// a repair of it would write launch_uncertain's release after this call has already taken it back.
 func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
@@ -868,7 +911,7 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	m.claim.State = StateQueued
-	if err := m.persist(ctx); err != nil {
+	if err := m.putClaim(ctx); err != nil {
 		m.claim.State = StateLaunchUncertain
 		return false, err
 	}
@@ -884,7 +927,9 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 // another opened — or when this round was already told: both are decisions already taken, not
 // faults, since the sweep posts over the same claims at every tick. A write the store refuses is
 // returned with false, and the sweep tells the round again at the next tick rather than lose the
-// notice.
+// notice. That is also why the write goes through putClaim and leaves nothing owed: the stamp is
+// taken back here, so there is no mark to make again, and the next tick's call writes the stamp
+// it makes then.
 func (m *Machine) PodUpdateTold(ctx context.Context, round string) (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
@@ -893,7 +938,7 @@ func (m *Machine) PodUpdateTold(ctx context.Context, round string) (bool, error)
 	}
 	told := m.deps.Clock.Now()
 	m.claim.UpdateToldAt = &told
-	if err := m.persist(ctx); err != nil {
+	if err := m.putClaim(ctx); err != nil {
 		m.claim.UpdateToldAt = nil
 		return false, err
 	}
@@ -1648,16 +1693,44 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim alone. Every write first normalizes state that is valid only while the
-// claim records a running process: a capability belongs to a registered agent, a suspension source
+// write runs one store write of a decision under the claim-write deadline, derived from the
+// decision's own context so the daemon's stop still ends the write at once. Every claim and
+// delivery write a decision makes while it holds the machine's lock goes through it, and those
+// are the only calls that do. Store.AdmitClaim and Store.CheckLaunch keep today's behaviour and
+// take no deadline: what they wait on is an advisory lock another transaction holds, so a
+// deadline there would fail a launch that was only queued behind its predecessor. So do the reads
+// of the record — PhaseHolds, RootHears, RootTask, TreeClosable — which decide what the next
+// write will say rather than hold the row, and whose failure costs the decision and nothing
+// after it. The deadline is what keeps a database that has stopped answering from holding the
+// machine's lock for the length of the outage; a write it cuts short is owed and made again at
+// the claim's next decision (owes, repair).
+func (m *Machine) write(ctx context.Context, call func(context.Context) error) error {
+	writing, cancel := context.WithTimeout(ctx, m.deps.claimWrite())
+	defer cancel()
+	return call(writing)
+}
+
+// putClaim writes the claim alone, under the claim-write deadline, and marks nothing: a caller
+// that rolls its own field back when the write fails must not leave a write owed for a state the
+// machine has just put back, since the repair would then write a decision this machine has
+// already taken back. Every write first normalizes state that is valid only while the claim
+// records a running process: a capability belongs to a registered agent, a suspension source
 // belongs to a suspended claim, and an enrollment belongs to the process it names. A confirmation
 // and a retire write the claim together with the delivery they change, each in one transaction.
-func (m *Machine) persist(ctx context.Context) error {
+func (m *Machine) putClaim(ctx context.Context) error {
 	c := m.stored()
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
-	return m.deps.Store.PutClaim(ctx, c)
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaim(ctx, c) })
+}
+
+// persist is putClaim with the mark, and is what every caller that leaves its decision standing
+// in memory uses: the claim the machine holds came from the worker's own frame and nothing puts
+// it back, so a write the store did not take is the only thing still missing, and it is owed and
+// made again at the claim's next decision rather than lost with the event that failed.
+func (m *Machine) persist(ctx context.Context) error {
+	return m.owes("PutClaim", m.putClaim(ctx))
 }
 
 // NormalizeClaim clears state a claim can hold only while it records a compatible running process.

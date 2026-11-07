@@ -1,11 +1,109 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// owedClaimWrite is one claim write the store did not take and the machine still owes: the whole
+// of what a failed write leaves behind, held on the Machine until the write is made. It carries
+// nothing of the claim, because the claim the repair writes is the one the machine holds when the
+// repair runs rather than a copy taken when the write failed (repair); what is left is only what
+// a reader of the log needs to follow the write from the failure to the repair.
+type owedClaimWrite struct {
+	// method is the store method whose call failed ("PutClaim" or "PutClaimAndDelivery"), for the
+	// log line a reader follows.
+	method string
+}
+
+// owedWriteLine is the one message a write left owed is logged under, at Warn, both where the
+// write failed and where a repair of it failed again. It is pinned as a constant because an
+// operator and a production check read it whole: a search for this line is the search for every
+// claim whose row is behind the daemon's memory, and a message that varied by call site would
+// answer that search with a part of the answer.
+const owedWriteLine = "supervise: a claim write the database did not take"
+
+// repairedWriteLine is the close of that story, at Info: the owed write was made, and the row is
+// what memory holds again. It is pinned for the same reason — the pair of lines is what an
+// operator counts to see an outage end — and it is the line a check reads to tell a daemon that
+// caught up from one that is still behind.
+const repairedWriteLine = "supervise: a claim write the database did not take was made"
+
+// owes marks the claim write owed when the rule owes err, and returns err as it was: the decision
+// still fails, and its event is still dropped; what the mark adds is that the write itself is not
+// lost with it. A machine that already owes one keeps the single mark and takes the newer
+// method's name, since the repair writes the claim as it stands rather than one write per
+// failure, and the newest failure is the one a reader of the log is following. A failure the rule
+// does not owe marks nothing: the server answered and refused the statement, and would refuse it
+// again.
+func (m *Machine) owes(method string, err error) error {
+	if writeOwed(err) {
+		if m.owedWrite == nil {
+			m.owedWrite = &owedClaimWrite{}
+		}
+		m.owedWrite.method = method
+		m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", true)
+	}
+	return err
+}
+
+// repair makes the claim write the machine owes, at the head of the decision, before anything
+// reads or writes the claim again (Handle). It is the whole of what this mark is for: a write the
+// database did not take is made at the claim's next decision instead of being lost with the event
+// that failed.
+//
+// It writes the claim as the machine holds it now, never a copy taken when the write failed.
+// Every state the machine holds came from the worker's own frame — a claim that reads working is
+// a claim whose agent said so — and no decision that marks a write owed puts its own field back,
+// so the claim standing now is the claim every failed write was trying to record, together with
+// whatever the claim has decided since. A copy would write an older claim over a newer one.
+//
+// It writes once: the claim with its pending delivery where one is pending, the claim alone where
+// none is. One call covers both rows, so a claim that owes a claim write and holds an unsaved
+// delivery is made whole here, and the settle that follows this call finds nothing unsaved and
+// writes nothing — where two writes would leave the row in between, and the second would have to
+// be owed in its turn.
+//
+// It returns nothing. A repair that fails must not drop the event behind it: the error would
+// reach supervisor.decisionFailed in internal/daemon, which logs it and drops the event, and an
+// event dropped for a write the database did not take is the fault this change exists to end. A
+// repair that failed keeps the mark, logs it, and the decision goes on to its own row, which will
+// be owed too if the database is still away.
+//
+// A failure the rule does not owe drops the mark: the server answered and refused the write, and
+// it would refuse the same write again, so keeping the mark would only buy the same refusal at
+// every decision from here on.
+func (m *Machine) repair(ctx context.Context) {
+	if m.owedWrite == nil {
+		return
+	}
+	method, pending := "PutClaim", m.claim.Pending
+	if pending != nil {
+		method = "PutClaimAndDelivery"
+	}
+	c := m.stored()
+	err := m.write(ctx, func(ctx context.Context) error {
+		if pending != nil {
+			return m.deps.Store.PutClaimAndDelivery(ctx, c, *pending)
+		}
+		return m.deps.Store.PutClaim(ctx, c)
+	})
+	if err != nil {
+		owed := writeOwed(err)
+		m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", owed)
+		if owed {
+			m.owedWrite.method = method
+			return
+		}
+		m.owedWrite = nil
+		return
+	}
+	m.owedWrite, m.unsaved = nil, false
+	m.log.Info(repairedWriteLine, "store", method)
+}
 
 // writeOwed is the rule for a claim write the store refused: a write is owed unless the server
 // answered and refused the statement. A server that answered has read the statement and decided

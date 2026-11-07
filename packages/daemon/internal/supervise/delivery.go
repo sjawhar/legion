@@ -173,11 +173,15 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		// failed leaves the row undelivered, so its retry queues the task.
 		stored := m.stored()
 		stored.DeliveredRows = append(slices.Clone(m.claim.DeliveredRows), request.Row)
-		if err := m.deps.Store.PutClaimAndDelivery(ctx, stored, d); err != nil {
+		if err := m.write(ctx, func(ctx context.Context) error {
+			return m.deps.Store.PutClaimAndDelivery(ctx, stored, d)
+		}); err != nil {
 			return err
 		}
 		m.claim.DeliveredRows = stored.DeliveredRows
-	} else if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
+	} else if err := m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutDelivery(ctx, m.claim.Token, d)
+	}); err != nil {
 		return err
 	}
 	m.claim.Pending, m.unsaved = &d, false
@@ -390,7 +394,9 @@ func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
 	}
 	next := *p
 	next.Task, next.Kept = task, kept
-	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+	if err := m.saved(m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutDelivery(ctx, m.claim.Token, next)
+	})); err != nil {
 		return false, err
 	}
 	*p = next
@@ -493,7 +499,9 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0
-	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
+	if err := m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.RetireDelivery(ctx, retired, p.ID)
+	}); err != nil {
 		return err
 	}
 	m.claim, m.unsaved = retired, false
@@ -514,7 +522,9 @@ func (m *Machine) saved(err error) error {
 
 // putPending writes the pending delivery as memory holds it (saved).
 func (m *Machine) putPending(ctx context.Context) error {
-	return m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending))
+	return m.saved(m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending)
+	}))
 }
 
 // streaming asks the agent whether a turn is in flight; answered is false when the agent could not
@@ -582,14 +592,21 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 // its worker is never prompted again, and an idle claim holding a confirmed delivery holds one
 // nothing retires. Once the write holds, the workflow is told the agent took its work
 // (Deps.TaskConfirmed): a root whose wait that untaken task held is decided on this fact rather
-// than at the next tick. A write that failed tells no one.
+// than at the next tick. A write that failed tells no one, and is owed: the claim it carries is
+// the claim memory holds from here on — the turn started whether or not the row says so — so the
+// write is marked and made again at the claim's next decision (owes). The mark is taken beside
+// saved rather than instead of it, and saved still sees the same error, because the two say
+// different things: saved is the delivery's own, and settle writes it again before the next
+// decision, where the mark is the claim's.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+	if err := m.saved(m.owes("PutClaimAndDelivery", m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)
+	}))); err != nil {
 		return err
 	}
 	if m.deps.TaskConfirmed != nil {
@@ -627,7 +644,9 @@ func (m *Machine) settle(ctx context.Context) error {
 		return nil
 	}
 	if m.unsaved {
-		if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+		if err := m.saved(m.write(ctx, func(ctx context.Context) error {
+			return m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)
+		})); err != nil {
 			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
 		}
 	}
@@ -695,7 +714,9 @@ func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool)
 	m.awaitingResult = ""
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+	if err := m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutDelivery(ctx, m.claim.Token, next)
+	}); err != nil {
 		return err
 	}
 	*p = next
@@ -762,7 +783,9 @@ func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	}
 	next := *p
 	next.ID = rotateTaskID(p.ID)
-	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+	if err := m.saved(m.write(ctx, func(ctx context.Context) error {
+		return m.deps.Store.PutDelivery(ctx, m.claim.Token, next)
+	})); err != nil {
 		return err
 	}
 	p.ID = next.ID
