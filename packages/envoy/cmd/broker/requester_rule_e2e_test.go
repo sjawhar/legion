@@ -118,9 +118,9 @@ const (
 	// owns it, and the daemon whose pods ask for it; and it carries the hour cap policy.TagRules
 	// demands of an admin secret and of this kind alike.
 	requesterGCPAdmin = "GCP_ADMIN"
-	// requesterAdminTrue is the one value the loader reads the admin tag as (policy.TagAdmin):
-	// anything else, the empty string included, refuses the secret as admin-malformed.
-	requesterAdminTrue = "true"
+	// requesterAdminTrue is the one value the loader reads the admin tag as, the policy's own
+	// AdminTrue: anything else, the empty string included, refuses the secret as admin-malformed.
+	requesterAdminTrue = policy.AdminTrue
 	// requesterGCPAdminAccount is the Google service account GCP_ADMIN mints a token as, the one
 	// BROKER_SERVICE_ACCOUNT_SECRETS binds it to. Its id does not begin dev-, as
 	// requesterServiceAccount's does: such an account is one person's own, and the policy refuses
@@ -194,9 +194,11 @@ const (
 // is never called for it.
 //
 // What this test reaches of the google-service-account kind, and what it does not:
-// cmd/broker/main.go builds secrets.GoogleServiceAccount{} with no BaseURL and no HTTP client,
-// so no BROKER_* setting points the compiled binary at another IAM endpoint, and this test adds
-// none. It reaches one instead through seams every Go program already honours and a deployment
+// cmd/broker/main.go builds secrets.GoogleServiceAccount{Accounts: cfg.ServiceAccountSecrets}
+// with no BaseURL and no HTTP client, so the one BROKER_* setting the minter reads binds each
+// secret to its account and none points the compiled binary at another IAM endpoint, and this
+// test adds none of the latter. It reaches one instead through seams every Go program already
+// honours and a deployment
 // may already set: GOOGLE_APPLICATION_CREDENTIALS gives the broker its own Google credential
 // from an endpoint of this test's, and HTTPS_PROXY with SSL_CERT_FILE sends the mint's own call
 // — to the name the binary holds, iamcredentials.googleapis.com — to a TLS endpoint of this
@@ -976,8 +978,9 @@ func (s *requesterStore) reread(t *testing.T, base, name string) {
 // Service Account Credentials API.
 //
 // The IAM endpoint has to be reached by name, because the compiled binary holds that name:
-// cmd/broker/main.go builds secrets.GoogleServiceAccount{} with no BaseURL, so no BROKER_*
-// setting points the minter anywhere else, and this test adds none. It is reached instead through
+// cmd/broker/main.go builds secrets.GoogleServiceAccount{Accounts: cfg.ServiceAccountSecrets}
+// with no BaseURL, so the one BROKER_* setting the minter reads binds each secret to its account
+// and none points the minter anywhere else, and this test adds none of the latter. It is reached instead through
 // seams every Go program already honours and a deployment may already set — HTTPS_PROXY for the
 // call and SSL_CERT_FILE for the certificate authority that signed this endpoint's certificate
 // for iamcredentials.googleapis.com — so the binary under test is the production one, unchanged.

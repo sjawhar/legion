@@ -84,8 +84,10 @@ func TestParseMaxGrant(t *testing.T) {
 
 // TestParseScopes pins the scopes tag's reading at its boundaries: a list of scope names is
 // answered sorted and joined by single spaces, so two spellings of one list are one policy and
-// the value fits an AWS tag; and each way of writing one wrong has an error of its own, which a
-// caller branches on — the CLI's --scopes rule does (checkScopes) — rather than reading the text.
+// the value fits an AWS tag; and each way of writing one wrong has an error of its own, whose
+// own words are what the CLI prints behind `--scopes:` (checkScopes wraps them) and what lets
+// this test say which mistake lands where, the loader collapsing all four into
+// ReasonScopesMalformed.
 // A whole https://www.googleapis.com/auth/ URL and an upper-case name are the two mistakes a
 // reader makes here, and both land on ErrScopesEntry rather than being trimmed or lowercased.
 func TestParseScopes(t *testing.T) {

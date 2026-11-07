@@ -96,6 +96,10 @@ const (
 	// release of it is approved by a person, asked for by someone it names, and short enough to
 	// be reviewed while it is live (TagRules).
 	TagAdmin = "admin"
+	// AdminTrue is the one value TagAdmin takes, as DefaultGrantSession is TagDefaultGrant's: the
+	// loader refuses every other value (ReasonAdminMalformed), and `agent-secrets` holds --admin
+	// to it before it writes, so the two cannot drift on what the tag says.
+	AdminTrue = "true"
 	// kindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	kindSourcePrefix = "mint:"
@@ -383,7 +387,8 @@ type TagSet struct {
 // TagRules is the one statement of what a secret's tags demand of each other, which the loader
 // applies to every secret it reads and `agent-secrets secret` create and retag apply before they
 // write (so it asks for no registered service list of its own). It takes a TagSet rather than a
-// positional list because the rules now weigh eight tags, six of them strings, which no caller
+// positional list because the rules now weigh eight values — seven tags and the deployment's
+// binding — six of them strings, which no caller
 // could pass in order without mistaking one for another. It answers "" for a secret the rules
 // allow, and otherwise the load reason that refuses it:
 //

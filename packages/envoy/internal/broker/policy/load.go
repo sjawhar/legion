@@ -287,7 +287,7 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		}
 	}
 	if raw, tagged := ls.Tags[TagAdmin]; tagged {
-		if raw != "true" {
+		if raw != AdminTrue {
 			return Secret{}, ReasonAdminMalformed, nil
 		}
 		s.Admin = true

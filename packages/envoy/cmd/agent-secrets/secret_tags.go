@@ -136,11 +136,12 @@ func checkRequesters(list string, orNone bool) (string, error) {
 	return parsed, nil
 }
 
-// adminTrue is the one value the admin tag holds, the only one the broker reads as an
-// administrator's secret (policy.TagAdmin): anything else, the empty string included, it refuses
-// as policy.ReasonAdminMalformed, so --admin takes this one word, checkAdmin refuses the rest
-// before any write, and checkTagsFor reads the mark off the tag by comparing against it.
-const adminTrue = "true"
+// adminTrue is the one value the admin tag holds, the policy's own AdminTrue: anything else, the
+// empty string included, the broker refuses as policy.ReasonAdminMalformed, so --admin takes this
+// one word, checkAdmin refuses the rest before any write, and checkTagsFor reads the mark off the
+// tag by comparing against it. Aliased rather than restated, as tagNone aliases policy.TagRemoved,
+// so this CLI cannot drift from the loader on what the tag says.
+const adminTrue = policy.AdminTrue
 
 // checkScopes is --scopes' rule, the broker's own (policy.ParseScopes): the names of the OAuth
 // scopes a google-service-account secret's token carries, each the part of a Google scope that
@@ -211,16 +212,6 @@ func checkAdmin(admin string, orNone bool) error {
 // broker's to apply on that reread.
 func checkTagsFor(kind, owner, tier, requesters, scopes, maxGrant string, admin bool) error {
 	duration, _ := policy.ParseMaxGrant(maxGrant)
-	// The one entry the agent-tier arm below speaks of: TagRules tells a person from a service by
-	// the @ alone, each entry's own shape being checkRequesters' business, so a service is any
-	// entry without one.
-	service := ""
-	for _, entry := range strings.Fields(requesters) {
-		if !strings.Contains(entry, "@") {
-			service = entry
-			break
-		}
-	}
 	switch policy.TagRules(policy.TagSet{
 		Kind:         kind,
 		Owner:        owner,
@@ -236,7 +227,7 @@ func checkTagsFor(kind, owner, tier, requesters, scopes, maxGrant string, admin 
 		if kind != "" {
 			holder = fmt.Sprintf("a %s secret", kind)
 		}
-		return usageErr{fmt.Errorf("--scopes narrows the token a %s secret mints, and no other kind's minter reads it, so %s holds none: drop --scopes, or write --kind %s, or the broker refuses it as %s", policy.KindGoogleServiceAccount, holder, policy.KindGoogleServiceAccount, policy.ReasonScopesKind)}
+		return usageErr{fmt.Errorf("--scopes narrows the token a %s secret mints, and no other kind's minter reads it, so %s holds none: remove the scopes tag with --scopes none, in a retag of its own, or write --kind %s, or the broker refuses it as %s", policy.KindGoogleServiceAccount, holder, policy.KindGoogleServiceAccount, policy.ReasonScopesKind)}
 	case policy.ReasonAdminTier:
 		return usageErr{fmt.Errorf("an admin secret releases an administrator's credential, which a person approves each release of, so it is human tier, not %q: write --tier %s, or the broker refuses it as %s", tier, policy.TierHuman, policy.ReasonAdminTier)}
 	case policy.ReasonAdminRequesters:
@@ -251,6 +242,17 @@ func checkTagsFor(kind, owner, tier, requesters, scopes, maxGrant string, admin 
 		}
 		return usageErr{fmt.Errorf("%s releases a credential whose grant is reviewed while it is live, so it bounds its grants to an hour, not %s: write --max-grant 1h or less, or the broker refuses it as %s", demands, maxGrant, policy.ReasonMaxGrantRequired)}
 	case policy.ReasonRequestersNotOwner:
+		// The one entry the service arm below speaks of: TagRules tells a person from a service
+		// by the @ alone, each entry's own shape being checkRequesters' business, so a service
+		// is any entry without one. Read here rather than above the switch, since no other arm
+		// and no accepted write needs it.
+		service := ""
+		for _, entry := range strings.Fields(requesters) {
+			if !strings.Contains(entry, "@") {
+				service = entry
+				break
+			}
+		}
 		switch {
 		case !policy.ValidPersonOwner(owner):
 			return usageErr{fmt.Errorf("a %s secret mints a token acting as that account, so it is served to the one person who owns it, and %q is no person: own it with --owner me, or the broker refuses it as %s", kind, owner, policy.ReasonRequestersNotOwner)}
