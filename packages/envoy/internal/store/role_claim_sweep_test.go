@@ -1,19 +1,20 @@
 // A deregistration releases the role claims its session holds from two sources: the role topics
 // of the session's own interest record (releaseRoleClaims), and the role claim view
 // (releaseAllRoleClaims), which reads the roles the session holds from the watcher's copy of the
-// bucket and makes no bucket call to find them. The scan of every key of the role bucket that the
-// view replaced is still there as the fallback a view that cannot be served runs
-// (releaseAllRoleClaimsByScan), and that scan is what answered the route 503 this change was
-// filed on: it costs one pass over the whole bucket, and a round trip per key in it, per
-// deregistration.
+// bucket and makes no bucket call to find them. The scan of the role bucket that the view
+// replaced is still there as the fallback a view that cannot be served runs
+// (releaseAllRoleClaimsByScan), and it is no longer what answered the route 503 this change was
+// filed on: it is one streamed scan carrying every record's value and revision, and past that
+// scan the fallback sends nothing but the deletes it owes, where it once paid a round trip per
+// key of the bucket.
 //
-// These cases are the three the issue's Verification document asks for before the merge. What
-// each turns on is a count or a holder, never a duration, except the one deadline a case needs to
-// tell the two algorithms apart: a sweep that costs the roles its session holds finishes a
-// deregistration inside a second over a bucket of 5,002 claims, and the scan the fallback runs
-// over the same bucket does not. The negative control is in the tree beside them, so a later
-// change that quietly puts the bucket scan back on the deregistration path fails a test rather
-// than a route.
+// These cases are the ones the issue's Verification document asks for before the merge. What
+// each turns on is a count or a holder, never a duration, except the one deadline that says what
+// the fallback now costs: over the same bucket of 5,002 claims it finishes a deregistration
+// inside the same second the view sweep answers in, from one scan and no read per key. The
+// control against a later change quietly putting that read back is a count and not a clock - the
+// scan's Gets are zero, and a Get per key would be read straight off the handle that counts them
+// - because a scan this fast would beat the deadline even carrying a few reads it does not need.
 
 package store
 
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
@@ -35,9 +37,9 @@ import (
 
 const (
 	// otherRoleClaims is how many claims held by sessions other than the one under test the large
-	// fixture's bucket holds. It is the bucket size the sweep must not pay for, and it is large
-	// enough that the scan the fallback runs over it cannot finish inside the deadline the cases
-	// give it, which the negative control below proves rather than assumes.
+	// fixture's bucket holds. It is the bucket size no sweep may pay a call per key for: at
+	// claimCallDelay a Get per key could not answer inside sweepDeadline, which is why the cases
+	// below read what a sweep cost from the counts rather than from the clock.
 	otherRoleClaims = 5000
 	// smallRoleClaims is the bucket the cases about one failed call use. They turn on which call
 	// failed, not on how many there were, so the bucket is small enough that every one of them
@@ -49,8 +51,8 @@ const (
 	// deployed bucket's call pays, which an in-process server does not.
 	claimCallDelay = 10 * time.Millisecond
 	// sweepDeadline is the deadline every deregistration below answers under: the route's own
-	// budget, shorter than one scan of the large bucket's claims and far longer than the two
-	// reads and two deletes the view sweep makes.
+	// budget, which the view sweep's two reads and two deletes answer inside, and so does the one
+	// scan of the large bucket's claims the fallback and the reaper now each make.
 	sweepDeadline = time.Second
 )
 
@@ -61,18 +63,22 @@ const (
 // calls counted are the calls the deregistration made, and a delay that applied to some other
 // handle's calls would prove nothing about these.
 //
-// failGet and failDelete fail the named key's call with an error of the test's own, as a bus that
-// refuses one call of many does, and beforeFirstDelete runs before the first delete reaches the
-// bucket, so another session's claim can land under it (racingUpdateKeyValue's shape, for the
-// claim path). All four, and delay, are set before the handle is installed and never written
-// again, so the goroutines bus.Bounded runs these calls on only read them; the counters are the
-// only state a call writes, and they are guarded, because a sweep's calls and the test's reads of
-// the counts are on different goroutines and -race would otherwise report them.
+// failDelete fails the named key's delete with an error of the test's own, as a bus that refuses
+// one call of many does, and beforeFirstDelete runs before the first delete reaches the bucket,
+// so another session's claim can land under it (racingUpdateKeyValue's shape, for the claim
+// path). Both, and delay, are set before the handle is installed and never written again, so the
+// goroutines bus.Bounded runs these calls on only read them; the counters are the only state a
+// call writes, and they are guarded, because a sweep's calls and the test's reads of the counts
+// are on different goroutines and -race would otherwise report them.
+//
+// scanTotal counts the watches the sweeps open over the bucket, one per pass over every key, and
+// is written by the jetstream handle beside this one (sweepRoleWatchHandle) under this same
+// mutex and read by scans. A sweep now costs one scan and the deletes it owes, so that pair of
+// counts - one scan, no Get - is the whole of what these cases read its cost by.
 type sweepRoleKeyValue struct {
 	natsgo.KeyValue
 
 	delay             time.Duration
-	failGet           map[string]error
 	failDelete        map[string]error
 	beforeFirstDelete func(key string)
 
@@ -81,6 +87,7 @@ type sweepRoleKeyValue struct {
 	deletes     map[string]int
 	getTotal    int
 	deleteTotal int
+	scanTotal   int
 }
 
 func (kv *sweepRoleKeyValue) Get(key string) (natsgo.KeyValueEntry, error) {
@@ -89,9 +96,6 @@ func (kv *sweepRoleKeyValue) Get(key string) (natsgo.KeyValueEntry, error) {
 	kv.getTotal++
 	kv.mu.Unlock()
 	time.Sleep(kv.delay)
-	if err := kv.failGet[key]; err != nil {
-		return nil, err
-	}
 	return kv.KeyValue.Get(key)
 }
 
@@ -127,19 +131,59 @@ func (kv *sweepRoleKeyValue) callsOn(key string) (gets, deletes int) {
 	return kv.gets[key], kv.deletes[key]
 }
 
-// countRoleBucketCalls installs handle over reg's role bucket handle and puts the previous handle
-// back when the test ends, so a case that shares a registry with another leaves it as it found
-// it. The swap is made under the mutex that guards that handle (Registry.kvMu), which every
-// reader of it takes (Registry.roles), so a call in flight - a watcher's, or another case's
-// release - cannot read the field while this writes it, which -race would otherwise report.
-func countRoleBucketCalls(t *testing.T, reg *Registry, handle *sweepRoleKeyValue) *sweepRoleKeyValue {
+// scans is how many scans of the role bucket have been opened through the jetstream handle
+// beside this one: one watch of every key is one pass over the bucket.
+func (kv *sweepRoleKeyValue) scans() int {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.scanTotal
+}
+
+// sweepRoleWatchHandle is the role bucket's jetstream handle with every watch counted on the
+// sweepRoleKeyValue it belongs to, and every other call forwarded to the handle it wraps. A scan
+// of the bucket is one watch of all its keys (kvwatch.ScanExistingKeys), so the count of watches
+// is the count of passes over the bucket, which is what a sweep that reads from one scan costs.
+//
+// It counts the sweeps' scans and not the role watcher's, which follows the bucket for the life
+// of the registry: the watcher captured the bus.KeyValue it watches through when it was built
+// (newRoleWatcher, at Open), so it goes on watching through the handle it holds and never sees
+// the one countRoleBucketCalls installs afterwards. Every watch counted here was opened by a
+// call the case under test made.
+type sweepRoleWatchHandle struct {
+	jetstream.KeyValue
+
+	counts *sweepRoleKeyValue
+}
+
+func (kv sweepRoleWatchHandle) Watch(ctx context.Context, keys string, opts ...jetstream.WatchOpt) (jetstream.KeyWatcher, error) {
+	kv.counts.mu.Lock()
+	kv.counts.scanTotal++
+	kv.counts.mu.Unlock()
+	return kv.KeyValue.Watch(ctx, keys, opts...)
+}
+
+// swapRoleBucketHandle installs the handle build returns over reg's role bucket handle for the
+// rest of the test, and puts the previous handle back when the test ends, so a case that shares
+// a registry with another leaves it as it found it. build is handed the bucket's own legacy
+// handle to wrap; the watch handle beside it is kept, and wrapWatch, when it is not nil, wraps
+// that one too. Keeping it is what leaves the case under test able to read the bucket at all: a
+// scan of it is a watch of all its keys (kvwatch.ScanExistingKeys), so a handle built without
+// that half would give a scan that silently delivers nothing, which is the very thing these
+// cases measure.
+//
+// The swap is made under the mutex that guards that handle (Registry.kvMu), which every reader
+// of it takes (Registry.roles), so a call in flight - a watcher's, or another case's release -
+// cannot read the field while this writes it, which -race would otherwise report.
+func swapRoleBucketHandle[H natsgo.KeyValue](t *testing.T, reg *Registry, build func(legacy natsgo.KeyValue) H, wrapWatch func(watch jetstream.KeyValue, handle H) jetstream.KeyValue) H {
 	t.Helper()
-	handle.gets = map[string]int{}
-	handle.deletes = map[string]int{}
 	reg.kvMu.Lock()
 	previous := reg.roleKV
-	handle.KeyValue = previous.Legacy()
-	reg.roleKV = bus.NewKeyValue(handle, previous.WatchHandle(), previous.Streams())
+	handle := build(previous.Legacy())
+	watch := previous.WatchHandle()
+	if wrapWatch != nil {
+		watch = wrapWatch(watch, handle)
+	}
+	reg.roleKV = bus.NewKeyValue(handle, watch, previous.Streams())
 	reg.kvMu.Unlock()
 	t.Cleanup(func() {
 		reg.kvMu.Lock()
@@ -147,6 +191,25 @@ func countRoleBucketCalls(t *testing.T, reg *Registry, handle *sweepRoleKeyValue
 		reg.roleKV = previous
 	})
 	return handle
+}
+
+// countRoleBucketCalls installs handle over reg's role bucket handle for the rest of the test
+// (swapRoleBucketHandle). Both halves of that handle are wrapped: handle itself counts the Gets
+// and Deletes the legacy half takes, and a sweepRoleWatchHandle over the jetstream half counts
+// the scans, so a sweep that reads the bucket by watching it is counted rather than passing
+// straight through.
+func countRoleBucketCalls(t *testing.T, reg *Registry, handle *sweepRoleKeyValue) *sweepRoleKeyValue {
+	t.Helper()
+	handle.gets = map[string]int{}
+	handle.deletes = map[string]int{}
+	return swapRoleBucketHandle(t, reg,
+		func(legacy natsgo.KeyValue) *sweepRoleKeyValue {
+			handle.KeyValue = legacy
+			return handle
+		},
+		func(watch jetstream.KeyValue, counts *sweepRoleKeyValue) jetstream.KeyValue {
+			return sweepRoleWatchHandle{KeyValue: watch, counts: counts}
+		})
 }
 
 // putRoleClaimsInParallel stores one claim per role, each held by holder(role), from a bounded
@@ -205,16 +268,27 @@ func assertRoleBucketCalls(t *testing.T, handle *sweepRoleKeyValue, held []strin
 	}
 }
 
+// scannedRoleNames is the roles a scan of the bucket delivered, in the order it delivered them,
+// for a check that is about which keys the bucket still holds rather than about their claims.
+func scannedRoleNames(scanned []scannedRoleClaim) []string {
+	names := make([]string, 0, len(scanned))
+	for _, claim := range scanned {
+		names = append(names, claim.Role)
+	}
+	return names
+}
+
 // assertBucketKeptOnlyTheOtherClaims fails the test unless the role bucket holds every claim the
 // fixture seeded for other sessions and neither of released. A sweep that released a claim of
 // another session's would be the bug check v3 is about, and one that left its own session's claim
 // behind is the leak the deregistration exists to prevent.
 func assertBucketKeptOnlyTheOtherClaims(t *testing.T, reg *Registry, released []string) {
 	t.Helper()
-	keys, err := reg.roleKeysUntil(context.Background())
+	scanned, err := reg.roleClaimsUntil(context.Background())
 	if err != nil {
 		t.Fatalf("list the role bucket's keys after the deregistration: %v", err)
 	}
+	keys := scannedRoleNames(scanned)
 	if len(keys) != otherRoleClaims {
 		t.Fatalf("the role bucket holds %d claims after the deregistration, want the %d held by other sessions", len(keys), otherRoleClaims)
 	}
@@ -228,9 +302,14 @@ func assertBucketKeptOnlyTheOtherClaims(t *testing.T, reg *Registry, released []
 // Check v1. A deregistration costs the roles its session holds, not the size of the role bucket.
 // The fixture is 5,000 claims held by other sessions and two held by the session deregistered,
 // and every role bucket Get and Delete takes claimCallDelay: a sweep that reads the roles from
-// the view answers in four of those delays, and the scan it replaced cannot finish 5,002 reads
-// inside the same deadline, which the last case here shows rather than asserts of the old code
-// from memory.
+// the view answers in four of those delays, and the two sweeps that read the bucket itself - the
+// fallback a view that cannot be served runs, and the role claim reaper's pass - pay one scan
+// over the 5,002 claims and nothing per key but the deletes they owe, which the last two cases
+// here measure over the very same fixture rather than assert of the code from memory.
+//
+// The four cases share one bucket of that size, which is why they are subtests of one function:
+// seeding it costs seconds, and each leaves it holding exactly the 5,000 claims the other
+// sessions hold, whatever order they run in.
 //
 // The first case's interest record carries no role topic, which is the point of it: Remove
 // releases from the record's role topics first (releaseRoleClaims) and from the view second
@@ -322,12 +401,14 @@ func TestTheDeregistrationSweepReadsOnlyTheClaimsItsSessionHoldsFromALargeRoleBu
 		assertInterestMissing(t, reg, session)
 	})
 
-	// The control. A registry whose role claim view cannot be served (no watcher follows the role
-	// claims) runs the fallback over the very same bucket, which is the algorithm the view sweep
-	// replaced, and it does not finish: the deregistration fails inside the same deadline, naming
-	// the claim read it was on. Without this case nothing here would show that 5,002 claims is a
-	// fixture large enough for the counts above to mean anything.
-	t.Run("the same fixture on a view that cannot be served runs the bucket scan and misses the deadline", func(t *testing.T) {
+	// Acceptance criterion A1 for the degraded path, and the stronger control the case it
+	// replaced tried to be. A registry whose role claim view cannot be served (no watcher
+	// follows the role claims) takes the fallback over this very same bucket, and the scan it
+	// now runs answers inside the route's own budget: one pass over the 5,002 claims, no read
+	// per key, and one delete per claim the session holds. The zero Gets are what a later
+	// change cannot slip a per-key read past - the count shows it long before any clock would,
+	// since a scan this fast would beat the deadline carrying a few reads it does not need.
+	t.Run("the same fixture on a view that cannot be served answers inside the deadline from one scan and no per-key read", func(t *testing.T) {
 		const session = "ses_sweep_fallback"
 		roles := []string{"sweep-fallback-a", "sweep-fallback-b"}
 		cold, rawInterests := coldRegistry(t, conn)
@@ -341,25 +422,108 @@ func TestTheDeregistrationSweepReadsOnlyTheClaimsItsSessionHoldsFromALargeRoleBu
 		for _, role := range roles {
 			putRoleClaim(t, rawRoles, role, session)
 		}
+		// The record's only topic is not a role's, so the pass over it releases nothing and
+		// every call the bucket takes below is the fallback's own.
 		putInterest(t, rawInterests, Interest{SessionID: session, MachineID: "m1", Topics: []string{"notifications.chat"}})
-		countRoleBucketCalls(t, cold, &sweepRoleKeyValue{delay: claimCallDelay})
+		counting := countRoleBucketCalls(t, cold, &sweepRoleKeyValue{delay: claimCallDelay})
 
 		ctx, cancel := context.WithTimeout(context.Background(), sweepDeadline)
 		defer cancel()
 		started := time.Now()
 		err := cold.Remove(ctx, session, nil)
-		if err == nil {
-			t.Fatalf("the bucket scan released %s's claims over %d stored claims in %s; the fixture is too small to tell the two algorithms apart",
-				session, otherRoleClaims+len(roles), time.Since(started).Round(time.Millisecond))
+		elapsed := time.Since(started)
+		gets, deletes := counting.totals()
+		scans := counting.scans()
+		// The scan's own duration is what the route's budget pays for now: the listing carries
+		// every claim's payload and not its metadata alone, so this is the number a bucket that
+		// grows is read against.
+		t.Logf("the fallback's scan released %s's claims over %d stored claims in %s, against the %s deadline",
+			session, otherRoleClaims+len(roles), elapsed.Round(time.Millisecond), sweepDeadline)
+		t.Logf("the fallback made %d scans, %d Gets and %d Deletes over %d stored claims",
+			scans, gets, deletes, otherRoleClaims+len(roles))
+		// The control is read before the answer, because a per-key read put back is what this
+		// case is here to catch and it shows in the count whether the deregistration then came
+		// in under the deadline or ran past it.
+		if gets != 0 {
+			t.Fatalf("the fallback made %d Gets over %d stored claims, want none: every claim comes from the scan",
+				gets, otherRoleClaims+len(roles))
 		}
-		t.Logf("the bucket scan fallback answered after %s: %v", time.Since(started).Round(time.Millisecond), err)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("the bucket scan answered %v, want the deadline it ran past", err)
+		if err != nil {
+			t.Fatalf("Remove(%s) under %s on a view that cannot be served, over %d stored claims: %v",
+				session, sweepDeadline, otherRoleClaims+len(roles), err)
 		}
-		// The wording matters: it is what the route reports, and it names a role's claim read,
-		// so the call the deregistration died on is one of the per-key reads the scan makes.
-		if !strings.HasPrefix(err.Error(), "read role ") || !strings.HasSuffix(err.Error(), "'s claim: context deadline exceeded") {
-			t.Fatalf("the bucket scan answered %q, want \"read role <role>'s claim: context deadline exceeded\"", err)
+		if scans != 1 {
+			t.Fatalf("the fallback made %d scans of the role bucket, want the one it reads every claim from", scans)
+		}
+		if deletes != len(roles) {
+			t.Fatalf("the fallback made %d Deletes, want %d, one per claim %s holds", deletes, len(roles), session)
+		}
+		for _, role := range roles {
+			roleGets, roleDeletes := counting.callsOn(role)
+			if roleGets != 0 || roleDeletes != 1 {
+				t.Fatalf("role %s, which the session holds, took %d Gets and %d Deletes; want no Get and the one delete",
+					role, roleGets, roleDeletes)
+			}
+		}
+		assertBucketKeptOnlyTheOtherClaims(t, cold, roles)
+		assertInterestMissing(t, cold, session)
+	})
+
+	// Acceptance criterion A1 for the role claim reaper, over the same fixture: a pass is one
+	// scan of the bucket and nothing per role but the deletes of the claims whose holders are
+	// gone. Three of those among 5,000 whose holders are alive, so a pass that read a claim per
+	// key would show 5,003 Gets where this one shows none.
+	t.Run("one reaper pass over the same bucket reaps the gone holders' claims from one scan and no per-key read", func(t *testing.T) {
+		gone := []string{"sweep-reaped-a", "sweep-reaped-b", "sweep-reaped-c"}
+		goneHolders := map[string]bool{}
+		for _, role := range gone {
+			holder := "ses_gone_holder_of_" + role
+			goneHolders[holder] = true
+			putRoleClaim(t, rawRoles, role, holder)
+		}
+		counting := countRoleBucketCalls(t, reg, &sweepRoleKeyValue{delay: claimCallDelay})
+
+		started := time.Now()
+		sweep, err := reg.ReapRoleClaims(context.Background(), func(holder string) bool { return !goneHolders[holder] }, 0)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("a reaper pass over %d stored claims: %v", otherRoleClaims+len(gone), err)
+		}
+		t.Logf("the reaper pass over %d stored claims answered in %s", otherRoleClaims+len(gone), elapsed.Round(time.Millisecond))
+		if want := (RoleClaimSweep{Reaped: len(gone)}); sweep != want {
+			t.Fatalf("the pass = %+v, want %+v: the claims of the three holders that are gone reaped, and nothing skipped", sweep, want)
+		}
+		gets, deletes := counting.totals()
+		t.Logf("the reaper pass made %d scans, %d Gets and %d Deletes over %d stored claims",
+			counting.scans(), gets, deletes, otherRoleClaims+len(gone))
+		if scans := counting.scans(); scans != 1 {
+			t.Fatalf("the pass made %d scans of the role bucket, want the one it reads every claim from", scans)
+		}
+		if gets != 0 {
+			t.Fatalf("the pass made %d Gets over %d stored claims, want none: every claim comes from the scan",
+				gets, otherRoleClaims+len(gone))
+		}
+		if deletes != len(gone) {
+			t.Fatalf("the pass made %d Deletes, want %d, one per claim whose holder is gone", deletes, len(gone))
+		}
+		// The fixture is left exactly as every other case here finds it: the 5,000 claims of
+		// the sessions that are alive, not one of them released by a pass that swept three
+		// others out from between them.
+		scanned, err := reg.roleClaimsUntil(context.Background())
+		if err != nil {
+			t.Fatalf("list the role bucket after the reaper pass: %v", err)
+		}
+		kept := make([]string, 0, len(scanned))
+		for _, claim := range scanned {
+			if claim.Claim.HolderSessionID != holderOfOther(claim.Role) {
+				t.Fatalf("role %s is held by %q after the pass, want the %q the fixture seeded",
+					claim.Role, claim.Claim.HolderSessionID, holderOfOther(claim.Role))
+			}
+			kept = append(kept, claim.Role)
+		}
+		if !slices.Equal(kept, others) {
+			t.Fatalf("the role bucket holds %d claims after the pass, want the %d held by the sessions that are alive",
+				len(kept), otherRoleClaims)
 		}
 	})
 }
@@ -387,12 +551,15 @@ func smallRoleBucketRegistry(t *testing.T, session string, held []string) (*Regi
 	return reg, rawRoles, others
 }
 
-// Check v2. One slow or refused call must not fail a deregistration that did not need it. The
-// fallback reads a bucket of claims that are almost all other sessions', so a read that fails on
-// one of them says nothing about the session being removed: it is logged, naming the role, and
-// the sweep goes on to the claims that are the session's. A delete that fails is the opposite
-// case and must fail the call, because the claim it did not delete is one the session holds and
-// nothing else in this deregistration will release it.
+// Check v2. One stored record the sweep cannot use must not fail a deregistration that did not
+// need it. The fallback reads a bucket of claims that are almost all other sessions', so a
+// record among them that this build cannot decode says nothing about the session being removed:
+// it is logged, naming the role, and the sweep goes on to the claims that are the session's.
+// That record is the one per-claim read failure left now that every claim comes from one scan -
+// there is no Get per key to fail - and it reads the same on every pass, so the claim is left
+// standing for the role reaper to meet again. A delete that fails is the opposite case and must
+// fail the call, because the claim it did not delete is one the session holds and nothing else
+// in this deregistration will release it.
 //
 // These two are a pair on purpose. A sweep that returned every error alike would turn one
 // stranger's unreadable claim into a failed deregistration, and one that swallowed every error
@@ -403,18 +570,19 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 		logs := captureRegistryLogs(t)
 		const session = "ses_small_unreadable"
 		held := []string{"small-held-read-a", "small-held-read-b"}
-		reg, _, others := smallRoleBucketRegistry(t, session, held)
+		reg, rawRoles, others := smallRoleBucketRegistry(t, session, held)
 		unreadable := others[len(others)/2]
-		refusal := errors.New("nats: no responders available for request")
-		counting := countRoleBucketCalls(t, reg, &sweepRoleKeyValue{failGet: map[string]error{unreadable: refusal}})
+		// A stored record this build cannot decode, written straight to the bucket: with every
+		// claim read from one scan there is no per-key read left to fail, so this is the one way
+		// a single claim of the bucket is unreadable while the rest are read.
+		if _, err := rawRoles.Put(unreadable, []byte(`["not a role claim"]`)); err != nil {
+			t.Fatalf("store a record this build cannot decode under %s: %v", unreadable, err)
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := reg.Remove(ctx, session, nil); err != nil {
 			t.Fatalf("Remove(%s) over a bucket with one unreadable claim of another session's: %v, want it released and no error", session, err)
-		}
-		if gets, _ := counting.callsOn(unreadable); gets != 1 {
-			t.Fatalf("the unreadable claim took %d Gets, want the one the scan made", gets)
 		}
 		for _, role := range held {
 			assertRoleHolder(t, reg, role, "")
@@ -422,18 +590,26 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 		assertInterestMissing(t, reg, session)
 		// The line is the only record that a claim was left unread, so it must name which: an
 		// operator reading it has no other way to tell the role apart from the thousands the
-		// scan did read. Both fields are read off that one line, because the fallback's own INFO
-		// line carries the session too and a check over the whole log would take it for this one.
-		line := logLine(t, logs, "role registry could not read a claim while releasing a session's claims; the claim stays in the bucket, unreleased by this deregistration")
-		if !strings.Contains(line, "role="+unreadable) || !strings.Contains(line, "session_id="+session) {
-			t.Fatalf("the sweep's line for the unread claim = %s; want it to name the claim %s and the session %s", line, unreadable, session)
+		// scan did read. It is one summary line for the whole sweep rather than one per claim,
+		// because the sweep runs only while the bus is degraded, so it carries the count beside
+		// the first claim it met - which is this one claim and this one role here. Every field is
+		// read off that one line, because the fallback's own INFO line carries the session too
+		// and a check over the whole log would take it for this one.
+		const left = "role registry could not read stored claims while releasing a session's claims; they stay in the bucket, unreleased by this deregistration, and role and error are the first claim's"
+		line := logLine(t, logs, left)
+		if !strings.Contains(line, "role="+unreadable) || !strings.Contains(line, "session_id="+session) || !strings.Contains(line, "claims=1") {
+			t.Fatalf("the sweep's line for the unread claim = %s; want it to name the claim %s, the session %s and the one claim it left", line, unreadable, session)
+		}
+		if wrote := logLines(logs, left); wrote != 1 {
+			t.Fatalf("the sweep wrote %d lines for the claims it left, want the one summary line a degraded deregistration pays for", wrote)
 		}
 		// And the claim it could not read is still in the bucket, which is what the line says:
 		// this deregistration released it no more than it read it.
-		keys, err := reg.roleKeysUntil(context.Background())
+		scanned, err := reg.roleClaimsUntil(context.Background())
 		if err != nil {
 			t.Fatalf("list the role bucket's keys: %v", err)
 		}
+		keys := scannedRoleNames(scanned)
 		if !slices.Contains(keys, unreadable) {
 			t.Fatalf("the claim the sweep could not read is gone from the bucket; the line says it stays there")
 		}
@@ -625,6 +801,121 @@ func TestTheDeregistrationSweepLeavesEveryClaimAnotherSessionHolds(t *testing.T)
 			t.Fatalf("the sweep made %d Deletes on %s, want the one it lost", deletes, takenDuring)
 		}
 		assertRoleHolder(t, reg, takenDuring, otherHolder)
+		assertInterestMissing(t, reg, session)
+	})
+}
+
+// Acceptance criterion A2, on both of the sweeps that now read every claim from one scan. The
+// scan carries the revision each record was read at, and the release deletes at that revision
+// and no other (nats.LastRevision), so a claim another session takes between the scan and the
+// delete is kept: the delete loses its compare-and-swap, which is the answer, not a failure.
+// Each case pairs the taken-over claim with one that did not change, which must be released, so
+// a sweep that stopped deleting altogether could not pass either of them.
+//
+// What each turns on is the holder and the revision the bucket ends with, because those are
+// what an unconditional delete would destroy: it would take the new holder's claim away and
+// leave the role to nobody. Both run over the small fixture, which is all the race needs - the
+// claim lands from beforeFirstDelete, under the sweep's own first delete, rather than from any
+// timing of the bucket's size.
+func TestTheSweepsThatReadFromOneScanKeepAClaimTakenUnderTheirDelete(t *testing.T) {
+	const otherHolder = "ses_race_other_holder"
+
+	// landClaimUnderTheFirstDelete returns the hook that writes otherHolder's claim on role when
+	// the sweep's first delete reaches the bucket, and the function that reads back the revision
+	// it wrote. The revision is guarded because the hook runs on the goroutine bus.Bounded put
+	// the delete on and the case reads it from its own.
+	landClaimUnderTheFirstDelete := func(t *testing.T, raw natsgo.KeyValue, role string) (func(key string), func() uint64) {
+		t.Helper()
+		var (
+			mu       sync.Mutex
+			revision uint64
+		)
+		hook := func(key string) {
+			if key != role {
+				t.Errorf("the sweep's first delete fell on %s, want %s, the role the claim lands on", key, role)
+				return
+			}
+			// Written through the bucket's own handle, so the claim the case lands is not
+			// counted among the sweep's calls.
+			landed, err := raw.Put(key, []byte(`{"holder_session_id":"`+otherHolder+`"}`))
+			if err != nil {
+				t.Errorf("land %s's claim on %s under the sweep's delete: %v", otherHolder, key, err)
+				return
+			}
+			mu.Lock()
+			revision = landed
+			mu.Unlock()
+		}
+		return hook, func() uint64 {
+			mu.Lock()
+			defer mu.Unlock()
+			return revision
+		}
+	}
+
+	// assertTheNewHoldersClaimStands fails the test unless the bucket holds role for otherHolder
+	// at the very revision that holder wrote. Reading both is the point: a delete that named no
+	// revision would have deleted the claim, and one that deleted and let the holder write again
+	// would leave another revision.
+	assertTheNewHoldersClaimStands := func(t *testing.T, raw natsgo.KeyValue, role string, want uint64) {
+		t.Helper()
+		entry, err := raw.Get(role)
+		if err != nil {
+			t.Fatalf("read %s's claim after the sweep: %v, want the claim %s took under the delete", role, err, otherHolder)
+		}
+		claim, err := DecodeRoleClaim(entry.Value())
+		if err != nil {
+			t.Fatalf("decode %s's claim after the sweep: %v", role, err)
+		}
+		if claim.HolderSessionID != otherHolder {
+			t.Fatalf("%s is held by %q after the sweep, want the %s that took it under the delete", role, claim.HolderSessionID, otherHolder)
+		}
+		if entry.Revision() != want {
+			t.Fatalf("%s's claim is at revision %d after the sweep, want the %d %s wrote", role, entry.Revision(), want, otherHolder)
+		}
+	}
+
+	t.Run("the role reaper keeps an expired claim another session took under its delete and reaps the one that did not change", func(t *testing.T) {
+		const expired = "ses_reaper_race_expired"
+		// The taken-over role sorts first, so the sweep's first delete - the one the hook runs
+		// before - is the one the new claim lands under.
+		taken, unchanged := "reap-race-a-taken-over", "reap-race-b-unchanged"
+		reg, rawRoles, _ := smallRoleBucketRegistry(t, expired, []string{taken, unchanged})
+		hook, takenRevision := landClaimUnderTheFirstDelete(t, rawRoles, taken)
+		counting := countRoleBucketCalls(t, reg, &sweepRoleKeyValue{beforeFirstDelete: hook})
+
+		sweep, err := reg.ReapRoleClaims(context.Background(), func(holder string) bool { return holder != expired }, 0)
+		if err != nil {
+			t.Fatalf("a reaper pass that lost one conditional delete to a claim landing under it: %v, want the loss read as the race it is", err)
+		}
+		// One reaped, and the claim the pass did not delete is not among them: the release
+		// reported it superseded, which is neither a reap nor a failure to skip.
+		if want := (RoleClaimSweep{Reaped: 1}); sweep != want {
+			t.Fatalf("the pass = %+v, want %+v: %s reaped and %s left to the session that took it", sweep, want, unchanged, taken)
+		}
+		if _, deletes := counting.callsOn(taken); deletes != 1 {
+			t.Fatalf("the pass made %d Deletes on %s, want the one it lost", deletes, taken)
+		}
+		assertTheNewHoldersClaimStands(t, rawRoles, taken, takenRevision())
+		assertRoleHolder(t, reg, unchanged, "")
+	})
+
+	t.Run("the deregistration's fallback keeps a claim another session took under its delete and releases the one that did not change", func(t *testing.T) {
+		const session = "ses_sweep_race_held"
+		// Both sort before the other sessions' claims, and the taken-over role before the
+		// other, so the sweep's first delete is the one the new claim lands under.
+		taken, unchanged := "fallback-race-a-taken-over", "fallback-race-b-unchanged"
+		reg, rawRoles, _ := smallRoleBucketRegistry(t, session, []string{taken, unchanged})
+		hook, takenRevision := landClaimUnderTheFirstDelete(t, rawRoles, taken)
+		countRoleBucketCalls(t, reg, &sweepRoleKeyValue{beforeFirstDelete: hook})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := reg.Remove(ctx, session, nil); err != nil {
+			t.Fatalf("Remove(%s) lost its conditional delete to a claim that landed under it: %v, want the loss read as the race it is", session, err)
+		}
+		assertTheNewHoldersClaimStands(t, rawRoles, taken, takenRevision())
+		assertRoleHolder(t, reg, unchanged, "")
 		assertInterestMissing(t, reg, session)
 	})
 }

@@ -139,6 +139,8 @@ func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
 			"spawn legion-omp-controller: the controller works no repository (got sjawhar/legion)"},
 		{"a default branch", func(s *SpawnSpec) { s.DefaultBranch = "main" },
 			"spawn legion-omp-controller: the controller works no repository, so it has no default branch (got main)"},
+		{"an issue key to stamp", func(s *SpawnSpec) { s.IssueTrailer = "ACME-7" },
+			"spawn legion-omp-controller: the controller works no repository and no issue, so it stamps nothing into a commit (got ACME-7)"},
 		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-controller: no role prompt"},
 		{"a credential as a value", func(s *SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" },
 			"spawn legion-omp-controller: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
