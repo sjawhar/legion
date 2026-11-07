@@ -103,3 +103,10 @@ export function keptTab(): KeptTab {
     storage,
   };
 }
+
+/** A v7 key minted at `at`, as `newSendKey` mints one: its first twelve hex digits are that
+ *  millisecond, which `keyExpired` reads back. */
+export function keyMinted(at: number): string {
+  const hex = at.toString(16).padStart(12, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8)}-7abc-9def-0123456789ab`;
+}

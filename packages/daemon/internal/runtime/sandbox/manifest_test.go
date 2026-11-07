@@ -2442,3 +2442,41 @@ func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
 		t.Errorf("prepare of a Claude claim resuming %s = %v, want it refused as no session id", named, err)
 	}
 }
+
+// Every Oh My Pi launch names the model the pod's overlay puts on the `default` role, resuming or
+// not: @default is Oh My Pi's own name for that role, and without the flag a resumed session runs
+// the model its first launch saved for ever. The flag rides the launch that starts a session too,
+// because a launch under it records no model of its own: the session file keeps the pin its first
+// launch wrote, so a later launch without the flag would read that pin again
+// (TestTheResumedAgentRunsTheConfiguredModel measures both on the real binary). Its place in the
+// argv is fixed here, after the two extension roots and before `--resume`. A Claude role's command
+// is claudelaunch's and names no model at all.
+func TestAgentArgvCarriesTheConfiguredModel(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := launchOf(t, r, workerSpec(t))
+	resuming := workerSpec(t)
+	resuming.Generation, resuming.BootToken, resuming.ResumeSessionFile = 2, "boot-g2", resumeSession
+	resumed := launchOf(t, r, resuming)
+	for _, tc := range []struct {
+		name string
+		l    launch
+		want []string
+	}{
+		{"a launch that starts a session", fresh, append(slices.Clone(r.agent),
+			"--extension", envoyPlugin, "--extension", legionPlugin, "--model", "@default",
+			"--mode", "rpc", "--append-system-prompt", fresh.prompt)},
+		{"a launch that resumes one", resumed, append(slices.Clone(r.agent),
+			"--extension", envoyPlugin, "--extension", legionPlugin, "--model", "@default",
+			"--resume="+resumeSession, "--mode", "rpc", "--append-system-prompt", resumed.prompt)},
+	} {
+		if got := tc.l.agentArgv(r.agent); !slices.Equal(got, tc.want) {
+			t.Errorf("%s runs %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if claude := launchOf(t, r, claudeWorkerSpec(t)).agentArgv(r.agent); slices.Contains(claude, "--model") {
+		t.Errorf("the Claude pod's command %q names a model, want claudelaunch's own command", claude)
+	}
+}

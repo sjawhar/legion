@@ -672,7 +672,8 @@ const diagnosisQuery = `
 // whose lock refuses a migration (diagnosisQuery), for the refusal to carry: by the time anyone
 // looks the session has usually ended. Its query text is printed only as redactedQuery leaves it,
 // with its literals, numbers and comments taken out, so the values a query carries in those do not
-// reach the report. A field Postgres hides from the census's role prints as not visible. A
+// reach the report. A field Postgres hides from the census's role prints as not visible, whether
+// it hides it as null or, as it hides a query alone, as a placeholder (visibleQuery). A
 // diagnosis that cannot be read says so and why (a SQLSTATE, never Postgres's message), and the
 // refusal it would have joined stands as it is.
 func holderDiagnosis(ctx context.Context, tx pgx.Tx, pid uint32) string {
@@ -718,10 +719,7 @@ func holderDiagnosis(ctx context.Context, tx pgx.Tx, pid uint32) string {
 			if waitType != nil || waitEvent != nil {
 				wait = orNotVisible(waitType) + "/" + orNotVisible(waitEvent)
 			}
-			text := "not visible"
-			if query != nil {
-				text = strconv.Quote(redactedQuery(*query))
-			}
+			text := visibleQuery(query)
 			backendXID := "none"
 			if xid != nil {
 				backendXID = *xid
@@ -780,6 +778,27 @@ func orNotVisible(s *string) string {
 		return "not visible"
 	}
 	return *s
+}
+
+// insufficientPrivilege is what pg_stat_activity.query holds for a session the reading role may
+// not see: Postgres hides that session's activity columns, query among them, and puts this
+// string in that one rather than a null (pgstatfuncs.c, pg_stat_get_activity). The session's
+// own identity is still there - pid is the backend's. Reading pg_stat_activity in this pod's
+// PostgreSQL 18.6 as a role that may not see another's backends answers, for pid, state and
+// query, "47||<insufficient privilege>": the pid, state null, query the placeholder.
+const insufficientPrivilege = "<insufficient privilege>"
+
+// visibleQuery is the holder's query text as the diagnosis prints it: not visible where Postgres
+// hides it, and otherwise only as redactedQuery leaves it. The placeholder holds no literal,
+// number or comment for the redactor to take out, so printing it as a statement loses no value;
+// it is wrong because there is no statement there, and an operator reading the diagnosis of a
+// session the census's role may not see must be told that rather than shown a placeholder in the
+// place a statement goes.
+func visibleQuery(query *string) string {
+	if query == nil || *query == insufficientPrivilege {
+		return "not visible"
+	}
+	return strconv.Quote(redactedQuery(*query))
 }
 
 // censusCount runs the migration's census inside a savepoint and records what it answered.

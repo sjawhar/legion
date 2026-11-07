@@ -1,4 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { IDEMPOTENCY_KEY_TTL_MS } from "@legion/contracts";
 import {
   type MutationKey,
   onlineManager,
@@ -8,9 +9,11 @@ import {
 import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { onFakeClock, settle } from "../../__tests__/fake-clock";
 import {
   type KeptTab,
   keptTab,
+  keyMinted,
   memoryFiles,
   UnloadTarget,
 } from "../../__tests__/kept-sends-harness";
@@ -19,7 +22,12 @@ import { ApiError, api, NetworkError } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import { SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
+import {
+  FIRST_BACKOFF_MS,
+  SEND_DEADLINE_MS,
+  SendExpiredError,
+  SendStoppedError,
+} from "../writes/keyed-write";
 import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { Writes } from "../writes/write-store";
 import { type HeldSend, HeldSends, heldSends, stoppable } from "./held-sends";
@@ -113,10 +121,6 @@ function heldOf(tab = keptTab(), client = signedIn(), unload?: EventTarget) {
   return { held: new HeldSends(writes), writes };
 }
 
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
-}
-
 /** Puts the write `key` back far enough that the page it comes back to does not make it again on
  *  its own: it shows refused, with Retry and Discard. */
 function pressedLongAgo(tab: KeptTab, key: string): void {
@@ -135,16 +139,6 @@ function retryHeld(store: HeldSends, mutationKey: MutationKey): void {
     throw new Error(`no refused send under ${String(mutationKey)}`);
   }
   store.retry(mutationKey);
-}
-
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    jest.advanceTimersByTime(1);
-    jest.useRealTimers();
-  }
 }
 
 // A composer holds one draft: a send under a name that is out refuses another, a refused one gives
@@ -575,6 +569,145 @@ test("a send held for a sign-out in another tab says so, and goes on once releas
       again.unmount();
     } finally {
       createAgentMessage.mockRestore();
+    }
+  });
+});
+
+// A message under a key Dispatch has forgotten is never sent under it again. The key counts
+// only once something has gone out under it - this attempt tells its request as
+// `api.createAgentMessage` does, then ends without Dispatch's verdict - so the attempt that
+// would follow is the one the spent key stops: the pending turn says so in the refusal's own
+// words - a Retry of it is a new message, which can be delivered a second time - and offers
+// Retry and Discard, as a stopped send's turn does.
+test("a send whose key has run out says so on its turn, with Retry and Discard", async () => {
+  await onFakeClock(async () => {
+    const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+      (sessionID, input, bounds) => {
+        bounds.sent?.({
+          body: input,
+          method: "POST",
+          path: `/api/v1/agents/${sessionID}/messages`,
+        });
+        return Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
+      }
+    );
+    const { held } = heldOf();
+    const sends = { discard: () => {}, retry: () => {}, stop: () => {} };
+    try {
+      held.send(agentKey, {
+        ...agentSend,
+        sendKey: keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS),
+      });
+      await settle();
+      // The first attempt ended without Dispatch's verdict, so the send waits its first backoff;
+      // the attempt the spent key stops is the one after that wait.
+      jest.advanceTimersByTime(FIRST_BACKOFF_MS);
+      await settle();
+      expect(held.get(agentKey)?.status).toBe("refused");
+      expect(createAgentMessage).toHaveBeenCalledTimes(1);
+      const spent = held.get(agentKey);
+      expect(spent?.status === "refused" && spent.refusal).toBeInstanceOf(SendExpiredError);
+
+      const turn = render(createElement(PendingSendTurn, { held: spent as HeldSend, sends }));
+      try {
+        expect(turn.getByTestId("agent-send-error").textContent).toBe(
+          new SendExpiredError().message
+        );
+        expect(turn.getByRole("button", { name: "Retry" })).toBeTruthy();
+        expect(turn.getByRole("button", { name: "Discard" })).toBeTruthy();
+      } finally {
+        turn.unmount();
+      }
+    } finally {
+      createAgentMessage.mockRestore();
+    }
+  });
+});
+
+// A Retry under the refused send's key is a press of its own: the entry that carried the first
+// request is gone (`Writes.supersede`), and the one that replaces it has sent nothing and holds
+// no request of its own, so nothing in that entry says its key has already carried a message. The
+// store keeps what the key carried beside the write (`KeptWrite.carried`), so a page a reload
+// brings back decides as the page that pressed it does: a Retry still waiting its turn when the
+// key runs out comes back expired in both, and the Retry of that goes under a key of its own.
+// Nothing goes out under the key Dispatch has forgotten either way.
+test("a send re-pressed under its key sends nothing under it after a reload", async () => {
+  /** The session's line holds one send that is out, `Ahead`, while the stopped send's Retry waits
+   *  its turn under the key its first request went out under; the key then runs out. `reload`
+   *  takes the page away and brings it back before that Retry's turn comes. Answers what the tab
+   *  kept for the Retry, how it came back, and the keys every attempt after the stop went out
+   *  under. */
+  const waitingOutTheKey = async (reload: boolean) => {
+    const tab = keptTab();
+    const ahead = Promise.withResolvers<Message>();
+    const keys: string[] = [];
+    const sendKey = keyMinted(Date.now() - IDEMPOTENCY_KEY_TTL_MS + 2 * SEND_DEADLINE_MS);
+    const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+      (sessionID, input, bounds) => {
+        // Every attempt tells its request before anything goes out, as `api.createAgentMessage`
+        // does: that is how the key is known to have carried one.
+        bounds.sent?.({
+          body: input,
+          method: "POST",
+          path: `/api/v1/agents/${sessionID}/messages`,
+        });
+        keys.push(bounds.key);
+        return input.body === "Ahead"
+          ? ahead.promise
+          : Promise.reject(new ApiError(503, { code: "UNAVAILABLE", error: "down" }));
+      }
+    );
+    const aheadKey: MutationKey = ["agent-live", "planner-session"];
+    try {
+      const first = heldOf(tab);
+      first.held.send(agentKey, { ...agentSend, sendKey });
+      for (let left = SEND_DEADLINE_MS + 1_000; left > 0; left -= 500) {
+        jest.advanceTimersByTime(500);
+        await settle();
+      }
+      expect(first.held.stop(agentKey)).toBe(true);
+      await settle();
+      first.held.send(aheadKey, {
+        ...agentSend,
+        draft: { body: "Ahead", mentions: [], replacement: "" },
+        sendKey: "send-ahead",
+      });
+      await settle();
+      retryHeld(first.held, agentKey);
+      await settle();
+      const kept = tab.kept(sendKey);
+      const sentUnderIt = () => keys.filter((key) => key === sendKey).length;
+      const beforeTheWait = sentUnderIt();
+      // Dispatch forgets the key while the Retry waits its turn behind `Ahead`.
+      jest.advanceTimersByTime(IDEMPOTENCY_KEY_TTL_MS);
+      await settle();
+
+      const page = reload ? heldOf(tab) : first;
+      if (reload) page.writes.resume("alice");
+      else ahead.resolve(sentMessage);
+      await settle();
+      const refused = page.held.get(agentKey);
+      retryHeld(page.held, agentKey);
+      await settle();
+      ahead.resolve(sentMessage);
+      await settle();
+      return { kept, refused, sentAfterTheWait: sentUnderIt() - beforeTheWait };
+    } finally {
+      createAgentMessage.mockRestore();
+      tab.close();
+    }
+  };
+
+  await onFakeClock(async () => {
+    for (const reload of [false, true]) {
+      const { kept, refused, sentAfterTheWait } = await waitingOutTheKey(reload);
+      // Nothing went out under the key Dispatch has forgotten: not on the Retry's turn, and not
+      // on the Retry the reader pressed over that refusal, which goes under a key of its own.
+      expect(sentAfterTheWait).toBe(0);
+      expect(refused?.status === "refused" && refused.refusal).toBeInstanceOf(SendExpiredError);
+      // The Retry is kept as a write that has sent nothing and holds no request of its own, and
+      // with the method its key carried all the same.
+      expect(kept).toMatchObject({ carried: "POST", request: null, sent: false });
     }
   });
 });

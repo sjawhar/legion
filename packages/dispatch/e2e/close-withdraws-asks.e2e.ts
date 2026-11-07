@@ -1,6 +1,5 @@
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
-import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import type { Actor } from "../web/src/api/types";
 import {
   createAsk,
@@ -13,7 +12,7 @@ import {
   patchIssue,
   requestApproval,
 } from "./api";
-import { connectedDot, countDocumentSockets, documentEditor } from "./editor";
+import { connectedDot, countDocumentSockets, documentEditor, reconnectedSockets } from "./editor";
 import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -112,19 +111,6 @@ async function openIssueAndInbox(
   return { decision, inbox, page, sockets };
 }
 
-/** Spends the document socket's reconnect draw - a uniform [0, RECONNECT_SPREAD_MS) set at the
- *  previous open (`web/src/features/doc/connection.ts`) - on the page's own clock, until the
- *  issue page holds `count` document sockets. The close that arms the draw may not have reached
- *  the page when the first jump lands, so the jump repeats. */
-async function reconnectedSockets({ page, sockets }: Opened, count: number): Promise<void> {
-  await expect
-    .poll(async () => {
-      await page.clock.fastForward(RECONNECT_SPREAD_MS);
-      return sockets();
-    }, PROBE)
-    .toBe(count);
-}
-
 /** The block hosts the open, answerable card. */
 async function expectOpenDecision(decision: Locator): Promise<void> {
   await expect(decision.getByRole("radio", { name: "Ship Release it" })).toBeVisible();
@@ -169,7 +155,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
 }) => {
   const seeded = await seedIssue("CLOSE");
   const opened = await openIssueAndInbox(browser, seeded, { clock: true });
-  const { decision, inbox, page } = opened;
+  const { decision, inbox, page, sockets } = opened;
   try {
     await page.getByRole("button", { name: "Close issue" }).click();
     await expectWithdrawn(opened, seeded, "alice");
@@ -199,7 +185,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     // (#2323) the page's own clock spends, so a row waits for the state the page settles in and
     // never depends on which side of the draw a run lands. A reload cannot make a closed issue's
     // document editable, so the page names none.
-    await reconnectedSockets(opened, 2);
+    await reconnectedSockets(page, sockets, 2);
     await expect(connectedDot(page)).toHaveText("connected");
     await expect(documentEditor(page)).toHaveAttribute("contenteditable", "false");
     await expect(page.getByText("Reload to edit.")).toHaveCount(0);
@@ -212,7 +198,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     // and no reload.
     await expect(decision.getByTestId("ask-resolution-badge")).toHaveCount(0);
     await expect(decision).not.toContainText("Withdrawn");
-    await reconnectedSockets(opened, 3);
+    await reconnectedSockets(page, sockets, 3);
     await expect(connectedDot(page)).toHaveText("connected");
     await expect(documentEditor(page)).toHaveAttribute("contenteditable", "true");
     await expect(page.getByText("Reload to edit.")).toHaveCount(0);
@@ -225,7 +211,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     // Reloaded, the block still hosts the open, answerable card. The reload opens a document
     // socket of its own, whose draw the page's clock spends as it did the two before it.
     await page.reload();
-    await reconnectedSockets(opened, 4);
+    await reconnectedSockets(page, sockets, 4);
     await expect(connectedDot(page)).toHaveText("connected");
     await expectOpenDecision(decision);
   } finally {

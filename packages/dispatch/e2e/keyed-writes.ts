@@ -177,6 +177,48 @@ export async function dropFirstAnswer(
   return promise;
 }
 
+/** Hands the page the first `method` answer on `path` over a body that errors as it is read,
+ *  under that answer's own status and headers, as a connection lost under an answer's body does:
+ *  Dispatch made the write and the page learns nothing of what it did. Every later answer is
+ *  the page's own.
+ *
+ *  Why not a `page.route`: Playwright fulfils a route with a body Chromium hands the page as it
+ *  was given, so neither a `Content-Encoding` the body does not honour nor a short
+ *  `Content-Length` makes a body the page cannot read - the page reads both bodies whole. The cut
+ *  therefore goes where the page reads the answer, over the `fetch` the API client calls
+ *  (`createApiClient`), from before the page loads. The request itself is the real one, so
+ *  Playwright's network events and the row's `watchWrites` list it as any other. */
+export async function cutFirstAnswerBody(page: Page, method: string, path: string): Promise<void> {
+  await page.addInitScript(
+    ({ method, path }) => {
+      const sent = window.fetch;
+      let cut = false;
+      // Every name of the page's own is read off `window`: this module's `Request` and
+      // `Response` are Playwright's.
+      const cutting = async (
+        input: Parameters<typeof window.fetch>[0],
+        init?: Parameters<typeof window.fetch>[1]
+      ) => {
+        if (cut) return sent(input, init);
+        const asked = input instanceof window.Request ? input.url : String(input);
+        const sentMethod = (
+          init?.method ?? (input instanceof window.Request ? input.method : "GET")
+        ).toUpperCase();
+        const response = await sent(input, init);
+        if (cut || sentMethod !== method) return response;
+        if (new URL(asked, window.location.href).pathname !== path) return response;
+        cut = true;
+        return new window.Response(
+          new ReadableStream<Uint8Array>({ start: (body) => body.error(new TypeError("cut")) }),
+          { headers: response.headers, status: response.status, statusText: response.statusText }
+        );
+      };
+      window.fetch = cutting as typeof window.fetch;
+    },
+    { method, path }
+  );
+}
+
 /** One attempt of an upload as the page's own `XMLHttpRequest` saw it: the key it went under and
  *  how it ended - `load`, with Dispatch's status and error code; `error`, the connection failed;
  *  `abort`, the page gave it up; `timeout`. `ended` is unset while it is still out. */

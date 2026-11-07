@@ -1,5 +1,5 @@
 import { ApiError, WRITE_METHODS, type WriteMethod, type WriteRequest } from "../../api/client";
-import { SendInterruptedError, SendStoppedError } from "./keyed-write";
+import { keySpent, SendExpiredError, SendInterruptedError, SendStoppedError } from "./keyed-write";
 
 /**
  * Where every write to Dispatch waits out a reload (`write-store.ts`). Every `POST` and `PATCH`
@@ -10,11 +10,11 @@ import { SendInterruptedError, SendStoppedError } from "./keyed-write";
  * resumes it on load under its key. Each write is one entry, `dispatch.write:<key>`, in one
  * versioned format for every kind (`KeptWrite`): its key, its kind and how it is shown, the login
  * of the person who pressed it and when, the target its line is ordered on, where it stood and its
- * refusal, the request as it last went out, and its kind's own record. An entry that does not
- * parse - another version's, or damaged - is dropped when the page loads, as is every entry of
- * another person's. While any of them the reader sees is unconfirmed the page asks the browser to
- * confirm leaving (`beforeunload`), since a closed tab would lose it; a quiet one (a read mark) is
- * never shown, so it never asks.
+ * refusal, the request as it last went out, what its key has carried, and its kind's own record.
+ * An entry that does not parse - another version's, or damaged - is dropped when the page loads,
+ * as is every entry of another person's. While any of them the reader sees is unconfirmed the
+ * page asks the browser to confirm leaving (`beforeunload`), since a closed tab would lose it; a
+ * quiet one (a read mark) is never shown, so it never asks.
  */
 
 const ENTRY_PREFIX = "dispatch.write:";
@@ -91,6 +91,15 @@ export interface KeptWrite {
   /** Whether an attempt of it went out under its key: one that never did is the reader's to
    *  discard while it waits its turn. */
   readonly sent: boolean;
+  /** The method of the request this write's key has already carried, which decides whether the
+   *  key is spent (`keySpent`), or `null` for a key nothing has gone out under. It is the
+   *  store's own record of the key (`Writes` `#carried`), not what `sent` and `request` say: a
+   *  write re-pressed under the key of the one it replaces (a composer's Retry, `supersede`) is
+   *  kept as a write that has sent nothing and holds no request, while its key has carried that
+   *  earlier press's request all the same. Every write kept here holds the field, and every one
+   *  `load` hands back: the release before this one wrote no such field, and `load` is the one
+   *  place that converts a missing one (`KeptEntry`), so nowhere else is absence a case. */
+  readonly carried: WriteMethod | null;
   readonly detail: unknown;
 }
 
@@ -173,8 +182,21 @@ const keptRequestShape = shape.either(
   shape.record({ body: shape.unknown, method: shape.oneOf(...WRITE_METHODS), path: shape.string })
 ) satisfies Shape<KeptRequest>;
 
-/** An entry as it is written: the write and the format's version. */
+/** An entry as it is read back: a kept write, whose `carried` can be missing, and the format's
+ *  version. The version stands still while a field is only added: the release before this one
+ *  wrote no `carried`, so an entry of its holds every other field this shape names and still
+ *  loads here, and an entry this one writes holds every field that release reads - it reads no
+ *  `carried` at all - so it still loads there. Every entry this release writes holds the field,
+ *  as a method or as `null`; a missing one is an entry of that older shape, and `load` is the
+ *  one place that converts it, so this shape is the only one that has it absent and nothing
+ *  downstream of `load` reads one. */
+type KeptEntry = Omit<KeptWrite, "carried"> & {
+  readonly carried?: WriteMethod | null;
+  readonly version: typeof FORMAT_VERSION;
+};
+
 const keptEntryShape = shape.record({
+  carried: shape.optional(shape.nullable(shape.oneOf(...WRITE_METHODS))),
   detail: shape.unknown,
   key: shape.string,
   kind: shape.string,
@@ -187,7 +209,7 @@ const keptEntryShape = shape.record({
   state: keptStateShape,
   target: shape.nullable(shape.string),
   version: shape.oneOf(FORMAT_VERSION),
-}) satisfies Shape<KeptWrite & { readonly version: typeof FORMAT_VERSION }>;
+}) satisfies Shape<KeptEntry>;
 
 /** How `error`, a write's refusal, is kept. */
 export function keptRefusal(error: Error): KeptRefusal {
@@ -199,13 +221,27 @@ export function keptRefusal(error: Error): KeptRefusal {
   return { kind: "error", message: error.message };
 }
 
-/** The refusal `kept` names, rebuilt as the error the write was refused with. */
-export function refusalFrom(kept: KeptRefusal): Error {
+/** The refusal `kept` names, rebuilt as the error the write was refused with. `key` is the key of
+ *  the write it refused, `carried` the method of the request that went out under that key -
+ *  `null` where nothing went out, which is the store's own record of the key
+ *  (`KeptWrite.carried`) and not what a kept request says, since a write waiting its turn is kept
+ *  with the request it is planned as - and `now` the time it is read back: a write that ended
+ *  without Dispatch's verdict under a key Dispatch has forgotten since comes back expired, since
+ *  a Retry of it is now a new write rather than the same one asked again. Which writes those are
+ *  is `keySpent`'s to say, the same question the retry loop asks before each attempt: a `PUT` or
+ *  a `DELETE` sends no key, and a key nothing went out under has never been seen by Dispatch. */
+export function refusalFrom(
+  kept: KeptRefusal,
+  key: string,
+  carried: WriteMethod | null,
+  now: number
+): Error {
+  const spent = keySpent(carried, key, now);
   switch (kept.kind) {
     case "interrupted":
-      return new SendInterruptedError();
+      return spent ? new SendExpiredError() : new SendInterruptedError();
     case "stopped":
-      return new SendStoppedError();
+      return spent ? new SendExpiredError() : new SendStoppedError();
     case "api":
       return new ApiError(kept.status, { code: kept.code ?? undefined, error: kept.message });
     case "error":
@@ -280,7 +316,14 @@ export class WriteStorage {
   }
 
   /** Every write `login` kept, in press order. An entry that is not one of this format's, or one
-   *  another person kept, is dropped. */
+   *  another person kept, is dropped. The one place an entry of the shape the release before
+   *  this one wrote becomes a write of this one: it holds no `carried`, and what the key of such
+   *  an entry has carried is read as that release read it, so none of the writes it kept is
+   *  decided differently here. A write is marked `sent` only as `writeUnderKey` tells the store
+   *  an attempt's request has gone out, while its request is kept from the press, before its
+   *  turn comes: so a kept request says what went out only where `sent` says one did, and a key
+   *  nothing went out under has never been seen by Dispatch. An entry this release wrote holds
+   *  the field, `null` included, and is read as it was written. */
   load(login: string): KeptWrite[] {
     const storage = this.#storage;
     if (storage === undefined || this.#retired) return [];
@@ -291,8 +334,11 @@ export class WriteStorage {
         this.#remove(name);
         continue;
       }
-      const { version: _version, ...write } = entry;
-      loaded.push(write);
+      const { carried, version: _version, ...write } = entry;
+      // What that older release derived, read only where the entry itself holds no record: one
+      // this release wrote is read as written, the `null` of a key nothing went out under too.
+      const derived = write.sent && write.request !== null ? write.request.method : null;
+      loaded.push({ ...write, carried: carried === undefined ? derived : carried });
     }
     return loaded.sort((a, b) => a.pressedAt - b.pressedAt);
   }

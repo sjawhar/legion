@@ -563,7 +563,8 @@ func SessionFromVolume(file, root string) (string, error) {
 
 // agentArgv is the command the shim runs, the launch's own harness: the Claude Code command for a
 // Claude role (claudeArgv), and otherwise the image's Oh My Pi with its two explicit extensions,
-// the Envoy plugin first, `--resume` on the recorded session when resuming, then RPC mode and the
+// the Envoy plugin first, `--model @default` so the session runs the model the pod's overlay puts
+// on the `default` role, `--resume` on the recorded session when resuming, then RPC mode and the
 // system prompt. For a plain launch the two roots are the image's own (envoyPlugin, legionPlugin); for
 // an installing launch (l.spec.Plugins set, LEGION-164) they are the pair launcherCommand's
 // install wrapper lands under this generation's own directory (pluginRoots), installed before Oh
@@ -576,6 +577,14 @@ func SessionFromVolume(file, root string) (string, error) {
 // route's `enabledModels` still bounds the session's model. The two plugins are roots the worker
 // image leaves unlinked from its profile: Oh My Pi loads a plugin that is both installed and named
 // by --extension twice, which the boot gate's pod lane refuses an image for.
+//
+// `--model @default` rides every launch, not the resuming one alone: @default is Oh My Pi's name
+// for the `default` model role, which every pod's operator overlay sets, and a resumed session
+// otherwise runs the model its first launch saved for ever. A launch under the flag writes no
+// `model_change` entry of its own, so the saved pin stays in the session file and a later launch
+// without the flag would read it again. A profile with no `default` role is not refused here: Oh
+// My Pi launches silently on a built-in model instead, which is the deployment's to notice
+// (deploy/kubernetes/operator-route/README.md, "Changing a role's model").
 func (l launch) agentArgv(agent []string) []string {
 	if l.runsClaude() {
 		return l.claudeArgv()
@@ -584,7 +593,7 @@ func (l launch) agentArgv(agent []string) []string {
 	if l.spec.Plugins != nil {
 		envoy, legion = pluginRoots(pluginGenDir(roleStateHome(l.spec.Role), l.spec.Generation))
 	}
-	argv := append(slices.Clone(agent), "--extension", envoy, "--extension", legion)
+	argv := append(slices.Clone(agent), "--extension", envoy, "--extension", legion, "--model", "@default")
 	if l.spec.ResumeSessionFile != "" {
 		argv = append(argv, "--resume="+l.spec.ResumeSessionFile)
 	}

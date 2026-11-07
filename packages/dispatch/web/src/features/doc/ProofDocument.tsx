@@ -256,14 +256,6 @@ export function ProofDocument({
   const pendingWaiter = useMemo(() => createPendingWaiter(), []);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
-  // Whether the issue was closed when the current admission came. The server admits a socket
-  // read-only for a closed issue as it does for a schema it does not serve, and a reload cannot
-  // make a closed issue's document editable, so the page names a reload only for a read-only
-  // admission that came while the issue was open, while the issue is open and the socket is
-  // connected. The admission and the connection decide the line, not the close or the reopen: each
-  // drops the socket only on the server process that served it, and where it does, the
-  // reconnect's admission decides again.
-  const [closedAdmission, setClosedAdmission] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const {
     blockSchema: runtimeBlockSchema,
@@ -624,7 +616,6 @@ export function ProofDocument({
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
-    setClosedAdmission(isClosedRef.current);
     // A transport or editor chunk that fails while online (after `DeploymentResilience` has
     // spent its reload) would otherwise leave the document "connecting" forever. Once failed,
     // the live provider's later status events must not repaint the dot over the alert.
@@ -793,7 +784,6 @@ export function ProofDocument({
             onAdmission: (readOnly) => {
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
-              setClosedAdmission(isClosedRef.current);
               editor?.setReadOnly(!page || isClosedRef.current || readOnly);
             },
             onOutsideSchema: () => {
@@ -1013,8 +1003,15 @@ export function ProofDocument({
           ) : null}
         </div>
       )}
-      {blockSchemaQuery.isError ||
-      (schemaReadOnly && !isClosed && !closedAdmission && connection === "connected") ? (
+      {/* The server admits a socket read-only for a closed issue as it does for a schema version
+          it does not serve, so the admission alone cannot say whether a reload would help. The
+          close state the page holds now decides: while the issue is open, a reload opens a new
+          socket the server admits on the issue as it stands, so a reload makes the document
+          editable again. A closed issue shows its own line above instead, and a socket that is
+          not connected shows nothing: its reconnect's admission decides. A block schema that
+          could not load leaves the page no editor to bind at all, and only a reload fixes that
+          too. */}
+      {blockSchemaQuery.isError || (schemaReadOnly && !isClosed && connection === "connected") ? (
         <p>Reload to edit.</p>
       ) : null}
       {/* The Open-decisions navigator walks the page's own document; a pane leaves it to the

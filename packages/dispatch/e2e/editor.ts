@@ -8,6 +8,7 @@ import {
   type WebSocketRoute,
 } from "@playwright/test";
 import { createDecoder, readVarUint } from "lib0/decoding";
+import { RECONNECT_SPREAD_MS } from "../web/src/api/live-socket";
 import type { Ask } from "../web/src/api/types";
 
 import { readField } from "../web/src/features/doc/sync-frame";
@@ -347,6 +348,27 @@ export function countDocumentSockets(page: Page, documentId?: string): () => num
     }
   });
   return () => count;
+}
+
+/** Every fact this poll waits on lands in milliseconds: Playwright's default 100/250/500/1000
+ *  ladder would first see it a quarter-second late. */
+const PROBE = { intervals: [50, 50, 100, 200, 500] };
+
+/** Spends the document socket's reconnect draw - a uniform [0, RECONNECT_SPREAD_MS) set at the
+ *  previous open (`web/src/features/doc/connection.ts`) - on the page's own clock, until the page
+ *  holds `count` document sockets, as `countDocumentSockets` counts them. What armed the draw may
+ *  not have reached the page when the first jump lands, so the jump repeats. */
+export async function reconnectedSockets(
+  page: Page,
+  sockets: () => number,
+  count: number
+): Promise<void> {
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(RECONNECT_SPREAD_MS);
+      return sockets();
+    }, PROBE)
+    .toBe(count);
 }
 
 /** Document sockets the tab still holds open: one per live document, never one per visit. */

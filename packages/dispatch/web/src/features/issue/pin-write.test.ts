@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
+import { settle } from "../../__tests__/fake-clock";
 import { api, NetworkError } from "../../api/client";
 import type { UserIssueState } from "../../api/types";
 import { writesOf } from "../writes/write-store";
@@ -12,10 +13,6 @@ function signedIn(login: string): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login });
   return client;
-}
-
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
 }
 
 const fresh: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 };

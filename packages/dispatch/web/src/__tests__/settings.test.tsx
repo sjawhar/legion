@@ -105,7 +105,9 @@ test("human users manage repository project mappings from the settings route", a
 
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
-    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    // The heading is the page's, drawn before the mapping arrives; the rows are the mapping
+    // query's, so this waits for one of them rather than reading the table in the same tick.
+    expect(await screen.findByRole("cell", { name: "owner/repo" })).toBeDefined();
     expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
     const radio = (repo: string) =>
       screen.getByRole("radio", {

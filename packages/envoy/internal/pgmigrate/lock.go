@@ -26,6 +26,17 @@ import (
 // runner's transaction ends.
 const LockTimeout = 5 * time.Second
 
+// diagnosisCleanupTimeout bounds the rollback and the close that end a diagnosis's connection,
+// which run together on a context of their own once the diagnosis is done: the diagnosis's own
+// context may have run out, and the one left by taking its cancellation off (context.WithoutCancel
+// keeps the values and drops the deadline) carries no bound at all, so a transport that has failed
+// without saying so would hold the runner for as long as that transport takes to notice - while
+// the runner is already reporting a failed migration and someone is waiting on that report. The
+// rollback and the close are one round trip each on a connection already open, so a second is far
+// longer than either needs. The timer starts when the cleanup does, so diagnoseHolders returns
+// within LockTimeout and a second however slow the diagnosis itself was.
+const diagnosisCleanupTimeout = 1 * time.Second
+
 // lockNotAvailable is the SQLSTATE Postgres cancels a statement with when its lock_timeout runs
 // out.
 const lockNotAvailable = "55P03"
@@ -131,7 +142,9 @@ func Exec(ctx context.Context, tx pgx.Tx, migration Migration, signIn func(conte
 // diagnoseHolders reads holderDiagnosis for each of holders on a connection of its own, in a
 // read-only transaction, within LockTimeout: the migration's own transaction is aborted by its
 // cancellation, and a diagnosis that cannot be had must not hold the runner up. A connection that
-// cannot be had is one diagnosis saying why.
+// cannot be had is one diagnosis saying why. Rolling that transaction back and closing that
+// connection run on a context of their own, bounded by diagnosisCleanupTimeout, so neither holds
+// the runner up either.
 func diagnoseHolders(ctx context.Context, dial func(context.Context) (*pgx.Conn, error), holders []Session) []string {
 	if len(holders) == 0 {
 		return nil
@@ -142,12 +155,22 @@ func diagnoseHolders(ctx context.Context, dial func(context.Context) (*pgx.Conn,
 	if err != nil {
 		return []string{"diagnosis not collected: " + err.Error()}
 	}
-	defer conn.Close(context.WithoutCancel(ctx))
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	// The rollback goes first and the close second: the rollback needs the connection the close
+	// ends. Both run on one context of their own (diagnosisCleanupTimeout), which bounds the two
+	// together.
+	var tx pgx.Tx
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), diagnosisCleanupTimeout)
+		defer cancel()
+		if tx != nil {
+			_ = tx.Rollback(cleanupCtx)
+		}
+		_ = conn.Close(cleanupCtx)
+	}()
+	tx, err = conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return []string{"diagnosis not collected: " + diagnosisFailure(err)}
 	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
 	diagnoses := make([]string, len(holders))
 	for i, holder := range holders {
 		diagnoses[i] = holderDiagnosis(ctx, tx, holder.PID)

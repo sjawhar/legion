@@ -3,6 +3,7 @@ import {
   type AgentStreamCommand,
   type AgentStreamFrame,
   type AgentStreamSettingsReported,
+  IDEMPOTENCY_KEY_TTL_MS,
   LIVE_SOCKET_MAX_AGE_CLOSE,
 } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -19,6 +20,7 @@ import {
 import type { ReactNode } from "react";
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 
+import { onFakeClock } from "../../__tests__/fake-clock";
 import {
   errorFrame,
   type FakeLiveSocket,
@@ -31,7 +33,12 @@ import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
 import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
 import { Sidebar } from "../sidebar/Sidebar";
-import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
+import {
+  KEYED_SEND_ATTEMPT_MS,
+  SEND_DEADLINE_MS,
+  SendExpiredError,
+  SendStoppedError,
+} from "../writes/keyed-write";
 import { AgentConversationPage } from "./AgentConversationPage";
 
 /** What each attempt of the live view's send is held to, beside the message it carries: its own
@@ -606,20 +613,6 @@ async function sendFromLiveView(body: string): Promise<void> {
       within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
     );
   });
-}
-
-/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
- *  timer left at zero delay would otherwise hang a later `waitFor`. */
-async function onFakeClock(body: () => Promise<void>): Promise<void> {
-  jest.useFakeTimers();
-  try {
-    await body();
-  } finally {
-    act(() => {
-      jest.advanceTimersByTime(1);
-    });
-    jest.useRealTimers();
-  }
 }
 
 // A message sent from the live view is one key, minted when the person presses Send: a fetch that
@@ -1546,6 +1539,27 @@ test("a refused switch shows the session's reason and the header keeps its value
   expect(picker("Model").value).toBe("anthropic/model-a");
   expect(screen.getByTestId("agent-session-model").textContent).toBe("anthropic/model-a");
   expect(picker("Thinking level").value).toBe("auto");
+});
+
+// A switch tried until Dispatch has forgotten its key is sent no more: the page says so in the
+// refusal's own words - a Retry of it is a new message, delivered a second time if the first one
+// was - and the pickers are the reader's again, to send a new switch with.
+test("a switch whose key has run out says so, and frees the pickers", async () => {
+  const createAgentMessage = answerAgentMessages().mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  spies.push(createAgentMessage);
+  await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  await onFakeClock(async () => {
+    fireEvent.change(picker("Model"), { target: { value: "anthropic/model-b" } });
+    await tick(0);
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+
+    await tick(IDEMPOTENCY_KEY_TTL_MS);
+    expect(screen.getByTestId("agent-send-error").textContent).toBe(new SendExpiredError().message);
+    expect(held(picker("Model"))).toBe(false);
+  });
 });
 
 /** A turn the session is still producing: the thread is mid-turn while it lasts. */

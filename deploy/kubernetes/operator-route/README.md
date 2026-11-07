@@ -65,6 +65,13 @@ the same `apply.sh` command; nothing in this repository changes. Pods started af
 new file. A running pod keeps the files it started with until it restarts, because `pod.yml` mounts
 both by `subPath`, which the kubelet never refreshes.
 
+`modelRoles.default` is the model every role's session runs on, a resumed session included: each
+launch names `--model @default`, Oh My Pi's own name for that role, so a role takes the model this
+file gives it now rather than the one its session saved when it started.
+A settings set without that key is not refused anywhere: Oh My Pi reads `@default` as its own
+built-in chat role and the session starts, silently, on a model that is no model of this
+directory's and reachable from no pod.
+
 A bump of `.omp-pin` moves each `modelRoles` line in `overlay.yml` to the newest model of the same
 family the new pin catalogues (`omp models anthropic` on the new build) and the model route
 serves, never to another family, and adds that model to `enabledModels` and to `models.yml` and

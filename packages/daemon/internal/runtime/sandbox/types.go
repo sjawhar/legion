@@ -179,8 +179,8 @@ type Options struct {
 	// generation's private directory.
 	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
-	// `--append-system-prompt`); Oh My Pi itself when nil.
+	// (`--extension <envoy plugin> --extension <legion plugin> --model @default`, `--resume`,
+	// `--mode rpc`, `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv each role runs
 	// before each start of its Oh My Pi — after a stale-plugin relaunch's install, in the role's

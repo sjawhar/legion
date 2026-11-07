@@ -240,6 +240,18 @@ export const WRITE_METHODS = ["DELETE", "PATCH", "POST", "PUT"] as const;
 
 export type WriteMethod = (typeof WRITE_METHODS)[number];
 
+/** Whether a write of `method` goes under its key, which it sends as `Idempotency-Key`: a `POST`
+ *  or a `PATCH`, each of which Dispatch would do a second time when a dropped answer has the page
+ *  ask again. A `PUT` or a `DELETE` is the same change however often it is made, so it sends no
+ *  key and Dispatch keeps nothing under one for it. The one place that rule is written: `send`
+ *  reads it as it builds the headers, and `keySpent` reads it to decide whether a key's age
+ *  stops a write, which is how both the retry loop (`writeUnderKey`) and a kept refusal
+ *  (`refusalFrom`) reach it.
+ */
+export function goesUnderKey(method: WriteMethod): boolean {
+  return method === "POST" || method === "PATCH";
+}
+
 /** What a request is answered with, for the type checker alone: no request carries it. */
 declare const answeredWith: unique symbol;
 
@@ -821,23 +833,24 @@ export class DispatchApiClient {
    * person who pressed it. A JSON body goes as JSON and a multipart form as itself, through the
    * upload transport; `bounds.sent` is told the request as it goes out. Answers what Dispatch
    * answered (nothing for an empty body), as the request's builder names it (`WriteRequest`), or
-   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`,
-   * and a replay of an answer Dispatch did not keep with `AnswerNotKeptError`.
+   * rejects with its refusal; a 2xx whose body is not JSON rejects with `UnreadableAnswerError`, a
+   * 2xx whose body stops part way with `NetworkError`, and a replay of an answer Dispatch did not
+   * keep with `AnswerNotKeptError`.
    */
   send<T>(
     request: WriteRequest<T>,
     { deadlineMs, key, login, progress, sent }: WriteBounds
   ): Promise<T> {
     const { body, method, path } = request;
-    const idempotent = method === "PUT" || method === "DELETE";
+    const keyed = goesUnderKey(method);
     const form = body instanceof FormData ? body : undefined;
     const json = body === undefined || form !== undefined ? undefined : JSON.stringify(body);
     const keepalive =
-      idempotent && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
+      !keyed && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
     const init: RequestInit = {
       ...(form !== undefined ? { body: form } : json !== undefined ? { body: json } : {}),
       headers: {
-        ...(idempotent ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(keyed ? { [IDEMPOTENCY_KEY_HEADER]: key } : {}),
         ...(login === undefined ? {} : { [DISPATCH_LOGIN_HEADER]: login }),
         ...(json === undefined ? {} : { "Content-Type": "application/json" }),
       },
@@ -846,7 +859,14 @@ export class DispatchApiClient {
     };
     sent?.(request);
     const read = async (response: Response): Promise<T> => {
-      const text = await response.text();
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        // The connection dropped as the answer's body came down: the page knows nothing of what
+        // Dispatch did, as for one that never answered, so the write is made again under its key.
+        throw new NetworkError(path, error);
+      }
       let answer: unknown;
       try {
         answer = text === "" ? undefined : JSON.parse(text);
