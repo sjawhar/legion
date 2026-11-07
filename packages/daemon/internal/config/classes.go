@@ -317,6 +317,13 @@ var Classes = []Row{
 	{Field: "Project.SlackChannels", Path: "projects.<KEY>.slack_channels", Class: ClassRebuild, Holder: HolderAPIServer,
 		Also: []string{HolderLaunchSpecs, HolderRuntime}},
 	{Field: "Project.Deploys", Path: "projects.<KEY>.deploys", Class: ClassRebuild, Holder: HolderAPIServer},
+	// The repositories whose commits a pane stamps the issue key into: a pane reads the key from
+	// its own launch environment (LEGION_ISSUE_TRAILER, built in the launch specs), so a change
+	// reaches a role at its next launch. The workflow runtime keeps a copy of its own, but only
+	// to say at the boot's mapping load which named repository the project does not serve
+	// (logUnservedCommitIssueTrailerRepos), and nothing else in the daemon reads it.
+	{Field: "Project.CommitIssueTrailerRepos", Path: "projects.<KEY>.commit_issue_trailer_repos",
+		Class: ClassLaunch, Holder: HolderLaunchSpecs},
 	{Field: "Deploy.Repo", Path: "projects.<KEY>.deploys[].repo", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "Deploy.Workflow", Path: "projects.<KEY>.deploys[].workflow", Class: ClassRebuild, Holder: HolderAPIServer},
 	{Field: "Deploy.Step", Path: "projects.<KEY>.deploys[].step", Class: ClassRebuild, Holder: HolderAPIServer},

@@ -597,6 +597,7 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `production_check_hours` | decision | — |
 | `project` | fixed | — |
 | `projects` | rebuild | `api-server` |
+| `projects.<KEY>.commit_issue_trailer_repos` | launch | `launch-specs` |
 | `projects.<KEY>.deploys` | rebuild | `api-server` |
 | `projects.<KEY>.deploys[].repo` | rebuild | `api-server` |
 | `projects.<KEY>.deploys[].step` | rebuild | `api-server` |
