@@ -13,18 +13,27 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export type TemporaryDirectoryOptions = {
+/**
+ * The root both forms take: the directory the temporary one is made in, `tmpdir()` by default.
+ * It is for a test that needs another filesystem, such as `/dev/shm` for a rename that must
+ * cross one.
+ */
+export type TemporaryRootOption = {
+  root?: string;
+};
+
+/** What {@link temporaryDirectories} takes: the root alone, since `mkdtemp` answers each path. */
+export type TemporaryDirectoriesOptions = TemporaryRootOption;
+
+/** What {@link temporaryDirectory} takes: the root, and whether to resolve it. */
+export type TemporaryDirectoryOptions = TemporaryRootOption & {
   /**
-   * Returns the path under `realpathSync` of `tmpdir()`. A macOS `tmpdir()` is a symlink (`/var`
+   * Returns the path under `realpathSync` of the root. A macOS `tmpdir()` is a symlink (`/var`
    * to `/private/var`), so a test that compares a path a child process printed with the path the
-   * fixture returned needs the resolved one.
+   * fixture returned needs the resolved one. The one-shot form alone takes it: it builds its own
+   * path, where the maker's paths are `mkdtemp`'s.
    */
   real?: boolean;
-  /**
-   * The directory the temporary one is made in, `tmpdir()` by default. It is for a test that
-   * needs another filesystem, such as `/dev/shm` for a rename that must cross one.
-   */
-  root?: string;
 };
 
 /**
@@ -58,16 +67,20 @@ export type TemporaryDirectoryMaker = (suffix?: string) => string;
  * The maker is synchronous, so a test body uses it without `await`.
  *
  * `options.root` is the directory the temporary ones are made in, for a test that needs another
- * filesystem; `options.real` is not read here, since each directory's path is `mkdtemp`'s own.
+ * filesystem.
+ *
+ * The `afterEach` attempts every directory even when one of them cannot be removed, since the
+ * directories are independent and one refusal must not leave the rest on disk, and reports the
+ * refusals together at the end.
  */
 export function temporaryDirectories(
   prefix: string,
-  options: TemporaryDirectoryOptions = {}
+  options: TemporaryDirectoriesOptions = {}
 ): TemporaryDirectoryMaker {
   const root = options.root ?? tmpdir();
   const made: string[] = [];
   afterEach(() => {
-    for (const directory of made.splice(0)) removeTree(directory);
+    removeEvery(made.splice(0));
   });
   return (suffix) => {
     const directory = mkdtempSync(join(root, nameTemplate(prefix, suffix)));
@@ -127,6 +140,28 @@ export function temporaryDirectory(
 function nameTemplate(prefix: string, suffix: string | undefined): string {
   const stem = suffix === undefined || suffix === "" ? prefix : `${prefix}-${suffix}`;
   return `${stem.replace(/-+$/, "")}-`;
+}
+
+/**
+ * Removes every directory of `directories`, newest first, so one made inside another goes before
+ * the directory holding it. Every tree is attempted even when one of them refuses, since the
+ * directories are independent and one refusal must not leave the rest on disk, and the refusals
+ * are reported together at the end: a hook that stopped at the first failure would leave every
+ * later directory behind and name only the one it stopped on (the behaviour
+ * `packages/envoy-client/test/temp-dir.ts` had, which this fixture took over from it).
+ */
+function removeEvery(directories: readonly string[]): void {
+  const failures: string[] = [];
+  for (const directory of [...directories].reverse()) {
+    try {
+      removeTree(directory);
+    } catch (error) {
+      failures.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`temporary directories left behind:\n  ${failures.join("\n  ")}`);
+  }
 }
 
 /**

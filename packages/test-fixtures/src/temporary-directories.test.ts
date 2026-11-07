@@ -154,9 +154,15 @@ describe("the removal", () => {
   const outside = temporaryDirectory("test-fixtures-outside");
   /** The read-only tree the first row makes, which the second finds gone. */
   let readOnlyTree = "";
-  /** The tree holding a symlink out of itself, and the file that symlink points into. */
+  /**
+   * The tree holding a symlink out of itself, the file that symlink points into, and a read-only
+   * directory beside it: a chmod walk that followed the link would make that directory writable,
+   * which is the fault this pair of rows exists to catch, since `rmSync` follows no symlink of
+   * its own and so deletes nothing out there whatever the walk does.
+   */
   let treeWithLink = "";
   let fileOutside = "";
+  let readOnlyOutside = "";
   /**
    * The tree holding a hard link to a file outside it, and that file: a mode the removal wrote
    * on the link would be that file's own, since the two names are one inode.
@@ -183,14 +189,19 @@ describe("the removal", () => {
     treeWithLink = makeDirectory("symlink");
     fileOutside = join(outside, "kept.txt");
     writeFileSync(fileOutside, "kept");
+    readOnlyOutside = join(outside, "sealed");
+    mkdirSync(readOnlyOutside);
+    chmodSync(readOnlyOutside, 0o555);
     symlinkSync(outside, join(treeWithLink, "link"));
     expect(existsSync(join(treeWithLink, "link", "kept.txt"))).toBe(true);
+    expect(statSync(readOnlyOutside).mode & 0o777).toBe(0o555);
   });
 
-  test("and the removal never reaches through that symlink", () => {
+  test("and the removal neither deletes through that symlink nor chmods through it", () => {
     expect(treeWithLink).not.toBe("");
     expect(existsSync(treeWithLink)).toBe(false);
     expect(existsSync(fileOutside)).toBe(true);
+    expect(statSync(readOnlyOutside).mode & 0o777).toBe(0o555);
   });
 
   test("a tree holding a hard link to a file outside it is made", () => {
@@ -205,5 +216,56 @@ describe("the removal", () => {
     expect(treeWithHardLink).not.toBe("");
     expect(existsSync(treeWithHardLink)).toBe(false);
     expect(statSync(linkedFile).mode & 0o777).toBe(0o444);
+  });
+});
+
+/**
+ * One directory the removal cannot remove must not keep the rest on disk. The hook is what
+ * removes, and a hook that throws fails the file it runs in, so this reads a `bun test` of its
+ * own: a file whose maker made three directories under a root made read-only before the hook
+ * ran, where every unlink fails for want of write permission on that root. The run must name all
+ * three rather than the first, which is what tells "attempted every one, reported together" from
+ * "stopped at the first and left the others".
+ */
+describe("a removal that cannot finish", () => {
+  const makeDirectory = temporaryDirectories("test-fixtures-batch");
+
+  test("names every directory it could not remove, not only the first", () => {
+    const work = makeDirectory("run");
+    const root = join(work, "root");
+    mkdirSync(root);
+    writeFileSync(
+      join(work, "batch.test.ts"),
+      `import { afterAll, test } from "bun:test";
+import { chmodSync } from "node:fs";
+import { temporaryDirectories } from ${JSON.stringify(join(import.meta.dir, "temporary-directories"))};
+
+const make = temporaryDirectories("left", { root: ${JSON.stringify(root)} });
+
+test("makes three and seals the root", () => {
+  make("one");
+  make("two");
+  make("three");
+  // Sealed after the directories are made and before the fixture's afterEach runs: unlinking a
+  // directory needs write permission on the directory holding it, so all three now refuse.
+  chmodSync(${JSON.stringify(root)}, 0o555);
+});
+
+// Registered after the fixture's own afterEach, so it runs after it: the root is writable again
+// for the outer suite that owns this scratch.
+afterAll(() => chmodSync(${JSON.stringify(root)}, 0o755));
+`
+    );
+    const run = Bun.spawnSync([process.execPath, "test", "./batch.test.ts"], {
+      cwd: work,
+      env: { ...process.env },
+    });
+    const output = `${run.stdout.toString()}${run.stderr.toString()}`;
+
+    expect(output).toContain("temporary directories left behind:");
+    for (const name of ["left-one-", "left-two-", "left-three-"]) {
+      expect(output).toContain(name);
+    }
+    expect(run.exitCode).not.toBe(0);
   });
 });
