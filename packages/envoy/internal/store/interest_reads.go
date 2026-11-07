@@ -35,7 +35,11 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 // session's consumer, which filters it on the row of a registration made on another listener
 // (cmd/listener's restoreRegistered, as session.SessionRegistry.Refresh reads that session's
 // record). The record read is cached as Get's own bucket read is, and a record this build cannot
-// decode is ErrMalformedInterest here too.
+// decode is ErrMalformedInterest here too. The bucket read is a direct get, so with
+// ENVOY_NATS_REPLICAS above 1 a copy one write behind answers the topics the registration
+// replaced and the restored consumer is filtered on those, until the session's next heartbeat
+// writes the row again (bus.KeyValue.Get, which states what that limit costs and why no read
+// here avoids it).
 func (r *Registry) Refresh(ctx context.Context, sessionID string) (Interest, error) {
 	item, _, err := r.getWithRevision(ctx, sessionID, true)
 	return item, err

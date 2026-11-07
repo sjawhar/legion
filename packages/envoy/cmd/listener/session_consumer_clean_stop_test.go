@@ -233,7 +233,7 @@ func TestACleanStopDeletesTheConsumerOfACallerThatHungUpOnceItsRecordWasGone(t *
 		defer close(served)
 		rig.mux.ServeHTTP(recorder, request)
 	}()
-	awaitDeleteWaitingForTheLock(t, &rig.delivery.locks, sessionID)
+	awaitDeleteWaitingOrDone(t, &rig.delivery.locks, sessionID, served, 2*time.Second)
 	rig.waitForRecordDeleted(t, sessionID)
 
 	hungUp()

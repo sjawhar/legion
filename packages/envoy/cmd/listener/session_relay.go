@@ -652,7 +652,7 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 //
 // The restart reads the session's stored topics under the session's lock, as an unsubscribe reads
 // them before it writes the filter, and a registration holds that lock from the filter it sets,
-// on the plan it is about to store, through that plan's write (registerSession): so the restart
+// on the plan it is about to store, through that plan's write (registerPass): so the restart
 // never reads the row between a registration's filter and that registration's write, and the
 // filter it writes is the row as it stood when it read it under that lock. It takes its mark
 // (sessionDelivery.mark) first, under the lock, and records it once it succeeds

@@ -462,6 +462,25 @@ func invalidKey(key any, err error) error {
 	return err
 }
 
+// Get reads key's latest value from the bucket.
+//
+// The read is a direct get, and no read of this build's buckets skips it: nats.go sends a KV get
+// to the stream's $JS.DIRECT.GET subject whenever that stream carries AllowDirect, CreateKeyValue
+// sets AllowDirect and nats.KeyValueConfig holds no field that unsets it, and neither KV surface
+// takes a per-read option for it (nats.go v1.50.0 kv.go:48, :272-289, :465, :632-633 and :1298,
+// and jetstream/kv.go:95 and :1576 over jetstream/stream.go:539). So with ENVOY_NATS_REPLICAS
+// above 1 a copy answers the read, one the queue group hands it at 90% caught up rather than when
+// it is current (EnsureKeyValue above), and what it answers stands up to one write behind the
+// bucket's leader. No test here reads a lagging copy: that takes a cluster, and these tests run
+// one server.
+//
+// The read that limit bears on is the listener's restore of a session's consumer, which reads the
+// session's record and its interest row through this get (session.SessionRegistry.Refresh,
+// store.Registry.Refresh). A copy behind the registration that restore raced answers no record,
+// and the session is left without a consumer, or answers the interest row that registration
+// replaced, and the consumer comes back filtered on the topics of the older row. The session's
+// next heartbeat registers again, writing both and creating the consumer its own answer promises,
+// so the cost is the messages published until that heartbeat.
 func (kv KeyValue) Get(key string) (nats.KeyValueEntry, error) {
 	if err := kv.check(key, getOverhead(kv.Bucket())); err != nil {
 		return nil, err

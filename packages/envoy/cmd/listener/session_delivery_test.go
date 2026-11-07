@@ -999,7 +999,7 @@ func TestSessionConsumerUnsubscribeWritesTheTopicsStoredWhenItHoldsTheLock(t *te
 
 // A relay restart that begins while a registration is between its filter and its interest row
 // waits for that row: the registration holds the session's consumer lock from the one to the other
-// (registerSession), so the restart rebuilds the filter from the row the registration wrote and
+// (registerPass), so the restart rebuilds the filter from the row the registration wrote and
 // never from the row it was about to replace. A restart in that window sets the filter back to a
 // row without the topic the registration is answered 200 for, and nothing restores the messages
 // published on that topic meanwhile: the registration's own write then matches its plan, so it

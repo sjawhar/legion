@@ -221,7 +221,7 @@ func TestASessionThatRacesADeleteThroughItsEntryWriteIsOfferedNothingItAcked(t *
 				defer close(deleted)
 				deleteErr = rig.deps.consumers.deleteConsumer(ctx, deleteDeps, sessionID)
 			}()
-			awaitDeleteWaitingForTheLock(t, &rig.deps.consumers.locks, sessionID)
+			awaitDeleteWaitingOrDone(t, &rig.deps.consumers.locks, sessionID, deleted, 2*time.Second)
 		})
 	}
 	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
@@ -352,7 +352,7 @@ func TestADeleteThatRacesARegistrationRestoresTheConsumerWithTheTopicItAnswered(
 				defer close(deleted)
 				deleteErr = rig.deps.consumers.deleteConsumer(ctx, rig.deps, sessionID)
 			}()
-			awaitDeleteWaitingOrDone(t, &rig.deps.consumers.locks, sessionID, deleted)
+			awaitDeleteWaitingOrDone(t, &rig.deps.consumers.locks, sessionID, deleted, 10*time.Second)
 		})
 	}
 	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1", followed))
@@ -475,30 +475,14 @@ func TestADeleteRestoresTheConsumerWithTheTopicItsCacheHasNotHeardOf(t *testing.
 	registering.awaitPending(t, sessionID, 1)
 }
 
-// awaitDeleteWaitingForTheLock holds a registration inside its hook until the delete it started
-// waits for the session's lock, so that delete's first call is made the moment the registration
-// releases it. The wait is short and what it waits for is one goroutine reaching one mutex, so
-// a deadline here is a delete that takes no lock at all: it is reported and the pass goes on,
-// within the registration's own budget, and the reads after the pass say what that delete did.
-func awaitDeleteWaitingForTheLock(t *testing.T, locks *sessionLocks, sessionID string) {
+// awaitDeleteWaitingOrDone holds a registration inside its hook until the delete it started waits
+// for the session's lock (two callers, this registration and it) or is done, which is what a
+// delete taking no lock is by then: the delete's first call is made the moment the registration
+// releases that lock. A deadline of within reached is reported and not fatal: the caller holds the
+// session's lock, and the reads after the pass say what the delete did.
+func awaitDeleteWaitingOrDone(t *testing.T, locks *sessionLocks, sessionID string, done <-chan struct{}, within time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for lockUsers(locks, sessionID) < 2 {
-		if time.Now().After(deadline) {
-			t.Errorf("after 2s the delete of %s's consumer does not wait for the session's lock the registration holds", sessionID)
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// awaitDeleteWaitingOrDone holds a registration inside its hook until the delete it started
-// waits for the session's lock (two callers, this registration and it) or is done, which is what
-// a delete taking no lock is by then. A deadline reached is reported and not fatal: the caller
-// holds the session's lock, and the reads after the pass say what the delete did.
-func awaitDeleteWaitingOrDone(t *testing.T, locks *sessionLocks, sessionID string, done <-chan struct{}) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(within)
 	for lockUsers(locks, sessionID) < 2 {
 		select {
 		case <-done:
@@ -506,7 +490,7 @@ func awaitDeleteWaitingOrDone(t *testing.T, locks *sessionLocks, sessionID strin
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("after 10s the delete of %s's consumer neither waits for the session's lock nor is done with it", sessionID)
+			t.Errorf("after %s the delete of %s's consumer neither waits for the session's lock nor is done with it", within, sessionID)
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
