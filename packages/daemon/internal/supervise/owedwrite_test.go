@@ -204,10 +204,10 @@ func serverError(code, message string) func(*testing.T) error {
 // measured incident lost, and one that leaves its state standing in memory whether or not the
 // row takes it.
 //
-// All but one leave the write owed, and the claim's next decision makes it: the row catches up
-// with what memory has held all along. The last is the server reading the statement and deciding
-// against it, which it would decide the same way again, so nothing is owed and nothing is
-// written again — the write is attempted once and that is the end of it.
+// All but two leave the write owed, and the claim's next decision makes it: the row catches up
+// with what memory has held all along. The last two are the server reading the statement and
+// deciding against it, which it would decide the same way again, so nothing is owed and nothing
+// is written again — the write is attempted once and that is the end of it.
 //
 // What the owed ones share is not a type: one is a pgx type, one is the standard library's, two
 // are a server's answer about a connection it refused, carried inside a pgx type, and the rest
@@ -315,6 +315,20 @@ func TestTheOwedWriteErrorsAreTheOnesNoServerAnsweredAbout(t *testing.T) {
 			name: "a statement the server refused",
 			err: func(*testing.T) error {
 				return &pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint", Severity: "ERROR"}
+			},
+			owed: false,
+		},
+		{
+			// A second statement the server read and refused, from a class of its own: a daemon
+			// deployed ahead of its migration writes a column the claims table has not got, and
+			// the server decides against that statement as plainly as it decides against a
+			// duplicate key. Two refusals are held here rather than one because one row holds
+			// only its own class: with 23505 alone, a build that owed every class but 23 would
+			// pass this table whole while repairing, at every decision for the life of the
+			// daemon, a write the server will refuse again.
+			name: "a column the server has not got",
+			err: func(*testing.T) error {
+				return &pgconn.PgError{Code: "42703", Message: `column "turn_started_at" of relation "claims" does not exist`, Severity: "ERROR"}
 			},
 			owed: false,
 		},

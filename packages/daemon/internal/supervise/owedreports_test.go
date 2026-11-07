@@ -1,9 +1,12 @@
 package supervise
 
 import (
+	"errors"
 	"slices"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -219,6 +222,85 @@ func TestTheOwedReportsAreMadeWhenTheWriteLandsAndNotBefore(t *testing.T) {
 		}
 		if dropped := h.logs.lines("an owed report is dropped", "the claim has left the generation it was owed at"); len(dropped) != 1 {
 			t.Fatalf("the dropped report is logged %d times, want once: %v", len(dropped), dropped)
+		}
+	})
+
+	// The other drop, and with the generation one the only drop there is: a repair whose own
+	// write the server judged. Such a refusal is one R2 never repeats, so no write of this
+	// claim is coming to put the row where the owed reports say it is, and a report of a state
+	// the store never took would tell the daemon more than the store can say. The reports go
+	// with the mark, and the line the drop writes is all that is left of them (R6), which is
+	// why this row reads it whole rather than counting it.
+	t.Run("a repair whose own write the server judged drops the reports it held", func(t *testing.T) {
+		h, counted := newCountedHarness(t)
+		reports := watchReports(h)
+		h.reach(StateReady)
+		h.store.fail("PutClaim", brokenConnection())
+
+		if err := h.handle(StreamTurnStart{Claim: testToken}); err == nil {
+			t.Fatal("the turn start whose write failed returned no error")
+		}
+		h.wantState(StateWorking)
+		if h.m.owedWrite == nil {
+			t.Fatal("the failed turn start left no mark; the working report it owes is what this row drops")
+		}
+		written := len(h.records.of(owedWriteLine))
+
+		// The outage lifts, and what refuses the repair is the server itself: a unique
+		// violation is a decision about that very write, which R2 never makes again.
+		refusal := &pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint", Severity: "ERROR"}
+		h.store.fail("PutClaim", refusal)
+		attempted := counted.mark()
+
+		// A task queued while the agent is in its turn: the repair runs at the head of that
+		// decision and is refused there, while the decision's own write is of the delivery, a
+		// table the refusal is not on.
+		h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+
+		if h.m.owedWrite != nil {
+			t.Fatal("the repair the server refused kept the mark; that write would be made again at every decision for the life of the daemon")
+		}
+		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady}) {
+			t.Fatalf("the daemon was told %v, want the ready alone: the owed working names a state the store never took", seen)
+		}
+		lines := h.records.of(owedWriteLine)[written:]
+		if len(lines) != 1 {
+			t.Fatalf("the drop wrote %d lines, want the one that is the whole record of it: %v", len(lines), lines)
+		}
+		line := lines[0]
+		if got, ok := line.attr("claim"); !ok || got.String() != string(h.token) {
+			t.Fatalf("the line carries claim %v (present %v), want %s", got, ok, h.token)
+		}
+		if got, ok := line.attr("store"); !ok || got.String() != "PutClaim" {
+			t.Fatalf("the line names the store method %v, want the repair's own claim write", got)
+		}
+		if got, ok := line.attr("error"); !ok {
+			t.Fatal("the line carries no error; it is the only record of what the server refused")
+		} else if err, isErr := got.Any().(error); !isErr || !errors.Is(err, refusal) {
+			t.Fatalf("the line carries error %v, want the server's own refusal %v", got, refusal)
+		}
+		if got, ok := line.attr("owed"); !ok || got.Bool() {
+			t.Fatalf("the line reads owed %v (present %v), want false: the write is dropped, not kept", got, ok)
+		}
+
+		// The decision went on to its own row rather than being dropped behind the refusal.
+		if asked := counted.writes()[attempted:]; !slices.Equal(asked, []string{"PutClaim", "PutDelivery"}) {
+			t.Fatalf("the decision asked for %v, want the refused repair and then the task's own delivery write", asked)
+		}
+		if p := h.claim().Pending; p == nil || p.Task != "the task" {
+			t.Fatalf("pending = %+v, want the task the deliver carried: the event was applied, not dropped", p)
+		}
+
+		// Nor does a later write make them true. The store takes claim writes again, the turn
+		// ends, that write lands, and the daemon is told nothing of what the drop took.
+		h.store.fail("PutClaim", nil)
+		h.mustQuiet(StreamTurnEnd{Claim: testToken})
+		h.wantState(StateIdle)
+		if stored := h.store.load(testToken); stored.State != StateIdle {
+			t.Fatalf("the turn's end stored %s, want idle: this row needs a later write that lands", stored.State)
+		}
+		if seen := states(reports()); !slices.Equal(seen, []ClaimState{StateReady}) {
+			t.Fatalf("the daemon was told %v after a write that landed; the dropped reports are gone for good", seen)
 		}
 	})
 
