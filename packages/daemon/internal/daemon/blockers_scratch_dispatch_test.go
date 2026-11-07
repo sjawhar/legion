@@ -806,15 +806,9 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 // last poll read — what Legion was doing instead.
 func settled(t *testing.T, d *daemon, what string, want func(api.State) bool) (api.State, string) {
 	t.Helper()
-	bound := time.Minute
-	if testDeadline, ok := t.Deadline(); ok {
-		if left := time.Until(testDeadline) - 20*time.Second; left < bound {
-			bound = left
-		}
-	}
 	var state api.State
 	var body []byte
-	if !testwait.Holds(bound, 20*time.Millisecond, func() bool {
+	if !testwait.Holds(testwait.Bounded(t, time.Minute, 20*time.Second), 20*time.Millisecond, func() bool {
 		status, read := d.request(http.MethodGet, "/legion/v1/state", nil, false)
 		body = read
 		if status != http.StatusOK {

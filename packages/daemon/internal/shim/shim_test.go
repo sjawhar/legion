@@ -1200,15 +1200,10 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				}
 				return strings.TrimSpace(string(output))
 			}
-			initArgv := fixturegit.JJInit(workspace, true)
-			initialize := exec.Command(jj, initArgv[1:]...)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
-			initialize.Dir = workspace
-			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
-			if output, err := initialize.CombinedOutput(); err != nil {
-				t.Fatalf("jj git init: %v\n%s", err, output)
-			}
+			fixturegit.Isolated(t, home).With("JJ_USER=implementer", "JJ_EMAIL=implementer@example.test").
+				Run(workspace, append([]string{jj}, fixturegit.JJInit(workspace, true)[1:]...)...)
 			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -1271,12 +1266,7 @@ func TestAdoptWorkingCopyLeavesTheRepositoryTheShimRunsInUntouched(t *testing.T)
 	home := t.TempDir()
 	initialize := func(dir string) {
 		t.Helper()
-		command := exec.Command(jj, fixturegit.JJInit(dir, true)[1:]...)
-		command.Dir = dir
-		command.Env = fixtureenv.Isolated(home)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("jj git init %s: %v\n%s", dir, err, output)
-		}
+		fixturegit.Isolated(t, home).Run(dir, append([]string{jj}, fixturegit.JJInit(dir, true)[1:]...)...)
 	}
 	decoy, workspace := t.TempDir(), t.TempDir()
 	initialize(decoy)
@@ -1380,15 +1370,10 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			workspace := t.TempDir()
-			initArgv := fixturegit.JJInit(workspace, true)
-			initialize := exec.Command(jj, initArgv[1:]...)
 			// The init takes no -R and opens no workspace, so with no Dir jj would walk up from
 			// the test process's directory to the closest .jj and write that repository.
-			initialize.Dir = workspace
-			initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
-			if output, err := initialize.CombinedOutput(); err != nil {
-				t.Fatalf("jj git init: %v\n%s", err, output)
-			}
+			fixturegit.Isolated(t, home).With("JJ_USER=implementer", "JJ_EMAIL=implementer@example.test").
+				Run(workspace, append([]string{jj}, fixturegit.JJInit(workspace, true)[1:]...)...)
 			// A file the adoption's first jj snapshots, so jj rewrites the git index.
 			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
 				t.Fatal(err)

@@ -343,18 +343,17 @@ func awaitRereadRate(t *testing.T, process *brokerProcess, replicas int) rereadR
 	t.Helper()
 	var rate rereadRateLine
 	var ok bool
-	if testwait.Holds(rereadRateSettles, listeningPoll, func() bool {
+	if !testwait.Holds(rereadRateSettles, listeningPoll, func() bool {
 		rate, ok = rereadRateIn(process.Log())
 		return ok && rate.Replicas == replicas
 	}) {
-		return rate
+		if !ok {
+			t.Fatalf("the broker at %s logged no reread rate at all within %s; want the one it derives from %d pods:\n%s",
+				process.Addr, rereadRateSettles, replicas, process.Log())
+		}
+		t.Fatalf("%s after the fleet became %d pods the broker at %s was still serving the rate it derived from %d of them, one reread every %s; want it to have counted the whole fleet:\n%s",
+			rereadRateSettles, replicas, process.Addr, rate.Replicas, rate.Every, process.Log())
 	}
-	if !ok {
-		t.Fatalf("the broker at %s logged no reread rate at all within %s; want the one it derives from %d pods:\n%s",
-			process.Addr, rereadRateSettles, replicas, process.Log())
-	}
-	t.Fatalf("%s after the fleet became %d pods the broker at %s was still serving the rate it derived from %d of them, one reread every %s; want it to have counted the whole fleet:\n%s",
-		rereadRateSettles, replicas, process.Addr, rate.Replicas, rate.Every, process.Log())
 	return rate
 }
 

@@ -729,9 +729,7 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 	// daemon serves, the held listener queues the connection unanswered.
 	poll := &http.Client{Transport: transport, Timeout: time.Second}
 	var err error
-	var exited error
-	var gone bool
-	answered := testwait.Holds(within, 20*time.Millisecond, func() bool {
+	if !testwait.Holds(within, 20*time.Millisecond, func() bool {
 		var response *http.Response
 		response, err = poll.Get(d.base + "/healthz")
 		if err == nil {
@@ -741,18 +739,13 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 			}
 		}
 		select {
-		case exited = <-d.done:
-			gone = true
-			return true
+		case exited := <-d.done:
+			d.stopped = true
+			t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
 		default:
 		}
 		return false
-	})
-	if gone {
-		d.stopped = true
-		t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
-	}
-	if !answered {
+	}) {
 		t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
 	}
 	return d

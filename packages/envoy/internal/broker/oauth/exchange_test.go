@@ -507,7 +507,7 @@ func waitForBlocked(t *testing.T, pool *pgxpool.Pool, blocker uint32, like strin
 // at once if the operation running there returns first, and after ten seconds.
 func waitForWaiting(t *testing.T, pool *pgxpool.Pool, pid uint32, like string, returned <-chan error) {
 	t.Helper()
-	if testwait.Holds(10*time.Second, 5*time.Millisecond, func() bool {
+	if !testwait.Holds(10*time.Second, 5*time.Millisecond, func() bool {
 		select {
 		case err := <-returned:
 			t.Fatalf("the operation returned (%v) before it waited on a lock in a statement matching %s", err, like)
@@ -520,9 +520,8 @@ func waitForWaiting(t *testing.T, pool *pgxpool.Pool, pid uint32, like string, r
 		}
 		return waiting > 0
 	}) {
-		return
+		t.Fatalf("backend %d never waited on a lock in a statement matching %s", pid, like)
 	}
-	t.Fatalf("backend %d never waited on a lock in a statement matching %s", pid, like)
 }
 
 // TestAMachineExchangeHoldsItsCredentialAgainstARevoke: an exchange of a machine access token

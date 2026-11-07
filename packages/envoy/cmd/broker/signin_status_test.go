@@ -60,13 +60,12 @@ func awaitClientCheck(t *testing.T, base string) (signInStatus, string) {
 	t.Helper()
 	var status signInStatus
 	var body string
-	if testwait.Holds(awaitTimeout, listeningPoll, func() bool {
+	if !testwait.Holds(awaitTimeout, listeningPoll, func() bool {
 		status, body = fetchSignInStatus(t, base)
 		return status.ClientCheck != nil
 	}) {
-		return status, body
+		t.Fatalf("the broker took no client check within %s: %s", awaitTimeout, body)
 	}
-	t.Fatalf("the broker took no client check within %s: %s", awaitTimeout, body)
 	return status, body
 }
 

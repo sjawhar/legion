@@ -1,16 +1,15 @@
 // Package githubtest holds the fake GitHub server the daemon's tests share. A test that drives
 // code which reads GitHub stands one up: an httptest server answering the handful of paths that
 // code asks for, closed when the test ends. What every such fake does the same way — the server
-// itself, the record it keeps of each request under one lock, the bearer gate, the JSON content
-// type and the close — is Server's; what the test proves stays in the test's own handler: its
-// switch, its default arm, and the state it keeps and reads. Unexpected is the default arm of a
-// fake for which any request it did not plan for is a failure.
+// itself, the record it keeps of each request, the bearer gate, the JSON content type and the
+// close — is Server's; what the test proves stays in the test's own handler: its switch, its
+// default arm, and the state it keeps and reads. Unexpected is the default arm of a fake for
+// which any request it did not plan for is a failure.
 package githubtest
 
 import (
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 )
 
@@ -18,7 +17,8 @@ import (
 type Spec struct {
 	// Token, when set, is the bearer every request must carry; one that does not gets 401.
 	Token string
-	// Record, when set, is called with each request before the handler, under the server's lock.
+	// Record, when set, is called with each request before the handler, from the server's own
+	// goroutine, so a recorder a test reads keeps a lock of its own.
 	Record func(*http.Request)
 	// Handle is the caller's own switch, its default arm included.
 	Handle http.HandlerFunc
@@ -34,12 +34,9 @@ func Server(t *testing.T, spec Spec) string {
 // handler, or a close of its own beside the one Serve registers.
 func Serve(t *testing.T, spec Spec) *httptest.Server {
 	t.Helper()
-	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if spec.Record != nil {
-			mu.Lock()
 			spec.Record(r)
-			mu.Unlock()
 		}
 		if spec.Token != "" && r.Header.Get("Authorization") != "Bearer "+spec.Token {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)

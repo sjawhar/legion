@@ -840,11 +840,5 @@ func (r *idleWakeRig) logged(msg string, attributes map[string]string) int {
 // which is a minute, so the package helper's one-minute cap is too short here.
 func idleRigEventually(t *testing.T, within time.Duration, what string, condition func() bool) {
 	t.Helper()
-	bound := within
-	if testDeadline, ok := t.Deadline(); ok {
-		if left := time.Until(testDeadline) - 5*time.Second; left < bound {
-			bound = left
-		}
-	}
-	testwait.WithinPolling(t, bound, 50*time.Millisecond, what, condition)
+	testwait.WithinPolling(t, testwait.Bounded(t, within, 5*time.Second), 50*time.Millisecond, what, condition)
 }

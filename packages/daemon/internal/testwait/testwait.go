@@ -4,7 +4,8 @@
 // binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
 // is not a failure, and a condition that never holds still fails, naming what it waited for.
 // Eventually is the wait a test usually wants; WithinPolling takes a bound and a pace of its
-// own; and Holds answers rather than fails, for a caller whose failure text is its own.
+// own; Holds answers rather than fails, for a caller whose failure text is its own; and Bounded
+// is the clamp alone, for a wait that holds the rest itself.
 package testwait
 
 import (
@@ -21,13 +22,20 @@ const Poll = 10 * time.Millisecond
 // so a `-timeout` smaller than a minute still reports the wait rather than the binary's panic.
 func Eventually(t *testing.T, what string, condition func() bool) {
 	t.Helper()
-	bound := time.Minute
+	WithinPolling(t, Bounded(t, time.Minute, time.Second), Poll, what, condition)
+}
+
+// Bounded is bound, or what is left of the test binary's own deadline less margin when that is
+// sooner, so a -timeout smaller than bound still reports the wait rather than the binary's panic.
+// Eventually is Bounded of a minute and a second; a wait with a span or a margin of its own takes
+// those.
+func Bounded(t *testing.T, bound, margin time.Duration) time.Duration {
 	if testDeadline, ok := t.Deadline(); ok {
-		if left := time.Until(testDeadline) - time.Second; left < bound {
+		if left := time.Until(testDeadline) - margin; left < bound {
 			bound = left
 		}
 	}
-	WithinPolling(t, bound, Poll, what, condition)
+	return bound
 }
 
 // WithinPolling waits for condition under the caller's own bound and its own pace, with no

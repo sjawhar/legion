@@ -609,7 +609,7 @@ func TestAWriterWaitingForTheSlotFinishesWhenTheRoomFails(t *testing.T) {
 // with the waiting operation's result if it returns first.
 func awaitOwnerRowTaken(t *testing.T, ctx context.Context, database *store.Store, returned <-chan error) {
 	t.Helper()
-	if testwait.Holds(recoveryBound, time.Millisecond, func() bool {
+	if !testwait.Holds(recoveryBound, time.Millisecond, func() bool {
 		select {
 		case err := <-returned:
 			t.Fatalf("the operation returned (%v) before it took the owner row", err)
@@ -630,9 +630,8 @@ func awaitOwnerRowTaken(t *testing.T, ctx context.Context, database *store.Store
 		}
 		return false
 	}) {
-		return
+		t.Fatal("no transaction took the owner row")
 	}
-	t.Fatal("no transaction took the owner row")
 }
 
 // Settlement is a transaction too: it holds the document's advisory lock while it stamps block

@@ -381,14 +381,13 @@ const awaitTimeout = 10 * time.Second
 func (p *brokerProcess) Await(t *testing.T, want string) string {
 	t.Helper()
 	var text string
-	if testwait.Holds(awaitTimeout, listeningPoll, func() bool {
+	if !testwait.Holds(awaitTimeout, listeningPoll, func() bool {
 		text = p.Log()
 		return strings.Contains(text, want)
 	}) {
-		return text
+		t.Fatalf("the broker never logged a line carrying %q:\n%s", want, p.Log())
 	}
-	t.Fatalf("the broker never logged a line carrying %q:\n%s", want, p.Log())
-	return ""
+	return text
 }
 
 // listeningPoll is how often AwaitListening looks for the broker's listening line. The line is
@@ -401,7 +400,7 @@ const listeningPoll = 20 * time.Millisecond
 // ever logging that line, and when within passes with no such line.
 func (p *brokerProcess) AwaitListening(t *testing.T, within time.Duration) {
 	t.Helper()
-	if testwait.Holds(within, listeningPoll, func() bool {
+	if !testwait.Holds(within, listeningPoll, func() bool {
 		if addr, boot, ok := listeningIn(p.Log()); ok {
 			p.Addr, p.Boot = addr, boot
 			return true
@@ -421,9 +420,8 @@ func (p *brokerProcess) AwaitListening(t *testing.T, within time.Duration) {
 		}
 		return false
 	}) {
-		return
+		t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
 	}
-	t.Fatalf("no %q line within %s:\n%s", "broker listening", within, p.Log())
 }
 
 // listeningIn finds the broker's first "broker listening" line in log and answers the address it

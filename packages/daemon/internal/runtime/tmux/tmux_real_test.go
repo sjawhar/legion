@@ -634,19 +634,13 @@ func probe(t *testing.T, rt *Runtime, loc runtime.Locator) runtime.Observation {
 func awaitGone(t *testing.T, rt *Runtime, loc runtime.Locator, after string) {
 	t.Helper()
 	var obs runtime.Observation
-	var alive bool
-	gone := testwait.Holds(10*time.Second, 20*time.Millisecond, func() bool {
+	if !testwait.Holds(10*time.Second, 20*time.Millisecond, func() bool {
 		obs = probe(t, rt, loc)
 		if obs.Kind == runtime.Alive {
-			alive = true
-			return true
+			t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
 		}
 		return obs.Kind == runtime.Gone
-	})
-	if alive {
-		t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
-	}
-	if !gone {
+	}) {
 		t.Fatalf("Probe after %s = %+v, want gone within 10s", after, obs)
 	}
 }
@@ -726,17 +720,11 @@ func descendant(t *testing.T, root int, name string) int {
 func readReport(t *testing.T, workspace string, pid int) map[string]any {
 	t.Helper()
 	path := filepath.Join(workspace, fmt.Sprintf("standin-%d.json", pid))
-	bound := 30 * time.Second
-	if testDeadline, ok := t.Deadline(); ok {
-		if left := time.Until(testDeadline) - time.Second; left < bound {
-			bound = left
-		}
-	}
 	// The read's own answer is the failure text, so err is the wait's verdict: it holds the last
 	// "no such file" when the bound passes, and any other error the moment the read returns it.
 	var raw []byte
 	var err error
-	testwait.Holds(bound, testwait.Poll, func() bool {
+	testwait.Holds(testwait.Bounded(t, 30*time.Second, time.Second), testwait.Poll, func() bool {
 		raw, err = os.ReadFile(path)
 		return err == nil || !errors.Is(err, os.ErrNotExist)
 	})

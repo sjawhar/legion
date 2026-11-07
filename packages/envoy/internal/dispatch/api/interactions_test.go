@@ -148,7 +148,7 @@ func (g *firstReplaceGate) AcceptSuggestion(ctx context.Context, artifactID, mar
 
 func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, secondReplacement <-chan struct{}) {
 	t.Helper()
-	if testwait.Holds(time.Second, 5*time.Millisecond, func() bool {
+	if !testwait.Holds(time.Second, 5*time.Millisecond, func() bool {
 		select {
 		case <-secondReplacement:
 			return true
@@ -163,9 +163,8 @@ func waitForSecondReplacementOrCommentLock(t *testing.T, database *store.Store, 
 		}
 		return waiting > 0
 	}) {
-		return
+		t.Fatal("second accept did not reach document service or wait for the comment lock")
 	}
-	t.Fatal("second accept did not reach document service or wait for the comment lock")
 }
 
 func TestAskWithoutOptionsEmitsEmptyOptionsArray(t *testing.T) {

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
@@ -49,13 +48,7 @@ func TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands(t *testing.
 		}
 	}
 	testbin.OMPHome(t, omp, home)
-	initArgv := fixturegit.InitWorkTree(repo, "")
-	initialise := exec.Command(initArgv[0], initArgv[1:]...)
-	initialise.Dir = repo
-	initialise.Env = fixtureenv.Isolated(home)
-	if out, err := initialise.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
+	fixturegit.Isolated(t, home).Run(repo, fixturegit.InitWorkTree(repo, "")...)
 	// A profile whose one model is an operator's provider that nothing listens on: RPC mode starts
 	// only on a profile with a model, and naming it keeps the test off any credential the machine
 	// carries (a devbox's instance role reaches Amazon Bedrock; a runner has none, and the metadata

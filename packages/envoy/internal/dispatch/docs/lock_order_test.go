@@ -36,7 +36,7 @@ func lockOrderService(t *testing.T) (*store.Store, *Service, string) {
 // the waiting operation's result if it returns first.
 func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, like string, returned <-chan error) {
 	t.Helper()
-	if testwait.Holds(10*time.Second, 2*time.Millisecond, func() bool {
+	if !testwait.Holds(10*time.Second, 2*time.Millisecond, func() bool {
 		select {
 		case err := <-returned:
 			t.Fatalf("the operation returned (%v) before any statement matching %s waited on a lock", err, like)
@@ -44,9 +44,8 @@ func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, l
 		}
 		return lockWaits(t, ctx, database, like) > 0
 	}) {
-		return
+		t.Fatalf("no statement waiting on a lock matching %s", like)
 	}
-	t.Fatalf("no statement waiting on a lock matching %s", like)
 }
 
 // lockWaits counts the sessions of the test's database waiting on a lock whose statement matches

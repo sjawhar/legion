@@ -5,13 +5,11 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/fixturegit"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -78,16 +76,10 @@ func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 		if err := os.MkdirAll(located.Clone, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		initArgv := fixturegit.InitWorkTree(located.Clone, "")
-		initialise := exec.Command(realGit, initArgv[1:]...)
 		// The clone's directory is made just above, so the init runs inside it rather than in
 		// whatever directory the test process has, and under an environment of its own, as the
 		// git helper above does.
-		initialise.Dir = located.Clone
-		initialise.Env = fixtureenv.Isolated(t.TempDir())
-		if out, err := initialise.CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v\n%s", err, out)
-		}
+		fixturegit.Isolated(t, t.TempDir()).Run(located.Clone, append([]string{realGit}, fixturegit.InitWorkTree(located.Clone, "")[1:]...)...)
 		old := "!gh auth git-credential"
 		git(t, located.Clone, "config", "--add", "credential.helper", old)
 		git(t, located.Clone, "config", "--add", "credential.https://github.com.helper", old)

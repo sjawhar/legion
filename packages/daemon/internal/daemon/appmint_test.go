@@ -147,11 +147,14 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 		}
 	})
 	var exited error
-	var stopping bool
 	answered := testwait.Holds(within, 20*time.Millisecond, func() bool {
 		select {
 		case err := <-done:
-			exited, stopping = err, true
+			stopped = true
+			if err == nil {
+				t.Fatal("run returned nil before the daemon answered /healthz")
+			}
+			exited = err
 			return true
 		default:
 		}
@@ -163,11 +166,7 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 		}
 		return false
 	})
-	if stopping {
-		stopped = true
-		if exited == nil {
-			t.Fatal("run returned nil before the daemon answered /healthz")
-		}
+	if exited != nil {
 		return exited
 	}
 	if !answered {

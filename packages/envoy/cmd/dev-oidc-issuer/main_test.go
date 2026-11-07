@@ -40,7 +40,7 @@ var listening = regexp.MustCompile(`issuer listening url=(\S+)`)
 func awaitListening(t *testing.T, stderr *lockedBuffer) string {
 	t.Helper()
 	var url string
-	if testwait.Holds(10*time.Second, 10*time.Millisecond, func() bool {
+	if !testwait.Holds(10*time.Second, 10*time.Millisecond, func() bool {
 		match := listening.FindStringSubmatch(stderr.String())
 		if match == nil {
 			return false
@@ -48,10 +48,9 @@ func awaitListening(t *testing.T, stderr *lockedBuffer) string {
 		url = match[1]
 		return true
 	}) {
-		return url
+		t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
 	}
-	t.Fatalf("the issuer never logged its URL:\n%s", stderr.String())
-	return ""
+	return url
 }
 
 // TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses runs the issuer with a

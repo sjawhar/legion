@@ -7,14 +7,14 @@
 package testlog
 
 import (
-	"bytes"
+	"strings"
 	"sync"
 )
 
-// Buffer is a bytes.Buffer an io.Writer's user and a reader may hold at the same time.
+// Buffer is a strings.Builder an io.Writer's user and a reader may hold at the same time.
 type Buffer struct {
 	mu  sync.Mutex
-	buf bytes.Buffer
+	buf strings.Builder
 }
 
 // Write appends p to the buffer.
@@ -29,6 +29,14 @@ func (b *Buffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// Len is how many bytes have been written so far, for a reader that measures the log rather
+// than copying it out to measure what it copied.
+func (b *Buffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 // Reset drops everything written so far, for a test that reads one phase of its subject at a time.

@@ -456,13 +456,11 @@ func (d *scratchDispatch) start() {
 	exited := make(chan error, 1)
 	go func() { exited <- command.Wait() }()
 	d.command, d.exited, d.output = command, exited, output
-	var exitErr error
-	var stopping bool
-	ready := testwait.Holds(time.Until(deadline), 50*time.Millisecond, func() bool {
+	if !testwait.Holds(time.Until(deadline), 50*time.Millisecond, func() bool {
 		select {
 		case err := <-exited:
-			exitErr, stopping = err, true
-			return true
+			d.command = nil
+			t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
 		default:
 		}
 		// Each poll is bounded (pollClient): until Dispatch serves, the held socket queues the
@@ -474,12 +472,7 @@ func (d *scratchDispatch) start() {
 			}
 		}
 		return false
-	})
-	if stopping {
-		d.command = nil
-		t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", exitErr, output.String())
-	}
-	if !ready {
+	}) {
 		t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
 	}
 }

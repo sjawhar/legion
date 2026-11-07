@@ -164,13 +164,7 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	})
 	defer stop()
 
-	bound := 10 * time.Minute
-	if testDeadline, ok := t.Deadline(); ok {
-		if left := time.Until(testDeadline) - 5*time.Second; left < bound {
-			bound = left
-		}
-	}
-	if !testwait.Holds(bound, 20*time.Millisecond, func() bool {
+	if !testwait.Holds(testwait.Bounded(t, 10*time.Minute, 5*time.Second), 20*time.Millisecond, func() bool {
 		if githubWaiting(t, consumers) == 0 {
 			return true
 		}

@@ -816,9 +816,7 @@ func TestTheNatsSeedReachesTheSandboxRuntimeAsTheProvidersSecrets(t *testing.T) 
 func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 	t.Helper()
 	var err error
-	var exited error
-	var gone bool
-	answered := testwait.Holds(15*time.Second, 20*time.Millisecond, func() bool {
+	if !testwait.Holds(15*time.Second, 20*time.Millisecond, func() bool {
 		var response *http.Response
 		response, err = pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
@@ -828,18 +826,13 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 			}
 		}
 		select {
-		case exited = <-done:
+		case exited := <-done:
 			done <- exited
-			gone = true
-			return true
+			t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
 		default:
 		}
 		return false
-	})
-	if gone {
-		t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
-	}
-	if !answered {
+	}) {
 		t.Fatalf("the daemon never answered /healthz: %v", err)
 	}
 }

@@ -1025,7 +1025,7 @@ func (l *keptLog) since(mark int) string {
 }
 
 func (l *keptLog) mark() int {
-	return len(l.String())
+	return l.Len()
 }
 
 // mirror writes what Dispatch says of key — its status and the keys it waits on — as the
