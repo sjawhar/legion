@@ -35,6 +35,8 @@
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
     "check:go": "bun run scripts/gen-go.ts --check",
+    "gen:api": "bun run scripts/gen-api.ts",
+    "check:api": "bun run scripts/gen-api.ts --check",
     "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
@@ -46,6 +48,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@types/bun": "latest",
+    "openapi-typescript": "7.13.0",
     "typescript": "^5.3.0"
   }
 }
