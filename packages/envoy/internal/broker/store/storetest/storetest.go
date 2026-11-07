@@ -60,6 +60,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/testpg"
 )
 
 // DatabaseURLEnv names the Postgres server the broker's tests run against.
@@ -92,15 +93,15 @@ func serverURL(t testing.TB) string {
 	return raw
 }
 
-// randomName mints the name of the database one test gets of its own, kind naming what it is in
-// a failure. It is random rather than derived from t.Name() because two concurrent runs of one
-// test - this package's tests and a sibling package's, against the one server - would otherwise
-// mint the same name and act on each other's rows.
-func randomName(t testing.TB, kind string) string {
+// randomName mints the name of the database one test gets of its own. It is random rather than
+// derived from t.Name() because two concurrent runs of one test - this package's tests and a
+// sibling package's, against the one server - would otherwise mint the same name and act on each
+// other's rows.
+func randomName(t testing.TB) string {
 	t.Helper()
 	suffix, err := randomSuffix()
 	if err != nil {
-		t.Fatalf("random %s name: %v", kind, err)
+		t.Fatal(err)
 	}
 	return "broker_test_" + suffix
 }
@@ -126,7 +127,7 @@ func URL(t testing.TB, params ...string) string {
 	if shared.err != nil {
 		t.Fatalf("prepare the migrated template database: %v", shared.err)
 	}
-	name := randomName(t, "database")
+	name := randomName(t)
 	if _, err := shared.admin.Exec(context.Background(), cloneStatement(name)); err != nil {
 		t.Fatalf("clone a test database from the template: %v", err)
 	}
@@ -164,7 +165,7 @@ func OpenFresh(t testing.TB, params ...string) *store.Store {
 // with the test, which is what every broker test cost before the template.
 func ownMigratedURL(t testing.TB, raw string, params []string) string {
 	t.Helper()
-	name := randomName(t, "database")
+	name := randomName(t)
 	// The database is a file copy of template1 (docs/testing.md, "A database a Go test creates").
 	admin(t, raw, "create database "+name+" strategy file_copy")
 	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
@@ -415,23 +416,7 @@ func PerPodLoginSchema(t testing.TB, st *store.Store) {
 // processes are there to settle. A caller that wants tables runs store.Migrate on it itself.
 func DatabaseURL(t testing.TB) string {
 	t.Helper()
-	raw := serverURL(t)
-	name := randomName(t, "database")
-	// Both statements go through admin, whose bare Exec runs them outside a transaction: a
-	// create database cannot run inside one. The drop forces the connections a test left behind
-	// (a listener that outlived its own cleanup, a pool closing) off the database, because a
-	// database one connection still holds cannot be dropped, and a leaked one would otherwise
-	// leave a database behind that no later run can clean up either. The database is a file copy
-	// of template1 (docs/testing.md, "A database a Go test creates").
-	admin(t, raw, "create database "+name+" strategy file_copy")
-	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
-
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse %s: %v", DatabaseURLEnv, err)
-	}
-	parsed.Path = "/" + name
-	return parsed.String()
+	return testpg.DatabaseOn(t, serverURL(t), "broker_test")
 }
 
 func admin(t testing.TB, databaseURL, statement string) {

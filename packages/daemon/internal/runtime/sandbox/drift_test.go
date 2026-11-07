@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -311,19 +312,69 @@ func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 	}
 }
 
+// A pod runs as the ServiceAccount it was created with for its whole life, so an operator's
+// change of runtime.kubernetes.pod.service_account is drift of every issue pod created under the
+// account before it, and PodDrift is what names it: the round that reason opens asks every worker
+// in the pod to push, rescues what the disk still holds and only then replaces the pod
+// (accountDrift). The reason carries both accounts, the one the pod runs as and the one
+// configured now, each read through serviceAccountOr — so a pod already on the configured
+// account has drifted from nothing, and so has one on `default` under a configuration naming no
+// account, which is that same account spelled the other way, while a pod on a named account
+// under a configuration naming none has drifted, with `default` read into the configured half of
+// its reason. The account is the only thing each case changes, so it is the only reason PodDrift
+// has to give: a pod drifted in the account alone is named for the account and for nothing else.
+func TestPodDriftNamesTheServiceAccountThePodRunsAs(t *testing.T) {
+	// The phrase drift.go's PodDrift builds, "account "+<the account the pod runs as>+", now "+
+	// <the configured account>, pinned whole and spelled out: it is what an operator reads of
+	// the round, so a change of it there is read beside this test of what it means. Its two
+	// halves here are defaultServiceAccount, which the rig's pods run as, and otherAccount; the
+	// row that configures no account pins those two halves the other way round, and reads
+	// `default` in the configured one, which is what serviceAccountOr makes of an unset account.
+	const says = "account default, now legion-worker"
+	for name, tc := range map[string]struct {
+		account string            // what the restarted daemon is configured with
+		stored  func(*corev1.Pod) // what the pod is edited to run as before the reading
+		says    string
+	}{
+		"a pod on default under a configuration naming another account": {otherAccount, nil, says},
+		"a pod already on the configured account":                       {otherAccount, onAccount(otherAccount), ""},
+		"no configured account and a pod on default":                    {"", onAccount(defaultServiceAccount), ""},
+		"no configured account and a pod on a named one":                {"", onAccount(otherAccount), "account legion-worker, now default"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			loc := g.spawn(workerSpec(t))
+			if tc.stored != nil {
+				g.update(g.pod(loc.Sandbox.Name), tc.stored)
+			}
+			r2 := restartedOver(t, g, loc, func(o *Options) { o.Pod.ServiceAccount = tc.account })
+			drifted := driftOf(t, g.ctx, r2, loc)
+			switch {
+			case tc.says == "" && len(drifted) > 0:
+				t.Errorf("PodDrift = %q of a pod on the configured account, want nothing", drifted)
+			case tc.says != "" && !slices.Equal(drifted, []string{tc.says}):
+				t.Errorf("PodDrift = %q, want %q and nothing beside it", drifted, tc.says)
+			}
+		})
+	}
+}
+
 // No round covers the project controller's pod (roundCovers), so its pod has drifted from nothing
-// whatever the configuration says now: the controller holds no issue workspace and has nothing to
-// push, so there is nobody in that pod to task and no round to open over it. What this answers
-// nothing for, its next launch replaces instead, for every kind of drift and as it always did
+// whatever the configuration says now — the ServiceAccount it runs as included: the controller
+// holds no issue workspace and has nothing to push, so there is nobody in that pod to task and no
+// round to open over it. What this answers nothing for, its next launch replaces instead, for
+// every kind of drift and as it always did
 // (TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted,
-// TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry): a pod neither covers would
-// run on for ever against a configuration it cannot carry.
+// TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry, and for the account
+// TestALaunchKeepsAnAccountDriftedPodARoundCoversAndReplacesOneNoRoundCovers): a pod neither
+// covers would run on for ever against a configuration it cannot carry.
 func TestPodDriftIsNothingForTheControllersPod(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(controllerSpec(t))
 	r2 := secondRuntime(t, g, func(o *Options) {
 		o.Image = nextImage
 		o.IssueVolume = resource.MustParse("40Gi")
+		o.Pod.ServiceAccount = otherAccount
 		withOperatorMount(o)
 	})()
 	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
@@ -605,6 +656,39 @@ func TestReplacePodNamesTheDisplacedPodAndWaitsItOut(t *testing.T) {
 	}
 	if resumed.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
 		t.Fatalf("the tester resumed into the replaced pod %s", testerLoc.Sandbox.PodUID)
+	}
+}
+
+// The pod the replacement's next launch provisions runs as the account the configuration names
+// now, and has drifted from nothing: that is the whole of moving the account to the round. An
+// operator changes runtime.kubernetes.pod.service_account, each issue pod's own round names the
+// account among its reasons (PodDrift, accountDrift), the round replaces the pod once its workers
+// have pushed, and the role that resumes next comes up in a pod holding the new identity, with
+// nothing of the old account left for a launch to replace.
+func TestTheLaunchAfterAReplacementProvisionsAPodOnTheConfiguredAccount(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	r2 := restartedOver(t, g, loc, func(o *Options) { o.Pod.ServiceAccount = otherAccount })
+	if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) == 0 {
+		t.Fatalf("PodDrift of a pod on another account = %q, want the account among its reasons: this is the round that reason opens", drifted)
+	}
+
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, stillDue); err != nil {
+		t.Fatalf("ReplacePod: %v", err)
+	}
+	resumed := resumeTester(t, g, r2, loc)
+	if resumed.Sandbox.PodUID == loc.Sandbox.PodUID {
+		t.Fatalf("the tester resumed into the replaced pod %s", loc.Sandbox.PodUID)
+	}
+	pod := g.pod(loc.Sandbox.Name)
+	if pod == nil || string(pod.UID) != resumed.Sandbox.PodUID {
+		t.Fatalf("the pod of %s is %+v, want the one the launch provisioned (%s)", loc.Sandbox.Name, pod, resumed.Sandbox.PodUID)
+	}
+	if pod.Spec.ServiceAccountName != otherAccount {
+		t.Fatalf("the pod the launch provisioned runs as %q, want the configured %s", pod.Spec.ServiceAccountName, otherAccount)
+	}
+	if drifted := driftOf(t, g.ctx, r2, resumed); len(drifted) > 0 {
+		t.Fatalf("the pod the launch provisioned has drifted: %q", drifted)
 	}
 }
 
