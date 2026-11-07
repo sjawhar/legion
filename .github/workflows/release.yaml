@@ -94,7 +94,7 @@ env:
   # The Envoy Oh My Pi plugin. The seed before the first pi-envoy-v* tag is the version line this
   # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name on npm holds
   # only a placeholder 0.0.0 until its first publish, so reading it would restart the line at 0.x.
-  # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which every Oh
+  # scripts/pi-plugin-prepack.sh copies this plugin's ten skills into dist/skills, which every Oh
   # My Pi session loads as the plugin's skills, so a commit there releases whatever its type. Its
   # notices generator, the prepack itself and patches/ (the bundle inlines nats.js with
   # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
@@ -759,7 +759,7 @@ jobs:
           done
           # The skills, read back out of the same tarball: the rules are in
           # packages/claude-envoy/scripts/check-packed-skills.sh, which tests/packed-skills.test.ts
-          # runs over tarballs of its own. Without them every install loses all eight skills and
+          # runs over tarballs of its own. Without them every install loses all ten skills and
           # the dispatch-first hook hooks/hooks.json runs on every session throws.
           packages/claude-envoy/scripts/check-packed-skills.sh packages/claude-envoy/*.tgz
 

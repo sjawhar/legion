@@ -16,7 +16,7 @@ Resolve the simplification scope in this order:
 2. **Otherwise, in git**, use the current branch versus its base. Without a usable base, use staged and unstaged changes (`git diff HEAD`).
 3. **Outside git or without a diff**, use files the user named or that were edited earlier in the conversation.
 
-If none of the above produces a non-empty scope, stop and ask the user what to simplify rather than guessing, with the host's blocking question tool, or numbered options on the user-visible chat surface where the host has none. Never silently skip the question.
+If none of the above produces a non-empty scope, stop and ask the user what to simplify rather than guessing, with the host's blocking question tool, matched by capability and not by another host's name. A tool in the current list exists; never call a question tool to ask whether it exists. Where the list names one that is not loaded, load it with the host's tool-discovery primitive. Fall back to numbered options on the user-visible chat surface only where the host lists no such tool or a real call to it errors. Never silently skip the question.
 
 **Preflight.** Every file of the scope is in the pass: documentation, workflow and configuration files as much as code, and a scope that holds no code at all still runs. A pass that drops the documentation drops the files a wrong procedure lives in, which is the failure this rule exists to stop. Read generated, vendored and lockfile content for what it shows and edit none of it. This is never a size gate: explicit small scopes still run, and callers own any size or cost threshold.
 

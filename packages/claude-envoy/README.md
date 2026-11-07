@@ -261,9 +261,11 @@ human approval surface.
 
 ## Skills
 
-The plugin ships eight skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
+The plugin ships ten skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
 `claude-envoy:dispatch-first`, `claude-envoy:dispatch-writing-specs`, `claude-envoy:asd-ste100`,
-`claude-envoy:outside-message`, `claude-envoy:plain-words` and `claude-envoy:agent-secrets`.
+`claude-envoy:outside-message`, `claude-envoy:plain-words`, `claude-envoy:agent-secrets` and the
+reviewer's pair, `claude-envoy:thermonuclear-code-quality` and
+`claude-envoy:thermonuclear-deep-review`.
 The first four teach the Envoy tools, the `dispatch` command and how to write a spec; `asd-ste100` gives the
 ASD-STE100 rules for text a person reads; `outside-message` holds the steps and the approval before text
 reaches a person outside the company; `plain-words` the empty verb phrases to delete from any text a
