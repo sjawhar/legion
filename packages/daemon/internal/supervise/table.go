@@ -1246,15 +1246,19 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
 	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
 	m.takeBackSignal(own && !m.unseenTurn)
-	persist := m.persist
+	// The write is the confirmation where this start is the pending delivery's turn, and the
+	// claim alone where it is a foreign one; the delivery is named in the start's line for the
+	// same reason, so both are decided in the one place that asks the question.
+	persist, task := m.persist, ""
 	if own {
-		persist = m.confirm
+		persist, task = m.confirm, p.ID
 	}
-	if err := persist(ctx); err != nil {
-		return err
-	}
-	m.durableState(StateWorking)
-	return nil
+	// The start is logged before the write, never after it: the decision this line exists for is
+	// a turn start whose claim write failed, and a line written after the write would leave
+	// exactly that decision silent again. The delivery is named only where this start is that
+	// delivery's turn; a foreign turn is no task's and carries none.
+	m.startTurn(task)
+	return m.durableWrite(ctx, StateWorking, persist)
 }
 
 // takeBackSignal takes back this claim's answer to its open round when the turn starting is not
@@ -1342,8 +1346,38 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // there would wait for an event nobody is going to post. A relaunch that did run leaves the claim
 // launching, which sendPending hands nothing (delivery.go), so the send costs that case nothing.
 //
+// The turn's end is logged here (turnEndedLine), and this is the only exit from working that
+// writes that line. The line names what this turn's own start line named (startTurn, endTurn),
+// because no reading of the claim can answer what the ending turn was: the window this same
+// function's resultPending branch leaves is one where the claim holds a task confirmed — its
+// turn ended before Oh My Pi said which turn the prompt's was, so settle retired nothing and the
+// task is still in the worker's hands — while the turn now ending is a turn of the agent's own,
+// which started naming no delivery. Every other way out of a turn writes a line of its own
+// instead, which is what a reader who found a start and no end looks for:
+//
+//   - a death of the process (died): "supervise: process died";
+//   - a held suspension whose deadline runs out (suspendAtTimeout): "supervise: the agent's turn
+//     has not ended; suspending it mid-turn";
+//   - a failure of the claim (fail): "supervise: claim failed";
+//   - a retirement (retire), which writes no line of its own: the agent's own exit says
+//     "supervise: the agent reported its exit" before it, and a stop or the workflow's close of
+//     the issue or the tree retires the claim with no line at all;
+//   - a stale-plugin relaunch of a claim whose turn is not waited out (relaunchStale):
+//     "supervise: the process speaks another plugin contract; relaunching it onto the current
+//     plugin" — one that is waited out says "supervise: the process speaks another plugin
+//     contract; its relaunch waits for the agent's turn to end" and comes back through here;
+//   - the end of an update round (endPodUpdate): "supervise: the update round is over for this
+//     claim" — a plugin round whose claim is in a turn does not end at all, and says "supervise:
+//     this claim's plugin round is not ready to end; its process is left as it is and the next
+//     sweep posts the end again".
+//
+// Widening the turn line to every one of those exits is not this change: each of them already
+// says in its own words what became of the turn, and the pair of turn lines is the turn the
+// worker ran.
+//
 // answerByTurnEnd runs first of all, before the marks it reads are cleared (askFirst, unseenTurn).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+	m.endTurn()
 	m.answerByTurnEnd()
 	m.askFirst, m.unseenTurn = false, false
 	if m.held != nil {
@@ -1633,10 +1667,9 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 // finishReady persists the current claim before publishing ready or delivering work. reready may
 // reach it while the claim is idle or working, so it must not rewrite the state to ready.
 func finishReady(m *Machine, ctx context.Context) error {
-	if err := m.persist(ctx); err != nil {
+	if err := m.durableWrite(ctx, StateReady, m.persist); err != nil {
 		return err
 	}
-	m.durableState(StateReady)
 	return m.sendPending(ctx)
 }
 

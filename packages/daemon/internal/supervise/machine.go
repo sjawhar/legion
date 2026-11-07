@@ -404,7 +404,10 @@ type Store interface {
 	// the delivery its turn started, and half of that is a task nothing sends again.
 	PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error
 	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
-	// transaction: the run a claim serves is set by the retiring of the task that ran.
+	// transaction: the run a claim serves is set by the retiring of the task that ran. A delete
+	// that removes no row is refused two ways, because the table is keyed on the claim and not
+	// on the delivery: ErrNoSuchDelivery where the row holds no delivery at all, and
+	// ErrOtherDelivery where it holds one under another id.
 	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
 }
 
@@ -458,6 +461,13 @@ type Timeouts struct {
 	// (relaunchAfterFailure) — one that died, or was retired at its registration deadline. The
 	// daemon sets it to its launchBackoffFirst.
 	LaunchBackoff time.Duration
+	// ClaimWrite bounds each claim and delivery write a decision makes while it holds the machine's
+	// lock, so a database that has stopped answering cannot hold that lock for as long as the
+	// connection's own patience: every other event for the claim queues behind the decision in
+	// flight, and a machine whose lock is held through an outage decides nothing at all. No
+	// setting names it, because the bound answers a question about the write rather than about a
+	// deployment, and no caller in internal/daemon sets it. Zero takes defaultClaimWrite.
+	ClaimWrite time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -609,6 +619,26 @@ func (d Deps) podUpdateRetask() time.Duration {
 	return d.PodUpdateRetask
 }
 
+// defaultClaimWrite is the claim-write bound a Deps that names none takes, which in production is
+// every one of them. Five seconds is chosen for what such a write is: one claim row, and at most
+// one delivery row beside it, written to a Postgres on this cluster, which a healthy database
+// answers in single-digit milliseconds. Five seconds is therefore hundreds of times a healthy
+// write — so no write that was going to land is ever cut short by it — and still a small fraction
+// of any outage worth the name, so a database that has stopped answering holds the machine's lock
+// for five seconds rather than for the length of the outage. The write it does cut short is not
+// lost: a bare context deadline is a write the server never answered, which writeOwed owes, so
+// the claim write is marked and made again at the claim's next decision (owes, repair).
+const defaultClaimWrite = 5 * time.Second
+
+// claimWrite is Deps.Timeouts.ClaimWrite, or defaultClaimWrite when it names none. It is a
+// fallback rather than a check, so a Deps built without it still writes under the deadline.
+func (d Deps) claimWrite() time.Duration {
+	if d.Timeouts.ClaimWrite <= 0 {
+		return defaultClaimWrite
+	}
+	return d.Timeouts.ClaimWrite
+}
+
 // RefusedError is a request the claim does not allow — the answer an API route gives its caller
 // instead of pretending the request happened. A refusal the transition table makes is the claim's
 // state refusing the request, and says which state and why (Reason). One an action makes is about
@@ -664,6 +694,32 @@ var ErrRetryArchitectOnly = errors.New("the operator's retry relaunches only an 
 // for the outbox log.
 var ErrHeldByOperator = wait.New("the suspension holds until the operator resumes the claim")
 
+// ErrNoSuchDelivery is the store's refusal of a retirement of a delivery the claim's row no
+// longer holds. It is named here, rather than matched as a string where the refusal is read,
+// because internal/store imports this package and so cannot be imported back: the store's
+// refusals can only carry an identity this package owns. It is a sentinel so that a caller can
+// tell a retirement the store has already made — a commit whose answer a broken connection lost,
+// made again and finding nothing left to delete — apart from any other failure of that write,
+// which is the difference between a claim that is settled and one whose write is still owed.
+var ErrNoSuchDelivery = errors.New("the claim holds no such delivery")
+
+// ErrOtherDelivery is the store's refusal of a retirement whose claim row holds a delivery under
+// another id than the one being retired. Because pending_task_deliveries is keyed on the claim,
+// a delete that removes no row says one of two things, and they call for opposite answers: the
+// row holds nothing, which is the retirement this daemon already made (ErrNoSuchDelivery), or it
+// holds another delivery, which is a write that rotated the id — an interruption, a take-back —
+// whose answer the claim-write bound cut off and which committed all the same, so the store
+// holds B where memory holds A.
+//
+// The two are told apart because reading the second as a retirement already made would drop A
+// from memory and leave B stored: a delivery no machine holds, unconfirmed and never retired,
+// whose kept decisions nothing releases. So it is a failure of the write like any other, and it
+// is a sentinel of its own that does not wrap ErrNoSuchDelivery, so that a caller asking
+// errors.Is for the retirement already made never catches this instead. It is named in this
+// package for the reason ErrNoSuchDelivery is: internal/store imports this package and so
+// cannot be imported back.
+var ErrOtherDelivery = errors.New("the claim's row holds another delivery")
+
 // Machine is one claim's decision owner.
 type Machine struct {
 	mu             sync.Mutex
@@ -680,9 +736,21 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
-	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
-	// it again, with the claim, before the next decision (saved).
+	// unsaved is a pending delivery the store's row does not hold as memory holds it — a write of
+	// it the store did not take (saved), or a row a rotation the daemon never heard of left under
+	// another id (retirePending): settle writes it again, with the claim, before the next decision.
 	unsaved bool
+	// owedWrite is the claim write a decision made and the store did not take, nil for none: the
+	// mark that the stored row is behind what memory holds, and that the write is to be made
+	// again at the head of the claim's next decision (owes, repair). It is a mark of its own
+	// rather than unsaved, which says the same of the pending delivery, because unsaved is
+	// cleared by writes that say nothing about the claim write owed: queue and retirePending both
+	// set it false when their own write lands, so a claim write marked with it would be dropped
+	// without a word. It is memory only, as unsaved is: a daemon that stops with a write owed
+	// loses the mark, and the next boot builds the machine from the stored row — the row the
+	// failed write left unchanged — which is the same claim a crash between a decision and its
+	// write has always left behind.
+	owedWrite *owedClaimWrite
 	// sentThrough is the registration sequence of the newest connection a prompt was sent through
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
@@ -721,6 +789,16 @@ type Machine struct {
 	// (answerByTurnEnd). turnEnded clears it with the turn, and it is memory only, as askFirst
 	// is: a restart asks the agent again.
 	unseenTurn bool
+	// turnsDelivery is the delivery the turn now running is the turn of, as that turn's own start
+	// line named it, and "" for a turn that is no task's. It is set where the machine learns a
+	// turn started (startTurn, on each of the three paths into working), read where that turn ends
+	// (endTurn), and cleared with the turn, so the end line names what the start line named rather
+	// than what the claim is left holding. It is memory only, as askFirst and unseenTurn are: a
+	// daemon restarted mid-turn holds none, and the end line of that turn then names no delivery
+	// rather than guessing one, which is the safe answer — the empty value says "this turn names
+	// no delivery" for both a turn that is no task's and a turn this daemon never saw begin, and
+	// both are lines a reader can trust.
+	turnsDelivery string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -847,6 +925,9 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
+	// The write a decision owes is made before anything reads or writes the claim again: settle
+	// can retire a delivery, and the repair must write what the failed decision left.
+	m.repair(ctx)
 	// Settle first, so the fence judges the task the row will find: a settle after the fence could
 	// retire the very task it let the event through for.
 	if err := m.settle(ctx); err != nil {
@@ -901,6 +982,9 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // relaunch then meets: a refused admission leaves both queued. A release the store does not take
 // is undone, the claim left launch_uncertain in both. A stop between the release and the launch's
 // own write leaves the claim stored queued at that generation, which ReleasedLaunch tells apart.
+// Because that undo puts the state back, the write goes through putClaim and leaves nothing owed:
+// memory then holds launch_uncertain, which is what the store still holds, so there is no write
+// left to make, and the release is made again only by this call's own caller retrying it.
 func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
@@ -908,7 +992,7 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	m.claim.State = StateQueued
-	if err := m.persist(ctx); err != nil {
+	if err := m.putClaim(ctx); err != nil {
 		m.claim.State = StateLaunchUncertain
 		return false, err
 	}
@@ -924,7 +1008,9 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 // another opened — or when this round was already told: both are decisions already taken, not
 // faults, since the sweep posts over the same claims at every tick. A write the store refuses is
 // returned with false, and the sweep tells the round again at the next tick rather than lose the
-// notice.
+// notice. That is also why the write goes through putClaim and leaves nothing owed: the stamp is
+// taken back here, so there is no mark to make again, and the next tick's call writes the stamp
+// it makes then.
 func (m *Machine) PodUpdateTold(ctx context.Context, round string) (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
@@ -933,7 +1019,7 @@ func (m *Machine) PodUpdateTold(ctx context.Context, round string) (bool, error)
 	}
 	told := m.deps.Clock.Now()
 	m.claim.UpdateToldAt = &told
-	if err := m.persist(ctx); err != nil {
+	if err := m.putClaim(ctx); err != nil {
 		m.claim.UpdateToldAt = nil
 		return false, err
 	}
@@ -1196,10 +1282,89 @@ func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.onDurableState = callback
 }
 
-func (m *Machine) durableState(state ClaimState) {
+// report hands the daemon one durable transition, with the claim copy that transition is of: the
+// copy of the claim as the decision reporting now holds it (durableWrite), or the copy an owed
+// report kept from the decision that owed it (makeOwedReports). Both go through here so that
+// what a report is — a state and the claim it is true of — is spelled in one place, and so is
+// the daemon that may have installed no callback at all.
+func (m *Machine) report(c Claim, state ClaimState) {
 	if m.onDurableState != nil {
-		m.onDurableState(copyClaim(m.claim), state)
+		m.onDurableState(c, state)
 	}
+}
+
+// durableWrite makes a decision's own write and reports the durable transition it wrote, in that
+// one order: the report follows the write, and a write the store did not take reports nothing
+// and owes the report instead, for whatever claim write lands next to make (oweDurableState,
+// settleOwedWrite). Every decision that reports a durable transition goes through here — the
+// turn that starts, the claim that is ready, the claim that failed — because the order is the
+// point and the owing works only on the error of the write it belongs to: a fourth caller that
+// wrote the three steps out itself and left the owing off would lose its report in silence,
+// which is the fault the mark exists to end.
+//
+// write is the decision's own claim write: persist for most of them, and confirm for a turn
+// start that confirms the delivery whose turn it is.
+func (m *Machine) durableWrite(ctx context.Context, state ClaimState, write func(context.Context) error) error {
+	if err := write(ctx); err != nil {
+		m.oweDurableState(state)
+		return err
+	}
+	m.report(copyClaim(m.claim), state)
+	return nil
+}
+
+// turnStartedLine is the message a turn's start is logged under, at Info, on each of the three
+// paths that put a claim in working. It is pinned as a constant because an operator and a
+// production check read it whole: with turnEndedLine it is how what the daemon did between a
+// turn's start and its end is read out of the log at all, and a message reworded or extended at
+// a call site would answer that search with a part of the answer. What differs between the call
+// sites belongs in the attributes (logTurn), never in the message.
+const turnStartedLine = "supervise: a turn started"
+
+// turnEndedLine is the close of that pair, at Info: the turn whose start the line above recorded
+// is over. It is pinned for the same reason, and is not to be reworded or extended at its call
+// site either — an operator counts the two against each other.
+const turnEndedLine = "supervise: a turn ended"
+
+// logTurn writes one of the two turn lines at Info, with the claim's generation and, where the
+// turn is a task's, that delivery. The claim is already an attribute of the machine's own logger,
+// so neither line repeats it, and a turn that is no task's carries no delivery key at all rather
+// than an empty one.
+func (m *Machine) logTurn(line, delivery string) {
+	if delivery == "" {
+		m.log.Info(line, "generation", m.claim.Generation)
+		return
+	}
+	m.log.Info(line, "generation", m.claim.Generation, "delivery", delivery)
+}
+
+// startTurn records what this turn is the turn of and writes its start line, which is how the
+// turn's end comes to name what its start named (Machine.turnsDelivery, endTurn). Every path that
+// puts a claim in working goes through here — turnStarted, sendPending's askFirst branch and
+// answerAskFirstAfterDrop — the two that name no delivery included, so a turn that is no task's
+// overwrites the identity of the turn before it rather than leaving it standing for its end to
+// read.
+//
+// The identity is carried from the start because no reading of the claim can answer it at the
+// end: a pending delivery that is confirmed is the running turn's in one case and a finished
+// turn's leftover in the other. The second is the window turnEnded's own resultPending branch
+// leaves — a turn of the task's ends before Oh My Pi says which turn the prompt's was, so settle
+// retires nothing and the task stays confirmed in the worker's hands — and a turn of the agent's
+// own starting in that window is no task's, so its start line names no delivery while a claim
+// read at its end would name that task and a reader would count the task's turn twice.
+func (m *Machine) startTurn(delivery string) {
+	m.turnsDelivery = delivery
+	m.logTurn(turnStartedLine, delivery)
+}
+
+// endTurn writes the turn's end line, naming what its own start line named, and forgets the turn
+// with it, so nothing of a turn that is over is left for the next turn's end to read. A turn this
+// daemon never saw begin — a restart mid-turn — holds no identity here, and its end line names no
+// delivery rather than the claim's pending task, which is the safe answer for a turn nobody can
+// say the task of.
+func (m *Machine) endTurn() {
+	m.logTurn(turnEndedLine, m.turnsDelivery)
+	m.turnsDelivery = ""
 }
 
 // Wait blocks until every send the machine started has had its outcome handled — what a daemon
@@ -1642,11 +1807,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
 		"promptRetires", m.claim.Budgets.PromptRetires)
-	if err := m.persist(ctx); err != nil {
-		return err
-	}
-	m.durableState(StateFailed)
-	return nil
+	return m.durableWrite(ctx, StateFailed, m.persist)
 }
 
 // release asks the runtime to let go of everything it holds for the claim — the process, when one
@@ -1699,7 +1860,10 @@ func (m *Machine) retire(ctx context.Context) error {
 // no stale-plugin relaunch waits for that turn either (refreshPlugin) — the process it was to
 // replace is gone — and the process the claim records, when it records one, moves into previous —
 // the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch
-// of the same session waits it out.
+// of the same session waits it out. The identity of the turn that process was running goes with
+// it (turnsDelivery): a turn whose process is gone ends by a line of its own rather than by
+// turnEnded, so nothing is left to read it, and a later turn must never end naming the delivery
+// of a turn that died with its process.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
@@ -1708,6 +1872,7 @@ func (m *Machine) letGo() {
 	m.held = nil
 	m.staleRelaunch = nil
 	m.unseenTurn = false
+	m.turnsDelivery = ""
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)
 	}
@@ -1858,16 +2023,92 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim alone. Every write first normalizes state that is valid only while the
-// claim records a running process: a capability belongs to a registered agent, a suspension source
+// write runs one store write of a decision under the claim-write deadline, derived from the
+// decision's own context so the daemon's stop still ends the write at once. Every claim and
+// delivery write a decision makes while it holds the machine's lock goes through it, and those
+// are the only calls that do. Store.AdmitClaim and Store.CheckLaunch keep today's behaviour and
+// take no deadline: what they wait on is an advisory lock another transaction holds, so a
+// deadline there would fail a launch that was only queued behind its predecessor. So do the reads
+// of the record — PhaseHolds, RootHears, RootTask, TreeClosable — which decide what the next
+// write will say rather than hold the row, and whose failure costs the decision and nothing
+// after it. The deadline is what keeps a database that has stopped answering from holding the
+// machine's lock for the length of the outage; a write it cuts short is owed and made again at
+// the claim's next decision (owes, repair).
+func (m *Machine) write(ctx context.Context, call func(context.Context) error) error {
+	writing, cancel := context.WithTimeout(ctx, m.deps.claimWrite())
+	defer cancel()
+	return call(writing)
+}
+
+// putClaim writes the claim alone, under the claim-write deadline, and marks nothing owed: a
+// caller that rolls its own field back when the write fails must not leave a write owed for a
+// state the machine has just put back, since the repair would then write a decision this machine
+// has already taken back. Every write first normalizes state that is valid only while the claim
+// records a running process: a capability belongs to a registered agent, a suspension source
 // belongs to a suspended claim, and an enrollment belongs to the process it names. A confirmation
 // and a retire write the claim together with the delivery they change, each in one transaction.
-func (m *Machine) persist(ctx context.Context) error {
+//
+// A write that lands settles a write the machine owed (settleOwedWrite): it wrote the claim as
+// the machine holds it, which is exactly what the repair would have written, so this write is
+// the repair, whichever decision made it.
+func (m *Machine) putClaim(ctx context.Context) error {
 	c := m.stored()
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
-	return m.deps.Store.PutClaim(ctx, c)
+	if err := m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaim(ctx, c) }); err != nil {
+		return err
+	}
+	m.settleOwedWrite("PutClaim")
+	return nil
+}
+
+// putDelivery writes one delivery of this claim under the claim-write deadline, as putClaim
+// writes the claim row under it. Every delivery write a decision makes goes through it, and it
+// marks nothing: a delivery write that fails has a mark of its own (saved, settle).
+func (m *Machine) putDelivery(ctx context.Context, d Delivery) error {
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutDelivery(ctx, m.claim.Token, d) })
+}
+
+// putClaimAndDelivery writes the claim c and the delivery d in the store's one transaction, under
+// the same deadline, and settles nothing at all: it writes what it is given, which is not always
+// what memory holds. Its callers are queue, whose claim is memory's with the request's outbox
+// row appended and whose delivery is not the claim's pending one until the store has taken both
+// — what it writes is ahead of memory rather than equal to it, so neither the delivery's mark nor
+// the claim write the machine may owe can be read off this write, and queue writes memory itself
+// once the store has answered — and putClaimAndPending, which passes memory's own claim with
+// memory's own pending delivery and is the call that settles both.
+func (m *Machine) putClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
+	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) })
+}
+
+// putClaimAndPending writes the claim as the machine holds it together with the delivery it holds
+// pending, in that same one transaction and under the same deadline, and settles what a write of
+// exactly those two rows settles. The delivery is left nothing unsaved, because the row the store
+// took is the one memory holds (saved, settle), and a claim write the machine owed is made good,
+// because the claim the store took is the claim the repair would have written (settleOwedWrite)
+// — which is the whole of repair's success path, since the repair it makes is the one this call
+// settles. It marks nothing owed: the callers that owe their claim write say so themselves
+// (confirm, repair).
+//
+// Its three callers are the decisions that write both of memory's own rows: confirm, settle's
+// write of a delivery an earlier write left unsaved, and repair's branch for a claim that holds
+// a pending delivery. Each has a pending delivery by the time it calls, which is what this reads.
+func (m *Machine) putClaimAndPending(ctx context.Context) error {
+	if err := m.putClaimAndDelivery(ctx, m.stored(), *m.claim.Pending); err != nil {
+		return err
+	}
+	m.unsaved = false
+	m.settleOwedWrite("PutClaimAndDelivery")
+	return nil
+}
+
+// persist is putClaim with the mark, and is what every caller that leaves its decision standing
+// in memory uses: the claim the machine holds came from the worker's own frame and nothing puts
+// it back, so a write the store did not take is the only thing still missing, and it is owed and
+// made again at the claim's next decision rather than lost with the event that failed.
+func (m *Machine) persist(ctx context.Context) error {
+	return m.owes("PutClaim", m.putClaim(ctx))
 }
 
 // NormalizeClaim clears state a claim can hold only while it records a compatible running process.

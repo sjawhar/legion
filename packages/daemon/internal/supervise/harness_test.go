@@ -219,9 +219,18 @@ func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID strin
 		return err
 	}
 	held, ok := s.deliveries[c.Token]
-	if !ok || held.ID != deliveryID {
+	switch {
+	// The real store tells the two refusals of a delete that removed no row apart, because its
+	// table is keyed on the claim: nothing stored under the claim is the retirement it has
+	// already made, and a delivery stored under another id is a write that rotated the id and
+	// committed after its answer was lost.
+	case !ok:
 		s.mu.Unlock()
-		return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+		return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, ErrNoSuchDelivery)
+	case held.ID != deliveryID:
+		s.mu.Unlock()
+		return fmt.Errorf("retire delivery %s on %s: the row holds delivery %s: %w",
+			deliveryID, c.Token, held.ID, ErrOtherDelivery)
 	}
 	s.mu.Unlock()
 	// The store writes the claim and the delete together; a failure injected on either leaves
@@ -325,20 +334,122 @@ func (b *logBuffer) lines(fragments ...string) []string {
 	return matched
 }
 
+// loggedRecord is one record the recorder kept: what a reader of the log sees of it, with the
+// attributes the logger itself carries folded in beside the ones the call site passed. A test
+// reads a record rather than the text buffer where what it holds is the attribute's own value —
+// a generation, a delivery, a level — rather than the shape the text handler renders it in.
+type loggedRecord struct {
+	level   slog.Level
+	message string
+	attrs   []slog.Attr
+}
+
+// attr is the value of one attribute by key, and whether the record carries that key at all. The
+// second answer is what a test holds a line writing no key by means of, as a turn that is no
+// task's writes no delivery.
+func (r loggedRecord) attr(key string) (slog.Value, bool) {
+	for _, a := range r.attrs {
+		if a.Key == key {
+			return a.Value, true
+		}
+	}
+	return slog.Value{}, false
+}
+
+// logRecords is every record the machine's logger wrote, in order. It is the handler's
+// destination, as logBuffer is the text handler's, and the two run side by side over the same
+// logger: a test reads whichever answers its question.
+type logRecords struct {
+	mu   sync.Mutex
+	kept []loggedRecord
+}
+
+// of is every record whose message is exactly message, in the order they were written. The match
+// is the whole message, never a fragment, because the two turn lines and the two owed-write lines
+// are pinned constants an operator and a production check read whole.
+func (l *logRecords) of(message string) []loggedRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var matched []loggedRecord
+	for _, r := range l.kept {
+		if r.message == message {
+			matched = append(matched, r)
+		}
+	}
+	return matched
+}
+
+func (l *logRecords) add(r loggedRecord) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.kept = append(l.kept, r)
+}
+
+// logRecorder is the handler that keeps those records, wrapped around the text handler the tests
+// that read lines use, so one logger feeds both and no test has to choose. It keeps what
+// WithAttrs and WithGroup give it rather than dropping them, which is the whole reason it exists:
+// the claim a machine's own logger carries (NewMachine) is an attribute of the logger, not of the
+// call site, and a handler that forgot it would answer "which claim" with nothing.
+type logRecorder struct {
+	slog.Handler
+	records *logRecords
+	attrs   []slog.Attr
+	groups  []string
+}
+
+func (h logRecorder) Handle(ctx context.Context, r slog.Record) error {
+	attrs := slices.Clone(h.attrs)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs = append(attrs, qualify(h.groups, a))
+		return true
+	})
+	h.records.add(loggedRecord{level: r.Level, message: r.Message, attrs: attrs})
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h logRecorder) WithAttrs(attrs []slog.Attr) slog.Handler {
+	kept := slices.Clone(h.attrs)
+	for _, a := range attrs {
+		kept = append(kept, qualify(h.groups, a))
+	}
+	h.attrs, h.Handler = kept, h.Handler.WithAttrs(attrs)
+	return h
+}
+
+func (h logRecorder) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	h.groups, h.Handler = append(slices.Clone(h.groups), name), h.Handler.WithGroup(name)
+	return h
+}
+
+// qualify is an attribute's key as the groups open around it name it, so an attribute written
+// inside a group is read by the key the text handler printed it under rather than shadowing a
+// bare one of the same name.
+func qualify(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) == 0 {
+		return a
+	}
+	a.Key = strings.Join(append(slices.Clone(groups), a.Key), ".")
+	return a
+}
+
 type harness struct {
-	t      *testing.T
-	ctx    context.Context
-	cancel context.CancelFunc
-	token  claim.Token
-	rt     *fake.Runtime
-	conns  *fake.Conns
-	conn   *fake.Conn
-	store  *memStore
-	clock  *fakeClock
-	specs  *testSpecs
-	logs   *logBuffer
-	deps   Deps
-	m      *Machine
+	t       *testing.T
+	ctx     context.Context
+	cancel  context.CancelFunc
+	token   claim.Token
+	rt      *fake.Runtime
+	conns   *fake.Conns
+	conn    *fake.Conn
+	store   *memStore
+	clock   *fakeClock
+	specs   *testSpecs
+	logs    *logBuffer
+	records *logRecords
+	deps    Deps
+	m       *Machine
 }
 
 func testLimits() Limits { return Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2} }
@@ -401,26 +512,32 @@ func newBareHarness(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h := &harness{
-		t:      t,
-		ctx:    ctx,
-		cancel: cancel,
-		token:  testToken,
-		rt:     fake.NewRuntime(),
-		conns:  fake.NewConns(),
-		conn:   fake.NewConn(),
-		store:  newMemStore(),
-		clock:  newFakeClock(),
-		specs:  &testSpecs{},
-		logs:   &logBuffer{},
+		t:       t,
+		ctx:     ctx,
+		cancel:  cancel,
+		token:   testToken,
+		rt:      fake.NewRuntime(),
+		conns:   fake.NewConns(),
+		conn:    fake.NewConn(),
+		store:   newMemStore(),
+		clock:   newFakeClock(),
+		specs:   &testSpecs{},
+		logs:    &logBuffer{},
+		records: &logRecords{},
 	}
 	h.rt.Now = h.clock.Now
 	h.deps = Deps{
-		Runtime:  h.rt,
-		Conns:    h.conns,
-		Store:    h.store,
-		Specs:    h.specs,
-		Clock:    h.clock,
-		Log:      slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Runtime: h.rt,
+		Conns:   h.conns,
+		Store:   h.store,
+		Specs:   h.specs,
+		Clock:   h.clock,
+		// Both handlers over the one logger: the text buffer every test that reads lines uses,
+		// and the recorder a test that reads an attribute's own value asks (logRecords.of).
+		Log: slog.New(logRecorder{
+			Handler: slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
+			records: h.records,
+		}),
 		Limits:   testLimits(),
 		Timeouts: testTimeouts(),
 		// PluginContract matches the real daemon's (api.DaemonAPIVersion), which the register()
