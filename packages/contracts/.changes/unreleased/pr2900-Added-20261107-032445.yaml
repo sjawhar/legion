@@ -1,0 +1,5 @@
+kind: Added
+body: "`TmuxPlace`, and `Agent.tmux_place`, which `GET /api/v1/agents` answers for a session in a tmux pane. Its `layout` is tmux's `window_layout` string and is absent on its own when the reporting client dropped it for length."
+time: 2026-11-07T03:24:45.888437656Z
+custom:
+    Issue: pr2900

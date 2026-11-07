@@ -1,0 +1,5 @@
+kind: Added
+body: "The listener keeps a session's tmux place on its registry entry and answers it in its session list, and Dispatch carries it through to `GET /api/v1/agents` as `tmux_place`. A session that reports none adds no key to either answer, and a registration that carries no place clears one a previous registration stored, because a session that left tmux is no longer in a pane."
+time: 2026-11-07T03:24:48.888437656Z
+custom:
+    Issue: pr2900

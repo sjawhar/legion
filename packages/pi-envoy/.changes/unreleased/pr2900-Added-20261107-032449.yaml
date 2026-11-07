@@ -1,0 +1,5 @@
+kind: Added
+body: "Every registration carries where the session sits in tmux, so Dispatch can draw a machine's tmux layout and say which pane runs which session. One reading serves every registration for `ENVOY_TMUX_PLACE_CACHE_MS`, since a tmux server driving a wall of panes answers slowly under load, and a reading that fails never reaches the heartbeat. A session outside tmux, which is every session in a Kubernetes pod, makes no tmux call."
+time: 2026-11-07T03:24:49.888437656Z
+custom:
+    Issue: pr2900
