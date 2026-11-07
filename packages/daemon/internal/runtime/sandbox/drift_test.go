@@ -319,12 +319,17 @@ func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 // (accountDrift). The reason carries both accounts, the one the pod runs as and the one
 // configured now, each read through serviceAccountOr — so a pod already on the configured
 // account has drifted from nothing, and so has one on `default` under a configuration naming no
-// account, which is that same account spelled the other way.
+// account, which is that same account spelled the other way, while a pod on a named account
+// under a configuration naming none has drifted, with `default` read into the configured half of
+// its reason. The account is the only thing each case changes, so it is the only reason PodDrift
+// has to give: a pod drifted in the account alone is named for the account and for nothing else.
 func TestPodDriftNamesTheServiceAccountThePodRunsAs(t *testing.T) {
 	// The phrase drift.go's PodDrift builds, "account "+<the account the pod runs as>+", now "+
 	// <the configured account>, pinned whole and spelled out: it is what an operator reads of
 	// the round, so a change of it there is read beside this test of what it means. Its two
-	// halves here are defaultServiceAccount, which the rig's pods run as, and otherAccount.
+	// halves here are defaultServiceAccount, which the rig's pods run as, and otherAccount; the
+	// row that configures no account pins those two halves the other way round, and reads
+	// `default` in the configured one, which is what serviceAccountOr makes of an unset account.
 	const says = "account default, now legion-worker"
 	for name, tc := range map[string]struct {
 		account string            // what the restarted daemon is configured with
@@ -334,6 +339,7 @@ func TestPodDriftNamesTheServiceAccountThePodRunsAs(t *testing.T) {
 		"a pod on default under a configuration naming another account": {otherAccount, nil, says},
 		"a pod already on the configured account":                       {otherAccount, onAccount(otherAccount), ""},
 		"no configured account and a pod on default":                    {"", onAccount(defaultServiceAccount), ""},
+		"no configured account and a pod on a named one":                {"", onAccount(otherAccount), "account legion-worker, now default"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -346,8 +352,8 @@ func TestPodDriftNamesTheServiceAccountThePodRunsAs(t *testing.T) {
 			switch {
 			case tc.says == "" && len(drifted) > 0:
 				t.Errorf("PodDrift = %q of a pod on the configured account, want nothing", drifted)
-			case tc.says != "" && !slices.Contains(drifted, tc.says):
-				t.Errorf("PodDrift = %q, want %q among it", drifted, tc.says)
+			case tc.says != "" && !slices.Equal(drifted, []string{tc.says}):
+				t.Errorf("PodDrift = %q, want %q and nothing beside it", drifted, tc.says)
 			}
 		})
 	}

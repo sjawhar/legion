@@ -32,9 +32,12 @@ func onAccount(account string) func(*corev1.Pod) {
 // installing, since no round will ever come for such a pod: that is the one place the account
 // still beats the stale-plugin exemption, which otherwise keeps a drifted pod and installs into
 // it. A replaced Sandbox is kept under its new pod (an issue pod's disk is the pod's own
-// ephemeral volume and goes with it, as for image drift). A pod already on the configured account
-// is kept, the role's new generation started in it — including a pod on `default` under a
-// configuration naming no account, which is that same account spelled the other way.
+// ephemeral volume and goes with it, as for image drift). An issue pod is kept here whatever
+// account it runs as, so the rows that hold the launch's own reading of the account are the
+// controller's: its pod is kept where it already runs as the configured account — including a
+// pod on `default` under a configuration naming no account, which is that same account spelled
+// the other way — and replaced where it does not. What an issue pod's account reaches instead
+// is its round's reasons (TestPodDriftNamesTheServiceAccountThePodRunsAs).
 func TestALaunchKeepsAnAccountDriftedPodARoundCoversAndReplacesOneNoRoundCovers(t *testing.T) {
 	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
@@ -49,9 +52,9 @@ func TestALaunchKeepsAnAccountDriftedPodARoundCoversAndReplacesOneNoRoundCovers(
 		"the controller's pod under a configuration naming another ServiceAccount":     {controllerSpec, controllerSession, otherAccount, nil, nil, true},
 		"an installing Resume keeps an issue pod on another ServiceAccount":            {workerSpec, resumeSession, otherAccount, nil, plugins, false},
 		"an installing Resume replaces the controller's pod on another ServiceAccount": {controllerSpec, controllerSession, otherAccount, nil, plugins, true},
-		"an issue pod already on the configured ServiceAccount":                        {workerSpec, resumeSession, otherAccount, onAccount(otherAccount), nil, false},
-		"no configured ServiceAccount and a pod on default":                            {workerSpec, resumeSession, "", onAccount(defaultServiceAccount), nil, false},
-		"no configured ServiceAccount and a pod on another one":                        {workerSpec, resumeSession, "", onAccount(otherAccount), nil, false},
+		"the controller's pod already on the configured ServiceAccount":                {controllerSpec, controllerSession, otherAccount, onAccount(otherAccount), nil, false},
+		"no configured ServiceAccount and the controller's pod on default":             {controllerSpec, controllerSession, "", onAccount(defaultServiceAccount), nil, false},
+		"no configured ServiceAccount and the controller's pod on another one":         {controllerSpec, controllerSession, "", onAccount(otherAccount), nil, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
