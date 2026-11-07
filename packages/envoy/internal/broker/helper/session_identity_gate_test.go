@@ -87,7 +87,7 @@ func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := recordNamed(t, state, pid, ticks, testSessionID, "enr-before")
+			recordNamed(t, state, pid, ticks, testSessionID, "enr-before")
 			recs, err := LoadRecords(state)
 			if err != nil {
 				t.Fatal(err)
@@ -101,8 +101,9 @@ func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
 			recs[0].BootID = tc.bootID(recs[0].BootID)
 			writeRecords(t, state, recs)
 
+			// This test asserts only whether the process was re-pinned or parked, so the
+			// fake broker needs no enrollment seeded for it.
 			r := startRig(t, state) // startRig runs Recover
-			seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
 			sess := r.srv.Registry.Get(pid)
 			if tc.rePinned {
 				if sess == nil {
@@ -252,16 +253,16 @@ func TestAProcessComingBackWhileItsSessionRetiresFindsTheIdentity(t *testing.T) 
 // the very thing the record exists for: a helper restart between the register and the first
 // enroll would find a record with no enrollment to keep or revoke.
 //
-// The rig is NOT logged in, so no enrollment can succeed and nothing can repair the record
-// behind the assertions: what the session holds here is the inherited id and nothing else.
+// A renew of an inherited enrollment is signed by the session's own key alone, so a
+// confirmation needs no launcher credential and can land on a helper that was never logged in.
+// The row holds that renew at the fake's renew gate until it has read the register's reply, so
+// what fixes the assertions below is this row's own ordering and not how fast the host is.
 // That also pins the other half of the rule — an inherited id is not an enrolled one. The
-// broker may have revoked it while the session was away, and only an enroll shows otherwise,
-// so the reply reads NO_CREDENTIAL rather than claiming a grant the session may not have.
+// broker may have revoked it while the session was away, and only its own answer shows
+// otherwise, so the reply reads NO_CREDENTIAL rather than claiming a grant the session may
+// not have.
 func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
-	state := filepath.Join(t.TempDir(), "sessions.json")
-	key := parkedRecord(t, state)
-	r := newRig(t, state)
-	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+	r, key, state, release := reclaimedIdentityRig(t)
 	if _, ok := r.srv.Registry.Dormant(testSessionID); !ok {
 		t.Fatal("the record must be parked first")
 	}
@@ -295,6 +296,13 @@ func TestAReclaimedIdentityKeepsItsEnrollmentID(t *testing.T) {
 	if len(recs) != 1 || recs[0].EnrollmentID != "enr-before" {
 		t.Fatalf("the saved record is %+v, want one naming enr-before", recs)
 	}
+	// And what the gate was holding back does land: the inherited enrollment is confirmed by a
+	// renew the session signs alone, which is why the reply above had to be read before it.
+	release()
+	waitFor(t, func() bool {
+		held := sess.identity()
+		return held.EnrollmentID == "enr-before" && held.Confirmed
+	})
 }
 
 // TestANamedRecordWithNoEnrollmentIsStillParked: a named session saved before its first enroll
@@ -427,6 +435,131 @@ func parkedRecord(t *testing.T, state string) *ecdsa.PrivateKey {
 	_ = gone.Process.Kill()
 	_, _ = gone.Process.Wait()
 	return recordNamed(t, state, pid, 1, testSessionID, "enr-before")
+}
+
+// reclaimedIdentityRig builds the fixture the rows that read a reclaimed identity share: a
+// helper that was never logged in, one parked record enrolled as enr-before whose key the fake
+// broker knows, and that record's confirming renew held at the fake's renew gate until the
+// returned release is called. It returns the rig, the key the record carries, the state path its
+// records are saved to, and that release.
+//
+// The peer is pinned by pid rather than read off the socket: a kernel without SO_PEERPIDFD
+// (gVisor) identifies no peer at all, and what these rows have under test is the register's
+// reply, not how the helper learns who called it. PeerOf itself stays proved by the package's
+// other rows on CI.
+//
+// The gate is taken after the rig starts, as testGate asks: the open it registers for cleanup
+// then runs before the fake server's own Close, which waits for any request still held at the
+// gate.
+func reclaimedIdentityRig(t *testing.T) (*rig, *ecdsa.PrivateKey, string, func()) {
+	t.Helper()
+	return reclaimedIdentityRigAmending(t, nil)
+}
+
+// reclaimedIdentityRigAmending is reclaimedIdentityRig's body, with amend — when it is not nil
+// — changing the parked record after parkedRecord has written it and before the rig recovers
+// it. It is how a variant gets a record parkedRecord does not write, such as one carrying a
+// lapsed enrollment beside the one to reclaim.
+func reclaimedIdentityRigAmending(t *testing.T, amend func(*Record)) (*rig, *ecdsa.PrivateKey, string, func()) {
+	t.Helper()
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	key := parkedRecord(t, state)
+	if amend != nil {
+		recs, err := LoadRecords(state)
+		if err != nil || len(recs) != 1 {
+			t.Fatalf("the parked state must hold exactly one record to amend: %+v (%v)", recs, err)
+		}
+		amend(&recs[0])
+		writeRecords(t, state, recs)
+	}
+	r := newRig(t, state)
+	gate, release := testGate(t)
+	// The confirming renew this gate holds is a FIRST confirmation, so the helper bounds it
+	// (Server.FirstConfirmBound, DefaultFirstConfirmBound = 3 s in production). The rows here
+	// hold the gate across that confirmation and release it in milliseconds, and the renew
+	// must still be the one that lands when they do: a bound of a minute is past anything but
+	// a hung host, so a loaded CI box cannot turn their ordering into a race with the bound.
+	// A variant that opens the gate at once is unaffected either way, and one that reads the
+	// bound itself (reclaimedIdentityRigNeverAnswering) sets its own.
+	r.srv.FirstConfirmBound = time.Minute
+	r.fake.mu.Lock()
+	r.fake.renewGate = gate
+	r.fake.mu.Unlock()
+	r.callerPID.Store(int64(os.Getpid()))
+	seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
+	return r, key, state, release
+}
+
+// reclaimedIdentityRigWithLapsedID is that same fixture with the parked record carrying a
+// LAPSED enrollment as well as the one to reclaim — the shape Recover's re-pin and a reclaim
+// both leave (reclaimIdentity's Revoke) — so the session comes back with an id enrollLoop must
+// revoke before it may renew anything. The gate is opened here: no renew can reach it anyway,
+// since the revoke ahead of the confirmation goes through on a person's sign-in or a machine
+// credential, and this rig holds neither; leaving the gate shut would only hide that behind a
+// held request.
+func reclaimedIdentityRigWithLapsedID(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRigAmending(t, func(rec *Record) { rec.LapsedEnrollmentID = "enr-lapsed" })
+	release()
+	return r
+}
+
+// reclaimedIdentityRigRefusingRenew is that same fixture with the broker refusing the confirming
+// renew rather than the gate holding it: the row that reads a refusal needs that renew to reach
+// the session on its own, so the gate is opened here, before the register that starts the enroll
+// loop. The enrollment the refusal speaks for is the record's own, which reclaimedIdentityRig has
+// already seeded, so the fake refuses a renew of an enrollment it knows rather than one it never
+// had.
+func reclaimedIdentityRigRefusingRenew(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRig(t)
+	r.fake.mu.Lock()
+	r.fake.refuseRenewNext = 1 // 401 ENROLLMENT_NOT_LIVE, the broker's one verdict that a row has ended
+	r.fake.mu.Unlock()
+	release()
+	return r
+}
+
+// reclaimedIdentityRigFailingRenew is that same fixture with the broker unable to ANSWER the
+// confirming renew — 503, an outage — rather than refusing it, the one failure confirmInherited
+// retries instead of falling through to the enroll. The gate is opened here, before the register
+// that starts the enroll loop, so those attempts reach the session on their own; renewFail is
+// set far above what a row can consume, since the outage must last the whole of it and the
+// attempts come a second apart at first.
+func reclaimedIdentityRigFailingRenew(t *testing.T) *rig {
+	t.Helper()
+	r, _, _, release := reclaimedIdentityRig(t)
+	r.fake.mu.Lock()
+	r.fake.renewFail = 1000
+	r.fake.mu.Unlock()
+	release()
+	return r
+}
+
+// reclaimedIdentityRigNeverAnswering is that same fixture against the outage the bound exists
+// for: a broker that ACCEPTS the connection and never answers, which the gate — held, and
+// never released by the row — is exactly. bound is the row's own FirstConfirmBound, short so
+// the row is quick; the renew that the first confirmation sends then runs into it instead of
+// into the helper's whole client timeout (leasetime.RenewClientTimeout, 30 s). The gate still
+// opens at cleanup, before the fake's Close, so no held request outlives the row.
+func reclaimedIdentityRigNeverAnswering(t *testing.T, bound time.Duration) *rig {
+	t.Helper()
+	r, _, _, _ := reclaimedIdentityRig(t)
+	r.srv.FirstConfirmBound = bound
+	return r
+}
+
+// reclaimedIdentityRigLoggedInNeverAnswering is that same never-answering fixture with the
+// helper LOGGED IN, which is the state a first confirming renew can BEGIN in and be waited on
+// out of: the row that uses it drops the machine credential once the renew is at the gate, so
+// what that renew read when it started and what the waiting register reads are two different
+// readings of the same credential (DefaultFirstConfirmBound). The login is taken after the rig
+// is built, so the register that admits the session is still the first call the row makes.
+func reclaimedIdentityRigLoggedInNeverAnswering(t *testing.T, bound time.Duration) *rig {
+	t.Helper()
+	r := reclaimedIdentityRigNeverAnswering(t, bound)
+	r.login(t)
+	return r
 }
 
 // requireReclaimable fails unless the identity parked for testSessionID is still whole: the

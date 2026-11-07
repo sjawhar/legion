@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'The secrets helper now answers `register --wait` for a session that comes back for a parked identity on a helper holding no launcher credential: the renew that confirms an inherited enrollment is signed by the session''s own key alone, so the helper waits for that one confirmation attempt, up to the caller''s wait, and answers as soon as the broker keeps it or refuses it. Before, the reply carried the state from before that confirmation and `agent-secrets register --wait N` exited 1 for a session the broker confirmed milliseconds later. That first renew has a bound of its own, three seconds, so a broker that never answers costs a launch that bound rather than the helper''s whole client timeout. A register that asked for no wait, one for a session holding no inherited enrollment, one whose record also carries a lapsed enrollment to revoke, and one arriving between the enroll loop''s own retries all still answer at once.'
+time: 2026-11-07T06:11:38.488615926Z
+custom:
+    Issue: pr2917
