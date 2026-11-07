@@ -198,3 +198,26 @@ func (m *Machine) replaceable(p *Delivery) bool {
 	}
 	return m.waitsForProviderError(p.ID)
 }
+
+// replaceOwedTask has a newer task take the place of the task a provider error took back, and
+// reports whether it did. Both places a newer task arrives at a claim that owes one run it: the
+// task queue is given (queue), and the operator's task that runs a launch the pacing parked
+// (runParkedLaunchNow). A pending task no ladder's wait stands for is replaced by neither, and
+// each caller answers that its own way, so this reports it rather than deciding it.
+//
+// The replaced task's row ends as any other retirement ends it (retirePending), and the question
+// a restart armed for that task is answered in the same step (answerAskFirstAfterDrop), so the
+// task that takes its place is never taken for the running turn's.
+//
+// line is the caller's own sentence for the replacement, since what the two have to say of it
+// differs, and args are what that caller adds to the owed task's own fields.
+func (m *Machine) replaceOwedTask(ctx context.Context, pending *Delivery, line string, args ...any) (bool, error) {
+	if !m.replaceable(pending) {
+		return false, nil
+	}
+	m.log.Info(line, append([]any{"owed", pending.ID, "attempt", pending.ProviderErrorRetries}, args...)...)
+	if err := m.retirePending(ctx); err != nil {
+		return false, err
+	}
+	return true, m.answerAskFirstAfterDrop(ctx)
+}

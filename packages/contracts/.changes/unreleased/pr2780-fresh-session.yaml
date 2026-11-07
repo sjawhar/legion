@@ -8,7 +8,9 @@ body: |-
   operator stopped, a failed one, and a root architect. The daemon refuses a claim in a turn
   (`CLAIM_IN_A_TURN`), a claim whose launch is in flight (`CLAIM_UNSETTLED`) and the project's own
   controller, which is no role the request may name (`INVALID_ROLE`).
-  `LegionOperatorClaimResponse` gains an optional `phaseNotRestarted`, which the operator's
-  `retry` carries when it asked for a fresh session: the claim is back in a new session owing no
-  task, and the workflow refused the restart of its phase that would have handed it one. The
-  claim started either way, so that refusal rides a successful answer rather than replacing it.
+  `LegionFreshSessionResponse`, that route's answer, carries the same word for the controller:
+  it is empty wherever the claim came back and its start ran, and holds `phaseNotRestarted`
+  where the claim came back owing no task and the workflow refused the restart of its phase that
+  would have handed it one. `LegionOperatorClaimResponse` gains the same optional member, which
+  the operator's `retry` carries when it asked for a fresh session. The claim started either
+  way, so that refusal rides a successful answer rather than replacing it.

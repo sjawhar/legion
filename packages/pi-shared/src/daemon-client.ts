@@ -8,6 +8,7 @@ import {
   type LegionControllerRegistration,
   LegionEmptyResponse,
   LegionErrorResponse,
+  LegionFreshSessionResponse,
   LegionGateRegisterRequest,
   LegionGrantRequest,
   LegionGrantResponse,
@@ -121,10 +122,12 @@ export interface LegionDaemonClient {
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
   /** The controller's `fresh_session`: the claim on `role` of `issue` leaves its recorded
    * session behind and starts again in a new one, the effect
-   * `legion claims retry --fresh-session` runs for an operator. */
+   * `legion claims retry --fresh-session` runs for an operator. The answer is empty wherever
+   * the claim came back and its start ran, and carries `phaseNotRestarted` where the claim came
+   * back owing no task and the workflow refused the restart that would have handed it one. */
   readonly freshSession: (
     input: z.input<typeof LegionClaimRequest>
-  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  ) => Promise<z.output<typeof LegionFreshSessionResponse>>;
   readonly gateRegister: (
     input: z.input<typeof LegionGateRegisterRequest>
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
@@ -491,7 +494,12 @@ export function createLegionDaemonClient(
     issueStatus: (input) =>
       post("/legion/v1/issues/status", LegionIssueStatusRequest, LegionEmptyResponse, input),
     freshSession: (input) =>
-      post("/legion/v1/claims/fresh-session", LegionClaimRequest, LegionEmptyResponse, input),
+      post(
+        "/legion/v1/claims/fresh-session",
+        LegionClaimRequest,
+        LegionFreshSessionResponse,
+        input
+      ),
     compact: (input) =>
       post("/legion/v1/claims/compact", LegionClaimRequest, LegionCompactResponse, input),
     gateRegister: (input) =>

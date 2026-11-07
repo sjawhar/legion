@@ -301,42 +301,6 @@ func agentRunning(state supervise.ClaimState) bool {
 	return state == supervise.StateRegistered || state == supervise.StateReady || state == supervise.StateIdle
 }
 
-// claimEvent posts one request to a claim's machine (postClaimEvent), as every operator request
-// on a claim does (claimRequest): it answers the caller itself when the daemon is stopping or
-// the machine refuses, and reports whether the machine held the request for the agent's turn
-// (supervise.ErrSuspendHeld), which is no refusal. The fresh session's resume posts through it
-// too.
-func (s *server) claimEvent(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token,
-	request string, ev supervise.Event) (held, ok bool) {
-	posted, err := s.postClaimEvent(w, r, m, token, request, ev)
-	switch {
-	case !posted:
-		return false, false
-	case errors.Is(err, supervise.ErrSuspendHeld):
-		return true, true
-	case err != nil:
-		s.operatorFailure(w, request, token, err)
-		return false, false
-	}
-	return false, true
-}
-
-// postClaimEvent posts one request to a claim's machine under a decision of the route's, which
-// it ends once the machine has answered, and hands that answer back for the caller to read: the
-// refusals of one request mean different things to different routes (claimEvent,
-// suspendForFreshSession), so each writes its own. The one answer this writes itself is the
-// daemon's stop, which no claim's state explains and every route gives in the same words
-// (stopped); posted is false there, and nothing was asked of the machine.
-func (s *server) postClaimEvent(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token,
-	request string, ev supervise.Event) (posted bool, err error) {
-	ctx, decided := s.decision(r, token)
-	defer decided()
-	if s.stopped(w, request) {
-		return false, nil
-	}
-	return true, m.Handle(ctx, ev)
-}
-
 // suspendForFreshSession stops the agent of a claim freshSession read in no turn, and is the one
 // request of either recovery the machine may not hold (supervise.RequestSuspend.NeverHold): a
 // claim that entered a turn, or a launch, between that read and the machine's lock refuses it and

@@ -198,13 +198,13 @@ func pendingID(p *Delivery) string {
 // holds a task at all, whichever task that is, and the reason it does is written there
 // (table.go).
 //
-// The replaced task's row ends as any other retirement ends it (retirePending), before the
-// newer task's row is written: the delete releases what that task held of a person's decisions
-// for whichever tree is owed them (the claim store's RetireDelivery and releaseKeptDecisions),
-// where a row overwritten in place would leave them held by a delivery id that is gone, or move
-// them to a task whose text never named them. The wait ends with the task, and the question a
-// restart armed for that task is answered in the same step (answerAskFirstAfterDrop), so the
-// task queued behind it is never taken for the running turn's.
+// The replaced task's row ends as any other retirement ends it, and the question a restart armed
+// for that task is answered in the same step, which is the one path both places a task replaces
+// an owed one take (replaceOwedTask): the delete releases what that task held of a person's
+// decisions for whichever tree is owed them (the claim store's RetireDelivery and
+// releaseKeptDecisions), where a row overwritten in place would leave them held by a delivery id
+// that is gone, or move them to a task whose text never named them. The wait ends with the task,
+// and the task queued behind it is never taken for the running turn's.
 //
 // What the ladder counted belongs to the delivery it counted for, and goes with it: the attempt
 // count and the sentence the next prompt would have carried are the delivery's own fields
@@ -227,19 +227,16 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
-		if !m.replaceable(pending) {
+		replaced, err := m.replaceOwedTask(ctx, pending,
+			"supervise: a newer task replaces the one a provider error took back", "delivery", id)
+		if err != nil {
+			return err
+		}
+		if !replaced {
 			if err := m.sendPending(ctx); err != nil {
 				return err
 			}
 			return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
-		}
-		m.log.Info("supervise: a newer task replaces the one a provider error took back",
-			"owed", pending.ID, "attempt", pending.ProviderErrorRetries, "delivery", id)
-		if err := m.retirePending(ctx); err != nil {
-			return err
-		}
-		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
-			return err
 		}
 	}
 	if delivered {

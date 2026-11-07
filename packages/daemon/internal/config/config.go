@@ -208,7 +208,7 @@ type Config struct {
 	RepositoryRenames ghrepo.Renames
 	// Warnings are what the loader has to say to the operator and nothing the daemon runs on, in
 	// file order; empty for a file that raises none. One line names each key the file carries that
-	// this daemon accepts and reads nothing from (warnedKeys, KeyWarning.Line), and one each place
+	// this daemon accepts and reads nothing from (warnedKeys, readKeys), and one each place
 	// a project still sets such a key (readProject's `deploys`): the key is accepted and warned
 	// about rather than refused, since the deployment that writes it releases on its own schedule
 	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
@@ -216,19 +216,6 @@ type Config struct {
 	// `legion start --check-config` prints each right after its OK line, so an operator reads the
 	// same sentence either way.
 	Warnings []string
-}
-
-// KeyWarning is one key the loader accepts, reads nothing from, and warns about: the key, and why
-// setting it changes nothing with what to do instead. Line is the line it contributes to
-// Config.Warnings.
-type KeyWarning struct {
-	Key    string
-	Detail string
-}
-
-// Line is the warning as boot logs it and `legion start --check-config` prints it.
-func (w KeyWarning) Line() string {
-	return fmt.Sprintf("setting %s changes nothing: %s", w.Key, w.Detail)
 }
 
 const (
@@ -295,7 +282,7 @@ var tossedKeys = map[string]string{
 // value from it, and warns: the reviewer's rule for this loader is that a refusal must close a
 // vulnerability, and a count nothing reads closes none, so refusing a boot over it would stop a
 // deployment for a word in a file. The refusal this key would otherwise carry is the warning's
-// own text (Config.Warnings, KeyWarning.Line), which boot logs and `legion start --check-config`
+// own text (Config.Warnings, readKeys), which boot logs and `legion start --check-config`
 // prints, so the operator reads what the refusal would have said and the daemon runs.
 var warnedKeys = map[string]string{
 	"max_fix_attempts": "nothing counts fix attempts any more, a red CI verdict always sends the work back to the implementer however many came before, and the architect decides when to stop; remove max_fix_attempts from legion.yaml, where review_round_cap is the one cap left that blocks a pull request (dispatch://INFRA-956 R4)",
@@ -530,7 +517,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			case warnedKeys[key] != "":
 				// The value is read for nothing, so no shape of it is refused: the key changes
 				// nothing whatever it says.
-				file.Warnings = append(file.Warnings, KeyWarning{Key: key, Detail: warnedKeys[key]}.Line())
+				file.Warnings = append(file.Warnings,
+					fmt.Sprintf("setting %s changes nothing: %s", key, warnedKeys[key]))
 			default:
 				err = classify(key)
 			}

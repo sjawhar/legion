@@ -3,13 +3,13 @@ import { LEGION_ROLES } from "./legion-roles";
 
 /**
  * The two claim recoveries the controller asks for, `fresh_session` and `compact`: the body they
- * share, and the answer the compaction gives through the controller's door and the operator's
- * alike.
+ * share, and the answer each gives through the controller's door and the operator's alike.
  *
- * Go owns both shapes, `packages/daemon/internal/api/freshsession.go` (`ClaimRequest`) and
- * `compact.go` (`CompactResponse`), and the fixtures pin them as they pin the rest of the API
- * (`legion-api.test.ts`). Importers read them through `@legion/contracts/legion-api`, which
- * re-exports both; this module has no export entry of its own (`package.json`).
+ * Go owns all three shapes, `packages/daemon/internal/api/freshsession.go` (`ClaimRequest`,
+ * `FreshSessionResponse`) and `compact.go` (`CompactResponse`), and the fixtures pin them as they
+ * pin the rest of the API (`legion-api.test.ts`). Importers read them through
+ * `@legion/contracts/legion-api`, which re-exports all three; this module has no export entry of
+ * its own (`package.json`).
  */
 
 const nonEmptyString = z.string().min(1);
@@ -37,13 +37,24 @@ const nonEmptyString = z.string().min(1);
  * with a launch in flight. The compaction adds three of its own: `CLAIM_NOT_RUNNING` for a
  * suspended, stopped or failed claim, which runs no session at all and which `fresh_session`
  * reaches; `CLAIM_NOT_ON_OMP` for a role running on Claude Code, which has no Oh My Pi session;
- * and `COMPACTION_FAILED` for an ask that did not happen or an end the daemon could not write,
- * neither of which gave the claim back. A registered claim is the compaction's `CLAIM_UNSETTLED`
- * and no refusal at all for `fresh_session`. */
+ * and `COMPACTION_FAILED` for an ask that did not happen, an end the daemon could not write, and
+ * a claim that lost its process while its session was being compacted, none of which gave the
+ * claim back. A registered claim is the compaction's `CLAIM_UNSETTLED` and no refusal at all for
+ * `fresh_session`. */
 export const LegionClaimRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
   role: z.enum(LEGION_ROLES),
+});
+
+/** `api.FreshSessionResponse`, what became of a fresh session. It is empty wherever the claim
+ * came back and its start ran, which is every answer but one: `phaseNotRestarted` is why nothing
+ * restarted the claim's phase, present only where the claim came back in a new session owing no
+ * task and the workflow refused the restart that would have handed it one. The claim started
+ * either way, which is why that refusal rides a success; a reader of the claim cannot tell it,
+ * since the state records nowhere that the restart did not run. */
+export const LegionFreshSessionResponse = z.object({
+  phaseNotRestarted: nonEmptyString.optional(),
 });
 
 /** `api.CompactResponse`, what became of a compaction. `compacted` is whether Oh My Pi
@@ -51,8 +62,8 @@ export const LegionClaimRequest = z.strictObject({
  * refused or skipped ("Already compacted", "Nothing to compact (session too small)"), and the
  * daemon's for a wait that ran out. The daemon cuts it to 200 bytes, since the words are a
  * model's and reach the controller's next prompt. A compaction that did not run is this answer
- * rather than a failure, because the claim came back and whatever task it owed has gone again
- * all the same. */
+ * rather than a failure, because the claim came back and whatever task it owed has gone to it
+ * again. */
 export const LegionCompactResponse = z.object({
   compacted: z.boolean(),
   reason: z.string().optional(),

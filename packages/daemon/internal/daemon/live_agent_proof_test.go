@@ -197,7 +197,7 @@ func (r *liveAgentProof) legionClaimsTry(args ...string) (string, error) {
 	return strings.TrimRight(string(out), "\n"), err
 }
 
-// indent puts each line of a command's output under a step's own note.
+// indentOutput puts each line of a command's output under a step's own note.
 func indentOutput(text string) string {
 	return "   " + strings.ReplaceAll(text, "\n", "\n   ")
 }
@@ -223,7 +223,7 @@ func takeOwnDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect the PostgreSQL LEGION_TEST_PG_DSN names: %v", err)
 	}
-	database := "legion_provider_error_" + strings.ToLower(randomSuffix(t))
+	database := "legion_live_proof_" + strings.ToLower(randomSuffix(t))
 	if _, err := server.Exec(ctx, "create database "+database+" strategy file_copy"); err != nil {
 		server.Close(ctx)
 		t.Fatalf("make this run's own database %s: %v", database, err)
@@ -270,8 +270,8 @@ func proofCheckoutRoot(t *testing.T) string {
 	return root
 }
 
-// buildLegion builds the `legion` every pane's shim and every operator command in either proof is,
-// from this checkout.
+// buildProofLegion builds the `legion` every pane's shim and every operator command in either
+// proof is, from this checkout.
 func buildProofLegion(t *testing.T, root, work string) string {
 	t.Helper()
 	binary := filepath.Join(work, "legion")
@@ -284,7 +284,7 @@ func buildProofLegion(t *testing.T, root, work string) string {
 	return binary
 }
 
-// installPlugins packs this checkout's two Oh My Pi plugins as the release packs them
+// installProofPlugins packs this checkout's two Oh My Pi plugins as the release packs them
 // (scripts/e2e/lib/pack-plugin.sh) and installs each into the run's own profile under its own
 // HOME, as scripts/e2e/lib/install-plugin-profile.sh does for a stage proof — through the Oh My Pi
 // the run's panes run rather than a mise pin, since a pod has no mise. The profile's natives are
@@ -376,7 +376,7 @@ func newPaneListener(t *testing.T) string {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"session_id": sent.SessionID,
-			"machine_id": "provider-error-retry",
+			"machine_id": "live-agent-proof",
 			"dir":        dir,
 			"topics":     []string{},
 		})

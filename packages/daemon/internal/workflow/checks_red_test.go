@@ -888,11 +888,11 @@ func TestTwoHeadsAheadOfTheirPushesAreJudgedAsThePushesFirstJudgeThem(t *testing
 // A push for a head the branch has since left - delivered after the head the record holds - moves
 // no head, and decides the checks when its replay of the head run changes the judgement or closes
 // the run (push), since no other fact reads what that replay changed. The chain it completes can
-// clear the planned mark the heads above it carried from a head whose push was unknown, or spare
-// the fix attempts their moves counted, with the newest head's push lost for good, so the run
-// stays open; or it can close the run with the judgement exactly as the heads left it. Each way
-// the red at the recorded head, held while the run waited and now past its hold, comes to stand
-// and sends the work back, and each way one clause of the re-check is what reads it.
+// clear the planned mark the heads above it carried from a head whose push was unknown, with the
+// newest head's push lost for good, so the run stays open; or it can close the run with the
+// judgement exactly as the heads left it. Each way the red at the recorded head, held while the
+// run waited and now past its hold, comes to stand and sends the work back, and each way one
+// clause of the re-check is what reads it.
 func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
 	start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)

@@ -97,12 +97,21 @@ func decodeAnswer(answer []byte, into any) error {
 // `suspended:released` for its state (claimStateWord): it is not a suspension anyone is waiting
 // to lift — its next delivery resumes it in a pod of its own — so an operator reading the list
 // must not read it as one.
+//
+// A second line follows it when the answer says nothing restarted the claim's phase, which only
+// `retry --fresh-session` sets (api.OperatorClaim.PhaseNotRestarted): the claim is back in a new
+// session owing no task, and the workflow refused the restart that would have handed it one. The
+// claim started either way, so the line above reports it as the success it is, and without this
+// one an operator would read that success as work handed back.
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
 		return err
 	}
 	writeClaimLine(w, c)
+	if c.PhaseNotRestarted != "" {
+		fmt.Fprintln(w, c.PhaseNotRestarted)
+	}
 	return nil
 }
 

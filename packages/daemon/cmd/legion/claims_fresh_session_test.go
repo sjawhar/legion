@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
@@ -38,5 +41,49 @@ func TestClaimsRetryFreshSessionSendsTheFreshSessionBody(t *testing.T) {
 	}
 	if file := started[len(started)-1].Spec.ResumeSessionFile; file != "" {
 		t.Fatalf("the fresh start resumes %q, want a session of its own", file)
+	}
+}
+
+// A fresh session whose phase restart the workflow refused answers 200 with the claim and that
+// refusal (api.FreshSessionResponse.PhaseNotRestarted, served on the operator's retry as
+// api.OperatorClaim.PhaseNotRestarted), where the route once answered 409. The claim's own line
+// says the claim is back, so the refusal is a line of its own under it: without it an operator
+// reads a success and no word of the work nothing handed the claim. Every other answer carries
+// no refusal and prints the claim's line alone.
+func TestARetryWhosePhaseRestartWasRefusedPrintsTheRefusalUnderTheClaim(t *testing.T) {
+	retried := api.OperatorClaim{Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208",
+		Role: "architect", Generation: 3, State: "launching", PluginContract: api.DaemonAPIVersion}
+	line := string(architectClaim) + " architect LEGION-208 launching 3 " + thisBinarysContract + " - -\n"
+	refusal := "LEGION-208 is still held after the retry of its phase implementing, so nothing relaunched " +
+		string(architectClaim) + ": its tree lingers, and a lingering tree's members stay where they stood"
+	for _, tc := range []struct {
+		name  string
+		claim api.OperatorClaim
+		want  string
+	}{
+		{name: "the phase was restarted", claim: retried, want: line},
+		{
+			name: "the workflow refused the restart",
+			claim: func() api.OperatorClaim {
+				c := retried
+				c.PhaseNotRestarted = "the claim is back in a new session owing no task, and nothing restarted its phase: " + refusal
+				return c
+			}(),
+			want: line + "the claim is back in a new session owing no task, and nothing restarted its phase: " + refusal + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answer, err := json.Marshal(tc.claim)
+			if err != nil {
+				t.Fatalf("marshal the claim the route answers: %v", err)
+			}
+			var out bytes.Buffer
+			if err := printClaim(&out, answer); err != nil {
+				t.Fatalf("print the claim: %v", err)
+			}
+			if out.String() != tc.want {
+				t.Fatalf("printed %q, want %q", out.String(), tc.want)
+			}
+		})
 	}
 }

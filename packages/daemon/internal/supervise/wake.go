@@ -439,10 +439,11 @@ func (m *Machine) dropWakeFor(ev Event) *wake {
 // place rather than waiting out a wait the next error only makes longer (queue,
 // dispatch://INFRA-956 R2). The claim takes an operator's task over such a one, so a person is
 // waiting on a task this claim will work, and the launch runs for it. The replacement is made
-// here, before that launch, and not left to the row: the launch takes the ladder's wait with
-// the claim's timers (letGo), and that wait is the whole of what makes the owed task
-// replaceable, so queue — reading the claim the launch leaves — would refuse the very task the
-// launch had just replaced a live process for. Nothing is lost if the launch's own lifecycle
+// here, before that launch, and not left to the row (replaceOwedTask, the one path both places
+// a task replaces an owed one take): the launch takes the ladder's wait with the claim's timers
+// (letGo), and that wait is the whole of what makes the owed task replaceable, so queue —
+// reading the claim the launch leaves — would refuse the very task the launch had just replaced
+// a live process for. Nothing is lost if the launch's own lifecycle
 // recheck refuses (runWake): the row that follows queues the operator's task into a claim
 // holding none, which is where R2 leaves it either way.
 //
@@ -457,15 +458,9 @@ func (m *Machine) runParkedLaunchNow(ctx context.Context, ev Event) error {
 		return nil
 	}
 	if pending := m.claim.Pending; pending != nil {
-		if !m.replaceable(pending) {
-			return nil
-		}
-		m.log.Info("supervise: the operator's task replaces the one a provider error took back, and the launch parked over the claim's process runs for it",
-			"owed", pending.ID, "attempt", pending.ProviderErrorRetries)
-		if err := m.retirePending(ctx); err != nil {
-			return err
-		}
-		if err := m.answerAskFirstAfterDrop(ctx); err != nil {
+		replaced, err := m.replaceOwedTask(ctx, pending,
+			"supervise: the operator's task replaces the one a provider error took back, and the launch parked over the claim's process runs for it")
+		if err != nil || !replaced {
 			return err
 		}
 	}

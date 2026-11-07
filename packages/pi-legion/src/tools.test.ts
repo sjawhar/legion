@@ -172,13 +172,15 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "fresh_session (issue, role) has one claim leave the session it runs in behind and start again in a new one: the daemon " +
   "stops the agent if it runs, forgets the session, and starts the claim, which loses everything that session held. A " +
   "phase worker that comes back owing no task is started through its issue's current phase, so it has that phase's work. " +
+  "The answer is empty when the claim came back and nothing else is to be said, and names why nothing restarted the " +
+  "phase (phaseNotRestarted) when the claim came back owing no task and the workflow refused that restart: the claim is " +
+  "running, and no work was handed to it. " +
   "The daemon refuses it for a claim in a turn (CLAIM_IN_A_TURN: ask again after the turn ends), for a claim whose " +
   "launch is in flight (CLAIM_UNSETTLED) and for role controller. " +
   "compact (issue, role) shortens one claim's session instead: the daemon has Oh My Pi write a text summary of the " +
-  "session so far and then sends the claim the task it owes again, and the claim keeps its session, its workspace and " +
-  "everything it knows of its issue. Try compact before fresh_session for a claim that stays stuck. The answer says " +
-  "whether the session was compacted and, when it was not, why; the claim came back and whatever task it owes went " +
-  "again either way. The daemon refuses " +
+  "session so far, and the claim keeps its session, its workspace and everything it knows of its issue and is sent " +
+  "whatever task it owes again. Try compact before fresh_session for a claim that stays stuck. The answer says " +
+  "whether the session was compacted and, when it was not, why; the claim is back either way. The daemon refuses " +
   "it for a claim that is suspended, stopped or failed (CLAIM_NOT_RUNNING: fresh_session reaches that one), for a claim " +
   "in a turn (CLAIM_IN_A_TURN), for a claim whose launch is in flight (CLAIM_UNSETTLED), for a claim whose role runs on " +
   "Claude Code (CLAIM_NOT_ON_OMP) and for role controller. " +
@@ -1218,7 +1220,14 @@ test("the controller reads the whole state without a grant and sets an issue's s
     capabilities: [],
   };
   const minted: string[] = [];
-  const { calls, daemon } = recordingDaemon({ state });
+  // What the daemon answers a fresh session whose phase restart the workflow refused: the claim
+  // came back, and this is the one thing about it the controller can read nowhere else.
+  const notRestarted = {
+    phaseNotRestarted:
+      "legion-omp-legion-209-implementer is back in a new session owing no task, and nothing restarted its phase: " +
+      "LEGION-209 is still held after the retry of its phase implementing",
+  };
+  const { calls, daemon } = recordingDaemon({ state, answers: { freshSession: notRestarted } });
   const tool = createLegionTool({
     pi,
     daemon,
@@ -1260,12 +1269,13 @@ test("the controller reads the whole state without a grant and sets an issue's s
   ]);
 
   // fresh_session names the claim by its issue and role, and mints the controller's grant as
-  // set_status does: the daemon decides which claims it reaches.
+  // set_status does: the daemon decides which claims it reaches. Its answer is the daemon's own,
+  // so the controller reads why nothing restarted the claim's phase; nothing else records it.
   await expect(
     run({ op: "fresh_session", issue: "LEGION-209", role: "implementer" })
   ).resolves.toEqual({
-    content: [{ type: "text", text: "{}" }],
-    details: {},
+    content: [{ type: "text", text: JSON.stringify(notRestarted) }],
+    details: notRestarted,
   });
   expect(minted).toEqual(["ses_controller", "ses_controller"]);
   expect(calls.at(-1)).toEqual([
@@ -1274,7 +1284,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
   ]);
 
   // compact names the claim the same way and returns the daemon's own answer: a compaction Oh
-  // My Pi refused or skipped says so and names why, and the owed task went again either way.
+  // My Pi refused or skipped says so and names why, and the claim is back either way.
   await expect(run({ op: "compact", issue: "LEGION-209", role: "implementer" })).resolves.toEqual({
     content: [{ type: "text", text: "{}" }],
     details: {},

@@ -17,7 +17,11 @@ import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
 
 /** The controller's two claim recoveries keep their own module, and every importer reads them
  * from here. */
-export { LegionClaimRequest, LegionCompactResponse } from "./legion-claim-recovery";
+export {
+  LegionClaimRequest,
+  LegionCompactResponse,
+  LegionFreshSessionResponse,
+} from "./legion-claim-recovery";
 
 const nonEmptyString = z.string().min(1);
 const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
