@@ -977,32 +977,3 @@ func TestTheReleasesCertificateIsTheAuthoritysOwnAndCarriesNoKey(t *testing.T) {
 		t.Fatalf("a broker with no airlock released %q; want nothing", released)
 	}
 }
-
-// TestTheAirlockProxyIsReadAndWrittenThroughOnePointer: the reread listener's goroutine is
-// started by the boot and reads the proxy on every notification a peer sends, and the proxy is
-// built after that boot returns, so the write and those reads are on different goroutines. Run
-// under -race this row is the report; the holder is what makes it pass.
-func TestTheAirlockProxyIsReadAndWrittenThroughOnePointer(t *testing.T) {
-	var holder airlockProxyHolder
-	proxy := airlockproxy.New(airlockproxy.Options{})
-	readers := make(chan struct{})
-	for range 4 {
-		go func() {
-			defer func() { readers <- struct{}{} }()
-			for range 200 {
-				// What a peer's reread does with the name it was told about, before and
-				// after the boot has built the proxy.
-				holder.dropName("DEMO_KEY")
-			}
-		}()
-	}
-	for range 200 {
-		holder.set(proxy)
-	}
-	for range 4 {
-		<-readers
-	}
-	if holder.server() != proxy {
-		t.Fatalf("the holder answers %p; want the proxy the boot built, %p", holder.server(), proxy)
-	}
-}

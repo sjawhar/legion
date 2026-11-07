@@ -247,14 +247,20 @@ func main() {
 	// written atomically, because the two reread paths below — this pod's own, and a peer's
 	// notification — are wired before it is built: the listener's goroutine is already running
 	// when it is stored, so the store and those reads are on different goroutines.
-	var airlockProxy airlockProxyHolder
+	var airlockProxy atomic.Pointer[airlockproxy.Server]
 	// dropAirlockName is what one reread of a secret's name does to the proxy: it drops that
 	// name's value from every grant the proxy holds values for, so the next request of such a
 	// grant reads the value again and mints again from it. The reread of the name is the
 	// signal, not the policy version: a new version of a secret's value moves neither the
 	// policy's version nor the set of names it serves, so nothing else this process sees says
-	// that the value the proxy is holding is the old one.
-	dropAirlockName := airlockProxy.dropName
+	// that the value the proxy is holding is the old one. Nothing to do when there is no
+	// proxy, which is both a deployment with no airlock and the window between the listener
+	// starting and the proxy being built.
+	dropAirlockName := func(name string) {
+		if proxy := airlockProxy.Load(); proxy != nil {
+			proxy.DropName(name)
+		}
+	}
 	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
 	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
 	// repository can check that it does: the guard this repository would otherwise write — a test
@@ -601,8 +607,9 @@ func main() {
 	// The airlock's proxy port, for a deployment that has one: the same rules file every
 	// release reads, the same request machine the API decides with - the proxy's two reads are
 	// its AirlockConnection and AirlockValues - and the authority built at the top of main.
+	var proxy *airlockproxy.Server
 	if started.AirlockListener != nil {
-		airlockProxy.set(airlockproxy.New(airlockproxy.Options{
+		proxy = airlockproxy.New(airlockproxy.Options{
 			Rules:  rules,
 			Grants: reqMachine,
 			CA:     airlockCA,
@@ -617,7 +624,8 @@ func main() {
 			DialAllow:     cfg.AirlockTestDialAllow,
 			KeepValues:    cfg.AirlockTestKeepValues,
 			NoKind:        cfg.AirlockTestNoKind,
-		}))
+		})
+		airlockProxy.Store(proxy)
 	}
 	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
 	// the socket is bound and srv.Serve is about to take it, so there are requests to finish and
@@ -640,7 +648,7 @@ func main() {
 			stopNotify()
 		}
 	}()
-	if proxy := airlockProxy.server(); proxy != nil {
+	if proxy != nil {
 		go func() {
 			if err := proxy.Serve(started.AirlockListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				slog.Error("broker: airlock proxy serve", "error", err)
@@ -653,7 +661,7 @@ func main() {
 	// nil when this deployment has no airlock, which is what brokerStop reads as "there is no
 	// proxy port to drain".
 	var airlockShutdown func(ctx context.Context) error
-	if proxy := airlockProxy.server(); proxy != nil {
+	if proxy != nil {
 		airlockShutdown = proxy.Shutdown
 	}
 	stop(context.Background(), brokerStop{
@@ -959,33 +967,6 @@ func airlockCACertificatePEM(ca *airlockproxy.Authority) string {
 		return ""
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Certificate().Raw}))
-}
-
-// airlockProxyHolder is the proxy port this process serves, held so that the paths wired before
-// it is built can reach it: the reread listener's goroutine is started by the boot, and the
-// proxy is built after that boot returns, so the write and the listener's reads are on
-// different goroutines and the pointer is read and written atomically. A deployment with no
-// airlock stores nothing and every read answers nil.
-type airlockProxyHolder struct {
-	proxy atomic.Pointer[airlockproxy.Server]
-}
-
-// set is the boot's one write: the proxy port, once it is built.
-func (h *airlockProxyHolder) set(proxy *airlockproxy.Server) { h.proxy.Store(proxy) }
-
-// server is the proxy this process serves, and nil for a deployment with no airlock or a boot
-// that has not built it yet.
-func (h *airlockProxyHolder) server() *airlockproxy.Server { return h.proxy.Load() }
-
-// dropName is what one reread of a secret's name does to the proxy: it drops that name's value
-// from every grant the proxy holds values for, so the next request of such a grant reads the
-// value again and mints again from it. Nothing to do when there is no proxy, which is both a
-// deployment with no airlock and the window between the listener starting and the proxy being
-// built.
-func (h *airlockProxyHolder) dropName(name string) {
-	if proxy := h.proxy.Load(); proxy != nil {
-		proxy.DropName(name)
-	}
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from

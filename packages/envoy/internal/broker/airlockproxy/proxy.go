@@ -630,7 +630,11 @@ func (s *Server) connectTunnel(w http.ResponseWriter, r *http.Request, hijacker 
 // for http:// rather than https://.
 func (s *Server) servePlain(w http.ResponseWriter, r *http.Request, grant requests.AirlockConnection) {
 	host := airlock.ASCIILower(r.URL.Hostname())
-	if s.boundName(grant, host) {
+	// Whether any name of this grant may carry a secret to this host, from the one function
+	// that says what is bound (candidates). It is asked about 443 because that is the only
+	// port an entry's hosts speak about, while the refusal below is about no port at all: a
+	// value may not cross in the clear whatever port it was asked for on.
+	if len(s.candidates(grant, host, 443)) > 0 {
 		// Plain HTTP to a bound host is refused rather than swapped into: the value would
 		// cross the network in the clear, and no rule of the airlock says a secret may. The
 		// command asks again over https, where the proxy's own certificate covers it.
@@ -667,19 +671,6 @@ func (s *Server) badGateway(host, path string) func(http.ResponseWriter, *http.R
 		s.log.Warn("airlock proxy: upstream", "host", host, "path", path, "error", err)
 		http.Error(w, "airlock: "+host+": "+err.Error(), http.StatusBadGateway)
 	}
-}
-
-// boundName reports whether host is a name this connection's grant may carry a secret to: at
-// least one of its names has an entry in the rules file whose hosts bind it. It says nothing
-// about a port, so it is the test for plain HTTP, where the refusal is that the value may not
-// cross in the clear at all, whatever port it was asked for on.
-func (s *Server) boundName(grant requests.AirlockConnection, host string) bool {
-	for name := range grant.Names {
-		if entry := s.rules.Lookup(name); entry != nil && airlock.HostBound(entry.Hosts, host) {
-			return true
-		}
-	}
-	return false
 }
 
 // hijack takes the client's connection over from the outer server, with whatever the client

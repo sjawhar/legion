@@ -1048,6 +1048,17 @@ func databaseIAM(databaseURL string) (bool, error) {
 	return true, nil
 }
 
+// httpURLSetting refuses a setting whose value is no absolute http or https URL, naming the
+// setting and quoting the value with its own credentials and query taken out (redact.URL). The
+// two settings held to this form are a page a machine opens in a browser and a proxy a command
+// dials, and neither works at all as a bare host and port.
+func httpURLSetting(name, value string) error {
+	if parsed, err := url.Parse(value); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("%s must be an absolute http(s) URL: %q", name, redact.URL(value))
+	}
+	return nil
+}
+
 func Load(getenv func(string) string) (Config, error) {
 	for _, removed := range removedVars {
 		if getenv(removed.name) != "" {
@@ -1134,8 +1145,8 @@ func Load(getenv func(string) string) (Config, error) {
 	// absolute URL for is a verification_uri no machine could follow, which is worse than the
 	// device grant the broker simply does not serve when the setting is unset.
 	if cfg.MachineLoginURL != "" {
-		if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", redact.URL(cfg.MachineLoginURL))
+		if err := httpURLSetting("BROKER_MACHINE_LOGIN_URL", cfg.MachineLoginURL); err != nil {
+			return Config{}, err
 		}
 	}
 	// A broker that reads the airlock's rules but cannot proxy would hold back the value of
@@ -1162,8 +1173,8 @@ func Load(getenv func(string) string) (Config, error) {
 		// client reads it as the proxy to dial. A value with no scheme or no host
 		// ("proxy:13381") boots and then fails every airlock run one command at a time, with
 		// a refusal in the CLI rather than in the pod that was configured wrong.
-		if parsed, err := url.Parse(cfg.AirlockProxyURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return Config{}, fmt.Errorf("BROKER_AIRLOCK_PROXY_URL must be an absolute http(s) URL: %q", redact.URL(cfg.AirlockProxyURL))
+		if err := httpURLSetting("BROKER_AIRLOCK_PROXY_URL", cfg.AirlockProxyURL); err != nil {
+			return Config{}, err
 		}
 	}
 	switch cfg.SecretsStore {

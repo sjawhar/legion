@@ -55,24 +55,7 @@ func (r releasedName) behindAirlock() bool { return r.split.values != nil }
 // holds back. Once every value is read, each stored one is checked against the policy as it
 // stands then (recheckStoredSources), so a retag that lands during the reads never releases
 // what the secret stores once it is a kind.
-//
-// A narrowing is refused outright, before any value is read or minted, when the airlock holds
-// back any granted name (ErrNarrowingBehindAirlock, naming the first such name): the broker
-// would answer that it applied the narrowing while the proxy went on swapping in the value it
-// holds for that grant, which is minted owner-wide. Recording the narrowing with the grant's
-// placeholders instead was the other way out, and is not taken: a narrowing is one release's
-// alone — the grant records nothing of it, and its next release without one is owner-wide again
-// (Values) — while the proxy mints per pod for the life of the grant, so recording it there
-// would make a per-release narrowing stick to the grant, which is a different promise from the
-// one the CLI's help makes.
 func (m *Machine) readRelease(ctx context.Context, grantID string, checked grantRelease, want releaseRead) ([]releasedName, error) {
-	if want.narrowing != nil {
-		for _, g := range checked.granted {
-			if m.Airlock.Lookup(g.name) != nil {
-				return nil, fmt.Errorf("%w: the airlock holds %s, whose value the proxy spends for this grant", ErrNarrowingBehindAirlock, g.name)
-			}
-		}
-	}
 	read := make([]releasedName, 0, len(checked.granted))
 	for _, g := range checked.granted {
 		entry := m.Airlock.Lookup(g.name)

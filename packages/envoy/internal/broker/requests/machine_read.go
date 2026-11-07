@@ -154,7 +154,7 @@ func (m *Machine) checkRelease(ctx context.Context, grantID, owner string) (gran
 // owner-wide again. A grant that holds no github-app name refuses a narrowing
 // (ErrNarrowingNotApplicable), one whose github-app name does not list the narrowing's owner in
 // the snapshot the release mints from refuses it (ErrNarrowingOwnerNotListed), and so does one
-// any of whose granted names is behind the airlock (ErrNarrowingBehindAirlock, readRelease);
+// any of whose granted names is behind the airlock (ErrNarrowingBehindAirlock, narrowingRefusal);
 // each releases nothing and runs no minter.
 //
 // A granted name the airlock's rules name is released as placeholders instead of as its value:
@@ -169,7 +169,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string, narr
 		return Release{}, err
 	}
 	if narrowing != nil {
-		if name, err := narrowingRefusal(checked.set, checked.granted, narrowing); err != nil {
+		if name, err := m.narrowingRefusal(checked.set, checked.granted, narrowing); err != nil {
 			if errors.Is(err, ErrNarrowingOwnerNotListed) {
 				slog.Warn(NarrowingRefusedMessage, "grant", grantID, "enrollment", enrollmentID, "name", name, "error", err)
 			}
@@ -225,11 +225,21 @@ func (m *Machine) readValue(ctx context.Context, grantID, enrollmentID string, g
 	return minted, nil
 }
 
-// narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for: the grant
-// holds no github-app secret (ErrNarrowingNotApplicable), or a github-app secret of it does not
-// list the narrowing's owner in its github-owners tag in set, the snapshot the release mints from
-// (ErrNarrowingOwnerNotListed). GitHubApp.Mint refuses that owner too, as a second barrier.
-func narrowingRefusal(set *policy.Set, granted []requestedSecret, narrowing *secrets.GitHubNarrowing) (string, error) {
+// narrowingRefusal is why narrowing cannot reach granted, with the name it refuses for, in the
+// order the three are reported: the grant holds no github-app secret
+// (ErrNarrowingNotApplicable), a github-app secret of it does not list the narrowing's owner in
+// its github-owners tag in set, the snapshot the release mints from (ErrNarrowingOwnerNotListed),
+// or the airlock holds back a granted name (ErrNarrowingBehindAirlock, naming the first such
+// name). GitHubApp.Mint refuses that owner too, as a second barrier.
+//
+// The airlock's refusal is there because the broker would answer that it applied the narrowing
+// while the proxy went on swapping in the value it holds for that grant, which is minted
+// owner-wide. Recording the narrowing with the grant's placeholders instead was the other way
+// out, and is not taken: a narrowing is one release's alone — the grant records nothing of it,
+// and its next release without one is owner-wide again (Values) — while the proxy mints per pod
+// for the life of the grant, so recording it there would make a per-release narrowing stick to
+// the grant, which is a different promise from the one the CLI's help makes.
+func (m *Machine) narrowingRefusal(set *policy.Set, granted []requestedSecret, narrowing *secrets.GitHubNarrowing) (string, error) {
 	held := false
 	for _, g := range granted {
 		if kind, _, minted, err := policy.ParseKindSource(g.source); err != nil || !minted || kind != policy.KindGitHubApp {
@@ -242,6 +252,11 @@ func narrowingRefusal(set *policy.Set, granted []requestedSecret, narrowing *sec
 	}
 	if !held {
 		return "", ErrNarrowingNotApplicable
+	}
+	for _, g := range granted {
+		if m.Airlock.Lookup(g.name) != nil {
+			return g.name, fmt.Errorf("%w: the airlock holds %s, whose value the proxy spends for this grant", ErrNarrowingBehindAirlock, g.name)
+		}
 	}
 	return "", nil
 }

@@ -970,15 +970,21 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 	// middle of the decision cannot leave the row recording a policy no part of that decision
 	// was made against.
 	set := m.Policy.Get()
+	// The request's names, read once rather than three times: the default lifetime below,
+	// currentPolicyAdmits and decidedUnder all want them, and the requests row is locked
+	// `for update` from the read above until this transaction ends, so three reads of them
+	// could only ever answer the same rows.
+	var requested []requestedSecret
+	if approve {
+		if requested, err = requestedSecrets(ctx, tx, requestID); err != nil {
+			return Decision{}, false, err
+		}
+	}
 	// A record that names no lifetime gets the default the current policy gives its names: a
 	// request pending from before the 12-hour default, or one whose names were all
 	// default-grant=session when it was made, is held to the policy as it stands at approval.
 	lifetime := parsed.LifetimeSeconds
 	if approve && lifetime == nil {
-		requested, err := requestedSecrets(ctx, tx, requestID)
-		if err != nil {
-			return Decision{}, false, err
-		}
 		names := make([]string, len(requested))
 		for i, g := range requested {
 			names[i] = g.name
@@ -994,7 +1000,7 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 		if err != nil {
 			return Decision{}, false, err
 		}
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, set, requester, login, lifetime); err != nil && !errors.As(err, &denied) {
+		if err := currentPolicyAdmits(requested, set, requester, login, lifetime); err != nil && !errors.As(err, &denied) {
 			return Decision{}, false, err
 		}
 	}
@@ -1041,7 +1047,7 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 	}
 	var grantID string
 	if next == "granted" {
-		if err := decidedUnder(ctx, tx, requestID, set); err != nil {
+		if err := decidedUnder(ctx, tx, requestID, requested, set); err != nil {
 			return Decision{}, false, err
 		}
 		// The grant lasts the lifetime the approved record names, or the default above.
@@ -1093,18 +1099,15 @@ func (m *Machine) applyDecisionAttempt(ctx context.Context, recordID string, app
 // makes the re-check run more often than it must, and the fingerprint it compares is this one.
 //
 // One statement over every name of the request, by name, since every row's digest is read from
-// the one snapshot: a name the rules do not name records "", as it does at creation.
-func decidedUnder(ctx context.Context, tx pgx.Tx, requestID string, set *policy.Set) error {
-	granted, err := requestedSecrets(ctx, tx, requestID)
-	if err != nil {
-		return err
-	}
+// the one snapshot: a name the rules do not name records "", as it does at creation. granted is
+// the request's names, read once by the approve path that calls this.
+func decidedUnder(ctx context.Context, tx pgx.Tx, requestID string, granted []requestedSecret, set *policy.Set) error {
 	names := make([]string, len(granted))
 	digests := make([]string, len(granted))
 	for i, g := range granted {
 		names[i], digests[i] = g.name, set.Secrets[g.name].AirlockDigest
 	}
-	_, err = tx.Exec(ctx, `update request_secrets s set airlock_digest = v.digest
+	_, err := tx.Exec(ctx, `update request_secrets s set airlock_digest = v.digest
 		from unnest($2::text[], $3::text[]) as v(name, digest)
 		where s.request_id = $1 and s.name = v.name`, requestID, names, digests)
 	return err
@@ -1127,7 +1130,7 @@ func (e *policyDenial) Error() string {
 // the approver's own login beside it, so the trail still names who pressed approve.
 const PolicyDeniedActor = "broker:policy"
 
-// currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
+// currentPolicyAdmits refuses login an approval of a request when the current policy wants
 // one of its names approved by someone else (record.MayDecide), since a change of owner since the
 // request was made moves who may approve it: a request waiting on anyone for a secret that is now
 // a person's is that person's alone to approve, and one waiting on a person for a secret another
@@ -1158,13 +1161,10 @@ const PolicyDeniedActor = "broker:policy"
 // approve now, as with a withheld name: the session asks again within it.
 //
 // set is the one snapshot the whole decision is made against, the one whose airlock fingerprints
-// the request then records as what it was decided under (decidedUnder).
-func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, set *policy.Set, requester policy.Requester, login string, lifetime *int) error {
-	names, err := requestedSecrets(ctx, tx, requestID)
-	if err != nil {
-		return err
-	}
-	for _, g := range names {
+// the request then records as what it was decided under (decidedUnder), and requested the
+// request's names, read once by the approve path that calls this.
+func currentPolicyAdmits(requested []requestedSecret, set *policy.Set, requester policy.Requester, login string, lifetime *int) error {
+	for _, g := range requested {
 		d, err := set.Evaluate(g.name, requester)
 		if errors.Is(err, policy.ErrUnknownSecret) {
 			continue
@@ -1176,7 +1176,7 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 			return &policyDenial{name: g.name}
 		}
 	}
-	for _, g := range names {
+	for _, g := range requested {
 		d, err := set.Evaluate(g.name, requester)
 		if errors.Is(err, policy.ErrUnknownSecret) {
 			if slices.Contains(requester.Withheld, g.name) {
@@ -1194,7 +1194,7 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
 		}
 	}
-	for _, g := range names {
+	for _, g := range requested {
 		if limit, over := overMaxGrant(set, g.name, lifetime); over {
 			return fmt.Errorf("%w: %w: %s now allows grants of at most %s, shorter than this request asks, so no one may approve it now; its session asks again within that bound", record.ErrNotApprover, ErrGrantRequiresLifetime, g.name, limit)
 		}
