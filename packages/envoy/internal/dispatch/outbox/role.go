@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,12 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 // its claim. Events that are not due are resolved too: their unreached role destinations hold
 // later events back from the holder's agent subject.
 //
+// resolved is what the batch has resolved already - the roles the unanswered mentions of its
+// comments name, resolved before any destination was read (resolveUnpinnedRoleMentions,
+// resolveDestinations) - and the roles read here are added to it, so a batch resolves each role
+// once however many of its roads name it: a comment routed to the role it mentions names that
+// one twice. A caller with nothing resolved yet passes nil.
+//
 // A role copy of a new comment waits for the mention that decides its dedupe key, rather than
 // being sent under a key that mention has not claimed yet, which would show the mentioned session
 // the comment twice. Two copies wait, each on the mention its own key comes from
@@ -162,12 +169,18 @@ func resolveRole(ctx context.Context, deps Deps, role string) (roles.Resolution,
 // goes with whatever settledKeys holds then - a partial map, or an empty one. That edge is
 // deliberate. Nothing waits for a destination the event already reached: that copy was kept
 // or forwarded under an earlier read and this one sends nothing.
-func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
+func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent, resolved map[string]roleResolution) {
+	if resolved == nil {
+		resolved = map[string]roleResolution{}
+	}
 	var routed []string
 	seen := map[string]struct{}{}
 	for _, event := range events {
 		for _, dest := range event.destinationsOf {
 			if _, ok := event.delivered[dest.subject]; ok || dest.role == "" {
+				continue
+			}
+			if _, ok := resolved[dest.role]; ok {
 				continue
 			}
 			if _, ok := seen[dest.role]; !ok {
@@ -176,10 +189,12 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 			}
 		}
 	}
-	if len(routed) == 0 {
+	if len(routed) > 0 {
+		maps.Copy(resolved, resolveRoles(ctx, deps, routed))
+	}
+	if len(resolved) == 0 {
 		return
 	}
-	resolved := resolveRoles(ctx, deps, routed)
 	for _, event := range events {
 		// Written into the event's own list: a destination that waits stays in it, marked, so
 		// that it holds its key against the owner's later events (destination.waiting,
@@ -199,7 +214,7 @@ func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 				continue
 			}
 			if dest.dedupeKey == "" {
-				dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.settledKeys, dest.forward)
+				dest.dedupeKey = roleFallbackKey(dest.mentionKeys, dest.settledKeys, dest.mentionStates.unpinned, dest.forward)
 			}
 		}
 	}
@@ -228,12 +243,14 @@ func resolveRoles(ctx context.Context, deps Deps, names []string) map[string]rol
 
 // resolveUnpinnedRoleMentions names the holder of every role an attempt of one of read that
 // names no session yet targets, for as long as that attempt's send is still coming
-// (unpinnedRoleMentions), resolving each role once and every role at once (resolveRoles). Those
-// attempts are the mentions whose listener lookup went unanswered when the comment was written:
-// the row names the role alone until the sender pins a session on it a round trip later, so this
-// is what says whose copies of the comment that attempt decides. It is run before any
-// destination of the batch is read (resolveDestinations), the copies bound for a session's own
-// topic being decided there, and again by the fallback pass for the one comment a held row is of
+// (unpinnedRoleMentions), resolving each role once and every role at once (resolveRoles), and
+// answers what it resolved, so that the batch's own role routes read the same resolution rather
+// than making it again (resolveRoleHolders, resolveDestinations). Those attempts are the
+// mentions whose listener lookup went unanswered when the comment was written: the row names the
+// role alone until the sender pins a session on it a round trip later, so this is what says
+// whose copies of the comment that attempt decides. It is run before any destination of the
+// batch is read (resolveDestinations), the copies bound for a session's own topic being decided
+// there, and again by the fallback pass for the one comment a held row is of
 // (decideFallbackCopy).
 //
 // A role whose resolution names a holder gives that holder's copies the attempt's own state,
@@ -241,25 +258,56 @@ func resolveRoles(ctx context.Context, deps Deps, names []string) map[string]rol
 // sent to the session the listener resolves the role to, not to a live one. So a live attempt
 // holds those copies back, and one past the lease the outbox waits a send out for leaves them to
 // the fallback pass, exactly as the attempts of a session they name do (mentionHolds.state,
-// destinations.leftTo). A role whose resolution names no holder at all - no claim stands for it
-// here, or the read failed - names no session this reading can tell from another, so every copy
-// of that comment bound for a session's own topic reads that state instead
-// (unpinnedRoleMentions.state).
+// destinations.leftTo).
 //
-// That a role no claim names here decides every copy, rather than none, is what the
-// measurement of the narrower rule showed. This resolution is a guess at the session the
-// mention's sender is about to pin, and the two are made by different readers a round trip
-// apart: the outbox reads the role bucket itself as it publishes the comment (resolveRole,
-// roles.Buckets.RoleClaim), while the sender asks the listener, which resolves the role through
-// its own registry, when it sends. So a role this read names no holder for is not a role nobody
-// holds - a claim made, or become visible to the listener, between the two is pinned on the
-// attempt row all the same - and a reading that published that session's copies meanwhile has
-// shown its host the comment twice
+// A role whose resolution names no holder at all - no claim stands for it here, or the read
+// failed - names no session this reading can tell from another, and what it holds back is the
+// copies bound for the sessions the owner's own work names: the session its route names and the
+// session that claims it (unpinnedRoleMentions.unnamedState, destinations.addWorkingSession).
+// A role token names a role of that owner's own tree, so the session the listener resolves such
+// a role to is a session working the owner, and those two are the outbox's names for one. The
+// copies bound for the sessions the comment's own thread names - the author of the thread it
+// replies to, a follower, a primary document's author - go in the pass that reads them, under
+// the event's own key, as they did before this hold: nothing of the comment says that mention is
+// on its way to one of them.
+//
+// That the hold is those copies rather than every copy of the comment is what the measurement
+// of the wider rule showed: holding every session's copy made each of them wait for the 2 s
+// re-read mentionPendingDelay sets (TestR17UnrelatedAuthorCopyFirstPass, measured at +2.3 s
+// against +0.3 s on this package's own drive), which is the whole of INFRA-514's p99 budget,
+// for a mention that reaches one session.
+//
+// This resolution is a guess at the session the mention's sender is about to pin, and the two
+// are made by different readers a round trip apart: the outbox reads the role bucket itself as
+// it publishes the comment (resolveRole, roles.Buckets.RoleClaim), while the sender asks the
+// listener, which resolves the role through its own registry, when it sends. So a role this
+// read names no holder for is not a role nobody holds - a claim made, or become visible to the
+// listener, between the two is pinned on the attempt row all the same - and a reading that
+// published that session's copies meanwhile has shown its host the comment twice
 // (TestACommentAnUnansweredRoleMentionWhoseHolderTheOutboxCannotNameReachesThatSessionOnce).
-// What it costs a comment whose role really is unheld is one pass: every session's copy of that
-// one comment waits until the attempt settles, which a mention that reaches no session does
-// within a round trip, and no longer than the attempt's own lease either way.
-func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mentionDeliveries) {
+// The same race runs the other way: a role this read names H1 for can be pinned to H2 by the
+// sender, the claim having moved between the two readings, and H2's copies are held by nothing
+// here. What covers a copy of either kind is the key, where the copy goes to a session this
+// read can name as a role's holder: a role route's forward carries the key that mention's send
+// carries at the holder it reaches (unpinnedRoleMentions.keyFor, roleFallbackKey), so whichever
+// of the copy and the mention reaches that host second is dropped there. It costs that session
+// the mention's mode - a steer arrives as the copy - which is why the session this read resolves
+// the mention's own role to waits for its mention instead, mode and all, and why the copies the
+// unnamed hold covers wait rather than taking a key of their own.
+//
+// A copy bound for a session the comment's own thread names carries the event's own key and no
+// mention's: that is the order an owner's events keep at one session
+// (TestR17UnrelatedAuthorCopyOrder), and a sender that pins its mention to such a session - an
+// author or a follower that holds the role, which nothing of the comment says - shows that host
+// the comment twice, under the mention's key and the event's. That is what the first pass costs
+// where the outbox has no name for the mention's session, and it is bounded by the attempt's
+// own lease, after which the attempt names the session itself.
+//
+// One key serves one mention, so a comment whose live unpinned attempts target two or more
+// roles keys no copy: each mention carries a target of its own, a copy under either key stands
+// beside the other, and the copies the unnamed hold covers, and the forwards that would carry a
+// key, wait as they did before the key (mentionHolds.waitsForAnUnnamedMention).
+func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mentionDeliveries) map[string]roleResolution {
 	var names []string
 	seen := map[string]struct{}{}
 	for _, deliveries := range read {
@@ -275,25 +323,26 @@ func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mention
 		}
 	}
 	if len(names) == 0 {
-		return
+		return nil
 	}
 	resolved := resolveRoles(ctx, deps, names)
 	for _, deliveries := range read {
 		if deliveries.unpinned == nil {
 			continue
 		}
-		for role, state := range deliveries.unpinned.roles {
+		for role, unpinned := range deliveries.unpinned.roles {
 			if holder := resolved[role].resolution.Holder; holder != "" {
-				if current, ok := deliveries.unpinned.holders[holder]; !ok || state < current {
-					deliveries.unpinned.holders[holder] = state
+				if current, ok := deliveries.unpinned.holders[holder]; !ok || unpinned.state < current {
+					deliveries.unpinned.holders[holder] = unpinned.state
 				}
 				continue
 			}
-			if state < deliveries.unpinned.unresolved {
-				deliveries.unpinned.unresolved = state
+			if unpinned.state < deliveries.unpinned.unnamed {
+				deliveries.unpinned.unnamed = unpinned.state
 			}
 		}
 	}
+	return resolved
 }
 
 // roleCopyWaitsForAMention reports whether dest's copy of the comment waits for a mention of that
@@ -307,6 +356,12 @@ func resolveUnpinnedRoleMentions(ctx context.Context, deps Deps, read ...mention
 // send (roleForward.skip) and one its holder's resolution held pending (roleForward.err), which
 // is backed off for the holder rather than waited out for a mention. What each wait is for, and
 // what bounds it, is on resolveRoleHolders.
+//
+// A forward waits for one mention more: a live attempt of the comment that names no session yet
+// and whose role this read could name no holder for, while no one key stands for that mention
+// (mentionHolds.waitsForAnUnnamedMention). Such a mention may be pinned to this very holder, and
+// where one key does stand for it the forward carries that key and goes in this pass instead of
+// waiting (unpinnedRoleMentions.keyFor, roleFallbackKey).
 func roleCopyWaitsForAMention(event *batchEvent, dest destination) bool {
 	if _, reached := event.delivered[dest.subject]; reached {
 		return false
@@ -317,20 +372,34 @@ func roleCopyWaitsForAMention(event *batchEvent, dest destination) bool {
 	case forward.skip != "" || forward.err != nil:
 		return false
 	default:
-		return dest.mentionStates.live(forward.holder)
+		return dest.mentionStates.live(forward.holder) ||
+			dest.mentionStates.waitsForAnUnnamedMention(forward.holder)
 	}
 }
 
 // roleFallbackKey is the dedupe key a role route's copy of a new comment carries in place of the
 // event's own (destination.dedupeKey): the key the settled mention of the session that copy
-// reaches went under, "" where the comment has no settled mention of it, which leaves the copy
-// on the event's key. settled is the comment's settled mentions by session, a delivered
-// mention's key among them, and keys its failed ones alone; only a role route carries either
-// (destination.settledKeys, destination.mentionKeys, mentionDeliveries.settledKeys,
+// reaches went under, else the key the comment's one unpinned mention would carry at that
+// session (unpinned, unpinnedRoleMentions.keyFor), and "" where the comment has neither, which
+// leaves the copy on the event's key. settled is the comment's settled mentions by session, a
+// delivered mention's key among them, and keys its failed ones alone; only a role route carries
+// either (destination.settledKeys, destination.mentionKeys, mentionDeliveries.settledKeys,
 // mentionDeliveries.fallbackKeys), and both are empty for every other event. The fallback pass
 // asks the same of the copy it publishes for a held role row, in place of that row's own key
 // and for a live holder alone (decideFallbackCopy): the copy it keeps instead stays under the
 // row's key, the id every writer of the role's kept lane holds it under (bus.KeptMsgID).
+//
+// The unpinned key is what lets the forward go at once to a holder the comment's unanswered
+// @role: mention may yet be pinned to: the sender pins one session on that attempt a round trip
+// later and the outbox cannot tell from here which it will be - the role may read no holder at
+// all, or one the claim has since left - so the copy carries the key that mention's own send
+// carries at this holder, and whichever of the two reaches its host second is dropped there
+// (contracts.RoleForwardDedupeKey carries an agent send key of the holder's own as it is).
+// What it costs that holder, if the mention is pinned to it, is the mention's mode: the comment
+// arrives as this copy rather than as a steer. The holder this read can name is not keyed this
+// way and waits for its mention instead, mode and all (roleCopyWaitsForAMention), and a comment
+// whose live unpinned attempts target two or more roles keys no copy, one key serving one
+// mention (unpinnedRoleMentions.keyFor).
 //
 // It is the rule a session route's copy follows (destinations.addSession), applied to the
 // session the role resolved to rather than to the one a route names: a mention's send can land
@@ -366,12 +435,15 @@ func roleCopyWaitsForAMention(event *batchEvent, dest destination) bool {
 // this copy the same way. A comment with no failed mention at all therefore keeps the event's
 // own key on the copy it stores, while the map on it still keys each mentioned session's own
 // forward.
-func roleFallbackKey(keys, settled map[string]string, forward *roleForward) string {
+func roleFallbackKey(keys, settled map[string]string, unpinned *unpinnedRoleMentions, forward *roleForward) string {
 	if forward == nil {
 		return ""
 	}
 	if forward.holder != "" {
-		return settled[forward.holder]
+		if key := settled[forward.holder]; key != "" {
+			return key
+		}
+		return unpinned.keyFor(forward.holder)
 	}
 	if forward.keptFor == "" || len(keys) == 0 {
 		return ""

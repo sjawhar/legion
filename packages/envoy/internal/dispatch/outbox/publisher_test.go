@@ -119,11 +119,12 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err != nil {
 		return err
 	}
-	// As a batch does before it reads any destination (resolveDestinations).
-	resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
+	// As a batch does before it reads any destination, and the roles it resolved there are the
+	// ones its own role routes read (resolveDestinations, resolveRoleHolders).
+	resolvedRoles := resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
 	list, mentionPending, resolveErr := eventDestinations(ctx, deps, single, found)
 	single.destinationsOf, single.mentionPending = list, mentionPending
-	resolveRoleHolders(ctx, deps, []*batchEvent{single})
+	resolveRoleHolders(ctx, deps, []*batchEvent{single}, resolvedRoles)
 	sender := deps.Publisher.WindowUntil(nil)
 	var failures []error
 	for _, dest := range single.destinationsOf {

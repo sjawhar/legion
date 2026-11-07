@@ -574,8 +574,10 @@ func loadMentionDeliveries(ctx context.Context, db queryer, ids []string, found 
 			state := mentionStateOf(sent, resending, sending, abandoned)
 			if sessionID == nil && (state == mentionSending || state == mentionResending) {
 				// An attempt of this target names no session and its send is still coming:
-				// only the role's holder says whose copies it decides (unpinnedRoleMentions).
-				deliveries.unpinned.record(target, state)
+				// only the role's holder says whose copies it decides, and the mention's own
+				// idempotency key says what any copy of this comment it may yet be pinned to
+				// goes under (unpinnedRoleMentions, unpinnedRoleMentions.keyFor).
+				deliveries.unpinned.record(commentID, target, mode, state)
 			}
 			if sessionID != nil {
 				deliveries.sessions.record(*sessionID, state)

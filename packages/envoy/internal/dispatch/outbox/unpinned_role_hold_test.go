@@ -120,9 +120,16 @@ func TestARoleForwardWaitsForAnUnpinnedRoleMentionOfItsHolder(t *testing.T) {
 
 // The hold is the role's holder and nobody else: a session the comment reaches for a reason of
 // its own, whom no mention of it names, is sent its copy in the pass that holds the holder's
-// back. An unpinned attempt says nothing about that session - the role it names resolves to one
-// session, which is the one session its send can reach - so holding every copy of the comment
-// would delay an author, a follower or a claimant the mention will never deliver anything to.
+// back. An unpinned attempt whose role this read resolves says nothing about that session - the
+// role it names resolves to one session, which is the one session its send can reach - so
+// holding every copy of the comment would delay an author, a follower or a claimant the mention
+// will never deliver anything to.
+//
+// A role this read can name no holder for is the other arm, and holds back only the copies bound
+// for the sessions the owner's own work names - its route and its claimant - every other copy
+// going in the pass that reads it under the event's own key
+// (resolveUnpinnedRoleMentions, destinations.addWorkingSession,
+// TestR17UnrelatedAuthorCopyFirstPass).
 //
 // Here both sessions are on one comment: the issue's claimant holds the role the comment
 // mentions, with the mention's attempt live and pinned to no session yet, and the thread root's

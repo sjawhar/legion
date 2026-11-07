@@ -266,10 +266,11 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 			deps.lanes.release(owner)
 		}
 	}()
-	if err := resolveDestinations(ctx, deps, events); err != nil {
+	resolvedRoles, err := resolveDestinations(ctx, deps, events)
+	if err != nil {
 		return batchResult{}, err
 	}
-	resolveRoleHolders(ctx, deps, events)
+	resolveRoleHolders(ctx, deps, events, resolvedRoles)
 	chains := planChains(events)
 
 	changed := deps.Publisher.ConnectionChanged()
@@ -843,7 +844,11 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 // rule with every other batch, and a settle waiting on the comment owner's lock would otherwise
 // refuse, or be refused by, whatever another batch runs beside it (store.ErrNestedAcquire). The
 // first pass, which answers nothing, writes nothing.
-func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) error {
+//
+// It answers the roles it resolved for those attempts, which the batch's own role routes read
+// rather than resolving again (resolveRoleHolders): a comment routed to the role it mentions
+// names one role on both roads.
+func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) (map[string]roleResolution, error) {
 	var resolvable []*batchEvent
 	want := newWanted()
 	for _, event := range events {
@@ -872,18 +877,18 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 		found, err = loadLookups(ctx, deps.Store.Pool, want)
 		return err
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	// What the attempts that name no session yet hold back, which the destinations below read
 	// of every session they would send a copy to (unpinnedRoleMentions, mentionHolds).
-	resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
+	resolved := resolveUnpinnedRoleMentions(ctx, deps, found.readings()...)
 	for _, event := range resolvable {
 		event.destinationsOf, event.mentionPending, event.resolveErr = eventDestinations(ctx, deps, event, found)
 		event.resolveLost = lostToContextEnd(ctx, event.resolveErr)
 		var unanswered *unansweredRecipients
 		event.incomplete = errors.As(event.resolveErr, &unanswered)
 	}
-	return nil
+	return resolved, nil
 }
 
 // destinations collects an event's destinations, each subject once: a subject an earlier route
@@ -947,6 +952,34 @@ func (d *destinations) addSession(sessionID, label, id string) {
 		label:     label,
 		id:        id,
 		dedupeKey: d.mentions.fallbackKeys[sessionID],
+	})
+}
+
+// addWorkingSession adds the subject of a session the owner's own work names - the session its
+// route names and the session that claims it - as addSession does, except that its copy reads
+// what an attempt of the comment that names no session yet and whose role this read could name
+// no holder for holds back, beside its own attempts (destinations.workingSessionHold,
+// unpinnedRoleMentions.unnamedState).
+//
+// A role token names a role of the owner's own tree, so the session the listener resolves such a
+// role to is a session working that owner, and these two are the outbox's names for one. While
+// such an attempt is live their copies wait, in the event's list and marked, so that none of the
+// owner's later events reaches that session before this comment (destination.waiting,
+// planChains); past its lease the copy is the fallback row's, as a named holder's is. The
+// copies the comment's own thread names - an author, a follower, a primary document's author -
+// go in this pass under the event's own key, no mention of the comment naming them
+// (resolveUnpinnedRoleMentions).
+func (d *destinations) addWorkingSession(sessionID, label, id string) {
+	hold := d.workingSessionHold(sessionID)
+	if hold == copyLeftToTheMention {
+		return
+	}
+	d.addDestination(destination{
+		subject:   contracts.AgentSubject(sessionID),
+		label:     label,
+		id:        id,
+		dedupeKey: d.mentions.fallbackKeys[sessionID],
+		waiting:   hold == copyWaitsForAnUnnamedMention,
 	})
 }
 
@@ -1046,7 +1079,7 @@ func addRoute(d *destinations, route *string) error {
 			role: parsed.ID, mentionKeys: d.mentions.fallbackKeys, settledKeys: d.mentions.settledKeys,
 			mentionStates: d.mentions.holds(), liveMention: d.mentions.anyLive()})
 	case "session":
-		d.addSession(parsed.ID, "publish route", *route)
+		d.addWorkingSession(parsed.ID, "publish route", *route)
 	default:
 		return fmt.Errorf("unsupported route %q", *route)
 	}
@@ -1059,9 +1092,9 @@ func addRoute(d *destinations, route *string) error {
 // follower of the ask, or an author the thread or document names, and the session working the
 // issue misses what a person told it there. Only a person's event qualifies (Actor.Kind "user"):
 // an agent's events reach nobody new through here, even the ones that notify. A new comment the
-// claimant's own mention of it delivers is left to that mention (destinations.addSession, the
-// mention rule); a claimant whose mention failed gets this copy instead, and the comment's edit,
-// resolution and reopening are never left to it. The claim is the one the batch
+// claimant's own mention of it delivers is left to that mention (destinations.addWorkingSession,
+// the mention rule); a claimant whose mention failed gets this copy instead, and the comment's
+// edit, resolution and reopening are never left to it. The claim is the one the batch
 // read when the event is published (readBatch, routing), not when it was written, so a retry after
 // the claim moved reaches the new claimant. A claimant that is also the route, a follower or an
 // author gets one copy: destinations adds a subject once per event. The claimant's subject is an
@@ -1079,7 +1112,7 @@ func addClaimantRoute(event model.Event, claimant string, d *destinations) {
 	default:
 		return
 	}
-	d.addSessions([]string{claimant}, "publish claimant route to")
+	d.addWorkingSession(claimant, "publish claimant route to", claimant)
 }
 
 // addPreviousClaimant tells a session that lost an issue's claim, on its own topic: a takeover
