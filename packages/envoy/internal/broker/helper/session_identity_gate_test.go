@@ -87,7 +87,7 @@ func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key := recordNamed(t, state, pid, ticks, testSessionID, "enr-before")
+			recordNamed(t, state, pid, ticks, testSessionID, "enr-before")
 			recs, err := LoadRecords(state)
 			if err != nil {
 				t.Fatal(err)
@@ -101,8 +101,9 @@ func TestOnlyARecordOfThisBootRePinsItsProcess(t *testing.T) {
 			recs[0].BootID = tc.bootID(recs[0].BootID)
 			writeRecords(t, state, recs)
 
+			// This test asserts only whether the process was re-pinned or parked, so the
+			// fake broker needs no enrollment seeded for it.
 			r := startRig(t, state) // startRig runs Recover
-			seedEnrollment(r.fake, "enr-before", thumbprintOf(t, key), SessionRuntimeID(testSessionID))
 			sess := r.srv.Registry.Get(pid)
 			if tc.rePinned {
 				if sess == nil {

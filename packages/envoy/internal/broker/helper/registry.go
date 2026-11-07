@@ -60,8 +60,10 @@ type Session struct {
 	// from a reclaim or a re-pin). An inherited id is the right one to sign with and the right
 	// one to record — the broker holds it for this key under this runtime id — but nothing has
 	// shown it is still live: it may have been revoked while the session was away. So the
-	// session reads "enrolling" and `register --wait` waits for the enroll that confirms it,
-	// rather than answering "enrolled" with an id the broker may refuse.
+	// session reads "enrolling" and `register --wait` waits for the renew that confirms it
+	// (confirmInherited) — a renew is signed by the session's own key alone, so it is waited
+	// for whether or not the helper holds a launcher credential — rather than answering
+	// "enrolled" with an id the broker may refuse.
 	confirmed bool
 	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
 	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
@@ -178,7 +180,8 @@ func (s *Session) rename(sessionID, runtimeID string, key *ecdsa.PrivateKey, enr
 	if enrollmentID != "" {
 		// Inherited, not confirmed: the broker holds it for this key under this runtime id,
 		// so it is the right id to sign with and to record, but nothing has shown it is still
-		// live. The session's own enroll, woken now, settles that (Session.inherit).
+		// live. confirmInherited's renew, woken now, settles that; only the broker refusing
+		// that renew falls through to an enroll (Session.inherit).
 		s.inheritLocked(enrollmentID)
 	}
 	return true
@@ -211,8 +214,8 @@ type enrollmentState struct {
 // snapshot reads the session's enrollment under one lock, so a reply built from it cannot pair
 // one moment's id with another's state or error, however a lapse or an enrollment interleaves.
 // The state is "enrolled" only for an id the broker itself answered with (confirmed); an id
-// inherited from a record reads "enrolling" until an enroll confirms it, since nothing has
-// shown the broker still honours it.
+// inherited from a record reads "enrolling" until confirmInherited's renew confirms it, since
+// nothing has shown the broker still honours it.
 func (s *Session) snapshot() enrollmentState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -225,9 +228,10 @@ func (s *Session) snapshot() enrollmentState {
 
 // inherit gives the session an enrollment a record named for the key it is signing with: the
 // right id to sign with and to record, but not one this helper has seen the broker honour, so
-// it does not count as enrolled and does not close the ready channel. The session's own enroll,
-// a second later, confirms it (the broker's idempotent enroll answers the same key under the
-// same runtime id with the row it already has) or replaces it.
+// it does not count as enrolled and does not close the ready channel. The session's own renew
+// confirms it: confirmInherited authenticates with the session's retained key, so it needs no
+// launcher credential. Only the broker refusing that renew falls through to an enroll, which
+// replaces it.
 func (s *Session) inherit(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
