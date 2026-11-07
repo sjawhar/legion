@@ -582,14 +582,18 @@ func TestPrepareAirlockFallsBackToTheTemporaryDirectory(t *testing.T) {
 // that calls it is one internal/testtmp's placement check refuses, since that is how a test
 // comes to place a directory wherever it runs.
 func TestTheSharedTemporaryRootNamesThisUser(t *testing.T) {
+	joined := func(environ []string) string {
+		base, elements := airlockRootParts(environ)
+		return filepath.Join(base, elements[0], elements[1])
+	}
 	system := t.TempDir()
 	t.Setenv("TMPDIR", system)
-	root := airlockRoot(nil)
+	root := joined(nil)
 	want := filepath.Join(system, fmt.Sprintf("agent-secrets-%d", os.Getuid()), "airlock")
 	if root != want {
 		t.Errorf("the root of a session with neither variable set is %q, want %q", root, want)
 	}
-	named := airlockRoot([]string{"XDG_RUNTIME_DIR=/run/user/1000"})
+	named := joined([]string{"XDG_RUNTIME_DIR=/run/user/1000"})
 	if want := filepath.Join("/run/user/1000", "agent-secrets", "airlock"); named != want {
 		t.Errorf("the root under the session's own runtime directory is %q, want %q, which names no uid", named, want)
 	}
@@ -644,6 +648,89 @@ func TestPrepareAirlockRefusesARootThatIsASymbolicLink(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), root) {
 		t.Errorf("the refusal is %q, want it to name %q", err, root)
+	}
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatalf("read where the link points: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the refused run left %d entries where the link points; want none", len(entries))
+	}
+}
+
+// TestPrepareAirlockRefusesAParentOthersCanWriteIn: the root is two directories this CLI makes
+// — "agent-secrets" under a base the session named, "agent-secrets-<uid>" under the shared
+// temporary one, and "airlock" under either — and the check reaches both. A parent another user
+// can write in is one they can rename the checked directory out of between the check and the
+// write, and put their own wgetrc and trust bundle where the command will read them, so the run
+// is refused with that parent's path and nothing is written under it.
+//
+// A parent another user owns is the same hole and cannot be made here, since this test runs as
+// one unprivileged user; the mode is the shape of it this pod can stand up.
+func TestPrepareAirlockRefusesAParentOthersCanWriteIn(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		shared bool
+	}{
+		{name: "under the session's own runtime directory"},
+		{name: "under the shared temporary directory", shared: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			base := t.TempDir()
+			var environ []string
+			parent := filepath.Join(base, "agent-secrets")
+			if row.shared {
+				// The system temporary directory is this process's own TMPDIR, which is
+				// where os.TempDir reads it; the CLI is handed an environment naming
+				// neither variable, which is the session that falls back to it.
+				t.Setenv("TMPDIR", base)
+				parent = filepath.Join(base, fmt.Sprintf("agent-secrets-%d", os.Getuid()))
+			} else {
+				environ = []string{"XDG_RUNTIME_DIR=" + base}
+			}
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatalf("make the root's parent: %v", err)
+			}
+			// Chmod rather than a mode asked of Mkdir, which takes the umask off what it is
+			// given.
+			if err := os.Chmod(parent, 0o777); err != nil {
+				t.Fatalf("open the root's parent to everybody: %v", err)
+			}
+			_, err := prepareAirlock(environ, testRelease("AIRLOCK_ME", nil, nil), "grant-one", nil)
+			if err == nil {
+				t.Fatalf("prepareAirlock wrote a grant's files under a parent everybody can write in")
+			}
+			if !strings.Contains(err.Error(), parent) {
+				t.Errorf("the refusal is %q, want it to name %q", err, parent)
+			}
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatalf("read the root's parent: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("the refused run left %d entries under the parent; want none", len(entries))
+			}
+		})
+	}
+}
+
+// TestPrepareAirlockRefusesAParentThatIsASymbolicLink: a link in the parent's place sends the
+// root, and everything written under it, wherever whoever made the link pointed it. Making the
+// root with one Mkdir per element rather than following the link is what sees it, so the run is
+// refused with the parent's path and the directory the link points at is left empty.
+func TestPrepareAirlockRefusesAParentThatIsASymbolicLink(t *testing.T) {
+	base := t.TempDir()
+	elsewhere := t.TempDir()
+	parent := filepath.Join(base, "agent-secrets")
+	if err := os.Symlink(elsewhere, parent); err != nil {
+		t.Fatalf("link the root's parent somewhere else: %v", err)
+	}
+	_, err := prepareAirlock([]string{"XDG_RUNTIME_DIR=" + base}, testRelease("AIRLOCK_ME", nil, nil), "grant-one", nil)
+	if err == nil {
+		t.Fatalf("prepareAirlock wrote a grant's files through a parent that is a symbolic link")
+	}
+	if !strings.Contains(err.Error(), parent) {
+		t.Errorf("the refusal is %q, want it to name %q", err, parent)
 	}
 	entries, err := os.ReadDir(elsewhere)
 	if err != nil {

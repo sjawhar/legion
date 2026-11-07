@@ -585,10 +585,8 @@ check_k2() {
 		"the answer carries the proxy's certificate in its new field" "airlock.ca_certificate is a $ca_len byte PEM certificate"
 
 	local old_out old_status
-	set +e
 	old_out="$("$OLD_CLI" AIRLOCK_DEMO_TOKEN -- sh -c 'echo THE-COMMAND-RAN' 2>&1)"
 	old_status=$?
-	set -e
 	observe "the old CLI for AIRLOCK_DEMO_TOKEN exited $old_status and said: $(printf '%s' "$old_out" | tail -n 2 | tr '\n' ' ')"
 	judge "$([ "$old_status" -ne 0 ] && ! contains "THE-COMMAND-RAN" "$old_out" && echo 0 || echo 1)" \
 		"the old CLI exits without running the command" "exit $old_status, and its output does not hold the command's own line"
@@ -607,10 +605,8 @@ check_k2() {
 	plain_airlock="$(printf '%s' "$RELEASE_JSON" | jq -r '.airlock // "null"')"
 	released="$(printf '%s' "$RELEASE_JSON" | jq -r '.values.AIRLOCK_PLAIN_TOKEN // ""')"
 	control "for a secret the rules do not name the answer's values keys are $plain_values, its airlock field is ${plain_airlock:0:4}, and values.AIRLOCK_PLAIN_TOKEN is $(shape "$released") against the stored $(shape "$plain_value") (compared by SHA-256 and length)"
-	set +e
 	old_out="$("$OLD_CLI" AIRLOCK_PLAIN_TOKEN -- sh -c 'echo THE-COMMAND-RAN' 2>&1)"
 	old_status=$?
-	set -e
 	control "the old CLI for that name exited $old_status and its output holds the command's own line: $(contains "THE-COMMAND-RAN" "$old_out" && echo yes || echo no)"
 	judge "$([ "$released" = "$plain_value" ] && contains "THE-COMMAND-RAN" "$old_out" && echo 0 || echo 1)" \
 		"negative control: the answer carries the value under the name and the old CLI runs its command" \
@@ -1574,10 +1570,8 @@ check_k7() {
 	# The exit status and the CLI's line: a command that exits 3 under the CLI leaves this run
 	# with 3, and the CLI says on its stderr which source each name came from.
 	local three_status three_err
-	set +e
 	AGENT_SECRETS_URL="$K7_API_URL" agent-secrets GITHUB_ADMIN_PAT --ttl 5m -- sh -c 'exit 3' >/dev/null 2>"$WORK_DIR/k7/three.err"
 	three_status=$?
-	set -e
 	three_err="$(tr '\n' ' ' <"$WORK_DIR/k7/three.err")"
 	observe "a command that exits 3 under the CLI left exit $three_status, and the CLI's stderr said: $three_err"
 	judge "$([ "$three_status" = 3 ] && contains "agent-secrets: GITHUB_ADMIN_PAT from " "$three_err" && echo 0 || echo 1)" \
@@ -1589,10 +1583,8 @@ check_k7() {
 	fetch_old_cli
 	local before_control after_control old_out old_status
 	before_control="$(grep -c 'a call to a bound host' "$WORK_DIR/k7/broker.log" || true)"
-	set +e
 	old_out="$(AGENT_SECRETS_URL="$K7_API_URL" "$OLD_CLI" GITHUB_ADMIN_PAT -- sh -c 'curl -sS -o /dev/null -w %{http_code} https://api.github.com/user' 2>&1)"
 	old_status=$?
-	set -e
 	after_control="$(grep -c 'a call to a bound host' "$WORK_DIR/k7/broker.log" || true)"
 	control "the last released agent-secrets ($OLD_CLI_TAG, the CLI without this change) exited $old_status saying '$(printf '%s' "$old_out" | tail -n 1)'"
 	control "the proxy logged $((after_control - before_control)) further calls to a bound host while it ran"
@@ -1619,10 +1611,8 @@ k8a_start_broker() { # <rules file> <label>
 		BROKER_LISTEN_ADDR="127.0.0.1:0" \
 		BROKER_AIRLOCK_RULES_FILE="$1" \
 		BROKER_AIRLOCK_LISTEN_ADDR="127.0.0.1:0"
-	set +e
 	"${BROKER_ENV[@]}" timeout 25 "$BROKER_BIN" >"$log" 2>&1
 	local status=$?
-	set -e
 	K8A_WHY="$(grep -m1 'fatal' "$log" | tr '\n' ' ')"
 	# The refusal has to be about this file: a broker that died of a setting this function did
 	# not give it would otherwise read as a refusal of the rules.
@@ -1651,10 +1641,8 @@ check_k8a() {
 	local label status out
 	declare -A K8A_STATUS K8A_OUT
 	for label in judge-1800 no-hosts new-host new-header removed-entry malformed; do
-		set +e
 		out="$("$BROKER_BIN" airlock-check "$d/$label.json" --against "$d/valid.json" 2>&1)"
 		status=$?
-		set -e
 		K8A_STATUS[$label]=$status
 		K8A_OUT[$label]="$out"
 		observe "$label: exit ${K8A_STATUS[$label]}; $(printf '%s' "$out" | head -n 3 | tr '\n' ' / ')"
@@ -1689,10 +1677,8 @@ check_k8a() {
 		"the new-host, new-header and removed-entry copies exit 0 and list what they add or remove" \
 		"new-host said '$(printf '%s' "${K8A_OUT[new-host]}" | tail -n 1)', new-header '$(printf '%s' "${K8A_OUT[new-header]}" | tail -n 1)', removed-entry '$(printf '%s' "${K8A_OUT[removed-entry]}" | tail -n 1)'"
 
-	set +e
 	out="$("$BROKER_BIN" airlock-check "$d/valid.json" --against "$d/valid.json" 2>&1)"
 	status=$?
-	set -e
 	control "the valid file against itself exited $status saying: $(printf '%s' "$out" | tail -n 1)"
 	judge "$([ "$status" = 0 ] && contains "nothing changed" "$out" && echo 0 || echo 1)" \
 		"negative control: on the valid file the command exits 0 and lists no change" \
@@ -1935,8 +1921,19 @@ check_k9() {
 ###############################################################################################
 
 check_k15() {
+	# The theorems are the ones Axioms.lean names: it holds one `#print axioms` line for each,
+	# and this check reads that list rather than writing a second copy of it, so a theorem
+	# added there is one k15 prints, counts and expects with nothing edited here.
+	local theorems count
+	theorems="$(sed -n 's/^#print axioms  *//p' "$LEAN_DIR/Axioms.lean")"
+	count="$(printf '%s\n' "$theorems" | grep -c .)"
+	if [ "$count" = 0 ]; then
+		echo "airlock-check: $LEAN_DIR/Axioms.lean names no theorem, so k15 has nothing to print or count" >&2
+		exit 1
+	fi
+
 	expect "the Lean model builds on the head"
-	expect "its five theorems are there and are printed with their statements"
+	expect "its $count theorems are there and are printed with their statements"
 	expect "they depend on no sorry and on no axiom outside propext, Classical.choice and Quot.sound"
 	expect "the comparison fuzz test passes for ten minutes"
 	expect "the negative control, the six mutants of scripts/airlock-mutants.sh, is caught: each Go mutant fails the comparison and each model mutant fails lake build or that same comparison"
@@ -1948,25 +1945,20 @@ check_k15() {
 
 	local build_log="$WORK_DIR/lake-build.log"
 	echo "airlock-check: building the Lean model..." >&2
-	set +e
 	(cd "$LEAN_DIR" && lake build) >"$build_log" 2>&1
 	local build_status=$?
-	set -e
 	local model="$LEAN_DIR/.lake/build/bin/airlock-model"
 	observe "lake build exited $build_status: $(tail -n 1 "$build_log")"
 	judge "$([ "$build_status" = 0 ] && [ -x "$model" ] && echo 0 || echo 1)" \
 		"the model builds" "lake build exited $build_status and wrote $model"
 
 	# The statements, printed from a file of this run's own so nothing is added to the tree.
-	cat >"$WORK_DIR/Statements.lean" <<'EOF'
-import Airlock
-#check @Airlock.T1
-#check @Airlock.T1_structure
-#check @Airlock.T2
-#check @Airlock.T3
-#check @Airlock.rewrite_some_iff_allow
-EOF
-	set +e
+	# Its list is the one read from Axioms.lean above, each `#print axioms X` written out as
+	# `#check @X`.
+	{
+		echo "import Airlock"
+		printf '%s\n' "$theorems" | sed 's/^/#check @/'
+	} >"$WORK_DIR/Statements.lean"
 	(cd "$LEAN_DIR" && lake env lean "$WORK_DIR/Statements.lean") >"$WORK_DIR/statements.txt" 2>&1
 	local statements_status=$?
 	# scripts/airlock-lean-axioms.sh is the one copy of the axiom check, and ci.yaml's
@@ -1975,35 +1967,32 @@ EOF
 	local bad
 	bad="$(bash "$SCRIPT_DIR/airlock-lean-axioms.sh" "$LEAN_DIR" --axioms-file "$WORK_DIR/axioms.txt" 2>&1 >/dev/null)"
 	local axioms_status=$?
-	set -e
 	echo
 	echo "the model's theorem statements:"
 	sed 's/^/  /' "$WORK_DIR/statements.txt"
 	echo
 	echo "the theorems' axioms:"
 	sed 's/^/  /' "$WORK_DIR/axioms.txt"
-	observe "lake env lean printed the five theorem statements (exit $statements_status) and scripts/airlock-lean-axioms.sh read their axioms (exit $axioms_status); both are above this block"
+	observe "lake env lean printed the $count theorem statements (exit $statements_status) and scripts/airlock-lean-axioms.sh read their axioms (exit $axioms_status); both are above this block"
 	# `#check @X` opens its line with "@Airlock.X" for a theorem with implicit arguments and
 	# with "Airlock.X" for one without, and a statement runs over several lines, so the count
 	# is of the lines that open one.
 	local printed
 	printed="$(grep -cE '^@?Airlock\.' "$WORK_DIR/statements.txt")"
-	judge "$([ "$statements_status" = 0 ] && [ "$printed" = 5 ] && echo 0 || echo 1)" \
-		"its five theorems are there and are printed with their statements" \
-		"$printed of the five named theorems type-checked and printed"
+	judge "$([ "$statements_status" = 0 ] && [ "$printed" = "$count" ] && echo 0 || echo 1)" \
+		"its $count theorems are there and are printed with their statements" \
+		"$printed of the $count theorems Axioms.lean names type-checked and printed"
 
 	observe "the axioms each theorem rests on: $(tr '\n' ' ' <"$WORK_DIR/axioms.txt")"
 	judge "$axioms_status" \
 		"the theorems depend on no sorry and on no axiom outside the three Lean admits" \
-		"${bad:-every one of the five rests on propext, Classical.choice and Quot.sound alone, and none on sorryAx}"
+		"${bad:-every one of the $count rests on propext, Classical.choice and Quot.sound alone, and none on sorryAx}"
 
 	echo "airlock-check: fuzzing the Go airlock against the model for ten minutes..." >&2
-	set +e
 	(cd "$ENVOY_DIR" && AIRLOCK_MODEL="$model" go test -run FuzzAirlock ./internal/broker/airlock/) >"$WORK_DIR/seed-corpus.log" 2>&1
 	local seed_status=$?
 	(cd "$ENVOY_DIR" && AIRLOCK_MODEL="$model" go test -fuzz FuzzAirlock -fuzztime=600s -run FuzzAirlock ./internal/broker/airlock/) >"$WORK_DIR/fuzz.log" 2>&1
 	local fuzz_status=$?
-	set -e
 	observe "the seed corpus comparison exited $seed_status: $(tail -n 2 "$WORK_DIR/seed-corpus.log" | tr '\n' ' ')"
 	observe "ten minutes of fuzzing exited $fuzz_status: $(grep -E '^(ok|FAIL|--- FAIL|fuzz:)' "$WORK_DIR/fuzz.log" | tail -n 3 | tr '\n' ' ')"
 	judge "$([ "$seed_status" = 0 ] && [ "$fuzz_status" = 0 ] && echo 0 || echo 1)" \
@@ -2011,10 +2000,8 @@ EOF
 		"the seed corpus exited $seed_status and -fuzztime=600s exited $fuzz_status"
 
 	echo "airlock-check: running the mutants..." >&2
-	set +e
 	(cd "$ENVOY_DIR" && AIRLOCK_MODEL="$model" bash "$SCRIPT_DIR/airlock-mutants.sh") >"$WORK_DIR/mutants.log" 2>&1
 	local mutants_status=$?
-	set -e
 	echo
 	echo "the mutants:"
 	grep -E '^(PASS|FAIL):' "$WORK_DIR/mutants.log" | sed 's/^/  /'
@@ -2041,6 +2028,11 @@ EOF
 # exited 1 and a grep that found nothing are all ordinary answers a step reads. Everything the
 # run needs before this point - its arguments, its work directory and its stack - is still
 # under set -e, and await ends the run itself when a stack does not come up.
+#
+# No check below turns it back on. A `set -e` in one of them re-arms it for every step of every
+# check after it, and the step it would then end the run at is the one a failing run most needs
+# reported: k15's statement count against a model that did not build, say, which would leave the
+# run with no result block at all.
 set +e
 
 case "$CHECK_ID" in

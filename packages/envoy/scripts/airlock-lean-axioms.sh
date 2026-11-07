@@ -14,18 +14,14 @@
 # It runs `lake env lean Axioms.lean` in the Lean project directory it is given and writes what
 # that printed to its standard output, so that a reader of either log sees the axioms. What is
 # wrong goes to standard error and exits 1: an axiom outside the three, a sorryAx, a count of
-# printed theorems other than the one below, or a `lake env lean` that failed. --axioms-file
-# keeps a copy of the axiom text for a caller that reads it back, which is what k15 does for its
-# result block.
+# printed theorems other than the number of `#print axioms` lines in Axioms.lean, or a
+# `lake env lean` that failed. --axioms-file keeps a copy of the axiom text for a caller that
+# reads it back, which is what k15 does for its result block.
 #
 # Usage: airlock-lean-axioms.sh <lean project directory> [--axioms-file <path>]
 #        --help prints this usage. A usage error exits 2. It needs lake from the Lean toolchain
 #        this environment names.
 set -uo pipefail
-
-# How many theorems Axioms.lean prints the axioms of, and the one place that number is written:
-# the file holds one `#print axioms` line for each, so a theorem added there is added here too.
-EXPECTED_THEOREMS=5
 
 usage() {
 	cat <<'EOF'
@@ -33,7 +29,7 @@ usage: airlock-lean-axioms.sh <lean project directory> [--axioms-file <path>]
 
 Runs `lake env lean Axioms.lean` in that directory, prints what it printed, and exits non-zero
 naming any axiom outside propext, Classical.choice and Quot.sound, any sorryAx, and a count of
-printed theorems other than the one this script holds.
+printed theorems other than the number of `#print axioms` lines in Axioms.lean.
 
   <lean project directory>  where lakefile.toml and Axioms.lean are
   --axioms-file <path>      keep a copy of the axiom text here as well
@@ -85,6 +81,16 @@ if [ -z "$LEAN_DIR" ]; then
 fi
 if [ ! -f "$LEAN_DIR/Axioms.lean" ]; then
 	echo "airlock-lean-axioms: $LEAN_DIR holds no Axioms.lean" >&2
+	exit 2
+fi
+
+# How many theorems to expect: one per `#print axioms` line of Axioms.lean, counted rather than
+# written down, so the theorems are named in one place and a theorem added there is one this
+# check holds the model to. A file naming none would pass every check below without a theorem
+# ever being read, so it is refused instead.
+EXPECTED_THEOREMS="$(grep -c '^#print axioms ' "$LEAN_DIR/Axioms.lean")"
+if [ "$EXPECTED_THEOREMS" = 0 ]; then
+	echo "airlock-lean-axioms: $LEAN_DIR/Axioms.lean names no theorem to print the axioms of" >&2
 	exit 2
 fi
 

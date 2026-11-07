@@ -256,8 +256,10 @@ time.
 
 Holds the airlock model's theorems to the axioms Lean's own kernel admits, and is the
 one copy of that check: `ci.yaml`'s `airlock-lean` job runs it, and so does `k15` of
-`airlock-check.sh`, so what the model must rest on — and how many theorems
-`Axioms.lean` prints — is written once, in this script.
+`airlock-check.sh`, so what the model must rest on is written once, in this script.
+How many theorems there are is written nowhere: this script and `k15` both count the
+`#print axioms` lines of `Axioms.lean`, so a theorem added there is one both hold the
+model to.
 
 ```bash
 packages/envoy/scripts/airlock-lean-axioms.sh packages/envoy/internal/broker/airlock/lean
@@ -266,10 +268,10 @@ packages/envoy/scripts/airlock-lean-axioms.sh packages/envoy/internal/broker/air
 It runs `lake env lean Axioms.lean` in that directory and writes what that printed to
 its stdout, so a reader of either log sees the axioms. What is wrong goes to stderr
 and exits 1: an axiom outside `propext`, `Classical.choice` and `Quot.sound`, a
-`sorryAx`, a count of printed theorems other than the one the script holds, or a
-`lake env lean` that failed. `--axioms-file PATH` keeps a copy of the axiom text for a
-caller that reads it back, which is what `k15` does for its result block; `--help`
-prints the usage, and a usage error exits 2.
+`sorryAx`, a count of printed theorems other than the number of `#print axioms` lines
+in `Axioms.lean`, or a `lake env lean` that failed. `--axioms-file PATH` keeps a copy
+of the axiom text for a caller that reads it back, which is what `k15` does for its
+result block; `--help` prints the usage, and a usage error exits 2.
 
 ## airlock-clients.sh
 

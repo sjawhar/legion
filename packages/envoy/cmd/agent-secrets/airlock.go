@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -97,26 +98,63 @@ func envValue(environ []string, key string) string {
 	return value
 }
 
-// airlockRoot is where every grant's directory lives: under XDG_RUNTIME_DIR when the session has
-// one (a tmpfs the session owns, which goes when the session does), else under TMPDIR, else
-// under the system temporary directory. Never the command's working directory: a check of this
-// change greps every file there for the secret's value, and these files must not be among them.
+// airlockRootParts is where every grant's directory lives, in the two pieces makeAirlockRoot
+// works on: the base directory, and the elements under it this CLI makes. The base is
+// XDG_RUNTIME_DIR when the session has one (a tmpfs the session owns, which goes when the
+// session does), else TMPDIR, else the system temporary directory. Never the command's working
+// directory: a check of this change greps every file there for the secret's value, and these
+// files must not be among them.
 //
 // The first two are named by the session's own environment and are the session's own, where the
 // third is shared with every other user of the machine: a directory called "agent-secrets" there
 // is one whoever gets there first holds, and what goes in it is the trust bundle this command
 // verifies every direct call against. So the fallback carries this user's id in its first
-// element, which gives each user a directory nobody else's run would make, and prepareAirlock
-// checks that the one it finds is this user's.
-func airlockRoot(environ []string) string {
+// element, which gives each user a directory nobody else's run would make, and makeAirlockRoot
+// checks that each element it finds is this user's.
+//
+// The base itself is neither this CLI's to make nor its to judge. XDG_RUNTIME_DIR and TMPDIR
+// are the session's own and were there before this run, the system temporary directory is the
+// machine's and is world-writable on purpose, and a CLI that refused any of the three would
+// refuse the ordinary machine. What it answers for is what it makes itself, which is every
+// element below the base.
+func airlockRootParts(environ []string) (string, [2]string) {
 	base := envValue(environ, "XDG_RUNTIME_DIR")
 	if base == "" {
 		base = envValue(environ, "TMPDIR")
 	}
 	if base != "" {
-		return filepath.Join(base, "agent-secrets", "airlock")
+		return base, [2]string{"agent-secrets", "airlock"}
 	}
-	return filepath.Join(os.TempDir(), "agent-secrets-"+strconv.Itoa(os.Getuid()), "airlock")
+	return os.TempDir(), [2]string{"agent-secrets-" + strconv.Itoa(os.Getuid()), "airlock"}
+}
+
+// makeAirlockRoot makes each element of the root below the base, outermost first, checks each
+// one as it is made (checkAirlockRoot) and answers the root.
+//
+// os.Mkdir per element rather than one os.MkdirAll over the lot, because MkdirAll follows
+// whatever stands in the way — a directory another user made, or their symbolic link to one —
+// and following it is the hole. A run that checked the last element alone would still write
+// under a parent somebody else holds, and that user can rename the checked element away
+// between the check and the write and leave their own wgetrc and trust bundle in its place,
+// which is the pair this command hands its child. An element already there is checked and kept,
+// since that is every second run of this user.
+//
+// Both elements are checked under a session-named base as well, not only under the shared
+// temporary directory: XDG_RUNTIME_DIR is a session's own, but TMPDIR is whatever the session
+// was started with, and one two users share puts that same rename in the same place.
+func makeAirlockRoot(environ []string) (string, error) {
+	base, elements := airlockRootParts(environ)
+	root := base
+	for _, element := range elements {
+		root = filepath.Join(root, element)
+		if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("make the airlock directory: %w", err)
+		}
+		if err := checkAirlockRoot(root); err != nil {
+			return "", err
+		}
+	}
+	return root, nil
 }
 
 // airlockBuildPrefix opens the name of a directory a run is still building. A grant's files are
@@ -144,8 +182,8 @@ const airlockBuildLifetime = time.Hour
 // outright or hand its command a bundle variable naming a file that is no longer there. Under
 // the rename the final name appears complete or not at all, however long a run takes.
 //
-// The root every grant's directory goes under is checked before any of this (checkAirlockRoot):
-// a root another user holds is one the command's trust bundle may not be written in or read
+// Every element of the root this CLI makes is checked before any of this (makeAirlockRoot): a
+// directory another user holds is one the command's trust bundle may not be written in or read
 // from, and the run answers an error rather than writing one.
 func prepareAirlock(environ []string, release *AirlockRelease, grantID string, expiresAt *time.Time) (airlockFiles, error) {
 	// The grant id becomes one path element, so it must be one: the broker's ids are opaque, and
@@ -153,14 +191,11 @@ func prepareAirlock(environ []string, release *AirlockRelease, grantID string, e
 	if grantID == "" || grantID == "." || grantID == ".." || grantID != filepath.Base(grantID) {
 		return airlockFiles{}, fmt.Errorf("the grant id %q is not a single path element, so its airlock files have nowhere to go", grantID)
 	}
-	root := airlockRoot(environ)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return airlockFiles{}, fmt.Errorf("make the airlock directory: %w", err)
-	}
 	// Before the tidy, which removes directories under the root, and before anything is
 	// written there: a root this user does not hold is one this run neither sweeps nor writes
 	// in.
-	if err := checkAirlockRoot(root); err != nil {
+	root, err := makeAirlockRoot(environ)
+	if err != nil {
 		return airlockFiles{}, err
 	}
 	tidyAirlockDirs(root, grantID, time.Now())
@@ -217,6 +252,9 @@ func prepareAirlock(environ []string, release *AirlockRelease, grantID string, e
 // chose and Stat would answer for what it points at rather than for what is checked here. The
 // owner and the mode are the two other ways another user comes to hold it: one who made the
 // directory before this run did, and one let in by a mode wider than this user alone.
+//
+// It is run on each element of the root rather than on the last alone, since a parent another
+// user holds is a parent they can rename the element below it out of.
 func checkAirlockRoot(root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {

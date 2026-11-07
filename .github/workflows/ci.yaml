@@ -4120,8 +4120,8 @@ jobs:
           changes: ${{ toJSON(needs.changes) }}
           job-status: ${{ job.status }}
 
-  # The Lean model of the airlock and the Go code it covers: the model is built, the axioms its
-  # five theorems rest on are printed and held to the three Lean's own kernel admits, and
+  # The Lean model of the airlock and the Go code it covers: the model is built, the axioms the
+  # theorems Axioms.lean names rest on are printed and held to the three Lean's own kernel admits, and
   # FuzzAirlock drives Validate, Decide and Rewrite against the model's program, so a change made
   # on one side and not on the other fails here rather than in production.
   #
