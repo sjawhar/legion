@@ -1198,10 +1198,18 @@ jobs:
           # workflow's job is named `<the caller's job> / <this job>`, with a matrix leg in
           # brackets after it. This job's own conclusion is still null while this step runs, so it
           # selects itself out.
+          #
+          # `skipped` is left out too, and not because a skip is uninteresting: on the
+          # pull-request lane the alone and multiprocess jobs are skipped by their own
+          # `if: inputs.lane == 'full'`, so naming them here would report the lane working as
+          # designed as a leg that did not succeed. A skip that is not by design is caught where
+          # it matters instead: reading one fails this job when a leg the lane owed a blob report
+          # did not upload one, and the verdict step fails on an upstream result that is neither
+          # success nor skipped.
           gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?filter=all&per_page=100" \
             --jq '.jobs[]
               | select(.name | test("(^| )(shard|alone|multiprocess|merge)( \\(|$)"))
-              | select(.conclusion != null and .conclusion != "success")
+              | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
               | [.id, .conclusion, .name] | @tsv' > "$unhappy"
           {
             echo "### The legs that did not succeed"
