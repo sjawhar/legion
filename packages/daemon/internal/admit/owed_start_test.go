@@ -182,8 +182,15 @@ func TestAReadmittedTreesMidPhaseChildrenEachWaitForTheirOwnSlot(t *testing.T) {
 	// outboxInOrder). Running those rows, as their lane does, leaves the slot as the one thing
 	// still holding a task back.
 	runBranchRows(t, pool, testing_, retro)
-	for child, role := range map[string]claim.Role{testing_: claim.RoleTester, retro: claim.RoleImplementer} {
-		if stands := issue(t, pool, child); stands.Phase != workflow.ResumePhase(stands) || stands.Generation != 1 {
+	for child, stood := range map[string]struct {
+		role  claim.Role
+		phase phase.Phase
+	}{testing_: {claim.RoleTester, phase.Testing}, retro: {claim.RoleImplementer, phase.Retro}} {
+		role := stood.role
+		// The re-admission rewrites no phase: the phase a member's record carries is the phase it
+		// stands in, since the merge is what ends merging and no phase of this workflow waits for
+		// one.
+		if stands := issue(t, pool, child); stands.Phase != stood.phase || stands.Generation != 1 {
 			t.Fatalf("%s stands at %s on generation %d, want its own phase on its own generation", child, stands.Phase, stands.Generation)
 		}
 		if got := assignmentOf(t, pool, child, role); got != "" {

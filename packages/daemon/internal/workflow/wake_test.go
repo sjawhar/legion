@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -420,4 +421,84 @@ func TestWakeTaskNamesItsWake(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A settlement that wakes a released worker also tells the roles what it says (tellChecks), and
+// one of those roles is the very worker it woke. Its message's listener report then arrives while
+// the claim is still released, and the mark's key, the wake's own identity, does not hold it: a
+// second kind is a second wake. Two things keep R6's one task per wake — the woken role is told no
+// message of the settlement that woke it, and a release takes one resume whatever else reaches it
+// — so the record names the cause that brought the pod back, `checks`, rather than describing the
+// daemon's own settlement to the worker as a message somebody published to its topic. The
+// architect is told as before, since no settlement wakes it.
+func TestASettlementTellsTheRoleItWokeNoMessageOfItself(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase phase.Phase
+		woken claim.Role
+		// told is every role the settlement must still reach, each exactly once: the roles
+		// tellChecks addresses less the one this settlement woke.
+		told []claim.Role
+	}{
+		{"the implementer holds the phase", phase.Implementing, claim.RoleImplementer,
+			[]claim.Role{claim.RoleArchitect}},
+		{"the tester holds it, and the implementer is told", phase.Testing, claim.RoleTester,
+			[]claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newWakeRig(t)
+			setWakeIssuePhase(t, rig.pool, tc.phase)
+			if tc.woken != claim.RoleImplementer {
+				seedReleasedClaim(t, rig.pool, tc.woken, "session-"+string(tc.woken))
+			}
+			rig.apply("settled", settlement("head1", "build"))
+
+			told := roleMessageTokens(t, rig.pool)
+			want := make([]string, 0, len(tc.told))
+			for _, role := range tc.told {
+				want = append(want, string(wakeToken(t, role)))
+			}
+			slices.Sort(told)
+			slices.Sort(want)
+			if !slices.Equal(told, want) {
+				t.Errorf("the settlement's role messages = %v, want %v: the %s it woke is told by its wake task alone",
+					told, want, tc.woken)
+			}
+
+			// The listener reports that very message, which is the sequence the defect was in.
+			rig.apply("role-message", intake.ListenerWake{Kind: intake.ListenerWakeRole,
+				Role: string(wakeToken(t, tc.woken)), At: wakeAt, Report: "report-1"})
+			oneWake(t, rig.pool, tc.woken, pods.WakeChecks, "head1", "build")
+		})
+	}
+}
+
+// setWakeIssuePhase moves the rig's issue to the phase whose worker the settlement wakes.
+func setWakeIssuePhase(t *testing.T, pool *pgxpool.Pool, p phase.Phase) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `update issues set phase = $1 where key = 'LEGION-208'`, string(p)); err != nil {
+		t.Fatalf("set the issue's phase to %s: %v", p, err)
+	}
+}
+
+// roleMessageTokens is the role topic of every role message queued, in the order they were.
+func roleMessageTokens(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `select payload->>'role' from outbox where kind = 'role_message' order by id`)
+	if err != nil {
+		t.Fatalf("read the role messages: %v", err)
+	}
+	defer rows.Close()
+	var tokens []string
+	for rows.Next() {
+		var token string
+		if err := rows.Scan(&token); err != nil {
+			t.Fatalf("read a role message: %v", err)
+		}
+		tokens = append(tokens, token)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the role messages: %v", err)
+	}
+	return tokens
 }

@@ -42,7 +42,7 @@ import (
 )
 
 func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
-	row, err := record.NewOutboxRow("LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
+	row, err := record.NewOutboxRow("LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), time.Now())
 	if err != nil {
 		t.Fatalf("new outbox row: %v", err)
 	}
@@ -58,13 +58,14 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 }
 
-// A person's handover row (StatusWrite.PersonHandover) answers a person's legion label on a triage
-// root, or a person's approval of a parked labelled root's spec. Its delivery writes todo only
-// while the issue still shows the status the row answered and still carries the label: a person
-// who parked the root since is let stand silently, as any superseded status write is, and one who
-// took the label off withdrew the handover, which is dropped with one log line (R4 of
-// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow (HandOver) is not held
-// to the label: TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
+// A person's handover row (record.PersonHandoverStatusRow) answers a person's legion label on a
+// triage root, or a person's approval of a parked labelled root's spec. Its delivery writes todo
+// only while the issue still shows the status the row answered and still carries the label: a
+// person who parked the root since is let stand silently, as any superseded status write is, and
+// one who took the label off withdrew the handover, which is dropped with one log line (R4 of
+// dispatch://LEGION-755 and the plan's D2). A hand-over row of the workflow
+// (record.HandOverStatusRow) is not held to the label:
+// TestAHandOverWritesTheStatusAndTheLabelTogether's unlabelled cases PATCH it on.
 func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.T) {
 	const dropped = "outbox: a person's handover is not written; the label is gone"
 	for _, tc := range []struct {
@@ -78,7 +79,7 @@ func TestOutboxWritesAPersonsHandoverOnlyWhileItsLabelAndStatusStand(t *testing.
 		{name: "label and status stand", shown: dispatch.Issue{Key: "LEGION-208", Status: "triage", Labels: []string{"legion"}, HandedOver: true}, statuses: []string{"todo"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}, time.Now())
+			row := mustOutboxRow(t, "LEGION-208", record.PersonHandoverStatusWrite("todo", "triage"), time.Now())
 			client := &outboxDispatch{issue: tc.shown}
 			var logs bytes.Buffer
 			runner := &outbox{log: slog.New(slog.NewJSONHandler(&logs, nil)), dispatch: client}
@@ -151,6 +152,13 @@ func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (
 	}
 	return dispatch.Issue{}, d.statusErr
 }
+
+// SetStatusAt is the fenced write the outbox's status row makes, which this stand-in takes as any
+// other: a test that drives the sequence fence runs against the real Dispatch
+// (status_scratch_dispatch_test.go).
+func (d *outboxDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
 	if d.handOverHook != nil {
@@ -184,7 +192,7 @@ func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProje
 func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), time.Now())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: row.Issue, Status: "todo"}}
 
 	if err := (&outbox{dispatch: client}).execute(context.Background(), row); err != nil {
@@ -216,7 +224,7 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 	member := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	orphaned := member
 	orphaned.Tree = child
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 3), time.Now())
 	for _, tc := range []struct {
 		name                string
 		root, child         record.Issue
@@ -292,7 +300,7 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 		return err
 	}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: reopen}
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 	if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
 		t.Fatalf("write the hand-over: %v", err)
 	}
@@ -355,7 +363,7 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "todo", HandedOver: true, Labels: []string{"legion"}}}
-	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 	if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
 		t.Fatalf("consume already-todo hand-over: %v", err)
 	}
@@ -411,7 +419,7 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
 			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 			client := &outboxDispatch{issue: tc.shown}
-			row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			row := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 			if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
 				t.Fatalf("write the hand-over: %v", err)
 			}
@@ -475,7 +483,7 @@ func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
 						return put
 					}
 				}
-				row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "testing", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
+				row, err := record.NewOutboxRow(child, record.HandOverStatusWrite("todo", "testing", root, 1), now)
 				if err != nil {
 					return err
 				}
@@ -559,7 +567,7 @@ func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
 				t.Fatalf("seed the newer linger's fence: %v", err)
 			}
 			client := &outboxDispatch{issue: tc.shown}
-			stale := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			stale := mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 1), time.Now())
 			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), stale); err != nil {
 				t.Fatalf("execute the stale hand-over row: %v", err)
 			}
@@ -612,7 +620,7 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 	if home, err := st.IssueSandboxHome(ctx, "legion", child); err != nil || home != child {
 		t.Fatalf("the child's Sandbox home while its hand-over is pending = %q, %v; want %s", home, err, child)
 	}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, child, record.HandOverStatusWrite("todo", "in_progress", root, 3), time.Now()))
 	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: func() error {
 		return &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
 	}}
@@ -642,7 +650,7 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 // The message is the row's own, under its marker, so a retry after a failed status write finds it
 // and posts none.
 func TestADoneWriteWithAReasonPostsItFirstAndOnce(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: "Closed by its architect before its first phase: no change"}, time.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("done", "in_progress", "Closed by its architect before its first phase: no change"), time.Now())
 	row.ID = 56
 	client := &outboxDispatch{issue: dispatch.Issue{Key: row.Issue, Status: "in_progress"}, postErr: errors.New("Dispatch refused the message")}
 	runner := &outbox{dispatch: client}
@@ -696,14 +704,13 @@ func TestOutboxMessagePostsItsMarkerAndReturnsReadFailure(t *testing.T) {
 // refusal and still retries.
 func TestAMessagePostDispatchRefusesIsFinishedAndItsArchitectTold(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, time.Now())
-	now := time.Now().UTC()
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 2 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
-	if !permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", refusal), now) {
+	if !permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", refusal)) {
 		t.Fatal("a CAP_EXCEEDED post is retried, want it finished refused")
 	}
 	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
-	if permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", outage), now) {
+	if permanentRefusal(row, fmt.Errorf("post Dispatch message for LEGION-208: %w", outage)) {
 		t.Fatal("a 503 post is finished refused, want it retried")
 	}
 	notice := messagePostRefused("LEGION-208", record.MessagePost{Body: "READY #42 at head\n\nthe rest of the packet"}, refusal)
@@ -725,7 +732,7 @@ func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArch
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change.\nThe rest of the reason."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}, postErr: refusal}
@@ -768,7 +775,7 @@ func TestAStatusWriteWhoseReasonDispatchRefusesStillSetsTheStatusAndTellsTheArch
 // disagree from here on.
 func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *testing.T) {
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "INVALID_STATUS", Message: "no such status"}
-	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done"},
+	notice := statusWriteRefused("LEGION-208", record.OrdinaryStatusWrite("done", "", ""),
 		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{})
 	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
 		!strings.Contains(notice.Reason, "The status done is not set, so the issue keeps the status it has") ||
@@ -788,7 +795,7 @@ func TestAStatusWriteDispatchRefusesTellsTheArchitectTheStatusDidNotLand(t *test
 func TestAStatusRefusedAfterItsReasonPostedTellsTheArchitectTheReasonStands(t *testing.T) {
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	refusal := &dispatch.Error{Status: http.StatusNotFound, Code: "ISSUE_NOT_FOUND", Message: "no such issue"}
-	notice := statusWriteRefused("LEGION-208", record.StatusWrite{Status: "done", Reason: reason},
+	notice := statusWriteRefused("LEGION-208", record.OrdinaryStatusWrite("done", "", reason),
 		fmt.Errorf("set Dispatch issue LEGION-208 to done: %w", refusal), statusWrites{reason: true})
 	if notice.Kind != "message-refused" || notice.Role != claim.RoleArchitect ||
 		!strings.Contains(notice.Reason, "The status done is not set") ||
@@ -812,7 +819,7 @@ func TestAStatusWriteRetriesUntilTheStatusLandsAfterItsReasonIsRefused(t *testin
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	outage := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
@@ -877,7 +884,7 @@ func TestAStatusWriteWhoseAnswerWasLostStillTellsTheArchitectItsRefusedReason(t 
 	now := time.Now().UTC()
 	const reason = "Closed by its architect before its first phase: the human decided no change."
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208",
-		record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", "in_progress", reason), now))
 	refusal := &dispatch.Error{Status: http.StatusBadRequest, Code: "CAP_EXCEEDED",
 		Message: "body block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)"}
 	lost := &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
@@ -962,119 +969,62 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	}
 }
 
-// The READY packet reaches the project's merge queue role as the message of one publish to its
-// role topic, keyed by the row so a retried row is one delivery.
-func TestOutboxMergeQueuePublishSendsThePacketToTheRole(t *testing.T) {
-	const packet = "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: packet}, time.Now())
-	row.ID = 57
-	publisher, client := &outboxPublisher{}, &outboxDispatch{}
-
-	if err := (&outbox{notices: publisher, dispatch: client}).execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish: %v", err)
-	}
-	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: packet, key: "legion-outbox:57", payload: packet}) {
-		t.Fatalf("publishes = %#v, want the packet on the merge queue role's topic once", got)
-	}
-	if len(client.messages) != 0 {
-		t.Fatalf("Dispatch messages = %q, want none when the role took the packet", client.messages)
-	}
-}
-
-// A merge queue role with no live holder cannot take the packet, and waiting would retry forever:
-// the Dispatch message already carries it, so the issue is told the role had no holder, as the
-// shared merger prompt has the merger say, and the row is done.
-func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
-	row.ID = 58
-	publisher := &outboxPublisher{err: fmt.Errorf("publish notice to notifications.role.merge-queue: %w: no holder for role merge-queue", notify.ErrNoHolder)}
-	client := &outboxDispatch{}
-	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
-
-	if err := runner.execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish with no holder: %v", err)
-	}
-	if got := client.messages; len(got) != 1 || !strings.HasPrefix(got[0], "merge queue role merge-queue had no live holder at 2026-09-25T03:04:05Z") || !strings.HasSuffix(got[0], "<!-- legion-outbox:58 -->") {
-		t.Fatalf("Dispatch messages = %q, want one naming the role with no live holder", got)
-	}
-
-	publisher.err = errors.New("listener unavailable")
-	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
-		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
-	}
-}
-
-// A merge queue holder the listener calls unresponsive still holds the role: its session is past
-// the live window and inside the gone horizon, so the READY packet is kept and retried on the
-// row's backoff, and no Dispatch message stands in for a delivery that was never lost
-// (dispatch://INFRA-392). The refusal comes from a listener answering as the real one does, since
-// what the packet's fate turns on is how that body is read.
-func TestOutboxMergeQueueKeepsThePacketForAnUnresponsiveHolder(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+// A role holder the listener calls unresponsive still holds the role: its session is past the live
+// window and inside the gone horizon, so the message is kept and retried on the row's backoff
+// rather than dropped as a message to a role nobody holds (dispatch://INFRA-392). The refusal comes
+// from a listener answering as the real one does, since what the message's fate turns on is how
+// that body is read.
+func TestOutboxRoleMessageKeptForAnUnresponsiveHolder(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.RoleMessage{Role: "implementer", Body: "CI settled at head"}, time.Now())
 	row.ID = 61
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"error":"role merge-queue holder ses_mq lapsed; claim retained","reason":"holder_lapsed",`+
-			`"holder":"ses_mq","holder_state":"unresponsive","last_seen":1,"claim_released":false}`)
+		_, _ = io.WriteString(w, `{"error":"role implementer holder ses_impl lapsed; claim retained","reason":"holder_lapsed",`+
+			`"holder":"ses_impl","holder_state":"unresponsive","last_seen":1,"claim_released":false}`)
 	}))
 	defer server.Close()
 	client := &outboxDispatch{}
 	runner := &outbox{notices: notify.New(server.URL, ""), dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
 
 	if err := runner.execute(context.Background(), row); !errors.Is(err, notify.ErrHolderUnresponsive) {
-		t.Fatalf("execute = %v, want the packet kept for an unresponsive holder", err)
+		t.Fatalf("execute = %v, want the message kept for an unresponsive holder", err)
 	}
 	if len(client.messages) != 0 {
 		t.Fatalf("Dispatch messages = %q, want none while the role's holder is only unresponsive", client.messages)
 	}
 }
 
-// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
-// refuses every attempt until another session holds the role, and the listener's own NATS grant
-// denies every forward (403 with no reason) until an operator changes it, as a role with no holder
-// does: the issue is told the role refused the packet and which holder did, or that the listener
-// was denied the forward and why, and the row is done. A holder that did not confirm the packet in
-// time (504 receipt_timeout or delivery_failed) is retried.
-func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+// A role whose holder does not advertise the message's delivery mode (403 capability) refuses
+// every attempt until another session holds the role, and the listener's own NATS grant denies
+// every forward (403 with no reason) until an operator changes it, as a role with no holder does:
+// the row is done either way, since the message reports a moment that has passed by then. A holder
+// that did not confirm the message in time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxRoleMessageAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.RoleMessage{Role: "implementer", Body: "CI settled at head"}, time.Now())
 	row.ID = 59
-	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
-		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_impl"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_impl"})}
 	client := &outboxDispatch{}
-	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+	runner := &outbox{log: quietLogger(), notices: publisher, dispatch: client}
 
 	if err := runner.execute(context.Background(), row); err != nil {
-		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+		t.Fatalf("execute a role message its holder refused: %v", err)
 	}
-	if got := client.messages; len(got) != 1 ||
-		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
-		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
-		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_impl"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute a role message the listener was denied: %v", err)
 	}
-
-	denied := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
-	denied.ID = 60
-	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_mq"`
-	publisher.err = fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
-	if err := runner.execute(context.Background(), denied); err != nil {
-		t.Fatalf("execute merge queue publish the listener was denied: %v", err)
-	}
-	if got := client.messages; len(got) != 2 ||
-		!strings.HasPrefix(got[1], "merge queue role merge-queue: the listener's NATS grant denied the forward ("+denial+"), at 2026-09-25T03:04:05Z") ||
-		!strings.HasSuffix(got[1], "<!-- legion-outbox:60 -->") {
-		t.Fatalf("Dispatch messages = %q, want a second naming the role and the listener's denial", got)
-	}
-
 	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
-		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		publisher.err = fmt.Errorf("publish notice to notifications.role.implementer: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_impl"})
 		var notDelivered notify.ErrNotDelivered
 		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
-			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+			t.Fatalf("a role message answered %s = %v, want the answer as a failure, retried", reason, err)
 		}
 	}
-	if got := client.messages; len(got) != 2 {
-		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
+	if got := client.messages; len(got) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none: a role message posts nothing to the issue", got)
 	}
 }
 
@@ -1986,10 +1936,20 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			holdSlot(t, pool, issue.Key)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				// The base branch requires no check, so the head's settlement gives no verdict, which an approval does not wait on.
-				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, Required: []string{}, State: record.PullRequestOpen})
+				// The settlement is the head's own, which the approval reads nothing of; GitHub's
+				// merge state for it is clean, which an approval of it advances on.
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, State: record.PullRequestOpen,
+					Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
+			}
+			// The reviewer's claim, which the daemon started it on: its completion arrives after
+			// its own review has moved the issue, and is recorded on its row (workflow's
+			// leftItsPhase).
+			if _, err := pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+				state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+				values ('reviewer', 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, '', '', 'working', 0, 0, 0, 0)`); err != nil {
+				t.Fatalf("seed the reviewer's claim: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
@@ -2032,7 +1992,8 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 
 			// The reviewer asks for round 2, and the implementer starts on its task.
 			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
-			// A review ends when its reviewer completes it: its handoff is part of the phase.
+			// The review itself ended the round; the reviewer's completion follows it, recorded on
+			// the reviewer's own row with the issue already in implementing.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", HandoffRecord: "review-round-1", HandoffVersion: 1})
 			due("the round-2 start")

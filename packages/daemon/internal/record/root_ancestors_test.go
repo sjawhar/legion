@@ -32,7 +32,7 @@ func TestARootReadsNoAncestorInTheTreeItsDispatchParentBelongsTo(t *testing.T) {
 	)
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, chainIssue(root, root, doneMember, phase.Admitted, "in_progress")))
-		must(t, records.PutIssue(ctx, tx, chainIssue(otherRoot, otherRoot, "", phase.AwaitingMerge, "needs_review")))
+		must(t, records.PutIssue(ctx, tx, chainIssue(otherRoot, otherRoot, "", phase.Merging, "needs_review")))
 		must(t, records.PutIssue(ctx, tx, chainIssue(doneMember, otherRoot, otherRoot, phase.Done, "done")))
 		approved := 1
 		must(t, records.PutGate(ctx, tx, DesignGate{Issue: root, ArtifactID: "spec", LatestVersion: 1, ApprovedVersion: &approved}))

@@ -87,15 +87,19 @@ test("every legion-worker reference is linked from a skill or a prompt", () => {
   expect(unlinked).toEqual([]);
 });
 
-// The daemon submits the merge itself once it accepts READY, and Legion enforces no GitHub
-// restriction the repository itself does not: no skill a Legion pane loads, and no daemon prompt,
-// says Legion never merges.
-test("no skill or prompt says Legion never merges", () => {
+// The merger merges the pull request itself, at the head it read, and the daemon submits no merge
+// and changes no merge setting (dispatch://INFRA-714, R2): no skill a Legion pane loads, and no
+// daemon prompt, may hand the merge back to the daemon. The pattern matches the claim made of the
+// daemon and not its denial, so the verb follows `daemon` directly and names what is merged.
+test("no skill or prompt says the daemon merges", () => {
   const saying = [staged, promptsRoot]
     .flatMap(files)
     .filter(
       (file) =>
-        file.endsWith(".md") && /never merges|merges? nothing/i.test(readFileSync(file, "utf8"))
+        file.endsWith(".md") &&
+        /daemon\s+(submits|arms|enqueues|enables|merges|turns)\s+(the|a|an|that|its|it|ready|auto)\b/i.test(
+          readFileSync(file, "utf8")
+        )
     )
     .map((file) => path.relative(REPO_ROOT, file));
   expect(saying).toEqual([]);
@@ -445,28 +449,6 @@ test("every shipped prompt and bash-running agent says how to read a piped comma
       "packages/pi-legion/agents/thermonuclear-code-quality.md",
     ]
   );
-});
-
-// R7: `READY_UNREVIEWED_CHANGE` has more causes than retro's own paths, and the merger's own
-// prompt part is the one complete list, so neither file gets a second copy of it
-// (dispatch://INFRA-427, and the spec's decision "A pointer, not a second list"). The pin counts
-// the pointer and refuses the list: a second copy would have to be kept equal to `ready.go`.
-test("retro and the merge gate point at the merger's list of READY_UNREVIEWED_CHANGE's causes", () => {
-  const files = ["skills/legion-worker/references/merge-gate.md", "skills/legion-retro/SKILL.md"];
-  countedOncePerFile(
-    "`READY_UNREVIEWED_CHANGE` has more causes than a path outside retro's own",
-    files
-  );
-  countedOncePerFile(
-    "the complete list, with each remedy, is the merger's own role prompt part",
-    files
-  );
-  for (const file of files) {
-    const text = collapsed(path.join(staged, file.slice("skills/".length)));
-    expect(text, `${file} lists the causes instead of pointing at them`).not.toContain(
-      "300-file limit"
-    );
-  }
 });
 
 // R8: every role of an issue shares one $TMPDIR on the issue's volume, so a glob sweep deletes

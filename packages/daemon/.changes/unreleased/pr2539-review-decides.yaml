@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  A review of the current head moves the phase: a request for changes returns the issue to
+  implementing and counts the review round, and an approval moves it to accepting once GitHub
+  reports the head mergeable. A head that conflicts with its base returns the issue to implementing
+  from any later phase.

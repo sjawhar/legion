@@ -93,7 +93,7 @@ func StandsIn(issue Issue, phases ...phase.Phase) bool {
 // (OpenBeneath, which leaves out what that hold stopped) — so none of them can count a root as
 // accepted that another counts as still at work.
 func Accepted(issue Issue) bool {
-	return StandsIn(issue, phase.Retro, phase.Merging, phase.AwaitingMerge)
+	return StandsIn(issue, phase.Retro, phase.Merging)
 }
 
 // Ancestors is every issue above issue inside its own tree, nearest first and the tree's own
@@ -437,7 +437,9 @@ func AtWork(issue Issue, gate DesignGate) bool {
 	case phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro:
 		return true
 	case phase.Merging:
-		return issue.ReadyPendingVersion == nil
+		// The merger works this phase, so an issue in it is at work. Its own merge is what ends
+		// it: there is no armed READY to wait for here any more.
+		return true
 	case phase.Admitted:
 		return claim.IsTreeRoot(issue.Key, issue.Tree) && !gate.EverOpened
 	default:

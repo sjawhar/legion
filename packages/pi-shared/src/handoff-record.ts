@@ -24,7 +24,7 @@ import { staleGitLockNote } from "./git-lock";
  * its answer. The implementer's implementing round also reports `commit`, the commit
  * `legion/<issue>@origin` names in the pane's jj (its pushed tip, the head of the pull request), and
  * is refused when `@-` is not on that branch yet, naming the push. The planner, the tester and the
- * reviewer report no commit. Every other completion — retro, the merger's READY, a role reporting
+ * reviewer report no commit. Every other completion — retro, the merger's, a role reporting
  * a phase it does not run (which the daemon refuses naming whose phase it is) — reports the commit
  * the workspace stands on, `@-`, and no record. The implementer's report on its closed issue's
  * production check resolves neither: `legion-phase-ops.ts` never asks this module for one.

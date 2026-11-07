@@ -590,12 +590,13 @@ func (r *personHandoverRig) statusRows(key string) []record.StatusWrite {
 	return writes
 }
 
-// personHandoverRows is the person's handover rows (StatusWrite.PersonHandover) still queued on key.
+// personHandoverRows is the person's handover rows (record.PersonHandoverStatusRow) still queued
+// on key.
 func (r *personHandoverRig) personHandoverRows(key string) []record.StatusWrite {
 	r.t.Helper()
 	var marked []record.StatusWrite
 	for _, write := range r.statusRows(key) {
-		if write.PersonHandover {
+		if write.Kind == record.PersonHandoverStatusRow {
 			marked = append(marked, write)
 		}
 	}

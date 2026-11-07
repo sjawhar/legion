@@ -97,7 +97,7 @@ func TestTheCapCountsIssuesAndAParentWaitsForItsChildrenLive(t *testing.T) {
 	r := newAdmissionIssuesLive(t)
 	r.step("step1-two-live-trees-hold-no-slot", r.liveTreesHoldNoSlot)
 	r.step("step2-the-released-children-hold-both-slots-and-their-parent-waits", r.childrenHoldTheSlots)
-	r.step("step3-a-red-head-returns-a-waiting-issue-and-its-start-waits-for-a-slot", r.redHeadReturnsAWaitingIssue)
+	r.step("step3-a-backward-move-returns-a-waiting-issue-and-its-start-waits-for-a-slot", r.backwardMoveReturnsAWaitingIssue)
 	r.step("step4-the-parked-children-free-the-slots-the-return-and-the-parent-take", r.freedSlotsGoToTheReturnAndTheParent)
 }
 
@@ -201,7 +201,7 @@ func (r *admissionIssuesLive) seedTrees() {
 		if err := r.records.PutPullRequest(ctx, tx, record.PullRequest{
 			State: record.PullRequestOpen, Issue: r.accepting, Repo: liveRepo, Number: r.acceptingPR,
 			Branch: "legion/" + r.accepting, HeadSHA: admissionIssuesHead, CheckedHead: admissionIssuesHead,
-			Required: []string{admissionIssuesCheck}, CheckRuns: []record.AttemptRun{{Name: admissionIssuesCheck, ID: 1}}, Failing: []string{},
+			CheckRuns: []record.AttemptRun{{Name: admissionIssuesCheck, ID: 1}}, Failing: []string{},
 		}); err != nil {
 			return err
 		}
@@ -271,9 +271,16 @@ func (r *admissionIssuesLive) token(issue string, role claim.Role) claim.Token {
 // its agent do: it waits for the launch, dials the worker stream with the launch's boot token,
 // registers the session and reports it ready.
 func (r *admissionIssuesLive) registerArchitect() *admissionIssuesArchitect {
+	return r.registerArchitectOf(r.root, "ses_architect")
+}
+
+// registerArchitectOf is registerArchitect for any tree root of the run, under the session name
+// given: the second tree's architect registers the same way, and its grant is what sends its own
+// issue back.
+func (r *admissionIssuesLive) registerArchitectOf(root, session string) *admissionIssuesArchitect {
 	t := r.t
 	t.Helper()
-	token := r.token(r.root, claim.RoleArchitect)
+	token := r.token(root, claim.RoleArchitect)
 	testwait.Eventually(t, "the launch of "+string(token), func() bool {
 		return slices.ContainsFunc(r.rt.Calls(), func(call fake.Call) bool {
 			return (call.Method == "Spawn" || call.Method == "Resume") && call.Spec.Claim == token
@@ -281,7 +288,6 @@ func (r *admissionIssuesLive) registerArchitect() *admissionIssuesArchitect {
 	})
 	launch := lastLaunch(t, r.rt, token)
 	dialShim(t, r.built.address, launch.BootToken)
-	const session = "ses_architect"
 	status, body := r.d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
 		AgentID: session, PluginContract: api.DaemonAPIVersion,
@@ -457,14 +463,18 @@ func (r *admissionIssuesLive) childrenHoldTheSlots() {
 		len(state.Admission.Active), state.Admission.Cap, r.root, r.root)
 }
 
-// Step 3. CI goes red on the second tree's pull request while it stands in accepting. The
-// transition applies at once — the issue is back in implementing and Dispatch is told in_progress
-// — and the start its implementer is owed waits: the two children hold both slots, so the issue
-// takes none and stands in the admission line instead. Nothing reports its claim as one nothing
-// will wake.
-func (r *admissionIssuesLive) redHeadReturnsAWaitingIssue() {
+// Step 3. The second tree's architect sends its issue back from accepting while the cap is full.
+// The transition applies at once — the issue is back in implementing and Dispatch is told
+// in_progress — and the start its implementer is owed waits: the two children hold both slots, so
+// the issue takes none and stands in the admission line instead. Nothing reports its claim as one
+// nothing will wake.
+//
+// The return is the architect's own, not a red settlement: a CI settlement moves no issue on this
+// release (dispatch://INFRA-714/spec R1), and what the step is about is a return that finds the
+// cap full, whichever move made it.
+func (r *admissionIssuesLive) backwardMoveReturnsAWaitingIssue() {
 	t := r.t
-	r.publishRed()
+	r.sendBackFromAccepting()
 	state := r.waitForState("the returned issue waiting for a slot", func(state api.State) bool {
 		return state.Issues[r.accepting].Phase == phase.Implementing && slices.Contains(state.Admission.Waiting, r.accepting)
 	})
@@ -556,25 +566,24 @@ func (r *admissionIssuesLive) publishStatus(key, status, parent string, daemon b
 	r.note("drove Dispatch's own event of that write: %s is %s under %s", key, status, parent)
 }
 
-// publishRed publishes CI's settlement of the second tree's head with its one required check
-// failed, as Envoy relays one (intake's decodeChecks reads it).
-func (r *admissionIssuesLive) publishRed() {
+// sendBackFromAccepting is the architect's request_backward_move of the accepting issue to
+// implementing, through the daemon's own route, with the grant its architect holds.
+func (r *admissionIssuesLive) sendBackFromAccepting() {
 	r.t.Helper()
-	group := func(checks ...string) map[string]any {
-		return map[string]any{"count": len(checks), "checks": append([]string{}, checks...)}
+	architect := r.registerArchitectOf(r.accepting, "ses_accepting_architect")
+	status, body := r.d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: architect.session, Secret: architect.secret, Tree: r.accepting, Issue: r.accepting}, false)
+	if status != http.StatusOK {
+		r.t.Fatalf("the grant of %s's architect = %d %s, want 200", r.accepting, status, body)
 	}
-	r.seq++
-	payload, err := json.Marshal(map[string]any{
-		"kind": "checks", "repo": liveRepo, "number": strconv.Itoa(r.acceptingPR), "sha": admissionIssuesHead,
-		"check_runs": []map[string]any{{"name": admissionIssuesCheck, "id": r.seq + 1}}, "generation": 1,
-		"snapshot": fmt.Sprintf("%s-red-%d", r.accepting, r.seq), "settled_at": time.Now().UnixMilli(),
-		"failed": group(admissionIssuesCheck), "passed": group(), "running": group(), "queued": group(),
-		"cancelled": group(), "skipped": group(),
-	})
-	if err != nil {
-		r.t.Fatalf("encode the settlement payload: %v", err)
+	var granted api.GrantResponse
+	if err := json.Unmarshal(body, &granted); err != nil {
+		r.t.Fatalf("decode the grant of %s's architect: %v", r.accepting, err)
 	}
-	subject := fmt.Sprintf("notifications.github.%s.pr.%d.checks", r.subjectRepo(), r.acceptingPR)
-	r.publish(subject, "github", fmt.Sprintf("checks-%d-%s-%d", r.acceptingPR, admissionIssuesHead, r.seq), string(payload))
-	r.note("drove CI's settlement of pull request #%d at %s with %s failed", r.acceptingPR, admissionIssuesHead, admissionIssuesCheck)
+	status, body = r.d.request(http.MethodPost, "/legion/v1/phase/backward",
+		api.PhaseBackwardRequest{GrantID: granted.GrantID, Issue: r.accepting, To: phase.Implementing, Reason: "the acceptance round asks for one more change"}, false)
+	if status != http.StatusOK {
+		r.t.Fatalf("request_backward_move of %s = %d %s, want 200", r.accepting, status, body)
+	}
+	r.note("drove %s's own architect's backward move of it from accepting to implementing", r.accepting)
 }

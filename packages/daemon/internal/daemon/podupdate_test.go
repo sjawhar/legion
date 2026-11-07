@@ -2504,8 +2504,9 @@ func (r *podUpdateRig) settleAll() {
 // the round was opened over, it is in no round, and it has answered nothing, which is the same
 // reading again.
 //
-// What each really left is the round's own record, written where the launch records the pod the
-// claim came up in: the round it left, and whether it had answered it by then.
+// What each really left is the round's own record: the launch, which records the pod the claim
+// came up in, writes the round the claim left, and the answer that round holds for it is the one
+// its own pod's process gave, if it gave one.
 func TestPodUpdateNamesOnlyTheRoundsOwnMembersAsHavingLostWork(t *testing.T) {
 	rig := newPodUpdateRig(t,
 		readyWorker(claim.RoleImplementer),

@@ -103,15 +103,15 @@ test("a WAITING reply moves the reported wake out by the waiting limit", async (
   });
 
   // An ordinary settle: the continuation is the first reminder of the run, so nothing is armed.
-  await reminder.settle("Pushed the branch.");
+  await reminder.settle({ kind: "settle", lastAssistantText: "Pushed the branch." });
   expect(reminder.phaseWake().nextReminderAt).toBeNull();
 
   // The next settle arms the ordinary reminder; a WAITING reply arms the waiting one instead.
   const beforeOrdinary = Date.now();
-  await reminder.settle("Still pushing.");
+  await reminder.settle({ kind: "settle", lastAssistantText: "Still pushing." });
   const ordinary = reminder.phaseWake();
   const beforeWaiting = Date.now();
-  await reminder.settle("WAITING on CI to finish the run.");
+  await reminder.settle({ kind: "settle", lastAssistantText: "WAITING on CI to finish the run." });
   const waiting = reminder.phaseWake();
 
   expect(timers.map((timer) => timer.delayMs)).toEqual([

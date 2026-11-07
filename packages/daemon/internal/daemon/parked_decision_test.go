@@ -934,7 +934,7 @@ func handedDecisionsLogged(t *testing.T, logged []byte) []string {
 func handOverRows(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
 	rows, err := pool.Query(context.Background(), `select issue from outbox
-		where kind = 'dispatch_status' and (payload->>'handOver')::boolean order by id`)
+		where kind = 'dispatch_status' and payload->>'kind' = 'hand-over' order by id`)
 	if err != nil {
 		t.Fatalf("read the hand-over rows: %v", err)
 	}

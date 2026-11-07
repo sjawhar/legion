@@ -329,6 +329,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		plan.phaseHolds, plan.rootHears, plan.treeClosable = workflow.phaseHolds, workflow.rootHears, workflow.treeClosable
 		plan.rootTask = workflow.rootTask
 		plan.taskConfirmed = workflow.taskConfirmed
+		plan.sessionLost, plan.sessionStoreFault = workflow.sessionLost, workflow.sessionStoreFault
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -600,6 +601,11 @@ type plan struct {
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
+	// sessionLost and sessionStoreFault tell the workflow that a claim's recorded session is in no
+	// session store any more, and that a start could not reach that store at all; nil without a
+	// workflow, where neither is reported to anyone.
+	sessionLost       func(c supervise.Claim, detail string)
+	sessionStoreFault func(c supervise.Claim, detail string)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -1208,21 +1214,24 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			identity: p.identity, repository: p.repository,
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
-			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
+			runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			commitIssueTrailerRepos: cfg.Projects[cfg.Project].CommitIssueTrailerRepos, same: p.repositories.same,
 			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 			memoryInstructions: p.memoryInstructions, memoryGroup: treeMemoryGroup(st),
 		},
-		Identity:      adoptIdentity(p.identity, p.repository),
-		Secrets:       p.secretsEnroller,
-		PhaseHolds:    p.phaseHolds,
-		RootHears:     p.rootHears,
-		RootTask:      p.rootTask,
-		TreeClosable:  p.treeClosable,
-		TaskConfirmed: p.taskConfirmed,
-		SessionGone:   cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
-		Clock:         p.clock,
-		Log:           log,
+		Identity:          adoptIdentity(p.identity, p.repository),
+		IssueInTurn:       sup.claimInTurn,
+		Secrets:           p.secretsEnroller,
+		PhaseHolds:        p.phaseHolds,
+		RootHears:         p.rootHears,
+		RootTask:          p.rootTask,
+		TreeClosable:      p.treeClosable,
+		TaskConfirmed:     p.taskConfirmed,
+		SessionLost:       p.sessionLost,
+		SessionStoreFault: p.sessionStoreFault,
+		SessionGone:       cleanSessionStop(supervising, cfg.EnvoyURL, p.secrets["ENVOY_TOKEN"], log),
+		Clock:             p.clock,
+		Log:               log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
@@ -1735,6 +1744,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var handoffCompleted func(string)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
 	var unread func(string) bool
 	var await func(repo, tree, child, parent string)
@@ -1743,6 +1753,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
+		handoffCompleted = workflow.handoffCompleted
 		githubAPI = workflow.githubAPI
 		consumerLag = workflow.consumers.Lag
 	}
@@ -1798,12 +1809,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		GitHubOwners:       p.repositories.Owners,
 		RepositoryRenames:  cfg.RepositoryRenames,
 		GitHubAPI:          githubAPI,
-		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
 		Memory:             cfg.Projects[cfg.Project].Memory,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
+		HandoffCompleted:   handoffCompleted,
 		PromptAgents:       promptAgents(p.roleReferences),
 		CapabilityReported: s.capabilityReported,
 		ReleaseRecords:     st,
@@ -2092,14 +2103,6 @@ func adoptIdentity(identity func(context.Context, claim.Role, ghrepo.Repository)
 			return runtime.GitIdentity{}, err
 		}
 		return identity(ctx, role, repo)
-	}
-}
-
-// projectMergeRules answers the merge policy an issue's project configures. A project absent from
-// the configuration has no special merge policy.
-func projectMergeRules(cfg config.Config) func(project string) config.MergeRules {
-	return func(project string) config.MergeRules {
-		return cfg.Projects[project].Merge
 	}
 }
 

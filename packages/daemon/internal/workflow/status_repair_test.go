@@ -112,7 +112,7 @@ func TestTheStatusRepairSkipsEveryIssueItsRulesExclude(t *testing.T) {
 		{name: "an issue whose status write is already queued", seed: func(t *testing.T, pool *pgxpool.Pool) {
 			seedIssue(t, pool, repairIssue("LEGION-208", "LEGION-208", phase.Implementing, "in_progress", "todo"))
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0})
-			seedStatusWrite(t, pool, "LEGION-208", record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"})
+			seedStatusWrite(t, pool, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""))
 		}, want: []statusRow{{"LEGION-208", "in_progress", "todo"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,7 +169,7 @@ func TestTheStatusRepairLogsEachRepairAndEveryRun(t *testing.T) {
 	// Its write is already queued, so it waits for the outbox rather than for the repair.
 	seedIssue(t, pool, repairIssue("LEGION-400", "LEGION-400", phase.Testing, "testing", "in_progress"))
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-400", Index: 1})
-	seedStatusWrite(t, pool, "LEGION-400", record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"})
+	seedStatusWrite(t, pool, "LEGION-400", record.OrdinaryStatusWrite("testing", "in_progress", ""))
 
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))

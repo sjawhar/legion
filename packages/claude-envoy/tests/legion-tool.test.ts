@@ -103,12 +103,12 @@ async function daemon(): Promise<{
 
 const implementer: ClaimCapability = {
   sessionID: "ses_implementer",
-  claimToken: "legion-legion-legion-208-implementer",
-  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 1,
 }
 
 /** The branch-head lookup of a tool that must never signal readiness for an update. */
@@ -145,7 +145,6 @@ test("declares the five phase-worker operations under one op, and names the Envo
       since: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
-      ready: { type: "boolean" },
       reason: { type: "string" },
       round: { type: "string" },
     },
@@ -155,7 +154,7 @@ test("declares the five phase-worker operations under one op, and names the Envo
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. read_release_records returns this deployment's idle-release records from `since` (an RFC 3339 time) on, read with this session's own claim: every release, resume and hold the daemon recorded, and over them the counts of releases, of resumes by wake kind and of holds by reason, the pod-hours released, the share of releases woken again within ten minutes, and the median, 90th percentile and maximum seconds from a wake to the woken role's first turn. handoff_complete",
   )
   expect(definition.description).toContain(
-    "arm nothing. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
+    "complete again. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
   )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
@@ -191,7 +190,6 @@ test("handoff_complete finds the record and commit for the issue's phase and the
         grantId: "grant-for-one-command",
         summary: "Implemented it.",
         verdict: "pass",
-        ready: false,
         commit: "a".repeat(40),
         handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
         handoffVersion: 2,

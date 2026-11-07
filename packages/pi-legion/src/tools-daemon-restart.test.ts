@@ -144,11 +144,11 @@ function toolFor(
       kind: role === "architect" ? "architect" : "phase-worker",
       role,
       sessionID: "ses_208",
-      claimToken: `legion-omp-legion-208-${role}`,
-      generation: 5,
       tree,
       issue: "LEGION-208",
       secret: "claim-secret",
+      claimToken: `legion-omp-legion-208-${role}`,
+      generation: 1,
     }),
     controllerGrant: async () => {
       throw new Error("no controller grant expected");

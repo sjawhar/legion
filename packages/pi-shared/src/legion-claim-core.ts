@@ -65,12 +65,12 @@ export async function bootLegionClaim(host: LegionClaimHost): Promise<void> {
     await host.afterRegister?.(claim);
     host.setCapability({
       sessionID: host.registration.sessionId,
-      claimToken: claim.claimToken,
-      generation: claim.generation,
       tree: claim.tree,
       issue: claim.issue,
       role: claim.role,
       secret: claim.secret,
+      claimToken: claim.claimToken,
+      generation: claim.generation,
       promptAgents: claim.promptAgents,
     });
     await host.claimRole(claim.claimToken);

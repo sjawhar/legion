@@ -42,7 +42,7 @@ func recordPodWake(t *testing.T, st *store.Store, res store.PodResume) int64 {
 	var id int64
 	if err := st.Tx(ctx, func(tx pgx.Tx) error {
 		var err error
-		id, err = store.RecordPodWakeTx(ctx, tx, res)
+		id, _, err = store.RecordPodWakeTx(ctx, tx, res)
 		return err
 	}); err != nil {
 		t.Fatalf("record the wake of %s: %v", res.Issue, err)

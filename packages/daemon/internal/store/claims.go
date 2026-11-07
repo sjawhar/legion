@@ -32,10 +32,12 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.serving_assignment,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for, c.delivered_rows,
+	c.last_turn_start, c.last_turn_end,
+	c.last_death_cause, c.last_start_failure, c.last_ready, c.turn_outcomes, c.abandoned_session,
 	c.update_round, c.update_reasons, c.update_opened_at, c.update_tasked_at, c.update_signalled_at,
 	c.update_head, c.update_told_at, c.update_answered_by_turn_end, c.update_reasked_for_push_check,
 	c.update_left_round,
-	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.out_of_memory,
+	d.delivery_id, d.task, d.phase, d.generation, d.assignment, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted, d.prompted, d.out_of_memory,
 	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -103,6 +105,26 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		}
 		locator = encoded
 	}
+	// The window is written as the array it is, never jsonb null: a claim with no report yet reads
+	// back as the empty array the column defaults to.
+	outcomes := []byte("[]")
+	if len(c.TurnOutcomes) > 0 {
+		encoded, err := json.Marshal(c.TurnOutcomes)
+		if err != nil {
+			return fmt.Errorf("put claim %s: encode its turn outcomes: %w", c.Token, err)
+		}
+		outcomes = encoded
+	}
+	// Null is a claim that has abandoned no session; one that has records the session, why and
+	// when, for the fresh agent's first task to name (supervise's abandonedTask).
+	var abandoned []byte
+	if c.Abandoned.Session != "" {
+		encoded, err := json.Marshal(c.Abandoned)
+		if err != nil {
+			return fmt.Errorf("put claim %s: encode its abandoned session: %w", c.Token, err)
+		}
+		abandoned = encoded
+	}
 	var enrollmentID, enrollmentIncarnation *string
 	if c.Enrollment != nil {
 		enrollmentID = &c.Enrollment.ID
@@ -121,11 +143,13 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		boot_token_hash, capability_hash, uncertain_streak, last_start_row,
 		serving_generation, serving_assignment, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
 		plugin_contract, plugin_relaunch_for, delivered_rows,
+		last_turn_start, last_turn_end,
+		last_death_cause, last_start_failure, last_ready, turn_outcomes, abandoned_session,
 		update_round, update_reasons, update_opened_at, update_tasked_at, update_signalled_at,
 		update_head, update_told_at, update_answered_by_turn_end, update_reasked_for_push_check,
 		update_left_round)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
-		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)
+		$27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -144,6 +168,10 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		plugin_relaunch_for = excluded.plugin_relaunch_for,
 		delivered_rows = (select coalesce(array_agg(distinct delivered order by delivered), '{}'::bigint[])
 			from unnest(claims.delivered_rows || excluded.delivered_rows) as delivered),
+		last_turn_start = excluded.last_turn_start, last_turn_end = excluded.last_turn_end,
+		last_death_cause = excluded.last_death_cause, last_start_failure = excluded.last_start_failure,
+		last_ready = excluded.last_ready, turn_outcomes = excluded.turn_outcomes,
+		abandoned_session = excluded.abandoned_session,
 		update_round = excluded.update_round, update_reasons = excluded.update_reasons,
 		update_opened_at = excluded.update_opened_at, update_tasked_at = excluded.update_tasked_at,
 		update_signalled_at = excluded.update_signalled_at, update_head = excluded.update_head,
@@ -161,6 +189,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.LastStartRow, int64(c.ServingGeneration), c.ServingAssignmentID,
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
 		c.PluginContract, c.PluginRelaunchFor, delivered,
+		instant(c.LastTurnStart), instant(c.LastTurnEnd),
+		c.LastDeathCause, c.LastStartFailure, instant(c.LastReady), outcomes, abandoned,
 		c.UpdateRound, c.UpdateReasons, c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt,
 		c.UpdateHead, c.UpdateToldAt, c.UpdateAnsweredByTurnEnd, c.UpdateReaskedForPushCheck,
 		c.UpdateLeftRound,
@@ -341,15 +371,16 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, out_of_memory, kept_decisions)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13::jsonb, '{}'::jsonb))
+		phase, generation, assignment, queued_at, delivered_at, marked_by, confirmed_at, interrupted, prompted, out_of_memory, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, coalesce($14::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		assignment = excluded.assignment, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
-		interrupted = excluded.interrupted, out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
+		interrupted = excluded.interrupted, prompted = excluded.prompted,
+		out_of_memory = excluded.out_of_memory, kept_decisions = excluded.kept_decisions`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.Assignment, d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted, d.OutOfMemory, keptDecisions(d.Kept),
+		instant(d.ConfirmedAt), d.Interrupted, d.Prompted, d.OutOfMemory, keptDecisions(d.Kept),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -415,7 +446,12 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		enrollmentID, enrollmentIC  *string
 		queuedAt, delivered         *time.Time
 		confirmed                   *time.Time
-		interrupted, outOfMemory    *bool
+		interrupted, prompted       *bool
+		outOfMemory                 *bool
+		turnStart, turnEnd          *time.Time
+		lastReady                   *time.Time
+		outcomes                    []byte
+		abandoned                   []byte
 		updateOpened, updateTasked  *time.Time
 		updateSignalled, updateTold *time.Time
 		kept                        []byte
@@ -425,10 +461,12 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &c.ServingAssignmentID, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor, &c.DeliveredRows,
+		&turnStart, &turnEnd,
+		&c.LastDeathCause, &c.LastStartFailure, &lastReady, &outcomes, &abandoned,
 		&c.UpdateRound, &c.UpdateReasons, &updateOpened, &updateTasked, &updateSignalled,
 		&c.UpdateHead, &updateTold, &c.UpdateAnsweredByTurnEnd, &c.UpdateReaskedForPushCheck,
 		&c.UpdateLeftRound,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &outOfMemory, &kept)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &deliveryAssignment, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &prompted, &outOfMemory, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -442,6 +480,23 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	}
 	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
+	if len(outcomes) > 0 {
+		if err := json.Unmarshal(outcomes, &c.TurnOutcomes); err != nil {
+			return supervise.Claim{}, fmt.Errorf("read claim %s: decode its turn outcomes: %w", token, err)
+		}
+		if len(c.TurnOutcomes) == 0 {
+			// The column's empty array is a claim no turn has been reported for, which is the
+			// claim a machine holds before its first report: it reads back as that claim, not as
+			// an empty window of its own.
+			c.TurnOutcomes = nil
+		}
+	}
+	if abandoned != nil {
+		if err := json.Unmarshal(abandoned, &c.Abandoned); err != nil {
+			return supervise.Claim{}, fmt.Errorf("read claim %s: decode its abandoned session: %w", token, err)
+		}
+	}
+	c.LastTurnStart, c.LastTurnEnd, c.LastReady = orZero(turnStart), orZero(turnEnd), orZero(lastReady)
 	c.UpdateOpenedAt, c.UpdateTaskedAt, c.UpdateSignalledAt, c.UpdateToldAt = updateOpened, updateTasked, updateSignalled, updateTold
 	if locator != nil {
 		var loc runtime.Locator
@@ -468,6 +523,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
+			Prompted:    orFalse(prompted),
 			OutOfMemory: orFalse(outOfMemory),
 			Kept:        keptDecisions(kept),
 		}

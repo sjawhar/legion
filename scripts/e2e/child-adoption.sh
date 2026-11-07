@@ -26,7 +26,7 @@
 # unset, kept and printed) keeps the transcript, the nats-server's log and the daemon's own; the
 # run's work directory, the driver binary among it, is under TMPDIR too, since a pod's own disk is
 # small and its TMPDIR names the issue's volume. The run around the driver is
-# lib/live-daemon-proof.sh's, which merged-root-waits.sh and no-required-checks.sh make too.
+# lib/live-daemon-proof.sh's.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)

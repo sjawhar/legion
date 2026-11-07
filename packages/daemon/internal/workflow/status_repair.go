@@ -88,7 +88,7 @@ func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record
 		// enqueueing anything when the record's own Status already holds the status asked for. An
 		// issue whose record says one thing while Dispatch shows another is exactly what this
 		// repair is for, so that guard would drop the write it exists to make.
-		if err := e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: want, ObservedStatus: issue.DispatchStatus}); err != nil {
+		if err := e.enqueue(ctx, tx, issue.Key, record.OrdinaryStatusWrite(want, issue.DispatchStatus, "")); err != nil {
 			return err
 		}
 		recorded := issue.DispatchStatus

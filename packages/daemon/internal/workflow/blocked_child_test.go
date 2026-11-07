@@ -251,9 +251,10 @@ func blockedNow(t *testing.T, pool *pgxpool.Pool) []record.BlockedIssue {
 	return blocked
 }
 
-// The opening of a tree's design gate releases every admitted member it was holding, and the
-// waiting line then starts each of them at its own slot — except one that waits on an unfinished
-// issue of its own, whose own blockers hold it where the gate left it.
+// The opening of a tree's design gate tells every phase holder of the tree and its architect, and
+// releases every admitted member it was holding, and the waiting line then starts each of them at
+// its own slot — except one that waits on an unfinished issue of its own, whose own blockers hold
+// it where the gate left it.
 func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
@@ -273,7 +274,7 @@ func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
 		t.Fatalf("the child that waits on nothing = %s once the line reached it, want planning", got)
 	}
-	assertOutboxKinds(t, pool, []string{"notice", "issue_branch", "dispatch_status", "supervise", "notice", "notice"})
+	assertOutboxKinds(t, pool, []string{"role_message", "role_message", "notice", "issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 }
 
 // An unblocked child whose tree would not start it now is in no line either: the tree's gate is
@@ -365,7 +366,7 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	for _, child := range []string{"LEGION-209", "LEGION-210"} {
 		var writes int
 		if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'dispatch_status' and issue = $1
-			and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'handOver' = 'true'
+			and payload->>'status' = 'todo' and payload->>'observedStatus' = 'todo' and payload->>'kind' = 'hand-over'
 			and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '4'`, child).Scan(&writes); err != nil || writes != 1 {
 			t.Fatalf("%s's hand-over writes = %d, %v; want one fenced on LEGION-208's linger 4", child, writes, err)
 		}

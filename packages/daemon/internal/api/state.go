@@ -456,6 +456,22 @@ type ClaimView struct {
 	// before its first push). It is the worker's word, which nothing verifies.
 	UpdateRound string `json:"updateRound,omitempty"`
 	UpdateHead  string `json:"updateHead,omitempty"`
+	// LastTurnStart and LastTurnEnd are when the claim's agent last began a turn and last ended
+	// one, each absent until that happens: a claim that has worked since this release records
+	// them, and one that last ran before it records neither. They are what says whether a worker
+	// is still making progress — a working claim whose turn began hours ago is wedged, and an idle
+	// one that last ended a turn yesterday has been told nothing since.
+	LastTurnStart *time.Time `json:"lastTurnStart,omitempty"`
+	LastTurnEnd   *time.Time `json:"lastTurnEnd,omitempty"`
+	// LastDeathCause is why the claim's process was last found gone, LastStartFailure why its last
+	// start did not produce a running agent — a launcher that refused it, a failed init container,
+	// a pod that never became ready — and LastReady when its agent last said it could be prompted.
+	// Each is absent until it happens. The two causes are separate because they answer separate
+	// questions, and LastReady is what dates them: a cause older than it is one the agent running
+	// now has already survived.
+	LastDeathCause   string     `json:"lastDeathCause,omitempty"`
+	LastStartFailure string     `json:"lastStartFailure,omitempty"`
+	LastReady        *time.Time `json:"lastReady,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session
@@ -494,11 +510,14 @@ func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
 }
 
 // PhaseView is one phase worker's claim, the handoff of its current phase — the commit its
-// completion reported, the Dispatch handoff record it named — and the rounds the phase has run.
+// completion reported, the Dispatch handoff record it named — and the two counts the phase
+// carries: the passes it has made through its stretch of the workflow, which every backward move
+// counts one of, and the review rounds, which only a review that requested changes counts.
 type PhaseView struct {
 	Claim         ClaimView          `json:"claim"`
 	HandoffCommit string             `json:"handoffCommit,omitempty"`
 	HandoffRecord *HandoffRecordView `json:"handoffRecord,omitempty"`
+	Pass          int                `json:"pass"`
 	Rounds        int                `json:"rounds"`
 }
 
@@ -517,17 +536,23 @@ type HandoffRecordView struct {
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
 // State is whether the pull request is open, merged, or closed unmerged, always one of the three:
-// a merged root waits in awaiting_merge for the rest of its tree, so an operator reads the merge
+// a merged root waits in merging for the rest of its tree, so an operator reads the merge
 // here rather than guessing at it.
+// MergeState is GitHub's own merge state for the head, in GitHub's lowercase spelling, as the
+// daemon's last read of the pull request found it (record.PullRequest.MergeState); absent until
+// that read has run. It is what says whether GitHub would merge the head now ("clean") or holds
+// it on a check or a review the repository requires ("blocked").
+// No CI verdict is shown: a CI result moves no issue, so the daemon keeps none
+// (dispatch://INFRA-714/spec R1), and GitHub's own merge state is what says whether a check the
+// repository requires holds the head.
 type PullRequestView struct {
 	// Repo is the repository (owner/name) the pull request is in, its issue's.
 	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
 	State          string `json:"state"`
-	ChecksVerdict  string `json:"checksVerdict,omitempty"`
+	MergeState     string `json:"mergeState,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
-	FixAttempts    int    `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the

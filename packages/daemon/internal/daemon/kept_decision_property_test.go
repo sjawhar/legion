@@ -1584,8 +1584,8 @@ func (r *keptRun) handOverMemberErr(member *keptTree, parent string, withRun boo
 			Generation: r.root.issue.Generation}); err != nil {
 			return err
 		}
-		row, err := record.NewOutboxRow(member.key, record.StatusWrite{Status: "todo", ObservedStatus: member.issue.Status,
-			HandOver: true, HandOverTree: r.root.issue.Tree, HandOverLinger: r.root.issue.Generation}, now)
+		row, err := record.NewOutboxRow(member.key, record.HandOverStatusWrite("todo", member.issue.Status,
+			r.root.issue.Tree, r.root.issue.Generation), now)
 		if err != nil {
 			return err
 		}

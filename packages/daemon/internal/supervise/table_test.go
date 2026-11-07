@@ -144,6 +144,7 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamHello":          {StreamHello{}},
 		"StreamTurnStart":      {StreamTurnStart{}},
 		"StreamTurnEnd":        {StreamTurnEnd{}},
+		"IssueTurnEnded":       {IssueTurnEnded{}},
 		"StreamPromptResult":   {StreamPromptResult{}},
 		"StreamClosed":         {StreamClosed{}},
 		"StreamLateRefusal":    {StreamLateRefusal{}},
@@ -169,6 +170,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestForgetSession": {RequestForgetSession{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
+		"RequestTurnOutcome":   {RequestTurnOutcome{}},
 	}
 	for _, kind := range timers {
 		byType["Timer"] = append(byType["Timer"], Timer{Kind: kind})
@@ -282,6 +284,8 @@ func fenced(ev Event, c Claim) Event {
 		return StreamTurnStart{Claim: c.Token}
 	case StreamTurnEnd:
 		return StreamTurnEnd{Claim: c.Token}
+	case IssueTurnEnded:
+		return IssueTurnEnded{Claim: c.Token}
 	case StreamPromptResult:
 		return StreamPromptResult{Claim: c.Token, DeliveryID: c.Pending.ID, AgentInvoked: true}
 	case StreamClosed:
@@ -328,6 +332,8 @@ func fenced(ev Event, c Claim) Event {
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
 		return RequestExit{Claim: c.Token, Generation: c.Generation, Session: session, Reason: "done"}
+	case RequestTurnOutcome:
+		return RequestTurnOutcome{Claim: c.Token, Generation: c.Generation, Sequence: 1}
 	}
 	panic("unhandled sample")
 }
@@ -431,7 +437,7 @@ func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
 		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit,
-		PodUpdateSignalled:
+		RequestTurnOutcome, PodUpdateSignalled:
 		return true
 	}
 	return false

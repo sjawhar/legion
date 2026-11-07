@@ -1,0 +1,12 @@
+-- 20261029120900_reparent_told.up.sql — the parent a root was told it stays its own tree under
+-- (dispatch://INFRA-714 R3).
+--
+-- A root that ran as a tree of its own is adopted by no release of children and no admission
+-- sweep, however a person re-parents it: it stays its own tree. The daemon says so once, on the
+-- issue and to the architect of the tree it was moved under, and the parent it said it for is kept
+-- here, so every later event under that same parent repeats nothing while a move under another
+-- live tree is told anew (record.Issue.ToldParent, workflow's tellReparented).
+--
+-- Null is a root never told, which is every row this migration leaves behind; the daemon reads it
+-- as the empty string.
+alter table issues add column told_parent text;

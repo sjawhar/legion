@@ -31,7 +31,7 @@ func TestAMergedChildClosesWhenTheIssueBeneathItLeaves(t *testing.T) {
 	seedSlot(t, pool, record.Slot{Issue: root, Index: 0})
 	rootKey, childKey := root, child
 	seedIssue(t, pool, record.Issue{Key: child, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
-		Tree: root, Parent: &rootKey, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 3,
+		Tree: root, Parent: &rootKey, Project: "LEGION", Title: "child", Phase: phase.Merging, Generation: 3,
 		Status: "retro", Rank: "V1", LastDispatchSeq: 1})
 	seedIssue(t, pool, record.Issue{Key: grandchild, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: root, Parent: &childKey, Project: "LEGION", Title: "grandchild", Phase: phase.Implementing, Generation: 3,
@@ -41,7 +41,7 @@ func TestAMergedChildClosesWhenTheIssueBeneathItLeaves(t *testing.T) {
 
 	apply := applyFacts(t, pool, engine)
 	apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge"})
-	if at := issueAt(t, pool, child); at != phase.AwaitingMerge {
+	if at := issueAt(t, pool, child); at != phase.Merging {
 		t.Fatalf("%s stands at %s after its merge, want awaiting_merge while %s is still in the workflow", child, at, grandchild)
 	}
 

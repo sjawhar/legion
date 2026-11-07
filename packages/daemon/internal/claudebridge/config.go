@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,13 @@ type Config struct {
 	SessionID string
 	Seed      bool
 	Title     string
+	// DaemonURL, BootTokenFile and Generation are what the bridge reports each turn's outcome
+	// with (turnoutcome.go): the daemon's API, the launch's own boot token file, and the launch
+	// generation, as the pane is told them (LEGION_DAEMON_URL, LEGION_BOOT_TOKEN_FILE,
+	// LEGION_GENERATION). A bridge run outside a pane has none of them and reports nothing.
+	DaemonURL     string
+	BootTokenFile string
+	Generation    uint64
 	// Stdin carries the daemon's frames from the shim, Stdout the frames back to it. Log receives
 	// the bridge's own lines and Claude Code's stderr: what the pane shows.
 	Stdin  io.Reader
@@ -57,8 +65,10 @@ type Config struct {
 }
 
 // Configure reads a bridge's configuration from the claude argv and the environment the runtime
-// gave it: the session from argv and the seed title from LEGION_ROLE and LEGION_ISSUE. Every
-// refusal names what is missing.
+// gave it: the session from argv, the seed title from LEGION_ROLE and LEGION_ISSUE, and the three
+// values a turn outcome is reported with. Every refusal names what is missing. A pane that names
+// no daemon, boot token file or generation is not refused: the bridge runs and reports no turn,
+// which is what a bridge run by hand does.
 func Configure(argv, env []string) (Config, error) {
 	if len(argv) == 0 {
 		return Config{}, errors.New("no claude command to run after --")
@@ -68,10 +78,13 @@ func Configure(argv, env []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		Argv:      argv,
-		Env:       env,
-		SessionID: session,
-		Seed:      fresh,
+		Argv:          argv,
+		Env:           env,
+		SessionID:     session,
+		Seed:          fresh,
+		DaemonURL:     envValue(env, "LEGION_DAEMON_URL"),
+		BootTokenFile: envValue(env, "LEGION_BOOT_TOKEN_FILE"),
+		Generation:    generationOf(envValue(env, "LEGION_GENERATION")),
 	}
 	if fresh {
 		role, issue := envValue(env, "LEGION_ROLE"), envValue(env, "LEGION_ISSUE")
@@ -81,6 +94,17 @@ func Configure(argv, env []string) (Config, error) {
 		cfg.Title = "Legion " + role + " · " + issue
 	}
 	return cfg, nil
+}
+
+// generationOf is LEGION_GENERATION as the launch generation a report names, and 0 for a pane
+// that names none or names one that is not a launch's number: a launch is generation 1 or later,
+// and 0 turns the reporting off rather than reporting turns of a generation no launch has.
+func generationOf(value string) uint64 {
+	generation, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return generation
 }
 
 // sessionOf is the session args name: --session-id's (fresh) or --resume's, each as `--flag value`

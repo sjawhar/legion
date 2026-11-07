@@ -605,7 +605,7 @@ func TestARootAPersonsApprovalHandsOverIsToldNoStaleApproval(t *testing.T) {
 			handovers = append(handovers, write)
 		}
 	}
-	if want := []record.StatusWrite{{Status: "todo", ObservedStatus: "backlog", PersonHandover: true}}; !reflect.DeepEqual(handovers, want) {
+	if want := []record.StatusWrite{record.PersonHandoverStatusWrite("todo", "backlog")}; !reflect.DeepEqual(handovers, want) {
 		t.Fatalf("status writes for LEGION-ROOT = %#v, want the person's handover %#v", handovers, want)
 	}
 	readmitRoot(t, pool, admission)

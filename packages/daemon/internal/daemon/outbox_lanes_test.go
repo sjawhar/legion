@@ -155,6 +155,9 @@ func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issu
 func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
+func (d *postingDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
 }
@@ -222,6 +225,9 @@ func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispa
 	d.status = status
 	d.landed = append(d.landed, status)
 	return dispatch.Issue{}, nil
+}
+func (d *laneBoard) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")
@@ -567,48 +573,6 @@ func TestAReleasedNoticeRunsOnItsLaneWhenTheReleaseCommits(t *testing.T) {
 	}
 }
 
-// A READY merge GitHub refuses for good tells the architect as the refusal commits: the
-// ready_merge row's finish and its merge-refused notice are one transaction through the workflow's
-// store (projectRecords), whose commit wakes the notice's board lane, so the notice is published
-// with no sweep fired and no row written outside a commit scope. Written unscoped, the wake comes
-// before the commit and the lane finds nothing unless the commit wins the race, so the write's
-// ERROR line (wakeOnCommit) is the witness the test holds, beside the publish and the quiet sweep.
-func TestAREADYMergeRefusalsNoticeRunsOnTheBoardLaneAsTheRefusalCommits(t *testing.T) {
-	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") },
-		refusedAnswer("Squash merges are not allowed on this repository."))
-	pool := isolatedOutboxPool(t)
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	architectClaim(t, sup, "LEGION-208", supervise.StateWorking)
-	clock := microClock()
-	publisher := &holderPublisher{}
-	var logged syncBuffer
-	log := slog.New(slog.NewTextHandler(&logged, nil))
-	runner := mergeRunner(pool, nil, github.url, log, clock.Now)
-	runner.supervisor, runner.notices = sup, publisher
-	runner.records = projectRecords{Store: record.NewStore(), project: "LEGION", wake: runner.wake, log: log}
-	seedReadyMerge(t, pool, runner.records, "LEGION-208", awaitingREADY)
-	runLanes(t, runner, clock)
-
-	commitRows(t, pool, runner.records, "ready", mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock.Now()))
-	testwait.Eventually(t, "the merge-refused notice was published and both rows finished", func() bool {
-		_, delivered := publisher.snapshot()
-		return len(delivered) == 1 && outboxRows(t, pool) == 0
-	})
-	_, delivered := publisher.snapshot()
-	if kind := delivered[0].payload.(record.Notice).Kind; kind != "merge-refused" || delivered[0].topic != architectTopic(t, "LEGION-208") {
-		t.Fatalf("delivered %s to %s, want merge-refused to LEGION-208's architect", kind, delivered[0].topic)
-	}
-	if merges, _ := github.merged(); merges != 1 {
-		t.Fatalf("merge submissions = %d, want the one GitHub refused", merges)
-	}
-	if _, sweeps := clock.armed(outboxLease); sweeps != 1 {
-		t.Fatalf("sweep timers armed = %d, want the one Run armed and never fired", sweeps)
-	}
-	if strings.Contains(logged.String(), "written outside a commit scope") {
-		t.Fatalf("the refusal's notice was written outside a commit scope:\n%s", logged.String())
-	}
-}
-
 // A start blocked on the runtime holds only its own issue's lifecycle rows. Another issue's status
 // write made while it blocks lands at once; the issue's own second lifecycle row, written while
 // its start blocks, waits — the lanes run on around it — and runs once the start has returned.
@@ -618,7 +582,7 @@ func TestAStartBlockedOnTheRuntimeHoldsOnlyItsOwnIssuesLifecycleLane(t *testing.
 
 	status := func(t *testing.T) record.OutboxRow {
 		t.Helper()
-		return mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, tree.clock.Now())
+		return mustOutboxRow(t, "LEGION-209", record.OrdinaryStatusWrite("in_progress", "todo", ""), tree.clock.Now())
 	}
 	tree.commit(t, "other-status", status(t))
 	testwait.Eventually(t, "the other issue's status landed", func() bool {
@@ -656,7 +620,7 @@ func TestACommitOnABlockedLifecycleLanesIssueReturnsAtOnceAndItsBoardRowRuns(t *
 	tree.holdArchitectStart(t)
 
 	began := time.Now()
-	tree.commit(t, "own-status", mustOutboxRow(t, tree.root.Key, record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, tree.clock.Now()))
+	tree.commit(t, "own-status", mustOutboxRow(t, tree.root.Key, record.OrdinaryStatusWrite("in_progress", "todo", ""), tree.clock.Now()))
 	if took := time.Since(began); took > 2*time.Second {
 		t.Fatalf("the fact took %s to commit with the issue's lifecycle lane blocked, want it back within 2s", took)
 	}
@@ -677,8 +641,8 @@ func TestTheLaneWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.
 	records := record.NewStore()
 	clock := microClock()
 	now := clock.Now()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &laneBoard{status: "in_progress", failures: 1}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, log: quietLogger()}
 	runLanes(t, runner, clock)
@@ -805,7 +769,7 @@ func TestALaneRenewsItsRunningRowsLeaseAndNoSweepClaimsItAgain(t *testing.T) {
 	var released sync.Once
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	runLanes(t, runner, clock, func() { released.Do(func() { close(release) }) })
 	<-entered
 
@@ -856,7 +820,7 @@ func TestTheSweepAfterALeasesLapseStartsItsLaneAgainWithoutARestart(t *testing.T
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
 	runLanes(t, runner, clock)
 
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = 'a-runner-that-died', lease_until = $1", clock.Now().Add(outboxLease/2)); err != nil {
 		t.Fatalf("leave a lease nobody holds on the row: %v", err)
 	}
@@ -886,7 +850,7 @@ func TestRunReturnsOnlyAfterItsLanesAndSettlesTheRowAStopInterrupted(t *testing.
 	var released sync.Once
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release, fail: errors.New("dispatch: context canceled")}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock.Now, clock: clock, log: quietLogger()}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now()))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

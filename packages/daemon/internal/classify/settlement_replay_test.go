@@ -186,9 +186,9 @@ type verdictChange struct {
 }
 
 // failingVerdict is what the failures the fence keeps say of the head: none before any settlement
-// is applied, red while a check is named failing, green otherwise. It is the settlement's half of
-// the verdict, which the base branch's required set then judges (HeadVerdict); LEGION-152 was a
-// failure the fence lost and found again.
+// is applied, red while a check is named failing, green otherwise. It is the settlement's own
+// reading, which no rule of the daemon's judges since (dispatch://INFRA-714/spec R1); LEGION-152
+// was a failure the fence lost and found again.
 func failingVerdict(pr record.PullRequest) string {
 	switch {
 	case pr.CheckRuns == nil:
@@ -205,7 +205,7 @@ func failingVerdict(pr record.PullRequest) string {
 func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.PullRequest, []verdictChange) {
 	var changes []verdictChange
 	for _, settlement := range settlements {
-		settled, applied, _ := ApplySettlement(pr, settlement.candidate)
+		settled, applied := ApplySettlement(pr, settlement.candidate)
 		if !applied {
 			continue
 		}
@@ -304,148 +304,10 @@ func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T
 	if want := []verdictChange{{"title fails", "red"}, {"title passes", "green"}}; !slices.Equal(changes, want) {
 		t.Fatalf("verdicts changed %v, want %v", changes, want)
 	}
-	if want := []record.AttemptRun{{Name: "ci", ID: 30}, {Name: "title", ID: 11}}; !slices.Equal(pr.CheckRuns, want) {
+	// Each run of the fence carries what it concluded, which is what retires the title failure:
+	// title's passing run outranks it, so the name is green however the older run ended.
+	want := []record.AttemptRun{{Name: "ci", ID: 30, Conclusion: record.RunSucceeded}, {Name: "title", ID: 11, Conclusion: record.RunSucceeded}}
+	if !slices.Equal(pr.CheckRuns, want) {
 		t.Fatalf("fence = %v, want %v", pr.CheckRuns, want)
-	}
-}
-
-// pr1084PassSettlement is the settlement the daemon's two-minute pass builds from #1084's check
-// runs on head 2257aaef once every one of them has completed, with no listener settlement recorded
-// (the daemon's listenerSettlement): each check's highest-id run, at PassGeneration.
-func pr1084PassSettlement(t *testing.T) SettlementCandidate {
-	t.Helper()
-	candidate, complete := listenerView(pr1084Head2257aaef, "23:59:59", false)
-	if !complete {
-		t.Fatal("#1084's runs are not all complete at the end of the day")
-	}
-	candidate.Head, candidate.Generation, candidate.Snapshot = "2257aaef", PassGeneration, "pass"
-	return candidate
-}
-
-// A head whose every listener settlement was lost is settled by the pass from the same check runs
-// GitHub holds, and the pass's settlement gives it the verdict, the fence and the failures the
-// listener's settlements of those runs give it.
-func TestThePassSettlementOfARealHeadGivesTheListenersVerdict(t *testing.T) {
-	listened, _ := settleAll(freshHead("2257aaef"), pr1084Settlements(false))
-	passed, applied, _ := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
-	if !applied || passed.CheckedHead != "2257aaef" || passed.Generation != PassGeneration {
-		t.Fatalf("the pass's settlement applied %t: %+v, want it recorded for 2257aaef at the pass's generation", applied, passed)
-	}
-	if failingVerdict(passed) != "green" || failingVerdict(passed) != failingVerdict(listened) {
-		t.Fatalf("the pass's settlement says %s, the listener's %s; want both green", failingVerdict(passed), failingVerdict(listened))
-	}
-	if !slices.Equal(passed.CheckRuns, listened.CheckRuns) || !slices.Equal(passed.Failing, listened.Failing) || !slices.Equal(passed.Cancelled, listened.Cancelled) {
-		t.Fatalf("the pass's fence %v failing %v cancelled %v, want the listener's %v failing %v cancelled %v",
-			passed.CheckRuns, passed.Failing, passed.Cancelled, listened.CheckRuns, listened.Failing, listened.Cancelled)
-	}
-}
-
-// The listener's settlements of a head the pass settled arrive late (a redelivery, or a listener
-// that caught up), and none undoes what the pass learned: one with the same run of every check is a
-// duplicate, which gives the record the listener's generation and snapshot as its fence and changes
-// no run and no outcome; an earlier one, lower on some check and higher on none, is stale; and one
-// with a higher run of one check takes that check's run and outcome alone, even when it is lower on
-// another check, where two listener settlements would conflict and the newer run be lost.
-func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(t *testing.T) {
-	published := pr1084Settlements(false)
-	passed, _, _ := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
-	last := published[len(published)-1].candidate
-	last.Head = "2257aaef"
-
-	t.Run("equal ids are a duplicate that adopts the listener's fence", func(t *testing.T) {
-		if got := ClassifySettlement(passed, last); got != SettlementDuplicate {
-			t.Fatalf("the listener's settlement of the same runs is %s, want duplicate", got)
-		}
-		adopted, applied, fenced := ApplyCheckSettlement(passed, last)
-		if applied || !fenced || adopted.Generation != last.Generation || adopted.Snapshot != last.Snapshot {
-			t.Fatalf("the duplicate applied %t, adopted the fence %t, at generation %d snapshot %q, want nothing applied and the fence adopted at the listener's %d %q",
-				applied, fenced, adopted.Generation, adopted.Snapshot, last.Generation, last.Snapshot)
-		}
-		if !slices.Equal(adopted.CheckRuns, passed.CheckRuns) || !slices.Equal(adopted.Failing, passed.Failing) || !slices.Equal(adopted.Cancelled, passed.Cancelled) {
-			t.Fatalf("the duplicate changed the fence to %v failing %v, want the pass's %v failing %v", adopted.CheckRuns, adopted.Failing, passed.CheckRuns, passed.Failing)
-		}
-		again := last
-		again.Generation, again.Snapshot = last.Generation+1, "next"
-		if got := ClassifySettlement(adopted, again); got != SettlementNewer {
-			t.Fatalf("the listener's next generation of the same runs is %s against the adopted fence, want newer", got)
-		}
-	})
-
-	t.Run("lower ids are stale", func(t *testing.T) {
-		for _, earlier := range published[:len(published)-1] {
-			if got := ClassifySettlement(passed, earlier.candidate); got != SettlementStale {
-				t.Fatalf("the listener's settlement %s is %s, want stale", earlier.label, got)
-			}
-		}
-		if pr, changes := settleAll(passed, published[:len(published)-1]); len(changes) != 0 || !slices.Equal(pr.CheckRuns, passed.CheckRuns) || pr.Generation != PassGeneration {
-			t.Fatalf("the earlier settlements changed the verdict %v and the fence to %v at %d, want neither changed", changes, pr.CheckRuns, pr.Generation)
-		}
-	})
-
-	t.Run("a higher id for one name merges that name", func(t *testing.T) {
-		rerun := last
-		rerun.CheckRuns = slices.Clone(last.CheckRuns)
-		var titleID, dispatchID int64
-		for i, run := range rerun.CheckRuns {
-			switch run.Name {
-			case "pr-title":
-				rerun.CheckRuns[i].ID++
-				titleID = rerun.CheckRuns[i].ID
-			case "dispatch":
-				dispatchID = run.ID
-				rerun.CheckRuns[i].ID = 103893940833 // dispatch's first attempt, older than the pass's
-			}
-		}
-		rerun.Failing = []string{"pr-title"}
-		if got := ClassifySettlement(passed, rerun); got != SettlementNewer {
-			t.Fatalf("a settlement higher on pr-title and lower on dispatch is %s, want newer", got)
-		}
-		merged, applied, _ := ApplySettlement(passed, rerun)
-		if !applied || !slices.Equal(merged.Failing, []string{"pr-title"}) || merged.Generation != PassGeneration {
-			t.Fatalf("the merge applied %t failing %v at %d, want pr-title failing and the fence still the pass's", applied, merged.Failing, merged.Generation)
-		}
-		for _, run := range merged.CheckRuns {
-			if (run.Name == "pr-title" && run.ID != titleID) || (run.Name == "dispatch" && run.ID != dispatchID) {
-				t.Fatalf("the merged fence %v, want pr-title's rerun %d and the pass's dispatch run %d", merged.CheckRuns, titleID, dispatchID)
-			}
-		}
-		covering := last
-		covering.CheckRuns = slices.Clone(last.CheckRuns)
-		for i, run := range covering.CheckRuns {
-			if run.Name == "pr-title" {
-				covering.CheckRuns[i].ID = titleID
-			}
-		}
-		covering.Failing = []string{"pr-title"}
-		if merged, applied, _ := ApplySettlement(passed, covering); !applied || merged.Generation != last.Generation || merged.Snapshot != last.Snapshot ||
-			!slices.Equal(merged.Failing, []string{"pr-title"}) {
-			t.Fatalf("a settlement higher on pr-title and equal on the rest applied %t at %d %q failing %v, want the listener's fence %d %q and pr-title failing",
-				applied, merged.Generation, merged.Snapshot, merged.Failing, last.Generation, last.Snapshot)
-		}
-	})
-}
-
-// While a head run is open the listener's duplicate of the pass's settlement is a step of it like
-// any other, and the replay adopts the listener's fence; the judgement is unchanged, so the
-// workflow decides nothing again.
-func TestTheListenersDuplicateOfThePassSettlementDecidesNothingInAHeadRun(t *testing.T) {
-	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
-	pr := stored(t, AdvancePullRequestHead(red, Arrival{}, "h3"))
-	if pr.Run == nil {
-		t.Fatal("h3 arriving before its push opened no head run")
-	}
-	pass := SettlementCandidate{Head: "h3", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: PassGeneration, Snapshot: "pass",
-		Failing: []string{}, Cancelled: []string{}}
-	settled, changed, _ := ApplyCheckSettlement(pr, pass)
-	if !changed || HeadVerdict(settled) != "green" || settled.Generation != PassGeneration {
-		t.Fatalf("the pass's settlement changed %t to %s at %d, want h3 green at the pass's generation", changed, HeadVerdict(settled), settled.Generation)
-	}
-	listener := pass
-	listener.Generation, listener.Snapshot = 4, "listener"
-	adopted, changed, fenced := ApplyCheckSettlement(stored(t, settled), listener)
-	if changed || !fenced || adopted.Generation != 4 || adopted.Snapshot != "listener" || HeadVerdict(adopted) != "green" {
-		t.Fatalf("the listener's duplicate changed %t, adopted the fence %t, to %s at %d %q, want nothing decided and the fence adopted at 4 listener",
-			changed, fenced, HeadVerdict(adopted), adopted.Generation, adopted.Snapshot)
 	}
 }

@@ -257,18 +257,15 @@ func assertTheSlotDeliversOnce(t *testing.T, pool *pgxpool.Pool, role claim.Role
 // place (record.Store.ReplaceOwedStart), keeping its id — the waiting line's ordering key — and
 // carrying the later task, so one task is delivered when the slot comes.
 func TestEveryReturnAppliesAtOnceAndOwesItsWorkerOneStart(t *testing.T) {
-	const required = "pr-checks-result"
 	readyRoot := func(t *testing.T, pool *pgxpool.Pool, at phase.Phase, status string) {
 		t.Helper()
 		seedIssue(t, pool, record.Issue{Key: returnIssue, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 			Tree: returnIssue, Project: "LEGION", Title: "root", Phase: at, Generation: 1, Status: status, Rank: "U", HandedOver: true})
 		seedTreeLifecycle(t, pool, returnIssue)
 		seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: returnIssue, Repo: "sjawhar/legion",
-			Number: 42, Branch: "legion/" + returnIssue, HeadSHA: "head", Required: []string{required}})
+			Number: 42, Branch: "legion/" + returnIssue, HeadSHA: "head"})
 		seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
 	}
-	red := intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "red", Failing: []string{required}}
 	for _, tc := range []struct {
 		name string
 		// seed records the issue as the return finds it, with the phases row of the role the
@@ -289,58 +286,14 @@ func TestEveryReturnAppliesAtOnceAndOwesItsWorkerOneStart(t *testing.T) {
 		task string
 	}{
 		{
-			name: "a red head",
-			seed: func(t *testing.T, pool *pgxpool.Pool) {
-				readyRoot(t, pool, phase.Testing, "testing")
-				seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleImplementer, Claim: "implement-claim", Assignment: servedAssignment})
-			},
-			fact: red, engine: func() *Engine { return testEngine(config.DesignGateRootIssues, nil) },
-			role: claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "CI is red at head",
-		},
-		{
 			name: "a head that conflicts with its base",
 			seed: func(t *testing.T, pool *pgxpool.Pool) {
-				readyRoot(t, pool, phase.AwaitingMerge, "retro")
+				readyRoot(t, pool, phase.Merging, "retro")
 				seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleImplementer, Claim: "implement-claim", Assignment: servedAssignment})
 			},
-			fact:   intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting},
-			engine: func() *Engine { return readyEngine("") },
-			role:   claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "the head conflicts with main",
-		},
-		{
-			name: "the merge queue's failed_checks removal",
-			seed: func(t *testing.T, pool *pgxpool.Pool) {
-				readyRoot(t, pool, phase.AwaitingMerge, "retro")
-				seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleImplementer, Claim: "implement-claim", Assignment: servedAssignment})
-			},
-			fact: intake.MergeFailed{Issue: returnIssue, Number: 42, Head: "head",
-				Reason: "the merge queue took pull request #42 out at READY's head head (failed_checks): integration failed"},
-			engine: func() *Engine { return readyEngine("") },
-			role:   claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "failed_checks",
-		},
-		{
-			name: "a push past READY",
-			seed: func(t *testing.T, pool *pgxpool.Pool) {
-				readyRoot(t, pool, phase.AwaitingMerge, "retro")
-				seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleImplementer, Claim: "implement-claim", Assignment: servedAssignment})
-			},
-			fact:   intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/" + returnIssue, HeadSHA: "moved"},
-			engine: func() *Engine { return readyEngine("") },
-			role:   claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "its head moved from head",
-		},
-		{
-			name: "sign_off, and a red head before the slot comes",
-			seed: func(t *testing.T, pool *pgxpool.Pool) {
-				seedAccepting(t, pool)
-				seedTreeLifecycle(t, pool, returnIssue)
-				seedPhase(t, pool, record.PhaseRow{Issue: returnIssue, Role: claim.RoleImplementer, Claim: "implement-claim",
-					HandoffCommit: "implement-1", Assignment: servedAssignment})
-			},
-			fact: intake.SignOff{Issue: returnIssue},
-			second: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-				CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 1}}, Generation: 1, Snapshot: "red", Failing: []string{acceptingRequired}},
+			fact:   intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", Base: "main", Mergeable: record.MergeabilityConflicting},
 			engine: func() *Engine { return testEngine(config.DesignGateRootIssues, nil) },
-			role:   claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "CI is red at head",
+			role:   claim.RoleImplementer, want: phase.Implementing, status: "in_progress", task: "the head conflicts with main",
 		},
 		{
 			name: "a backward move",

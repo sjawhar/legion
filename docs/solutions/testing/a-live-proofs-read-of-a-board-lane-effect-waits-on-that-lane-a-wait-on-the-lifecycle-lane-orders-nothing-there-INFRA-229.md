@@ -8,7 +8,7 @@ tags:
   - flake
   - daemon-tests
 date: 2026-10-25
-status: active
+status: superseded in part by INFRA-714 — the `ready_merge` lane this note's example waits on is deleted with the daemon's merge submission; the rule, that a read of a lane's effect waits on that lane, stands for every lane that is left
 module: packages/daemon/internal/daemon
 related_issues:
   - "INFRA-229"

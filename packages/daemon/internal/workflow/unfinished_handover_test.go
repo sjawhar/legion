@@ -82,7 +82,7 @@ func TestTheHeldGrandchildIsHandedOverWhateverBecomesOfItsAcceptedParent(t *test
 				Tree: root, Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 7,
 				Status: "in_progress", DispatchStatus: "in_progress", Rank: "U", LastDispatchSeq: 1})
 			seedIssue(t, pool, record.Issue{Key: child, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
-				Tree: root, Parent: &rootKey, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 7,
+				Tree: root, Parent: &rootKey, Project: "LEGION", Title: "child", Phase: phase.Merging, Generation: 7,
 				Status: "retro", DispatchStatus: "retro", Rank: "V1", LastDispatchSeq: 1})
 			seedIssue(t, pool, record.Issue{Key: held, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 				Tree: root, Parent: &childKey, Project: "LEGION", Title: "held", Phase: phase.Admitted, Generation: 7,

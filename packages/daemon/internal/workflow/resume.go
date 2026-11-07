@@ -53,6 +53,9 @@ import (
 // line's first part ahead of its own root. It is the lifecycle rather than the root's slot
 // because a slot now counts one issue at work, and a running tree holds none of its own while
 // its issues wait in the line.
+// A phase its own terminating fact has already met is given no owner either (PhaseFinished): a
+// merged root stands in merging for as long as the rest of its tree runs, and resuming its merger
+// there would hand it the same phase again at every boot, for days.
 // Accepting's owner is the tree's architect, which admission starts with the tree, so no issue
 // there is given one. Each owner is given the start admission gives a re-admitted tree's
 // mid-phase child, through the outbox's start like every other start (StartOrOwe): its claim is
@@ -111,6 +114,13 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		// itself waiting in the line for the tree to be opened, whose architect's first task comes
 		// with its promotion.
 		if _, runs := running[root.Key]; !runs {
+			continue
+		}
+		finished, err := e.phaseFinished(ctx, tx, issue)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if finished {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)

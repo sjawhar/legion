@@ -50,7 +50,7 @@ func TestRerunChildJudgesTheTreeFromOneRead(t *testing.T) {
 	if recorder := h.request(http.MethodPost, "/legion/v1/children/park", map[string]any{"grantId": architect.grant(t), "issue": statusChild}, nil); recorder.Code != http.StatusOK {
 		t.Fatalf("park = %d %s", recorder.Code, recorder.Body)
 	}
-	acceptPhase(t, h, statusRoot, phase.AwaitingMerge)
+	acceptPhase(t, h, statusRoot, phase.Merging)
 
 	issues, trees := counting.issues.Load(), counting.trees.Load()
 	recorder := h.request(http.MethodPost, "/legion/v1/children/rerun", map[string]any{"grantId": architect.grant(t), "issue": statusChild}, nil)

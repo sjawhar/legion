@@ -1,0 +1,24 @@
+-- 20261029121100_claim_turn_outcomes.up.sql — the newest turns a claim's agent ended, as the producer that
+-- ended each one reported it: the window the daemon derives a run of refused turns from.
+--
+-- A provider that refuses a session refuses it again every turn, and nothing the daemon counted
+-- said so: an implementer's every turn was refused at about 226k tokens of context, its claim never
+-- failed, and only a hand edit of the claims store moved its issue to a new session
+-- (dispatch://INFRA-714). Each turn's end is now reported by the one producer that sees it —
+-- pi-legion's agent_end hook for Oh My Pi, the Claude bridge for Claude Code — with the producer's
+-- own sequence within the launch generation, and the daemon fails the claim once the run of
+-- refusals reaches launch_failure_limit.
+--
+-- The column holds the reports themselves rather than a count, keyed by (generation, sequence), so
+-- that every derivation reads what arrived and no count is ever mutated: a report that arrives late
+-- or out of order lands in its own place, and the run it leaves is the run the same reports in
+-- order leave. It is bounded to the newest launch_failure_limit reports (supervise's
+-- recordTurnOutcome), since a longer run cannot exist — the claim fails the moment the run reaches
+-- the limit — so a handful of small objects is the whole history the derivation can read, rather
+-- than a turn-by-turn log of a week's work that nothing reads.
+--
+-- jsonb on the claim's own row, rather than a table of its own, because the window is written in
+-- the same decision as the state it may fail the claim into: a separate table would need the two
+-- writes to commit together to say the same thing. Every existing row takes the empty array, which
+-- is "no turn reported", and the first report of each claim fills it.
+alter table claims add column turn_outcomes jsonb not null default '[]'::jsonb;

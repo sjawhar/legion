@@ -11,6 +11,7 @@ import {
   type ReadyInput,
   retryWhileDaemonRestarts,
 } from "./daemon-client";
+import { type ClaimCapability, executePhaseOp } from "./legion-phase-ops";
 
 /** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
 function daemonFixture(name: string): Record<string, unknown> {
@@ -68,6 +69,7 @@ test("registers with the claim wire's request and returns the claim the daemon i
 
 test("refuses a registration answer that drops a field the daemon API contract requires, without quoting its secret", async () => {
   const registered = daemonFixture("register.json");
+
   const client = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() => Response.json(without(registered, "promptAgents"))).fetch
@@ -265,6 +267,47 @@ test("reads the daemon's state over a bodyless GET", async () => {
   ]);
 });
 
+// A session runs the release before its daemon's through every roll, so the state it reads can
+// carry fields this build has no schema line for. read_record is what every phase worker reads its
+// own record with, so it is what proves such a response is not merely parsed but used.
+test("a state from a daemon a release ahead parses without its unknown top-level and nested fields, and read_record reads the record out of it", async () => {
+  const state = daemonFixture("state.json") as { issues: Record<string, unknown> };
+  const record = state.issues["LEGION-208"] as Record<string, unknown>;
+  const ahead = {
+    ...state,
+    runnerPools: [{ name: "gvisor", size: 4 }],
+    issues: { ...state.issues, "LEGION-208": { ...record, reparentedAt: "2026-10-30T09:00:00Z" } },
+  };
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json(ahead)).fetch
+  );
+  const claim: ClaimCapability = {
+    sessionID: "ses_implementer_208",
+    tree: "LEGION-208",
+    issue: "LEGION-208",
+    role: "implementer",
+    secret: "U2VjcmV0",
+    claimToken: "legion-legion-legion-208-implementer",
+    generation: 1,
+  };
+
+  await expect(client.state()).resolves.toEqual(state as never);
+  await expect(
+    executePhaseOp(
+      {
+        daemon: client,
+        claim,
+        handoffReport: async () => ({ commit: "a".repeat(40) }),
+        branchHead: async () => {
+          throw new Error("no branch-head lookup expected");
+        },
+      },
+      { op: "read_record", issue: "LEGION-208" }
+    )
+  ).resolves.toEqual({ record });
+});
+
 test("a state read hands fetch its caller's signal, and an abort ends a read the daemon never answers", async () => {
   const handed: (AbortSignal | null | undefined)[] = [];
   const hung = (async (_input, init) => {
@@ -306,8 +349,7 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       "grant.json",
     ],
     // An implementing round's completion names the Dispatch handoff record and the pushed tip,
-    // which the legion tool found in the pane; the daemon answers the note READY leaves for a pull
-    // request already merged.
+    // which the legion tool found in the pane; the daemon answers an empty object.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",
@@ -315,7 +357,6 @@ test("posts every Stage 3 workflow request through its matching route", async ()
         grantId: "grant-208",
         summary: "done",
         verdict: "",
-        ready: false,
         commit: "abc123",
         handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
         handoffVersion: 2,
@@ -494,7 +535,6 @@ test("the registration, the grant and the handoff completion are read whole when
     grantId: "grant-208",
     summary: "done",
     verdict: "",
-    ready: false,
     commit: "abc123",
     handoffId: "5b1f0c2e-9d7a-4c3b-8e61-2f4a9d0c7b13",
     handoffVersion: 2,

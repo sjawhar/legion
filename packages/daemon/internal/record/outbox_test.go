@@ -25,8 +25,11 @@ func (unsupportedOutboxPayload) OutboxKind() OutboxKind { return "unsupported" }
 func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	now := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
 	payloads := []OutboxPayload{
-		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
-		StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true},
+		OrdinaryStatusWrite("testing", "in_progress", ""),
+		OrdinaryStatusWrite("done", "in_progress", "Closed by its architect: no change is needed."),
+		PersonHandoverStatusWrite("todo", "triage"),
+		ReassertStatusWrite("in_progress", "done"),
+		HandOverStatusWrite("todo", "in_progress", "LEGION-200", 3),
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
@@ -39,20 +42,18 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
 		WorkspaceRemove{Linger: 3},
-		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
 		IssueBranch{Generation: 2},
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
 		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
-		AutoMergeDisable{Number: 42},
-		ReadyMerge{Number: 42, Head: "c0de"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
 		CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: now},
 		CheckCompare{Look: 3, Cause: "deploy run", Deploy: &DeployRun{Run: 40203304600, Attempt: 2, Workflow: ".github/workflows/envoy.yaml", Step: "Apply", Branch: "main"}, OpenedAt: now},
 		CheckLook{Look: 2, OpenedAt: now},
 		CheckLook{Look: 1},
 		CheckBound{},
-		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "CI is red at head: pytest"},
-		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "CI is red at head: pytest", TaskFollows: true},
+		RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.implementer", Body: "Pull request #42: CI settled at c0de: unit failed."},
+		PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: "the head conflicts with main"},
+		PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: "the head conflicts with main", TaskFollows: true},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -91,11 +92,42 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	}
 }
 
-// A person's handover is one dispatch_status row marked PersonHandover: while it is pending, the
-// issue has a person's handover pending, and no second row is queued for it. The workflow's other
-// status rows suppress nothing, so a hand-over row (HandOver, also a todo) on another issue, and
-// an unmarked todo on the same issue, count for nothing; a finished row is deleted, so once the
-// marked row is gone nothing is pending.
+// Every kind of status row has a constructor of its own, and no constructor leaves Kind empty:
+// the kind is the one thing a row cannot be queued without (validateOutboxPayload refuses a write
+// without one), so a kind nothing builds has no way into the outbox at all. The table is read
+// against StatusRowKinds rather than written out, so a kind added to that list and given no
+// constructor fails here.
+func TestEveryStatusRowKindHasAConstructorThatSetsIt(t *testing.T) {
+	built := map[StatusRowKind]StatusWrite{
+		OrdinaryStatusRow:       OrdinaryStatusWrite("testing", "in_progress", ""),
+		PersonHandoverStatusRow: PersonHandoverStatusWrite("todo", "triage"),
+		ReassertStatusRow:       ReassertStatusWrite("in_progress", "done"),
+		HandOverStatusRow:       HandOverStatusWrite("todo", "in_progress", "LEGION-200", 3),
+		CloseStatusRow:          CloseStatusWrite("done", "in_progress", "merged", 7),
+	}
+	if len(built) != len(StatusRowKinds) {
+		t.Fatalf("%d constructors for the %d kinds of StatusRowKinds: one of them builds a kind the list does not name",
+			len(built), len(StatusRowKinds))
+	}
+	for _, kind := range StatusRowKinds {
+		write, ok := built[kind]
+		if !ok {
+			t.Fatalf("status row kind %q has no constructor here: give the kind one, and this test its line", kind)
+		}
+		if write.Kind != kind {
+			t.Fatalf("the constructor of %q built a write of kind %q, want it to set its own kind", kind, write.Kind)
+		}
+		if err := validateOutboxPayload(write); err != nil {
+			t.Fatalf("the write the constructor of %q built was refused: %v", kind, err)
+		}
+	}
+}
+
+// A person's handover is one dispatch_status row of kind PersonHandoverStatusRow: while it is
+// pending, the issue has a person's handover pending, and no second row is queued for it. The
+// workflow's other status rows suppress nothing, so a hand-over row (also a todo) on another
+// issue, and an ordinary todo on the same issue, count for nothing; a finished row is deleted, so
+// once the person's handover is gone nothing is pending.
 func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 	now := time.Date(2026, 10, 14, 17, 0, 0, 0, time.UTC)
 	ctx := context.Background()
@@ -122,9 +154,9 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 		return got
 	}
 
-	enqueue("LEGION-208", StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true})
-	enqueue("LEGION-209", StatusWrite{Status: "todo", ObservedStatus: "backlog", HandOver: true, HandOverTree: "LEGION-200", HandOverLinger: 3})
-	enqueue("LEGION-210", StatusWrite{Status: "todo", ObservedStatus: "triage"})
+	enqueue("LEGION-208", PersonHandoverStatusWrite("todo", "triage"))
+	enqueue("LEGION-209", HandOverStatusWrite("todo", "backlog", "LEGION-200", 3))
+	enqueue("LEGION-210", OrdinaryStatusWrite("todo", "triage", ""))
 	enqueue("LEGION-210", ControllerNotice{Kind: TriageNotice})
 
 	if !pending("LEGION-208") {
@@ -162,8 +194,9 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 // list it: a kind on neither lane would be queued and never run, one on both would run twice over.
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
-		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease}
+		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindIssueBranch,
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindRoleMessage, OutboxKindPhaseEnded,
+		OutboxKindIssueBundle, OutboxKindIssueRelease}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
@@ -197,7 +230,9 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		payload OutboxPayload
 		reason  string
 	}{
-		{name: "empty status", payload: StatusWrite{}, reason: "empty status"},
+		{name: "a status write of no kind", payload: StatusWrite{Status: "testing", ObservedStatus: "in_progress"}, reason: `unknown kind ""`},
+		{name: "a status write of a kind nobody gave a rule", payload: StatusWrite{Kind: "escalation", Status: "testing", ObservedStatus: "in_progress"}, reason: `unknown kind "escalation"`},
+		{name: "empty status", payload: StatusWrite{Kind: OrdinaryStatusRow}, reason: "empty status"},
 		{name: "unknown notice", payload: Notice{Kind: "unknown"}, reason: "unknown notice kind"},
 		{name: "a triage notice for an architect", payload: Notice{Kind: TriageNotice}, reason: "unknown notice kind"},
 		{name: "a slot-free notice for an architect", payload: Notice{Kind: SlotFreeNotice}, reason: "unknown notice kind"},
@@ -228,10 +263,8 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
 		{name: "start without tree", payload: SuperviseRequest{Op: "start", Role: claim.RoleArchitect}, reason: "start requires tree"},
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
-		{name: "a merge queue publish without a role", payload: MergeQueuePublish{Packet: "READY #42"}, reason: "merge queue publish requires role"},
-		{name: "a merge queue publish without a packet", payload: MergeQueuePublish{Role: "merge-queue"}, reason: "merge queue publish requires packet"},
-		{name: "a READY merge without a pull request", payload: ReadyMerge{Head: "c0de"}, reason: "READY merge requires its pull request number and head"},
-		{name: "a READY merge without a head", payload: ReadyMerge{Number: 42}, reason: "READY merge requires its pull request number and head"},
+		{name: "a role message without a role", payload: RoleMessage{Body: "Pull request #42 settled."}, reason: "role message requires role"},
+		{name: "a role message without a body", payload: RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.architect"}, reason: "role message requires body"},
 		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
 		{name: "a check look on a phase start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Phase: phase.Implementing, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
 		{name: "a check look on another role's start", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
@@ -276,7 +309,10 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "invalid JSON", row: OutboxRow{ID: 32, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{`)}, reason: "unexpected EOF"},
 		{name: "unknown field", row: OutboxRow{ID: 33, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"status":"testing","observedStatus":"todo","surprise":true}`)}, reason: "unknown field"},
 		{name: "kind payload mismatch", row: OutboxRow{ID: 34, Kind: OutboxKindDispatchMessage, Payload: json.RawMessage(`{}`)}, reason: "no body"},
-		{name: "empty status", row: OutboxRow{ID: 35, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"observedStatus":"todo"}`)}, reason: "empty status"},
+		{name: "empty status", row: OutboxRow{ID: 35, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"kind":"ordinary","observedStatus":"todo"}`)}, reason: "empty status"},
+		{name: "a stored status row of no kind", row: OutboxRow{ID: 51, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"status":"testing","observedStatus":"in_progress"}`)}, reason: `unknown kind ""`},
+		{name: "a stored status row of a kind nobody gave a rule", row: OutboxRow{ID: 52, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"kind":"escalation","status":"testing","observedStatus":"in_progress"}`)}, reason: `unknown kind "escalation"`},
+		{name: "a stored status row still carrying an old mark", row: OutboxRow{ID: 53, Kind: OutboxKindDispatchStatus, Payload: json.RawMessage(`{"kind":"person-handover","status":"todo","observedStatus":"triage","personHandover":true}`)}, reason: "unknown field"},
 		{name: "unknown notice", row: OutboxRow{ID: 36, Kind: OutboxKindNotice, Payload: json.RawMessage(`{"kind":"unknown"}`)}, reason: "unknown notice kind"},
 		{name: "unknown supervise operation", row: OutboxRow{ID: 37, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"unknown","tree":"LEGION-208","role":"architect"}`)}, reason: "unknown supervise operation"},
 		{name: "start without tree", row: OutboxRow{ID: 38, Kind: OutboxKindSupervise, Payload: json.RawMessage(`{"op":"start","role":"architect"}`)}, reason: "start requires tree"},
@@ -287,8 +323,9 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "a deploy run without a step", row: OutboxRow{ID: 44, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","branch":"main"}}`)}, reason: deployRunRefusal},
 		{name: "a deploy run with an unknown field", row: OutboxRow{ID: 45, Kind: OutboxKindCheckCompare, Payload: json.RawMessage(`{"look":1,"cause":"deploy run","deploy":{"run":7,"attempt":1,"workflow":".github/workflows/envoy.yaml","step":"Apply","branch":"main","job":3}}`)}, reason: "unknown field"},
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
-		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 46, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"CI is red at head: pytest"}`)}, reason: "never to an architect"},
-		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 47, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red at head: pytest","quiesce":"tester"}`)}, reason: "unknown field"},
+		{name: "a role message with no body", row: OutboxRow{ID: 48, Kind: OutboxKindRoleMessage, Payload: json.RawMessage(`{"role":"legion.sjawhar-legion.LEGION-208.architect"}`)}, reason: "role message requires body"},
+		{name: "a phase-ended message to an architect", row: OutboxRow{ID: 49, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"architect","from":"accepting","to":"implementing","reason":"the head conflicts with main"}`)}, reason: "never to an architect"},
+		{name: "a phase-ended message with an unknown field", row: OutboxRow{ID: 50, Kind: OutboxKindPhaseEnded, Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"the head conflicts with main","quiesce":"tester"}`)}, reason: "unknown field"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)

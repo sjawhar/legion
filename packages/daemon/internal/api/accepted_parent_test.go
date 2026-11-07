@@ -40,7 +40,7 @@ func holdFrom(t *testing.T, h *harness, key string, at phase.Phase) {
 // Read by the phase alone the hold let work in beneath such a head — rerun_child and
 // release_children both took it — and the waiting line offered that work a slot of its own.
 func TestTheDoorsRefuseAChildUnderARootHeldFromAnAcceptedPhase(t *testing.T) {
-	for _, from := range []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge} {
+	for _, from := range []phase.Phase{phase.Retro, phase.Merging} {
 		t.Run(string(from), func(t *testing.T) {
 			h, _, statuses := statusHarness(t)
 			architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
@@ -83,7 +83,7 @@ func TestTheDoorsRefuseAChildUnderARootHeldFromAnAcceptedPhase(t *testing.T) {
 // entering the workflow beneath a head on its way to the merge queue would let that head merge
 // without carrying it. The refusal names the ancestor, and is lifted once that ancestor closes.
 func TestRerunChildIsRefusedUnderAnAcceptedAncestor(t *testing.T) {
-	for _, at := range []phase.Phase{phase.Retro, phase.Merging, phase.AwaitingMerge} {
+	for _, at := range []phase.Phase{phase.Retro, phase.Merging} {
 		t.Run(string(at), func(t *testing.T) {
 			h, _, _ := statusHarness(t)
 			architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
@@ -117,7 +117,7 @@ func TestRerunChildIsRefusedUnderAnAcceptedAncestor(t *testing.T) {
 func TestWaveReleaseIsRefusedForAGrandchildUnderADoneParent(t *testing.T) {
 	h, _, statuses := statusHarness(t)
 	architect := newLiveClaim(t, h, statusRoot, claim.RoleArchitect)
-	acceptPhase(t, h, statusRoot, phase.AwaitingMerge)
+	acceptPhase(t, h, statusRoot, phase.Merging)
 	acceptPhase(t, h, statusChild, phase.Done)
 	const grandchild = "LEGION-300"
 	parent := statusChild

@@ -10,7 +10,7 @@ tags:
   - golden-fixture
   - security-review
 date: 2026-10-21
-status: active
+status: superseded in part by INFRA-714 — two of the configuration shapes it audits, `merge.by_hand` and `max_fix_attempts`, are deleted from the loader; the audit rule, that admitted value shapes rather than field names are read, stands
 module: packages/daemon/internal/api
 related_issues:
   - "LEGION-791"

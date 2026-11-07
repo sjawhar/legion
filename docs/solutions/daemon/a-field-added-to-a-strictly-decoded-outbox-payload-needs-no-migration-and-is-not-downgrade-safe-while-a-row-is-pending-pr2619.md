@@ -25,7 +25,7 @@ The outbox stores each row's payload as JSON and decodes it with `DisallowUnknow
 
 - **No schema migration is needed, and a JSON predicate is the right dedupe.** A pending-row check
   of the form `select exists (select 1 from outbox where kind = $1 and issue = $2 and
-  payload->>'<field>' = 'true')` follows `DisarmPending`'s pattern and reads the new field from the
+  payload->>'<field>' = 'true')`, as `PersonHandoverPending` (`record/store.go`) is, reads the new field from the
   payload column.
 - **State the rollback hazard in the pull request's risk section.** A daemon of the release before
   the field cannot decode a row that carries it; the row fails, retries on the lane's backoff, and

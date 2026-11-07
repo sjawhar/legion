@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+  A role's commits are authored by its own App again when two roles of an issue overlap. The
+  daemon hands the shared jj working copy a role's identity only for that role's phase task — a
+  message, a notice, a reminder or any other prompt adopts nothing — and only while no other
+  claim of the issue is in a turn; a task that would adopt one waits, and is sent when that turn
+  ends. Before, every prompt adopted the working copy, so a role starting while the previous one
+  was still writing took that worker's next commit into a commit of its own.
+time: 2026-10-31T12:00:00Z

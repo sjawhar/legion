@@ -25,10 +25,10 @@ import {
 import { createPhaseReminder, type EnvoyPublish } from "@legion/pi-shared/phase-reminder";
 import {
   assistantRanTool,
-  assistantText,
   inboundKind,
   PHASE_STALL_ENTRY,
   restorePhaseStallEntry,
+  turnEndOf,
 } from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
@@ -60,6 +60,7 @@ import { createControllerSession } from "../src/controller-session";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
+import { createTurnOutcomeReporter } from "../src/turn-outcome";
 import {
   branchHoldsWorkspaceRecreatedNotice,
   type WorkspaceRecreatedNotice,
@@ -284,6 +285,16 @@ export default function legionExtension(pi: PiApi): void {
     );
     return daemonClient;
   };
+
+  // Reports every turn this pane's claim ends to the daemon, refused or not (`src/turn-outcome.ts`).
+  // It runs for an architect's claim as well as a phase worker's: a provider that refuses turn
+  // after turn ends either of them the same way, and a `task` subagent, whose instance registers
+  // no claim of its own, reports nothing.
+  const turnOutcomes = createTurnOutcomeReporter({
+    daemon: roleDaemon,
+    claim: (sessionID) => claimSession.capability(sessionID),
+    log: logger,
+  });
 
   // A root architect's or phase worker's claim, and the operator-launched controller's.
   const claimSession = createClaimSession({
@@ -515,10 +526,20 @@ export default function legionExtension(pi: PiApi): void {
     if (assistantRanTool(event.message)) phaseReminder.apply({ kind: "tool-call" });
   });
 
+  // Every turn this pane's claim ends, as the daemon counts them: `agent_end` is the one event
+  // that says how a turn ended, so it is where the outcome is reported (`src/turn-outcome.ts`).
+  // The host does not await this handler and nothing of the turn waits on the report, but the
+  // report is awaited inside it all the same, so its failure is the handler's own promise rather
+  // than a floating one, and the reporter never rejects.
+  pi.on("agent_end", async (event, context) => {
+    await turnOutcomes.report(context.sessionManager.getSessionId(), event);
+  });
+
   // The run is about to settle with nothing left for the host to continue: a phase still open
-  // earns a reminder (src/phase-stall.ts). The first of a run comes back as the host's own
-  // continuation, one more turn of this same session; every one after it is a timer, so the run
-  // settles and the daemon sees the turn end (src/phase-reminder.ts).
+  // earns a reminder (src/phase-stall.ts), unless the provider refused the turn, which earns
+  // none. The first reminder of a run comes back as the host's own continuation, one more turn of
+  // this same session; every one after it is a timer, so the run settles and the daemon sees the
+  // turn end (src/phase-reminder.ts).
   pi.on("session_stop", async (event, context) => {
     if (event.signal.aborted) return undefined;
     if (!phaseWorkerSession(context)) {
@@ -527,7 +548,7 @@ export default function legionExtension(pi: PiApi): void {
       await reportActivity(context, { onlyWhenChanged: false });
       return undefined;
     }
-    const reminder = await phaseReminder.settle(assistantText(event.last_assistant_message));
+    const reminder = await phaseReminder.settle(turnEndOf(event.last_assistant_message));
     // After the settle, so the report carries the wake that settle armed: the daemon releases no
     // claim whose last report is older than its last turn, so this one goes whatever it says.
     await reportActivity(context, { onlyWhenChanged: false });

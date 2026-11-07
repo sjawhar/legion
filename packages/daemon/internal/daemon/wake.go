@@ -200,17 +200,18 @@ func (w *workflowRuntime) stampPodResume(ctx context.Context, issue string, role
 // publish to a live session instead, so the row's own retry is what waits for the pod, and this
 // is what makes the pod come back for it to find.
 //
-// It answers whether the claim was released and the wake taken. key is what makes the wake one
-// wake however often the row retries — the row's id — so a notice that backs off for ten minutes
-// resumes the claim once. A claim of an issue that has left the workflow, or whose tree lingers,
-// is not woken: that pod is a close's to stop. An outbox with no supervisor — a test's, which
-// supervises nothing — wakes nothing: there is no machine to read a claim's state from.
+// It answers whether the claim was released and a resume of it is under way. The role's one open
+// resume is what makes the wake one wake however often the row retries, so a notice that backs
+// off for ten minutes resumes the claim once. A claim of an issue that has left the workflow, or
+// whose tree lingers, is not woken: that pod is a close's to stop. An outbox with no supervisor —
+// a test's, which supervises nothing — wakes nothing: there is no machine to read a claim's state
+// from.
 //
 // The claim is read from the machine's View, which never waits on the decision in flight: a
 // machine holds its lock through the runtime call its decision makes, so a read that waited
 // would hold the notice and the phase-ended message behind a Sandbox relaunch waiting on the
 // cluster, which is the defect LEGION-650 fixed in the routing beside this read.
-func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, detail string) (bool, error) {
+func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, detail string) (bool, error) {
 	if r.supervisor == nil {
 		return false, nil
 	}
@@ -233,17 +234,34 @@ func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, de
 	if root == nil || !pods.InWorkflowNotLingering(issue.Standing(), root.Standing(), record.OutOfWorkflow) {
 		return false, nil
 	}
-	taken, err := r.trees.TakePodWake(ctx, r.project, issue.Key, held.Role, pods.WakeDelivery, key, r.now().UTC())
+	taken, err := r.trees.TakePodWake(ctx, r.project, issue.Key, held.Role, pods.WakeDelivery, r.now().UTC())
 	if err != nil {
 		return false, err
 	}
+	// A wake the role's open resume refused is a pod already on its way back — unless no resume
+	// of that claim ever ran. This take commits before the resume it leads to, and that resume is
+	// in process rather than a row of the take's own transaction (the workflow's wakes queue a
+	// `start`, this one calls the machine), so a resume refused by the store, or a daemon that
+	// restarted between the two, would leave the claim released with the role's resume open —
+	// and that open resume would then refuse every later wake of the role for as long as the
+	// issue lives, since only a release closes one and a pod fully released is never released
+	// again. So the claim is read again here, and one that is still not running is resumed
+	// whatever took the wake: resuming is idempotent — the machine serializes on its own lock and
+	// a claim already running is left alone (supervise's RequestRuleResume) — so the wake that
+	// meets a stuck resume heals it rather than reading it as a pod coming back.
+	reason := "a wake for " + detail
 	if !taken {
-		// Another attempt of this same row already woke the pod; it is on its way back.
-		return true, nil
+		if !machine.View().Released() {
+			return true, nil
+		}
+		reason = "a wake for " + detail + ", whose resume the record already held open"
+		r.log.Warn("wake: a released pod's resume stands open with no process behind it; this wake resumes it",
+			"issue", issue.Key, "role", held.Role, "detail", detail)
+	} else {
+		r.log.Info("wake: a released pod is coming back for a delivery the daemon holds for one of its roles",
+			"issue", issue.Key, "role", held.Role, "detail", detail)
 	}
-	r.log.Info("wake: a released pod is coming back for a delivery the daemon holds for one of its roles",
-		"issue", issue.Key, "role", held.Role, "detail", detail)
-	if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token, Reason: "a wake for " + detail}); err != nil {
+	if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token, Reason: reason}); err != nil {
 		return false, fmt.Errorf("wake claim %s for %s: %w", token, detail, err)
 	}
 	return true, nil
@@ -254,10 +272,10 @@ func (r *outbox) wakeForDelivery(ctx context.Context, token claim.Token, key, de
 // its own is due, and a sub-architect woken for nothing would hold a pod open for the backstop
 // period — and neither does an issue whose phase no role works.
 //
-// It also forgets the wake marks of the release before this one: their keys are spent, and a head
-// that settled before the pod was released last must be able to wake it again now.
+// It also cancels the backstops the release before this one armed: that pod is gone, and its
+// backstop has nothing left to bring back.
 func (r *outbox) armBackstops(ctx context.Context, issue record.Issue) error {
-	if err := r.trees.ForgetPodWakesOf(ctx, r.project, issue.Key); err != nil {
+	if err := r.trees.CancelPodBackstopsOf(ctx, r.project, issue.Key); err != nil {
 		return err
 	}
 	if r.backstop <= 0 {
@@ -285,8 +303,8 @@ func (r *outbox) armBackstops(ctx context.Context, issue record.Issue) error {
 }
 
 // takeOverRelease is what every path that suspends, stops or closes a claim does to a pod that
-// was released: it drops the wake marks and the open backstops of the issue, so no later wake
-// acts on a claim this path has taken over. The claim's own suspension source is re-stamped by
+// was released: it drops the open backstops of the issue, so no later backstop acts on a claim
+// this path has taken over. The claim's own suspension source is re-stamped by
 // the machine (supervise's suspendedAgain), which is what takes it out of every released-claim
 // read; this drops what is left behind in the record.
 //
@@ -298,7 +316,7 @@ func (r *outbox) takeOverRelease(ctx context.Context, issue string) {
 	if r.trees == nil {
 		return
 	}
-	if err := r.trees.ForgetPodWakesOf(ctx, r.project, issue); err != nil {
+	if err := r.trees.CancelPodBackstopsOf(ctx, r.project, issue); err != nil {
 		r.log.Warn("wake: could not forget the wakes of a pod another path took over", "issue", issue, "error", err)
 	}
 }

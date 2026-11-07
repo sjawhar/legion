@@ -136,8 +136,9 @@ func TestALaunchWhosePodNeverProvisionsGivesUpAtTheBootTimeout(t *testing.T) {
 
 // The launcher's deadline is the boot timeout after the pod was last seen provisioning, and never
 // past the boot timeout plus ProvisionBound from the first time it was. The last row is the edge a
-// cap counted from the wait's start got wrong: a 60 s image pull, a fetch that ran its whole
-// 30 minutes, then a 90 s workspace-init, whose launcher connects 32 min 30 s after the wait began.
+// cap counted from the wait's start got wrong: a 60 s image pull, a fetch that ran the whole bound
+// this case gives it, then a 90 s workspace-init, whose launcher connects 32 min 30 s after the
+// wait began.
 func TestTheLauncherDeadlineFollowsProvisioningUpToItsBound(t *testing.T) {
 	start := time.Date(2026, 10, 13, 17, 49, 23, 0, time.UTC)
 	boot, bound := 2*time.Minute, 30*time.Minute
@@ -160,9 +161,12 @@ func TestTheLauncherDeadlineFollowsProvisioningUpToItsBound(t *testing.T) {
 	}
 }
 
-// The launch's wait for its pod's launcher outlasts the fetch's whole budget, which workspace-fetch
-// keeps to, so a fetch still within it is never cut short by the launch, and one that runs out of
-// it fails, naming why, before the launch would give up. With the default 2-minute boot timeout
+// The launch's wait for its pod's launcher outlasts the fetch's whole clocked budget, which the
+// fetch's waits and clocked stages keep to, so a fetch still within it is never cut short by the
+// launch, and one that runs out of one of those bounds fails, naming why, before the launch would
+// give up. The stream from the repository cache is the one part outside them, on the low-speed
+// bound rather than a clock (workspace.CacheStreamLowSpeedBytes), and it runs on into the slack
+// this wait holds over what the fetch actually waited. With the default 2-minute boot timeout
 // and the runtime's own bound: a pod pulled in a minute whose fetch waits 35 minutes for its
 // repository's cache is still waited on, and one whose fetch runs its whole FetchBudget leaves
 // workspace-init the boot timeout.

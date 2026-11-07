@@ -169,7 +169,6 @@ type Config struct {
 	PodUpdateMaxOpenRounds   *int
 	PodUpdateRoundsPerMinute *int
 	ReviewRoundCap           int
-	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
@@ -307,7 +306,6 @@ type fileConfig struct {
 	PodUpdateMaxOpenRounds   *int
 	PodUpdateRoundsPerMinute *int
 	ReviewRoundCap           *int
-	MaxFixAttempts           *int
 	Controller               *string
 	Capabilities             *Capabilities
 	Durations                map[string]int
@@ -452,8 +450,6 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
-		case "max_fix_attempts":
-			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -918,7 +914,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		PodUpdateRetask:      time.Hour,
 		PodUpdateNotice:      4 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

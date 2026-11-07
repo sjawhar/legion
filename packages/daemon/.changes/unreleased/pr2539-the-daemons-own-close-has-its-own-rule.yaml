@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  The done the daemon writes when it closes an issue survives a Dispatch refusal. A merge's close
+  and an architect's `close_root` are queued in the transaction that takes the record out of the
+  workflow, so the rule for an ordinary status write — which drops a row whose issue has left the
+  workflow — would lose the close at its first `ISSUE_CHANGED`, leaving the issue open in Dispatch
+  for good while its tree lingered. Such a write is its own kind of row now, fenced on the
+  generation it closed: its retry writes `done` unless a person's reopen has taken the issue back.
+  Migration `20261102003600` gives the rows queued before this release the same two kinds, a
+  re-assert by the status it observes and a close by the status it writes.

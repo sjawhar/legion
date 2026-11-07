@@ -91,12 +91,12 @@ test("registers, runs afterRegister, records the capability, claims the role, th
   expect(capabilities).toEqual([
     {
       sessionID: "ses_claim",
-      claimToken,
-      generation: Number(registered.generation),
       tree: String(registered.tree),
       issue: String(registered.issue),
       role: registered.role as never,
       secret: String(registered.secret),
+      claimToken,
+      generation: Number(registered.generation),
       promptAgents: registered.promptAgents as never,
     },
   ]);

@@ -14,67 +14,85 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// The release before this one (#2379) judged these histories, every arrival naming no move, to
-// these digests: the run's own fuzz (randomHistory, with pushes lost, delivered twice and in random
-// order, settlements, reopens and required reads) and the fuzz of moves made again (movesMadeAgain,
-// in the reference order and in one random or bounded order each). A digest is the SHA-256 of one
-// line per history: its index, whether a head run is open, and its judgement (judgementOf) less
-// the moves made, whose record this release extends. LEGION_PRINT_RELEASE_DIGESTS prints this
-// tree's digests, which is how these were made: by this test, its helpers copied to the release
-// before (main at ec0263277), with no move named, as that release named none. Every push of these
-// histories is the implementer's or the review App's, so main at ec0263277, which also read
-// handoff-only pushes, and this branch's tree before it took #2436 (b5d2a262) give the same digests.
-var releaseBeforeDigests = map[string]string{
-	"run-1":          "0fc445683dd6d4a02eebca6786b14f6826e9ad3123007d3b66edd10562a683a4",
-	"run-7":          "94bb2ea3532aa8a2cf1652759a24adc18cf5d52748fe1b24335b85b8f3b19a1b",
-	"move-1-random":  "b47c62228f9cf8e581fbfcc059efa619d854bea96b75c2031c0382b0c28cbc3c",
-	"move-1-bounded": "f53b89c3c8c79a48bf24ba21e11c2265ffa7d6aa547a9ce7cbe1c6264f39c30e",
-	"move-7-random":  "73fd22e557eb89404ca78a6f194ef3c3298cc46b75a3948670ef31423a96ed39",
-	"move-7-bounded": "8657eddcb777a2f94b2ab1a19d3803dd838515ab5f352e8f5fd3f836b6988872",
+// This release judges these histories, every arrival naming no move, to these digests: the run's
+// own fuzz (randomHistory, with pushes lost, delivered twice and in random order, settlements and
+// reopens) and the fuzz of moves made again (movesMadeAgain, in the reference order and in one
+// random or bounded order each). A digest is the SHA-256 of one line per history: its index,
+// whether a head run is open, and its judgement (judgementOf) less the moves made.
+// LEGION_PRINT_RELEASE_DIGESTS prints this tree's digests (printDigests), which is how these were
+// made.
+//
+// They are not the digests of the release before, and cannot be: that release's judgement carried
+// the fix-attempt accounting a CI result moved an issue by, which moves nothing now
+// (dispatch://INFRA-714/spec R1), and its histories carried reads of what the base branch
+// requires, which this release has no fact for. Every digest of both fuzzes moved again when each
+// run of the fence gained the head GitHub reported it on and what it concluded
+// (record.AttemptRun), which the judgement carries: both fuzzes settle heads, so every judgement
+// with a check run in it reads differently, and a settlement that is newer for some names and
+// older for others is applied per name now rather than dropped whole (ClassifySettlement), which
+// moves what the fences of the run fuzz's several heads come to. What they fence is this release
+// against itself: a daemon running ahead of its listener judges as recorded here, so a later
+// change that moves that judgement is seen rather than deployed.
+var noMoveNamedDigests = map[string]string{
+	"run-1":          "766fbd213a31cf9c05dc3144b1a0c4f5388803fa849b83a6a2c7233fdede0b1d",
+	"run-7":          "ef6c5b97ecbfc20e021c1bc6fe243c6ed18c5af5ae8027643e39eb86bbe17a1f",
+	"move-1-random":  "4335ce7e08f659833a709cda0ceb068f8e7138fba459901fe5d098636c88d4c7",
+	"move-1-bounded": "c7b409783de5e9d58e651d0210051ccca0f39f281d6183a8418785fb432b46f4",
+	"move-7-random":  "20cab3e755524b93e8355dcad36a68492897b186d9262fed851ac207daa35454",
+	"move-7-bounded": "ea6c805dc3e6c01642afed7cc4dcad7dd5fddee3bca1f9f88c79c87740a5c83f",
 }
 
-// The release before this one judged these histories, every arrival naming its before but no
-// sender, to these digests (made as releaseBeforeDigests were, at #2436's e5c72dfb3, design (c′)
-// with the record keeping one push of each two heads as the release before did).
-var beforeAloneDigests = map[string]string{
-	"run-1":          "0fc445683dd6d4a02eebca6786b14f6826e9ad3123007d3b66edd10562a683a4",
-	"run-7":          "94bb2ea3532aa8a2cf1652759a24adc18cf5d52748fe1b24335b85b8f3b19a1b",
-	"move-1-random":  "1e0a8420eacc4a013af8fe4d2a1f7becec9f634db9abf971d1bbc8085287d4a3",
-	"move-1-bounded": "c0a7f52443a1eff91077e9c0b7fe89f06f6b6336c56a20bd7cd825d1079e6c77",
-	"move-7-random":  "6588b63ddfc379954ce3246fdcf317805b2f4405ad939ce44f55fa4340d1f930",
-	"move-7-bounded": "6d5461d42272c832bfe60b7c7ea91ebc0d8066b68d94fd0cfaae0432d5ce6f85",
+// The same histories, every arrival naming its before but no sender, judge to these digests, made
+// as noMoveNamedDigests were. The run fuzz's are the no-move ones - its synchronizes name no
+// sender either way - and the move fuzz's are not: there the sender is what tells two pushes of
+// the same two heads apart.
+var noSenderNamedDigests = map[string]string{
+	"run-1":          "766fbd213a31cf9c05dc3144b1a0c4f5388803fa849b83a6a2c7233fdede0b1d",
+	"run-7":          "ef6c5b97ecbfc20e021c1bc6fe243c6ed18c5af5ae8027643e39eb86bbe17a1f",
+	"move-1-random":  "89200283a3b20a127c13aae45628706f8daf13f666904aa81aeae61eaab52861",
+	"move-1-bounded": "de66fdbccfd11787ee1e1a0a1a2a6e6bf300eaaeaa507ed0ff34d698bee32570",
+	"move-7-random":  "881a012880d0f58147ab10e75a83ed01ae2e94e248011437f65510814fb354f0",
+	"move-7-bounded": "59205c380ed8d18029751ed247a843272057f04f983bebb5374089917e44d1c2",
 }
 
 // A daemon of this release behind a listener that sends a synchronize's before but not its sender
-// judges every history of both fuzzes as design (c′) did: an arrival that names no sender takes no
-// push by it and names no move late (NameMove), so the sender is what changes the judgement.
-func TestAnArrivalThatNamesNoSenderIsJudgedAsBeforeAlone(t *testing.T) {
+// judges every history of both fuzzes as recorded: an arrival that names no sender takes no push
+// by it and names no move late (NameMove), so the sender is what changes the judgement.
+func TestAnArrivalThatNamesNoSenderIsJudgedAsRecorded(t *testing.T) {
 	got := fuzzDigests(t, 2000, func(f runFact) runFact {
 		f.sender = ""
 		return f
 	})
-	for kind, want := range beforeAloneDigests {
+	printDigests(t, got)
+	for kind, want := range noSenderNamedDigests {
 		if got[kind] != want {
-			t.Errorf("%s: histories with no sender named digest to %s, want design (c′)'s %s", kind, got[kind], want)
+			t.Errorf("%s: histories with no sender named digest to %s, want the recorded %s", kind, got[kind], want)
 		}
 	}
 }
 
 // A daemon of this release behind a listener that does not yet send a synchronize's before - an
-// arrival that names no move, everywhere - judges every history of both fuzzes exactly as the
-// release before did, and leaves the same head runs open: the daemon may deploy before the
-// listener. Its behaviour changes only once a listener that sends before is deployed.
-func TestAnArrivalThatNamesNoMoveIsJudgedAsTheReleaseBefore(t *testing.T) {
+// arrival that names no move, everywhere - judges every history of both fuzzes as recorded, and
+// leaves the same head runs open: the daemon may deploy before the listener. Its behaviour
+// changes only once a listener that sends before is deployed.
+func TestAnArrivalThatNamesNoMoveIsJudgedAsRecorded(t *testing.T) {
 	got := noMoveDigests(t, 2000)
-	if os.Getenv("LEGION_PRINT_RELEASE_DIGESTS") != "" {
-		for _, kind := range slices.Sorted(maps.Keys(got)) {
-			t.Logf("%q: %q,", kind, got[kind])
+	printDigests(t, got)
+	for kind, want := range noMoveNamedDigests {
+		if got[kind] != want {
+			t.Errorf("%s: histories with no move named digest to %s, want the recorded %s", kind, got[kind], want)
 		}
 	}
-	for kind, want := range releaseBeforeDigests {
-		if got[kind] != want {
-			t.Errorf("%s: histories with no move named digest to %s, want the release before's %s", kind, got[kind], want)
-		}
+}
+
+// printDigests prints digests under LEGION_PRINT_RELEASE_DIGESTS, which is how the maps above are
+// made.
+func printDigests(t *testing.T, digests map[string]string) {
+	if os.Getenv("LEGION_PRINT_RELEASE_DIGESTS") == "" {
+		return
+	}
+	for _, kind := range slices.Sorted(maps.Keys(digests)) {
+		t.Logf("%q: %q,", kind, digests[kind])
 	}
 }
 
@@ -111,8 +129,8 @@ func fuzzDigests(t *testing.T, iters int, arrive func(runFact) runFact) map[stri
 				drop := rng.IntN(len(pushes))
 				pushes = append(pushes[:drop:drop], pushes[drop+1:]...)
 			}
-			red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: rng.IntN(2) == 0}
+			red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1}
 			order := append([]record.ClassifiedPush{}, pushes...)
 			rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 			if len(order) > 0 && rng.IntN(4) == 0 {
@@ -139,7 +157,6 @@ func fuzzDigests(t *testing.T, iters int, arrive func(runFact) runFact) map[stri
 				start := redAtH0()
 				if it%2 == 0 {
 					d := deliveries(rng, movesMadeAgain(rng), bounded)
-					start.PlannedRed = rng.IntN(2) == 0
 					pending = d.order
 					return start, d.reference
 				}
@@ -157,7 +174,7 @@ func namingNoMove(f runFact) runFact {
 	return f
 }
 
-// The one change a daemon of this release makes with no move named, on purpose: a head run that a
+// One change this release makes to the run with no move named, on purpose: a head run that a
 // lost push opened closes at its bound (TestARunOneLostPushOpenedClosesAtItsBound), where the
 // release before held it open for good once more heads than its bound on waiting pushes followed
 // with no other steps between them. Neither fuzz above reaches that bound.

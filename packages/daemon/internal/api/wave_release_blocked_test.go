@@ -281,6 +281,8 @@ func TestWaveReleaseRecordsABacklogChildFromItsOwnWrite(t *testing.T) {
 	if wantWrites := []statusWrite{{blocked, "todo"}, {free, "todo"}}; !reflect.DeepEqual(statuses.writes, wantWrites) {
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, wantWrites)
 	}
+	// A child the release starts shows its phase's status, in_progress, from its first phase; one
+	// held at admitted has started nothing and stays todo.
 	wantPhase := map[string]phase.Phase{blocked: phase.Admitted, free: phase.Planning}
 	// The held child keeps the todo the release wrote, since admitted has no status of its own;
 	// the free child's entry into planning writes in_progress over it.

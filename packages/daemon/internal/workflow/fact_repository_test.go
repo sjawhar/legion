@@ -31,7 +31,6 @@ func TestAGitHubFactFromAnotherRepositoryChangesNothing(t *testing.T) {
 			intake.Push{Repo: "acme/other", Branch: "legion/LEGION-209", Before: "head", After: "other-head"},
 			intake.PullRequestReview{Repo: "acme/other", Number: 42, ID: 7, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp, SubmittedAt: updated},
 			intake.PullRequestChecks{Repo: "acme/other", Number: 42, HeadSHA: "head", Failing: []string{"unit"}, Cancelled: []string{}, Snapshot: "red", Generation: 9},
-			intake.RequiredChecks{Repo: "acme/other", Number: 42, Names: []string{"unit"}, Workflows: []record.RequiredWorkflow{}},
 			intake.PullRequestMergeability{Repo: "acme/other", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting},
 			intake.PullRequestMerged{Repo: "acme/other", Number: 42, MergeSHA: "merge"},
 			intake.PullRequestClosed{Repo: "acme/other", Number: 42, HeadSHA: "head", UpdatedAt: updated},
@@ -94,7 +93,7 @@ func renamedEngine(renames ghrepo.Renames) *Engine {
 // seedRenamedTree seeds LEGION-209, a child of the open tree recorded on sjawhar/legion and in
 // reviewing with its reviewer's and its implementer's rows, as a tree opened before its
 // repository's transfer stands. prRepo, when it names one, is the repository its pull request #42
-// is recorded on — the one GitHub named when it was opened — with the base requiring ci.
+// is recorded on — the one GitHub named when it was opened.
 func seedRenamedTree(t *testing.T, pool *pgxpool.Pool, prRepo string) {
 	t.Helper()
 	openTree(t, pool)
@@ -107,7 +106,7 @@ func seedRenamedTree(t *testing.T, pool *pgxpool.Pool, prRepo string) {
 		return
 	}
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: prRepo, Number: 42, Branch: "legion/LEGION-209",
-		HeadSHA: "head", HeadUpdatedAt: renamedUpdated.Add(-time.Hour), Failing: []string{}, Required: []string{"ci"}, Generation: 1})
+		HeadSHA: "head", HeadUpdatedAt: renamedUpdated.Add(-time.Hour), Failing: []string{}, Generation: 1})
 }
 
 // renamedUpdated is the clock every lifecycle fact of the rename tests carries.
@@ -159,8 +158,8 @@ func TestAGitHubFactNamingARenamedRepositoryAppliesToTheTreeRecordedUnderItsOldN
 				if pr == nil || pr.CheckedHead != "head" || len(pr.Failing) != 1 || pr.Failing[0] != "ci" {
 					t.Fatalf("LEGION-209's pull request = %+v, want the red settlement of head recorded on it", pr)
 				}
-				if after.Issue == nil || after.Issue.Phase != phase.Implementing {
-					t.Fatalf("LEGION-209 is in %+v, want the red to have sent it back to implementing", after.Issue)
+				if after.Issue == nil || after.Issue.Phase != phase.Reviewing {
+					t.Fatalf("LEGION-209 is in %+v, want the settlement to have left it in reviewing: a settlement moves no issue", after.Issue)
 				}
 			},
 		},
@@ -278,8 +277,8 @@ func TestAPullRequestOpenAtTheTransferTakesTheFactsNamingTheRepositoryItMovedTo(
 				if pr == nil || pr.CheckedHead != "head" || len(pr.Failing) != 1 || pr.Failing[0] != "ci" {
 					t.Fatalf("LEGION-209's pull request = %+v, want the red settlement of head recorded on it", pr)
 				}
-				if after.Issue == nil || after.Issue.Phase != phase.Implementing {
-					t.Fatalf("LEGION-209 is in %+v, want the red to have sent it back to implementing", after.Issue)
+				if after.Issue == nil || after.Issue.Phase != phase.Reviewing {
+					t.Fatalf("LEGION-209 is in %+v, want the settlement to have left it in reviewing: a settlement moves no issue", after.Issue)
 				}
 			},
 		},

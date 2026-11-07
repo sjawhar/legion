@@ -27,7 +27,7 @@ func TestAPersonsTodoOnARunningHandedOverRootDoesNotPromoteItAgain(t *testing.T)
 	// from the tree it left, and no slot, since a worker of it has no work in awaiting_merge.
 	const root = "LEGION-300"
 	putIssue(t, pool, record.Issue{Key: root, Tree: root, Repo: "acme/widgets", DefaultBranch: "main",
-		GitHubRepo: "acme/widgets", Project: testProject, Title: "a carried root that ran", Phase: phase.AwaitingMerge,
+		GitHubRepo: "acme/widgets", Project: testProject, Title: "a carried root that ran", Phase: phase.Merging,
 		Generation: 2, Status: "todo", Rank: "A", HandedOver: true})
 	seedLifecycle(t, pool, root)
 	seedMirror(t, pool, root, "todo")
@@ -35,7 +35,7 @@ func TestAPersonsTodoOnARunningHandedOverRootDoesNotPromoteItAgain(t *testing.T)
 	assertWaiting(t, pool, nil)
 	tick(t, pool, admission, "tick")
 
-	if running := issue(t, pool, root); running.Phase != phase.AwaitingMerge {
+	if running := issue(t, pool, root); running.Phase != phase.Merging {
 		t.Fatalf("%s stands in %s after the pass, want awaiting_merge: a running root a person set to todo is promoted by nothing", root, running.Phase)
 	}
 	if holders := slots(t, pool); len(holders) != 0 {

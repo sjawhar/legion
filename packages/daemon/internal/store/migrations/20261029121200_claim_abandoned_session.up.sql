@@ -1,0 +1,19 @@
+-- 20261029121200_claim_abandoned_session.up.sql — the session a claim stopped resuming, and why.
+--
+-- A claim leaves a session behind in three ways: the provider refused it out of the launch failure
+-- budget and the retry starts a new one, an operator asked for a new one (`legion claims retry
+-- --fresh-session`, `legion claims forget-session`), or no session store holds it any more. The
+-- session itself is never deleted, so until now the only record of where it went was a line in the
+-- daemon's log: the claim's own session column was blanked and nothing said that an older session
+-- existed (dispatch://INFRA-714, item 4 of the refusal section).
+--
+-- The fresh agent is told of it in the first task it is given (supervise's abandonedTask), which
+-- can be a launch, a registration and a daemon restart after the abandonment, so the record is
+-- durable rather than held in the machine's memory. Each abandonment replaces the one before it:
+-- the session before this one is gone whatever happens next, and a history of abandoned sessions
+-- is not something any reader asks for.
+--
+-- jsonb on the claim's own row, as the turn outcomes and the locator are, because it is written in
+-- the same decision as the session it replaces. Every existing row takes null, which is "this
+-- claim has abandoned no session".
+alter table claims add column abandoned_session jsonb;

@@ -12,8 +12,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// Wake kinds, the vocabulary of a recorded resume's kind and of a wake mark's: the five ways a
-// released pod comes back. WakeDelivery is a delivery the daemon already had for a role of the
+// Wake kinds, the vocabulary of a recorded resume's kind: the five ways a released pod comes
+// back. WakeDelivery is a delivery the daemon already had for a role of the
 // pod — a phase start, a task, a backward move, a notice, a phase-ended message, a production
 // check's look, a slot resume; WakeChecks is a CI settlement on the head of the issue's pull
 // request; WakeRoleMessage and WakeAgentMessage are what only the Envoy listener sees, a message
@@ -22,7 +22,7 @@ import (
 //
 // They are records rather than the rule's own, because the rule that names a wake (workflow) and
 // the store that files it under this word are different packages, and one vocabulary is what
-// keeps a wake's mark, its resume row and the task it writes saying the same thing.
+// keeps a wake's resume row and the task it writes saying the same thing.
 const (
 	WakeDelivery     = "delivery"
 	WakeChecks       = "checks"

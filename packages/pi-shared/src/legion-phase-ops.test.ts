@@ -24,12 +24,12 @@ function daemonFixture(name: string): Record<string, unknown> {
 
 const implementer: ClaimCapability = {
   sessionID: "ses_implementer",
-  claimToken: "legion-legion-legion-208-implementer",
-  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
   secret: "U2VjcmV0",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
 };
 
 /** What the implementer's round reports in the pane: its record and its pushed tip. */
@@ -82,7 +82,6 @@ test("the phase ops' fields, as a host declares them, are every field of every o
       since: { type: "string" },
       summary: { type: "string" },
       verdict: { enum: ["pass", "pending", "fail"] },
-      ready: { type: "boolean" },
       to: { enum: [...LEGION_PHASE_BACKWARD_TARGETS] },
       reason: { type: "string" },
       round: { type: "string" },
@@ -113,7 +112,7 @@ test("the description sets the host's sentences before and after handoff_complet
   // Every host states `ready_for_update`, so its sentences are the template's own, between
   // handoff_complete's contract and the host's `after`.
   expect(placed).toContain(
-    "arm nothing. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
+    "complete again. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
   );
   expect(placed.endsWith("role topic with mcp__legion__envoy_publish.")).toBe(true);
 });
@@ -128,14 +127,10 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       "handoff_complete's verdict is pass, pending or fail",
     ],
     [
-      { op: "handoff_complete", summary: "x", ready: "yes" },
-      "handoff_complete's ready is true or false",
-    ],
-    [
       { op: "handoff_complete", summary: "x", phase: "plan", other: 1 },
       'handoff_complete does not accept field "phase"; handoff_complete does not accept field "other"',
     ],
-    [{ op: "read_record" }, "read_record requires issue"],
+    [{ op: "read_record", issue: 44 }, "expected string"],
     [{ op: "read_release_records" }, "read_release_records requires since"],
     [{ op: "read_release_records", since: " " }, "read_release_records requires since"],
     [
@@ -180,7 +175,6 @@ test("handoff_complete reads the issue's phase, finds the record and commit for 
     grantId: "grant-for-one-command",
     summary: "Done.",
     verdict: "pass",
-    ready: false,
     ...REPORT,
   });
 });
@@ -246,7 +240,7 @@ test("a root architect's handoff_complete is refused as unavailable before its o
   for (const input of [
     { op: "handoff_complete" },
     { op: "handoff_complete", summary: "x" },
-    { op: "handoff_complete", summary: " ", verdict: "maybe", ready: "yes" },
+    { op: "handoff_complete", summary: " ", verdict: "maybe" },
   ]) {
     await expect(executePhaseOp(root.ops, input)).rejects.toThrow(new Error(refusal));
   }
@@ -316,25 +310,14 @@ test("the implementer's report on its closed issue's production check carries a 
       grantId: "grant-for-one-command",
       summary: `Look 2: ${verdict}.`,
       verdict,
-      ready: false,
     });
   }
   expect(posted).toHaveLength(6);
 
-  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
-  // and one sent as READY.
-  for (const [input, message] of [
-    [
-      { op: "handoff_complete", summary: "Looked." },
-      "handoff_complete on a production check names a verdict of pass, pending or fail",
-    ],
-    [
-      { op: "handoff_complete", summary: "Looked.", verdict: "pass", ready: true },
-      "handoff_complete on a production check is no READY: leave ready out",
-    ],
-  ] as const) {
-    await expect(executePhaseOp(ops, input)).rejects.toThrow(new Error(message));
-  }
+  // Refused after the record is read, with nothing minted or posted: a report with no verdict.
+  await expect(executePhaseOp(ops, { op: "handoff_complete", summary: "Looked." })).rejects.toThrow(
+    new Error("handoff_complete on a production check names a verdict of pass, pending or fail")
+  );
   expect(posted).toHaveLength(6);
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
@@ -358,7 +341,6 @@ test("the implementer's report on its closed issue's production check carries a 
     grantId: "grant-for-one-command",
     summary: "Looked.",
     verdict: "",
-    ready: false,
   });
 });
 
@@ -448,12 +430,26 @@ test("request_backward_move names the issue an architect returns from accepting,
   expect(posted).toHaveLength(before + 2);
 });
 
-test("read_record answers the issue's record, or names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
+test("read_record answers the issue's record, or the claim's own when it names none, and names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
   const { ops, routes } = runtime();
   const state = daemonFixture("state.json") as { issues: Record<string, unknown> };
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-208" })).resolves.toEqual({
     record: state.issues["LEGION-208"],
   });
+  // The claim's own issue, which the daemon already told it: a worker reads the issue it works
+  // far more often than another, and naming none is no refusal.
+  await expect(executePhaseOp(ops, { op: "read_record" })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(executePhaseOp(ops, { op: "read_record", issue: "  " })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(
+    executePhaseOp(
+      { ...ops, claim: { ...implementer, issue: "LEGION-210" } },
+      { op: "read_record" }
+    )
+  ).resolves.toEqual({ record: state.issues["LEGION-210"] });
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-999" })).rejects.toThrow(
     "The daemon has no record for LEGION-999"
   );
@@ -464,7 +460,7 @@ test("read_record answers the issue's record, or names an issue the daemon has n
       reason: "The plan misses X.",
     })
   ).resolves.toEqual({});
-  expect(routes.slice(2)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
+  expect(routes.slice(5)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
 });
 
 /** A window the daemon served: three releases — one woken five minutes later, one woken three

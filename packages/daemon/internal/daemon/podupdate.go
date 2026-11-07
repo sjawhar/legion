@@ -1423,9 +1423,10 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 //
 // A claim that left some earlier round is not that claim. It still records the round it left,
 // this round's open has not reached it yet, and it holds this round's pod exactly as any claim
-// the round has not reached does — which is why the predicate is asked about the round being
-// decided rather than about the claim's own. Asked the other way, such a claim stopped holding
-// the pod, and its disk could be deleted with work on it the round had asked nobody for.
+// the round has not reached does, which is why the predicate is asked about the round being
+// decided rather than about the claim's own: read of the claim's own round, such a claim would
+// hold the pod no longer, and its disk could be deleted with work on it the round had asked
+// nobody for.
 //
 // What a claim lost is the other question (lostClaims), and the two are never the same set.
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {

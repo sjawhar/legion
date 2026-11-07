@@ -31,7 +31,7 @@ func TestAChainOfMergedIssuesClosesWhenTheLastIssueBeneathItLeaves(t *testing.T)
 		number int
 	}{{child, &rootKey, 43}, {grandchild, &childKey, 44}} {
 		seedIssue(t, pool, record.Issue{Key: merged.key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
-			Tree: root, Parent: merged.parent, Project: "LEGION", Title: merged.key, Phase: phase.AwaitingMerge,
+			Tree: root, Parent: merged.parent, Project: "LEGION", Title: merged.key, Phase: phase.Merging,
 			Generation: 3, Status: "retro", Rank: "V" + merged.key, LastDispatchSeq: 1})
 		seedPR(t, pool, record.PullRequest{State: record.PullRequestMerged, Issue: merged.key, Repo: "sjawhar/legion",
 			Number: merged.number, Branch: "legion/" + merged.key, HeadSHA: "head", MergeSHA: "merge", Failing: []string{}})

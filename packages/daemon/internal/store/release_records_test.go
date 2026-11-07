@@ -129,7 +129,7 @@ func TestTheStrandedReadSeesOnlyTheWakesOfTheNewestRelease(t *testing.T) {
 	wake := func(release int64, role string, when time.Time) {
 		t.Helper()
 		if err := st.Tx(ctx, func(tx pgx.Tx) error {
-			_, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: "legion", Issue: rootIssue,
+			_, _, err := RecordPodWakeTx(ctx, tx, PodResume{Release: release, Project: "legion", Issue: rootIssue,
 				Role: role, Kind: pods.WakeDelivery, At: when})
 			return err
 		}); err != nil {

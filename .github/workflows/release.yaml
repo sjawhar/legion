@@ -215,6 +215,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.version.outputs.skip }}
+      notes: ${{ steps.notes.outputs.notes }}
       pi_legion_version: ${{ steps.plugin_versions.outputs.pi_legion_version }}
       pi_envoy_version: ${{ steps.plugin_versions.outputs.pi_envoy_version }}
     steps:
@@ -339,6 +340,29 @@ jobs:
         with:
           name: legion-assets
           path: assets/
+          if-no-files-found: error
+
+      - uses: ./.github/actions/install-changie
+        if: steps.version.outputs.skip != 'true'
+
+      # This release's own changelog entries, as in pi_envoy_build and for the reasons given
+      # there: the fragments under packages/daemon/.changes/unreleased/ that this release's own
+      # commits first added, and the `notes` line fold-notes prints says whether there were any.
+      - name: Render this release's changelog entries
+        id: notes
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          .github/scripts/release-push.sh fold-notes "$VERSION" \
+            "$RUNNER_TEMP/release-notes.md" packages/daemon legion-v >> "$GITHUB_OUTPUT"
+
+      # The entries, exactly as rendered, for publish; a release with none uploads nothing at all.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true' && steps.notes.outputs.notes == 'true'
+        with:
+          name: legion-notes
+          path: ${{ runner.temp }}/release-notes.md
           if-no-files-found: error
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential
@@ -1268,6 +1292,25 @@ jobs:
           done <<< "$FILES"
           .github/scripts/release-push.sh release "$TAG" "legion v$VERSION" "${assets[@]}"
           { echo "version=$VERSION"; echo "tag=$TAG"; } >> "$GITHUB_OUTPUT"
+
+      # legion's entries, written into its release body as the plugins' are above.
+      - name: "legion: Download the changelog entries"
+        id: legion_notes
+        if: ${{ !cancelled() && steps.legion_release.outcome == 'success' && needs.legion_build.outputs.notes == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: legion-notes
+          path: ${{ runner.temp }}/legion-notes
+
+      - name: "legion: Write the changelog into the release body"
+        if: ${{ !cancelled() && steps.legion_notes.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.legion_assets.outputs.tag }}
+        run: |
+          # legion_build's one rendered file, written into the body as the plugins' are above.
+          .github/scripts/release-push.sh release-section "$TAG" '## Changelog' \
+            "$RUNNER_TEMP/legion-notes/release-notes.md"
 
   # The worker image, built from this run's commit with the plugin pair legion_build decided (empty
   # off main, where legion_build skips and the Dockerfile links none) and labelled with the legion

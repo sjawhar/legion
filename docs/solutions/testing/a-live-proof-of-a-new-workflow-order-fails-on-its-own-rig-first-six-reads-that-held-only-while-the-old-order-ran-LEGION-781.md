@@ -13,7 +13,7 @@ tags:
   - ISSUE_CLOSED
   - durable-consumers
 date: 2026-10-21
-status: active
+status: superseded in part by INFRA-714 — one read its rig holds, the issue reaching `awaiting_merge`, names a phase that no longer exists; the rule, that a proof of a new workflow order fails on its own rig first, stands and is why this note exists
 module: scripts/e2e
 related_issues:
   - "LEGION-781"

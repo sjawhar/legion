@@ -24,8 +24,9 @@ const timestamp = z.iso.datetime({ offset: true });
  * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
  * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
  * the issue record). `accepting` is the architect's acceptance between the reviewer's approval and
- * retro: no worker runs it. The merge closes the issue (`done`); the production check after it is
- * no phase (`check` on the issue record). */
+ * retro: no worker runs it. The merger merges in `merging`, and the daemon closes the issue when
+ * it reads that merge (`done`); the production check after the close is no phase (`check` on the
+ * issue record). */
 export const LEGION_WORKFLOW_PHASES = [
   "admitted",
   "awaiting_person",
@@ -36,7 +37,6 @@ export const LEGION_WORKFLOW_PHASES = [
   "accepting",
   "retro",
   "merging",
-  "awaiting_merge",
   "integrating",
   "done",
   "held",
@@ -53,7 +53,6 @@ export const LEGION_PHASE_BACKWARD_TARGETS = [
   "accepting",
   "retro",
   "merging",
-  "awaiting_merge",
   "done",
   "held",
 ] as const;
@@ -146,6 +145,21 @@ const legionClaimView = z.object({
    * round; absent until it answers, and for a worker that reported none. It is the worker's
    * word, which nothing verifies. */
   updateHead: nonEmptyString.optional(),
+  /** When the claim's agent last began a turn and last ended one, each absent until that happens
+   * and both absent for a claim whose last turn ran before the daemon recorded them. A working
+   * claim whose `lastTurnStart` is hours old is wedged; an idle claim's `lastTurnEnd` is when it
+   * last did anything. */
+  lastTurnStart: timestamp.optional(),
+  lastTurnEnd: timestamp.optional(),
+  /** Why the claim's process was last found gone, and why its last start did not produce a
+   * running agent — a launcher that refused the start, a failed init container, a pod that never
+   * became ready. Each is absent until it happens, and the two are separate because they answer
+   * separate questions: a claim that cannot start and a claim that keeps dying are different
+   * faults. `lastReady` is when the claim's agent last said it could be prompted, which dates
+   * both: a cause older than it is one the agent running now has already survived. */
+  lastDeathCause: nonEmptyString.optional(),
+  lastStartFailure: nonEmptyString.optional(),
+  lastReady: timestamp.optional(),
 });
 
 /** `api.HandoffRecordView` — the Dispatch handoff record a worker's completion of its current
@@ -156,11 +170,15 @@ const legionHandoffRecordView = z.object({
 });
 
 /** `api.PhaseView` — one phase worker's claim, the handoff of its current phase (the commit its
- * completion reported, the Dispatch handoff record it named), and the rounds it has run. */
+ * completion reported, the Dispatch handoff record it named), and the two counts the phase
+ * carries: `pass`, the passes it has made through its stretch of the workflow, which every
+ * backward move counts one of, and `rounds`, the review rounds, which only a review that
+ * requested changes counts. */
 const legionPhaseView = z.object({
   claim: legionClaimView,
   handoffCommit: nonEmptyString.optional(),
   handoffRecord: legionHandoffRecordView.optional(),
+  pass: z.number().int().nonnegative(),
   rounds: z.number().int().nonnegative(),
 });
 
@@ -169,7 +187,10 @@ const legionPhaseView = z.object({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed.
+ * No CI verdict and no fix-attempt count ride here: a CI result moves no issue, so the daemon
+ * keeps neither (dispatch://INFRA-714/spec R1), and `mergeState` is what says whether a check the
+ * repository requires holds the head. */
 const legionPullRequestView = z.object({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
@@ -177,9 +198,14 @@ const legionPullRequestView = z.object({
   head: nonEmptyString,
   /** `open`, `merged` or `closed` (contract 36), `record.PullRequestState`'s values. */
   state: z.enum(["open", "merged", "closed"]),
-  checksVerdict: nonEmptyString.optional(),
+  /** GitHub's own merge state for the head, in GitHub's lowercase spelling, as the daemon's last
+   * read of the pull request found it (`record.MergeState`); absent until that read has run. It
+   * says whether GitHub would merge the head now (`clean`) or holds it on a check or a review the
+   * repository requires (`blocked`). */
+  mergeState: z
+    .enum(["clean", "unstable", "has_hooks", "blocked", "dirty", "behind", "draft", "unknown"])
+    .optional(),
   reviewDecision: nonEmptyString.optional(),
-  fixAttempts: z.number().int().nonnegative(),
 });
 
 /** `api.GateView` — the design gate; `approvedVersion` is null until a human approves one, and
@@ -450,7 +476,7 @@ const legionCapabilityState = z.object({
  * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
  * contract change. */
 const legionSettings = z.looseObject({
-  max_fix_attempts: z.number().int().positive(),
+  review_round_cap: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
 
@@ -588,6 +614,60 @@ export const LegionReadyRequest = z.strictObject({
 });
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
+
+/** The half of `claim.TurnOutcomeRequest` that is the turn rather than the caller: `sequence` is
+ * the producer's own count of the turns it has ended at `generation`, from 1, and the daemon
+ * keeps the report under the pair, so a report that arrives late or out of order lands in its own
+ * place and the run of refused turns it derives is the same either way. `message` is what the
+ * provider said about a refusal, and a clean turn carries none. */
+const turnOutcomeFields = {
+  generation: z.number().int().positive(),
+  sequence: z.number().int().positive(),
+  outcome: z.enum(["clean", "refused"]),
+  message: z.string().optional(),
+};
+
+/** `claim.AgentCaller`'s report: the producer inside the agent's own session — pi-legion's
+ * `agent_end` hook for an Oh My Pi session — which holds the secret its registration was issued
+ * and names the claim with it, as the ready does. */
+export const LegionTurnOutcomeAgentRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  ...turnOutcomeFields,
+});
+
+/** `claim.BootCaller`'s report: the producer beside the agent rather than inside it, which holds
+ * no secret — `legion claude-bridge`, whose pane's registration is claude-envoy's, inside Claude
+ * Code. It presents the launch's own boot token, which names the same claim, and the route holds
+ * it to that launch: a token of a launch the claim has moved past, and a report for any other
+ * generation, are refused. */
+export const LegionTurnOutcomeBootRequest = z.strictObject({
+  bootToken: nonEmptyString,
+  ...turnOutcomeFields,
+});
+
+/** `claim.TurnOutcomeRequest`, the body of `POST /legion/v1/claims/turn-outcome`: how one turn of
+ * the claim's agent ended, reported by the producer that ended it, under exactly one of the two
+ * caller identities above. A body that names both, or neither, is refused
+ * (`claim.TurnOutcomeRequest.Caller`). */
+export const LegionTurnOutcomeRequest = z.union([
+  LegionTurnOutcomeAgentRequest,
+  LegionTurnOutcomeBootRequest,
+]);
+
+export type LegionTurnOutcomeRequestBody = z.output<typeof LegionTurnOutcomeRequest>;
+
+/** `claim.TurnOutcomeResponse`, the answer to a reported turn: `refusedRun` is the run of refused
+ * turns the claim's reports now end with, and `failed` whether this report took that run to
+ * `launch_failure_limit` and failed the claim. The producer acts on neither — its turn is over —
+ * and logs them, which is where an operator sees the count that failed a claim being made. */
+export const LegionTurnOutcomeResponse = z.object({
+  refusedRun: z.number().int().nonnegative(),
+  failed: z.boolean(),
+});
+
+export type LegionTurnOutcome = z.output<typeof LegionTurnOutcomeResponse>;
 
 /** `claim.ReadyForUpdateRequest`, the body of `POST /legion/v1/claims/ready-for-update`: the
  * worker's answer to its pod's update task, which says it has pushed everything it wants kept and
@@ -820,6 +900,17 @@ export const LegionOperatorClaimResponse = z.object({
    * round; absent until it answers, and for a worker that reported none. It is the worker's
    * word, which nothing verifies. */
   updateHead: nonEmptyString.optional(),
+  /** When the claim's agent last began a turn and last ended one, each absent until that happens
+   * and both absent for a claim whose last turn ran before the daemon recorded them. */
+  lastTurnStart: timestamp.optional(),
+  lastTurnEnd: timestamp.optional(),
+  /** Why the claim's process was last found gone, why its last start did not produce a running
+   * agent, and when its agent last said it could be prompted; each absent until it happens. The
+   * two causes answer separate questions and never overwrite each other, and `lastReady` dates
+   * them. `legion claims list --json` serves them. */
+  lastDeathCause: nonEmptyString.optional(),
+  lastStartFailure: nonEmptyString.optional(),
+  lastReady: timestamp.optional(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;
@@ -861,13 +952,9 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
  * the daemon adds to a fact route is caught by the golden drift test in `legion-api.test.ts`,
  * where each of the eight fact-route goldens is `{}`, not at runtime. */
 export const LegionEmptyResponse = z.object({});
-/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
- * the merge it publishes - the pull request was already merged, so its head's handoffs went
- * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
- * none. */
-export const LegionHandoffCompleteResponse = z.object({
-  note: nonEmptyString.optional(),
-});
+/** `api.HandoffCompleteResponse`: an empty object. The merger merges and the daemon merges
+ * nothing, so no completion has anything to answer with. */
+export const LegionHandoffCompleteResponse = z.object({});
 /** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
  * `released` is every issue the request named, each once, in the order the request first named it,
  * and the architect is never asked to send the request again; `started` and `held` then say what
@@ -904,7 +991,7 @@ export const LegionControllerGrantRequest = z.strictObject({
  * (`HANDOFF_RECORD_NOT_FOUND`), unreadable (`DISPATCH_READ_FAILED`), of another issue, phase or
  * version (`HANDOFF_RECORD_MISMATCH`), or written by another session than the claim's
  * (`HANDOFF_SESSION_MISMATCH`). `commit` is the implementer's (its pushed tip for an implementing
- * round, the commit it stands on for retro) and the merger's READY head; the planner, the tester
+ * round, the commit it stands on for retro) and the head the merger merged; the planner, the tester
  * and the reviewer report none, and a check report carries neither (the look pushed nothing), so
  * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
  * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
@@ -914,7 +1001,6 @@ export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
   verdict: z.string(),
-  ready: z.boolean(),
   commit: nonEmptyString.optional(),
   handoffId: nonEmptyString.optional(),
   handoffVersion: z.number().int().positive().optional(),

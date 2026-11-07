@@ -3,7 +3,7 @@
 Read this when a wake's row in the skill's table is not enough to act on it. The daemon publishes
 these on your controller topic, `notifications.legion.<project>.controller`, only while you are
 registered, and sends no second wake of a kind while one is still unsent. Other agents' messages
-(READY packets, finding asks, escalations) reach you on your role topic,
+(finding asks, escalations) reach you on your role topic,
 `notifications.role.legion-<project>-controller`; you hear both. Check each in `read_state` before
 you act, because a wake can be stale.
 

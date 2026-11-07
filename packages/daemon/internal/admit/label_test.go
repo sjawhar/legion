@@ -63,7 +63,7 @@ func TestAPersonsLabelOnAnUnrecordedRootInTriageIsQueuedByTheDaemon(t *testing.T
 	labelled := intake.DispatchIssue{Key: "LEGION-306", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "triage", Title: "Handed over by a person", Rank: "A", HandedOver: handed, LabelSetter: "user"}
 	apply(t, pool, admission, "labelled-by-a-person", labelled, engineStub{})
 	queued := []effect{
-		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-306", payload: record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}},
+		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-306", payload: record.PersonHandoverStatusWrite("todo", "triage")},
 	}
 	assertEffects(t, pool, queued)
 
@@ -162,7 +162,7 @@ func TestOnlyAnIssueCarryingTheLegionLabelIsAdmitted(t *testing.T) {
 	apply(t, pool, admission, "root-labeled", intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "handed over", Rank: "A", HandedOver: true}, engineStub{})
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}})
 	assertEffects(t, pool, []effect{
-		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-1", payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-1", payload: record.OrdinaryStatusWrite("in_progress", "todo", "")},
 		{kind: record.OutboxKindIssueBranch, issue: "LEGION-1", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-1", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-1", Role: claim.RoleArchitect, Generation: 1}},
 	})
@@ -287,7 +287,7 @@ func TestReconcileQueuesAPersonsLabelOnAnUnrecordedRootInTriage(t *testing.T) {
 
 	boot()
 	queued := []effect{
-		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-310", payload: record.StatusWrite{Status: "todo", ObservedStatus: "triage", PersonHandover: true}},
+		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-310", payload: record.PersonHandoverStatusWrite("todo", "triage")},
 	}
 	assertEffects(t, pool, queued)
 	assertWaiting(t, pool, nil)

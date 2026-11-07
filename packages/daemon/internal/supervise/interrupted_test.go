@@ -33,7 +33,7 @@ func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 		if resent.DeliveryID == sent {
 			t.Fatalf("death %d: the task was re-sent as %s, the id the dead process's turn ran under", death, sent)
 		}
-		if want := interruptedTask + "implement the plan"; resent.Message != want {
+		if want := interruptedTask(h.claim().LastDeathCause) + "implement the plan"; resent.Message != want {
 			t.Fatalf("death %d: re-sent %q, want %q", death, resent.Message, want)
 		}
 		if p := h.pending(); !p.ConfirmedAt.IsZero() || p.ID != resent.DeliveryID {
@@ -74,7 +74,7 @@ func TestAnInterruptedTasksNoteIsTheEndThatCutItsLastTurn(t *testing.T) {
 		Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now(), OutOfMemory: true,
 	}})
 	h.relaunched()
-	if want := interruptedTask + outOfMemoryTask + "implement the plan"; h.wantPrompts(2)[1].Message != want {
+	if want := interruptedTask(deathCause(runtime.Observation{Kind: runtime.Gone})) + outOfMemoryTask + "implement the plan"; h.wantPrompts(2)[1].Message != want {
 		t.Fatalf("after the out-of-memory end the task was re-sent as %q, want %q", h.wantPrompts(2)[1].Message, want)
 	}
 	if p := h.store.load(testToken).Pending; p == nil || !p.OutOfMemory {
@@ -85,7 +85,7 @@ func TestAnInterruptedTasksNoteIsTheEndThatCutItsLastTurn(t *testing.T) {
 	h.wantState(StateWorking)
 	h.observe(runtime.Gone)
 	h.relaunched()
-	if want := interruptedTask + "implement the plan"; h.wantPrompts(3)[2].Message != want {
+	if want := interruptedTask(deathCause(runtime.Observation{Kind: runtime.Gone})) + "implement the plan"; h.wantPrompts(3)[2].Message != want {
 		t.Fatalf("after the ordinary end the task was re-sent as %q, want %q: the note describes no end of this turn",
 			h.wantPrompts(3)[2].Message, want)
 	}

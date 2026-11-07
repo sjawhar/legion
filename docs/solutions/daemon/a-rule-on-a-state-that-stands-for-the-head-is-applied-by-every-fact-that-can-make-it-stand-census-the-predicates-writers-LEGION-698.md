@@ -9,7 +9,7 @@ tags:
   - predicate-writers
   - review-round
 date: 2026-10-14
-status: active
+status: superseded by INFRA-714 — the state this note's rule stood on is gone: there is no `awaiting_merge` phase, and no `checks-red` move for CI, since a red check moves the issue nowhere. The census habit stands; the predicate it was written about does not
 module: packages/daemon/internal/workflow
 related_issues:
   - "LEGION-698"

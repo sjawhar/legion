@@ -22,7 +22,6 @@ const (
 	Accepting      Phase = "accepting"
 	Retro          Phase = "retro"
 	Merging        Phase = "merging"
-	AwaitingMerge  Phase = "awaiting_merge"
 	Done           Phase = "done"
 	Held           Phase = "held"
 )
@@ -30,7 +29,7 @@ const (
 // All is every phase, in the transition table's order.
 var All = []Phase{
 	Admitted, AwaitingPerson, Planning, Implementing, Testing, Reviewing, Accepting, Retro, Merging,
-	AwaitingMerge, Done, Held,
+	Done, Held,
 }
 
 // Handoff is the word of the Dispatch handoff record a phase ends with, the role that writes it,
@@ -38,9 +37,9 @@ var All = []Phase{
 // tester's, and the reviewer's, each under the word its role's prompt spells
 // (internal/prompts/roles/*.md), the phase of the record whose newest version the `legion` tool's
 // `handoff_complete` reads and names (packages/pi-shared/src/handoff-record.ts). The writer is the
-// role the workflow starts on the phase (workflow.RoleFor, whose tests tie the two). Retro and the
-// merger's READY write none, and report the commit they stand on; accepting is the architect's
-// sign-off, no handoff at all.
+// role the workflow starts on the phase (workflow.RoleFor, whose tests tie the two). Retro and
+// merging write none, and report the commit they stand on; accepting is the architect's sign-off,
+// no handoff at all.
 func Handoff(p Phase) (word string, writer claim.Role, ok bool) {
 	switch p {
 	case Planning:

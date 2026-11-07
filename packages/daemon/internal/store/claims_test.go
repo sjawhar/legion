@@ -249,6 +249,31 @@ func TestAClaimsPluginContractRoundTrips(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
+// The turn a claim last started and the one it last ended are nullable columns of their own: a
+// claim that has taken no turn reads back with neither time rather than with a zero one, and a
+// claim that has worked reads both back to the microsecond, which is what a restarted daemon
+// hands every reader of the claim.
+func TestAClaimsTurnTimesRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if got := onlyClaim(t, store); !got.LastTurnStart.IsZero() || !got.LastTurnEnd.IsZero() {
+		t.Fatalf("a claim that has taken no turn read back %v and %v, want no turn times", got.LastTurnStart, got.LastTurnEnd)
+	}
+
+	c.LastTurnStart, c.LastTurnEnd = at(3), at(9)
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put the worked claim: %v", err)
+	}
+	got := onlyClaim(t, store)
+	if !got.LastTurnStart.Equal(at(3)) || !got.LastTurnEnd.Equal(at(9)) {
+		t.Fatalf("turn times read back = %v and %v, want %v and %v", got.LastTurnStart, got.LastTurnEnd, at(3), at(9))
+	}
+}
+
 // The round a claim left is a column of its own, and it is read back exactly as it was written:
 // the daemon decides from it what the pod of a round took with it when it went, and a restart
 // has nothing else to read that from (INFRA-484). It round-trips independently of the round the

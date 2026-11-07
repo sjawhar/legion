@@ -1,0 +1,18 @@
+kind: Changed
+body: |-
+  `legion claims retry --fresh-session` is one decision rather than two. The flag now rides the
+  phase restart the route applies, so the claim forgets its session inside the retry that start
+  makes: a restart the workflow refuses — a lingering tree, a phase this role does not work, a
+  store that failed — leaves the session where the operator still has it, where before it had
+  already been discarded. The route applies that one restart whether or not the issue is held,
+  since the workflow restores a held issue from its hold itself.
+
+  A claim that forgets a session records which one it abandoned and why, and the agent that
+  replaces it is told in the first task it is given: the session that was left behind, the cause in
+  the provider's own words, the issue's branch and the handoffs committed on it. A failed claim's
+  cause now reads `the provider refused <n> turns in a row: <message>`.
+
+  The boot-token form of `POST /legion/v1/claims/turn-outcome` is held to the launch it was minted
+  for, as the shim's hello is: a token of a launch the claim has moved past is refused, and so is a
+  report for any other generation, so a pane left from a replaced launch cannot add refusals to the
+  claim its replacement is working.

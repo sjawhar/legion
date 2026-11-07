@@ -34,7 +34,7 @@ func TestTheChildHeldUnderAnAcceptedRootIsHandedOverWhenTheRootCloses(t *testing
 	root, child, held := "LEGION-208", "LEGION-209", "LEGION-210"
 	rootKey, childKey := root, child
 	seedIssue(t, pool, record.Issue{Key: root, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
-		Tree: root, Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro",
+		Tree: root, Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 7, Status: "retro",
 		Rank: "U", LastDispatchSeq: 1})
 	// The child between them finished, as a tree's children do before their root is accepted.
 	seedIssue(t, pool, record.Issue{Key: child, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
@@ -137,7 +137,7 @@ func assertHandedOver(t *testing.T, pool *pgxpool.Pool, key, tree string, genera
 	}
 	var writes int
 	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'dispatch_status' and issue = $1
-		and payload->>'status' = 'todo' and payload->>'handOver' = 'true' and payload->>'handOverTree' = $2
+		and payload->>'status' = 'todo' and payload->>'kind' = 'hand-over' and payload->>'handOverTree' = $2
 		and payload->>'handOverLinger' = $3`, key, tree, fmt.Sprint(generation)).Scan(&writes); err != nil || writes != 1 {
 		t.Fatalf("the hand-over writes of %s = %d, %v; want one fenced on %s's linger %d: nothing else would ever start it, though the architect was told it starts once %s closed",
 			key, writes, err, tree, generation, tree)

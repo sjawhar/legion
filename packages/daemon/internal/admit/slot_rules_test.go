@@ -43,12 +43,12 @@ func slotTree(t *testing.T, pool *pgxpool.Pool, approved bool) {
 // slotMember records key in LEGION-1's tree at stands, with the Dispatch status a member in that
 // phase shows, and a working claim of the phase's own role, so a pass that moved a claim or a
 // status would be seen.
-func slotMember(t *testing.T, pool *pgxpool.Pool, key string, stands phase.Phase, status string, ready *int) {
+func slotMember(t *testing.T, pool *pgxpool.Pool, key string, stands phase.Phase, status string) {
 	t.Helper()
 	parent := "LEGION-1"
 	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject,
 		Title: key, Tree: "LEGION-1", Parent: &parent, Phase: stands, Generation: 1, Status: status, DispatchStatus: status, Rank: "B",
-		ReadyPendingVersion: ready, LastDispatchSeq: 3})
+		LastDispatchSeq: 3})
 	role := workflow.RoleFor(stands)
 	if role == "" || role == claim.RoleArchitect {
 		role = claim.RoleImplementer
@@ -153,11 +153,11 @@ func dispatchStatuses(t *testing.T, pool *pgxpool.Pool) map[string]string {
 // A1. One slot rule per state, each read by one admission pass over a tree that runs.
 //
 // An issue in a state the spec's first list names — planning, implementing, testing, reviewing,
-// retro, merging with no READY the gate holds, and a root at admitted whose gate has never
-// opened — holds a slot as soon as one is free. An issue in a state of the second list — merging
-// with a READY the closed gate holds, a child at admitted, a root at admitted after its gate
-// opened, accepting, awaiting_merge, held, awaiting_person and done — holds none after one pass,
-// and neither does any issue of a tree that lingers.
+// retro, merging, and a root at admitted whose gate has never opened — holds a slot as soon as
+// one is free. An issue in a state of the second list — a child at admitted, a root at admitted
+// after its gate opened, accepting, held, awaiting_person and done — holds none after one pass,
+// and neither does any issue of a tree that lingers. Merging is a worker's phase on this release,
+// since the merger merges the pull request itself, so it holds a slot like every other.
 //
 // The slot is accounting and nothing else: the pass suspends no claim, moves no phase and writes
 // no Dispatch status, which the three unchanged reads below pin.
@@ -177,45 +177,40 @@ func TestSlotPerState(t *testing.T) {
 	}{
 		{name: "planning", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Planning, "in_progress", nil)
+			slotMember(t, pool, member, phase.Planning, "in_progress")
 			oweStart(t, pool, member, phase.Planning)
 		}},
 		{name: "implementing", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Implementing, "in_progress", nil)
+			slotMember(t, pool, member, phase.Implementing, "in_progress")
 			oweStart(t, pool, member, phase.Implementing)
 		}},
 		{name: "testing", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Testing, "testing", nil)
+			slotMember(t, pool, member, phase.Testing, "testing")
 			oweStart(t, pool, member, phase.Testing)
 		}},
 		{name: "reviewing", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Reviewing, "needs_review", nil)
+			slotMember(t, pool, member, phase.Reviewing, "needs_review")
 			oweStart(t, pool, member, phase.Reviewing)
 		}},
 		{name: "retro", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Retro, "retro", nil)
+			slotMember(t, pool, member, phase.Retro, "retro")
 			oweStart(t, pool, member, phase.Retro)
 		}},
-		{name: "merging with no pending READY", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
+		{name: "merging", issue: member, wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Merging, "retro", nil)
+			slotMember(t, pool, member, phase.Merging, "retro")
 			oweStart(t, pool, member, phase.Merging)
 		}},
 		{name: "a root at admitted whose gate never opened", issue: "LEGION-9", wants: true, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			seedWaiting(t, pool, "LEGION-9", "A")
 		}},
-		{name: "merging with a READY the gate holds", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
-			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Merging, "retro", new(2))
-			takeSlot(t, pool, member)
-		}},
 		{name: "a child at admitted", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, false)
-			slotMember(t, pool, member, phase.Admitted, "todo", nil)
+			slotMember(t, pool, member, phase.Admitted, "todo")
 			takeSlot(t, pool, member)
 		}},
 		{name: "a root at admitted after its gate opened", issue: "LEGION-1", seed: func(t *testing.T, pool *pgxpool.Pool) {
@@ -227,27 +222,22 @@ func TestSlotPerState(t *testing.T) {
 		}},
 		{name: "accepting", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Accepting, "needs_review", nil)
-			takeSlot(t, pool, member)
-		}},
-		{name: "awaiting_merge", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
-			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.AwaitingMerge, "retro", nil)
+			slotMember(t, pool, member, phase.Accepting, "needs_review")
 			takeSlot(t, pool, member)
 		}},
 		{name: "held", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Held, "in_progress", nil)
+			slotMember(t, pool, member, phase.Held, "in_progress")
 			takeSlot(t, pool, member)
 		}},
 		{name: "done", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Done, "done", nil)
+			slotMember(t, pool, member, phase.Done, "done")
 			takeSlot(t, pool, member)
 		}},
 		{name: "an issue of a lingering tree", issue: member, seed: func(t *testing.T, pool *pgxpool.Pool) {
 			slotTree(t, pool, true)
-			slotMember(t, pool, member, phase.Implementing, "in_progress", nil)
+			slotMember(t, pool, member, phase.Implementing, "in_progress")
 			takeSlot(t, pool, member)
 			root := issue(t, pool, "LEGION-1")
 			until := fixedNow.Add(time.Hour)

@@ -37,7 +37,7 @@ func approvalOf(actor dispatch.Actor, view *dispatch.Issue) intake.DispatchArtif
 
 // personHandoverWrite is the row the daemon queues for a person's handover found at status.
 func personHandoverWrite(status string) record.StatusWrite {
-	return record.StatusWrite{Status: "todo", ObservedStatus: status, PersonHandover: true}
+	return record.PersonHandoverStatusWrite("todo", status)
 }
 
 // statusWrites decodes the queued dispatch_status rows of issue, oldest first.
@@ -251,7 +251,7 @@ func TestAnApprovalOfALiveOrClosedRootsSpecIsAppliedToItsGateAsToday(t *testing.
 
 			apply("approval", approvalOf(askPerson, tc.view))
 
-			if writes := statusWrites(t, pool, "LEGION-208"); slices.ContainsFunc(writes, func(write record.StatusWrite) bool { return write.PersonHandover }) {
+			if writes := statusWrites(t, pool, "LEGION-208"); slices.ContainsFunc(writes, func(write record.StatusWrite) bool { return write.Kind == record.PersonHandoverStatusRow }) {
 				t.Fatalf("status writes = %#v, want no person's handover for a root the approval does not queue", writes)
 			}
 			if gate := gateState(t, pool, "LEGION-208"); gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 {
@@ -303,24 +303,26 @@ func TestACarriedCopyOfAParkedRootsGateTakesTheApprovalWhileTheOwnerIsQueued(t *
 
 // One row of a person's handover at a time: while a marked row is pending for the root, a second
 // approval — the stream's redelivery under another event id, or the person approving again — queues
-// nothing, since the pending row carries the same write. The workflow's other status rows suppress
-// nothing: a hand-over row, also a todo, pending for the root leaves the person's handover queued
-// beside it.
+// nothing, since the pending row carries the same write, at either status a parked root holds. The
+// workflow's other status rows suppress nothing: a hand-over row, also a todo, pending for the root
+// leaves the person's handover queued beside it.
 func TestAPendingPersonsHandoverSuppressesASecondAndAHandOverRowDoesNot(t *testing.T) {
-	t.Run("a pending marked row", func(t *testing.T) {
-		pool := migratedPool(t)
-		apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	for _, status := range []string{"backlog", "icebox"} {
+		t.Run("a pending marked row at "+status, func(t *testing.T) {
+			pool := migratedPool(t)
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 
-		apply("approval", approvalOf(askPerson, parkedRootView("backlog")))
-		apply("approval-redelivered", approvalOf(askPerson, parkedRootView("backlog")))
+			apply("approval", approvalOf(askPerson, parkedRootView(status)))
+			apply("approval-redelivered", approvalOf(askPerson, parkedRootView(status)))
 
-		if got, want := statusWrites(t, pool, "LEGION-208"), []record.StatusWrite{personHandoverWrite("backlog")}; !reflect.DeepEqual(got, want) {
-			t.Fatalf("status writes = %#v, want the one row %#v", got, want)
-		}
-	})
+			if got, want := statusWrites(t, pool, "LEGION-208"), []record.StatusWrite{personHandoverWrite(status)}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("status writes = %#v, want the one row %#v", got, want)
+			}
+		})
+	}
 	t.Run("a pending hand-over row", func(t *testing.T) {
 		pool := migratedPool(t)
-		handOver := record.StatusWrite{Status: "todo", ObservedStatus: "backlog", HandOver: true, HandOverTree: "LEGION-200", HandOverLinger: 3}
+		handOver := record.HandOverStatusWrite("todo", "backlog", "LEGION-200", 3)
 		row, err := record.NewOutboxRow("LEGION-208", handOver, time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC))
 		if err != nil {
 			t.Fatal(err)

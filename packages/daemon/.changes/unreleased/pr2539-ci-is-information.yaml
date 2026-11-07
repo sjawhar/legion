@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+  A failed CI check moves no issue. The daemon tells the worker holding the phase, the implementer
+  and the tree's architect what settled, naming each check and its conclusion once per settled head,
+  and the worker decides whether to re-run it, wait for it, or fix the code. A job GitHub never
+  started reads like any other conclusion, because nothing classifies it.

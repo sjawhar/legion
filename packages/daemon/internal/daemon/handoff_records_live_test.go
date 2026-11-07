@@ -18,15 +18,16 @@
 //
 // What is stood in for lies outside the records. The broker is a native nats-server the script
 // starts and names in LEGION_E2E_NATS_URL. GitHub is the daemon's own REST stand-in
-// (mergedRootWaitsGitHub, which answers each repository with default branch main and nothing
-// else). The Apps' tokens are workflowTokenRecorder's placeholders, Envoy's listener is the
-// package's noticeListener, and no agent runs: each claim is launched by the package's fake
-// runtime, which provisions its workspace in its own pod, and is driven over the daemon's worker
-// stream as its pane's shim drives it (handoffClaimant). The issues, their pull requests, their
-// trees' slots and the claims the boot relaunches are seeded through the store, as every daemon
-// test seeds its fixture; every assertion is a read of GET /legion/v1/state, of a route's answer,
-// of what the CLI printed, of Dispatch's own routes, or of the task a started worker's shim was
-// prompted with.
+// (handoffRecordsDaemonGitHub, which answers each repository with default branch main, lists the
+// one open pull request of the branch that completes rounds here, and nothing else). The Apps'
+// tokens are workflowTokenRecorder's placeholders, Envoy's listener is the package's
+// noticeListener, and no
+// agent runs: each claim is launched by the package's fake runtime, which provisions its workspace
+// in its own pod, and is driven over the daemon's worker stream as its pane's shim drives it
+// (handoffClaimant). The issues, their pull requests, their trees' slots and the claims the boot
+// relaunches are seeded through the store, as every daemon test seeds its fixture; every
+// assertion is a read of GET /legion/v1/state, of a route's answer, of what the CLI printed, of
+// Dispatch's own routes, or of the task a started worker's shim was prompted with.
 package daemon
 
 import (
@@ -38,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -196,7 +198,7 @@ func (r *handoffRecordsLive) seed() {
 	}
 	// The implementer's completion of implementing reads GitHub for the open pull request on its
 	// branch, so GitHub lists the one the record holds for the issue that completes rounds here.
-	r.github = mergedRootWaitsGitHub(t, "legion/"+r.renew, int(number)+2)
+	r.github = handoffRecordsDaemonGitHub(t, "legion/"+r.renew, int(number)+2)
 	type seeded struct {
 		key   string
 		phase phase.Phase
@@ -993,4 +995,26 @@ func (d *handoffDispatch) latest(key, word string) handoffRecord {
 	var latest handoffRecord
 	d.agentGet("/api/v1/issues/"+key+"/handoffs/"+word+"/latest", &latest)
 	return latest
+}
+
+// handoffRecordsDaemonGitHub is GitHub's REST API as the daemon reads it through this proof: every
+// repository has default branch main, and the open pull requests of branch are the one numbered
+// number, which the implementer's completion of implementing reads before it moves its issue on.
+// Every other route is a 404: nothing else of GitHub is read here.
+func handoffRecordsDaemonGitHub(t *testing.T, branch string, number int) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
+		switch parts := strings.Split(rest, "/"); {
+		case r.Method == http.MethodGet && isRepository && len(parts) == 2:
+			_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
+		case r.Method == http.MethodGet && isRepository && len(parts) == 3 && parts[2] == "pulls":
+			_, _ = fmt.Fprintf(w, `[{"number":%d,"state":"open","head":{"ref":%q,"sha":"head-child"},"base":{"ref":"main"},"updated_at":"2026-10-28T00:00:00Z"}]`, number, branch)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
 }

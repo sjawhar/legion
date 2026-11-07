@@ -15,11 +15,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A pull request that finishes before the issue awaits its merge — merged early, or closed without
+// A pull request that finishes before the issue reaches merging — merged early, or closed without
 // merging — is the architect's to act on, as the shipped daemon routes it: the architect is told
 // once, naming the pull request and the phase the issue was in, and the issue's phase is left for
 // the architect to decide. A redelivered observation tells it nothing new.
-func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testing.T) {
+func TestAPullRequestFinishingOutsideMergingTellsTheArchitectOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		fact   intake.Fact
@@ -128,21 +128,21 @@ func TestAReopenOfAMergedPullRequestChangesNothing(t *testing.T) {
 	}
 }
 
-// An issue that reaches awaiting_merge with its pull request already merged has nothing left to
-// merge: the merge closes it at once, its tree lingering as any root's close does, no READY asks a
-// human to merge it, and the one start the close queues is the implementer's first look of the
-// production check the merge opens (merge_close_test.go).
-func TestAnIssueReachingAwaitingMergeWithItsPullRequestMergedCloses(t *testing.T) {
+// An issue that reaches merging with its pull request already merged has nothing left to merge:
+// the merge closes it at once, no merger is started for it, its tree lingers as any root's close
+// does, and the one start the close queues is the implementer's first look of the production check
+// the merge opens (merge_close_test.go).
+func TestAnIssueReachingMergingWithItsPullRequestMergedCloses(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 		MergeSHA: "merge", Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 
-	result, err := intake.ApplyFact(context.Background(), pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}, readyEngine("merge-queue"), admissionStub{})
+	result, err := intake.ApplyFact(context.Background(), pool, "api", "retro", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim", Generation: 1, Summary: "retro done", Commit: "head"}, mergingEngine(), admissionStub{})
 	if err != nil || result.Refusal != nil {
-		t.Fatalf("ApplyFact READY = %#v, %v", result, err)
+		t.Fatalf("ApplyFact retro = %#v, %v", result, err)
 	}
 	assertPhase(t, pool, phase.Done)
 	var lingering bool
@@ -151,16 +151,13 @@ func TestAnIssueReachingAwaitingMergeWithItsPullRequestMergedCloses(t *testing.T
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
 	if started := superviseRequests(t, pool, "start"); len(started) != 1 || started["LEGION-208/implementer"] != 1 {
-		t.Fatalf("the close started %v, want the implementer's check look alone", started)
+		t.Fatalf("the close started %v, want the implementer's check look alone and no merger", started)
 	}
 	if check := productionCheck(t, pool, "LEGION-208"); check == nil || !check.Open() || check.MergeSHA != "merge" || check.Looks != 1 {
 		t.Fatalf("the production check = %+v, want it open on merge commit merge at look 1", check)
 	}
 	if got := messageBodies(t, pool); len(got) != 0 {
-		t.Fatalf("Dispatch messages = %q, want no READY for a merged pull request", got)
-	}
-	if got := mergeQueuePublishes(t, pool); len(got) != 0 {
-		t.Fatalf("merge queue publishes = %v, want none for a merged pull request", got)
+		t.Fatalf("Dispatch messages = %q, want none: the daemon posts no packet", got)
 	}
 }
 

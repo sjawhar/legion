@@ -263,7 +263,6 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 	spec, running, lingering, queued := bootProject+"-1", bootProject+"-2", bootProject+"-7", bootProject+"-9"
 	building, testing := bootProject+"-3", bootProject+"-4"
 	heldReady, merging, lingerChild := bootProject+"-5", bootProject+"-6", bootProject+"-8"
-	pendingVersion := 2
 	lingers := time.Now().UTC().Add(time.Hour)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		// A root whose architect is writing its spec, a running tree whose own root waits in
@@ -274,14 +273,12 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 			bootIssue(running, running, "needs_review", phase.Accepting),
 			bootIssue(building, running, "in_progress", phase.Implementing),
 			bootIssue(testing, running, "testing", phase.Testing),
-			bootIssue(merging, running, "retro", phase.AwaitingMerge),
+			bootIssue(merging, running, "retro", phase.Merging),
 			bootIssue(lingering, lingering, "done", phase.Done),
 			bootIssue(lingerChild, lingering, "in_progress", phase.Implementing),
 			bootIssue(queued, queued, "todo", phase.Admitted),
 		}
-		held := bootIssue(heldReady, running, "retro", phase.Merging)
-		held.ReadyPendingVersion = &pendingVersion
-		seeded = append(seeded, held)
+		seeded = append(seeded, bootIssue(heldReady, running, "retro", phase.Merging))
 		for _, issue := range seeded {
 			if err := records.PutIssue(ctx, tx, issue); err != nil {
 				return err
@@ -309,7 +306,9 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 		t.Fatalf("migrate the pre-release store onto the release: %v", err)
 	}
 	granted := slotHolders(t, pool)
-	if want := []string{spec, running, building, testing, lingering}; !reflect.DeepEqual(granted, want) {
+	// Merging is a worker's phase on this release — the merger merges the pull request itself — so
+	// the two issues standing in it are at work and hold slots like the rest.
+	if want := []string{spec, running, building, testing, heldReady, merging, lingering}; !reflect.DeepEqual(granted, want) {
 		t.Fatalf("the slots the migration left = %v, want %v: every issue of a live tree at work, and the roots that already held one",
 			granted, want)
 	}
@@ -321,8 +320,8 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 		t.Fatalf("apply the first boot on the release: %v", err)
 	}
 	working := slotHolders(t, pool)
-	if want := []string{spec, building, testing}; !reflect.DeepEqual(working, want) {
-		t.Fatalf("the slots after the first boot = %v, want %v: the spec's root and the two children at work, above the cap of 2",
+	if want := []string{spec, building, testing, heldReady, merging}; !reflect.DeepEqual(working, want) {
+		t.Fatalf("the slots after the first boot = %v, want %v: the spec's root, the two children at work and the two in merging, above the cap of 2",
 			working, want)
 	}
 	if len(working) <= 2 {
@@ -332,8 +331,12 @@ func TestTheFirstBootOnTheReleaseKeepsEveryWorkingIssueAtItsTurn(t *testing.T) {
 		t.Fatalf("admission.waiting after the first boot = %v, want the root that never ran", waiting)
 	}
 
-	// The count falls to the cap as the first child finishes, and nothing new starts there: the
-	// loop admits while the holders are under the cap, never at it.
+	// The count falls to the cap as the issues finish, and nothing new starts there: the loop
+	// admits while the holders are under the cap, never at it. The two in merging are finished
+	// first: their phase is the merger's on this release, so each holds a slot until its own
+	// merge closes it.
+	finish(t, pool, records, heldReady)
+	finish(t, pool, records, merging)
 	finish(t, pool, records, building)
 	tick(t, pool, handlers, "tick-at-the-cap")
 	if holders := slotHolders(t, pool); !reflect.DeepEqual(holders, []string{spec, testing}) {
@@ -383,7 +386,9 @@ func finish(t *testing.T, pool *pgxpool.Pool, records record.Store, key string) 
 		if err != nil {
 			return err
 		}
-		issue.Phase, issue.Status, issue.DispatchStatus = phase.AwaitingMerge, "retro", "retro"
+		// Its work is over, which on this release is the phase the merge leaves: merging is the
+		// merger's own phase and holds a slot until its merge closes the issue.
+		issue.Phase, issue.Status, issue.DispatchStatus = phase.Done, "done", "done"
 		return records.PutIssue(ctx, tx, *issue)
 	}); err != nil {
 		t.Fatalf("finish %s: %v", key, err)

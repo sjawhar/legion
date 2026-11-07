@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
 func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T) {
@@ -193,7 +194,7 @@ func TestOutboxSetsTheStatusOfAWriteWhoseReasonDispatchRefusesAgainstScratchDisp
 	now := time.Now().UTC()
 	reason := "Closed by its architect before its first phase: " + strings.Repeat("x", 32001)
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue,
-		record.StatusWrite{ObservedStatus: before.Status, Status: "done", Reason: reason}, now))
+		record.OrdinaryStatusWrite("done", before.Status, reason), now))
 	runner := &outbox{
 		dispatchProject: "LEGION", log: quietLogger(),
 		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
@@ -355,7 +356,7 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 		t.Fatalf("create scratch Dispatch database: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+database+" with (force)"); err != nil {
+		if err := testpg.Drop(context.Background(), admin, database); err != nil {
 			t.Errorf("drop scratch Dispatch database: %v", err)
 		}
 	})

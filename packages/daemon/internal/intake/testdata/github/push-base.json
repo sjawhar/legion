@@ -1,0 +1,11 @@
+{
+  "event_id": "task714-push-base",
+  "source": "github",
+  "source_event_id": "task714-push-base",
+  "topic": "notifications.github.sjawhar.legion.push.branch.main",
+  "dedupe_key": "github.task714-push-base",
+  "issued_at": 1790124795393,
+  "payload_summary": "push to main: Merge a pull request (base-ca) by merger",
+  "payload": "{\"after\":\"base-captured\",\"before\":\"base-before\",\"changed_paths\":\"source.go\",\"changed_paths_truncated\":\"false\",\"commit_count\":\"1\",\"head_subject\":\"Merge a pull request\",\"kind\":\"push\",\"pusher\":\"merger\",\"ref\":\"refs/heads/main\",\"repo\":\"sjawhar/legion\",\"sender\":\"merger\"}",
+  "trace_id": "task714-push-base"
+}

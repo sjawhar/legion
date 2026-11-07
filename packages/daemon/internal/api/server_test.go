@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -215,6 +216,36 @@ func TestStateRouteReportsASourceFailure(t *testing.T) {
 	}
 	if body["error"] == "" {
 		t.Fatalf("body = %v, want an error message", body)
+	}
+}
+
+// A caller that hangs up mid-read — an operator who interrupts the read, a poll past its own
+// timeout, a proxy that drops the connection — cuts the state read short with its own context,
+// and that says nothing about the daemon: the route answers as it must and logs the read at
+// Debug, never as an ERROR line an operator is meant to act on. The daemon's own tests read its
+// ERROR lines to judge a boot (internal/daemon's every-installation-read-failed boot), so an
+// ERROR logged for a caller's hang-up is a failure reported against the daemon that had none.
+func TestStateRouteLogsNoErrorWhenTheCallerHangsUp(t *testing.T) {
+	var logged bytes.Buffer
+	server := NewServer("127.0.0.1", 8437, Options{
+		State:             fakeSource{err: context.Canceled},
+		StateTransactions: &fakeStateTransactions{tx: &fakeTx{}},
+		Log:               slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+
+	server.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/legion/v1/state", nil).WithContext(ctx))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	if strings.Contains(logged.String(), `"level":"ERROR"`) {
+		t.Fatalf("log = %s, want no ERROR line for a caller that hung up", logged.String())
+	}
+	if !strings.Contains(logged.String(), "api: state source failed") {
+		t.Fatalf("log = %s, want the read logged at Debug", logged.String())
 	}
 }
 

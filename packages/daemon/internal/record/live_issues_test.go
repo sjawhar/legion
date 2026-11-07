@@ -20,7 +20,7 @@ func TestLiveIssuesReadsTheRecordsOfTheProjectThatAreNotFinished(t *testing.T) {
 	records := NewStore()
 	issue := func(key, project string, at phase.Phase, status string) Issue {
 		recorded := issueFixture(key)
-		recorded.Project, recorded.Phase, recorded.Status, recorded.Parent, recorded.ReadyPendingVersion = project, at, status, nil, nil
+		recorded.Project, recorded.Phase, recorded.Status, recorded.Parent = project, at, status, nil
 		return recorded
 	}
 	inTx(t, st, func(tx pgx.Tx) {

@@ -156,7 +156,7 @@ func TestClaimsSuspendFailsWhenTheHeldSuspensionOutlastsTheWait(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("suspend exited %d printing %q, want 1 and nothing printed", code, out)
 	}
-	if want := "is still working after 1s, its suspension held"; !strings.Contains(errb, want) {
+	if want := "is still working after the --wait bound of 1s, its suspension held"; !strings.Contains(errb, want) {
 		t.Fatalf("suspend said %q, want %q", errb, want)
 	}
 }

@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,14 +20,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -33,7 +40,7 @@ func TestOutboxLeaseLetsOnlyOneRunnerExecuteDueRow(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release}
@@ -62,7 +69,7 @@ func TestOutboxRetryBacksOffFailedEffect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, fail: errors.New("Dispatch down")}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
 
@@ -92,9 +99,9 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	now := clock.Now()
 	// Three issues: one issue's status rows run one at a time by design, so each row is on a lane
 	// of its own and none waits for another.
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now.Add(time.Hour)))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.OrdinaryStatusWrite("in_progress", "todo", ""), now.Add(time.Hour)))
 	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = 'a-runner-that-died', lease_until = $2 where issue = $1",
 		"LEGION-209", now.Add(-time.Second)); err != nil {
 		t.Fatalf("leave a lapsed lease on LEGION-209's row: %v", err)
@@ -137,7 +144,7 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), now))
 
 	first := claimDueOutboxRow(t, pool, records, now)
 	second := claimDueOutboxRow(t, pool, records, first.LeaseUntil.Add(time.Nanosecond))
@@ -226,7 +233,7 @@ func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("create %s: %v", name, err)
 	}
 	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+		if err := testpg.Drop(context.Background(), admin, name); err != nil {
 			t.Errorf("drop %s: %v", name, err)
 		}
 	})
@@ -286,6 +293,9 @@ func (d *blockingDispatch) SetStatus(context.Context, string, string) (dispatch.
 	}
 	return dispatch.Issue{}, fail
 }
+func (d *blockingDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *blockingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("blockingDispatch takes no hand-over")
 }
@@ -322,8 +332,8 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &boardDispatch{status: "in_progress", failures: 1}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }}
 
@@ -352,8 +362,8 @@ func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *te
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("needs_review", "testing", ""), now))
 	board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{
 		"testing": {Status: 422, Code: "INVALID_STATUS", Message: "testing is not a status of this issue"},
 	}}
@@ -412,7 +422,7 @@ func TestACredentialOrUncodedRefusalIsRiddenOutRatherThanDroppingTheWrite(t *tes
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			now := time.Now().UTC()
-			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("testing", "in_progress", ""), now))
 			board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{"testing": tc.refusal}}
 			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }, log: quietLogger()}
 
@@ -461,6 +471,9 @@ func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string)
 	d.status = status
 	return dispatch.Issue{}, nil
 }
+func (d *refusingDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *refusingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("refusingDispatch takes no hand-over")
 }
@@ -505,6 +518,9 @@ func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) (d
 	d.status = status
 	return dispatch.Issue{}, nil
 }
+func (d *boardDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *boardDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("boardDispatch takes no hand-over")
 }
@@ -527,6 +543,477 @@ func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProjec
 }
 func (d *boardDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
+// A person's handover row (dispatch://LEGION-755) is the one status row that brings its issue
+// into the workflow rather than moving one along inside it: a todo observed at the `triage` a
+// person's legion label found, or at the `backlog` or `icebox` their approval of a parked root's
+// spec found, marked PersonHandover. When Dispatch refuses its fenced write because an event
+// landed between the row's read and that write (ISSUE_CHANGED) — an interleaved comment, an edit
+// — the retry is judged by the handover's own rule, that the label is still there
+// (personHandoverStands), and nothing of the re-read is applied.
+//
+// Judged by statusStillWanted instead, whose record.OutOfWorkflow is true for exactly those three
+// statuses, every such row was dropped without writing and logged as having left a workflow its
+// issue had never entered; and the read applied on the triage path told admission the label was
+// nobody's — a read of Dispatch names no actor, so it carries no LabelSetter — which queued a
+// `triage` wake for a root the controller is told to leave alone
+// (skills/legion-controller/references/triage.md).
+//
+// The runner holds a real pool and the two handlers that would queue that wake (workflow.New and
+// admit.New, the pair the hand-over tests wire): with a nil pool applyRead returns before applying
+// anything, so the wake assertion would hold whether the retry applies its read or not. The cases
+// share the pool and take a key each, so one case's wake is never read for another's.
+func TestAPersonsHandoverIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T) {
+	const dropped = "outbox: a person's handover is not written; the label is gone"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	for _, tc := range []struct {
+		name     string
+		key      string
+		observed string
+		// labelled is the label as the re-read after the refusal shows it: a person who took it
+		// off between the queue and this delivery withdrew the handover.
+		labelled bool
+		statuses []string
+		logged   int
+	}{
+		{name: "a person's label on a triage root", key: "LEGION-751", observed: "triage", labelled: true, statuses: []string{"todo"}},
+		{name: "a person's approval of a backlog root", key: "LEGION-752", observed: "backlog", labelled: true, statuses: []string{"todo"}},
+		{name: "a person's approval of an icebox root", key: "LEGION-753", observed: "icebox", labelled: true, statuses: []string{"todo"}},
+		{name: "the label taken off between the queue and the retry", key: "LEGION-754", observed: "triage", logged: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shown := dispatch.Issue{Key: tc.key, Status: tc.observed, Title: tc.key, Rank: "A", Labels: []string{dispatch.LegionLabel},
+				HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 4}
+			// What the read after the refusal shows: the issue at the status the row was queued
+			// from, at the sequence the interleaved event moved it to.
+			reread := shown
+			reread.LastSeq, reread.HandedOver = shown.LastSeq+1, tc.labelled
+			if !tc.labelled {
+				reread.Labels = nil
+			}
+			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
+			var logs bytes.Buffer
+			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
+				log: slog.New(slog.NewJSONHandler(&logs, nil))}
+			row := mustOutboxRow(t, tc.key, record.PersonHandoverStatusWrite("todo", tc.observed), time.Now())
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the person's handover: %v", err)
+			}
+
+			if client.refusals != 1 {
+				t.Fatalf("Dispatch refused %d writes, want the one interleaved change this test is about", client.refusals)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) {
+				t.Fatalf("status writes = %v, want %v", client.statuses, tc.statuses)
+			}
+			if len(tc.statuses) > 0 && client.at != reread.LastSeq {
+				t.Fatalf("the retry wrote at sequence %d, want the re-read's %d", client.at, reread.LastSeq)
+			}
+			if wakes := triageWakes(t, pool, tc.key); wakes != 0 {
+				t.Fatalf("triage wakes queued for the controller = %d, want none: the retry applies nothing of its read", wakes)
+			}
+			if lines := loggedLines(t, logs.String(), dropped); len(lines) != tc.logged {
+				t.Fatalf("logged %q %d times, want %d: %s", dropped, len(lines), tc.logged, logs.String())
+			}
+		})
+	}
+}
+
+// The daemon's re-assert of its own status over one a session wrote is the other row queued at a
+// status the issue is not meant to be at (workflow's sessionStatusWrite): the session set the
+// issue done, backlog or icebox, the record kept the daemon's status, and this row sets Dispatch
+// back. One interleaved change — the agent's next comment is enough — refuses its first write, and
+// the retry must write again. Before, it asked the ordinary rule, whose record.OutOfWorkflow is
+// true for exactly those three statuses, so the re-assert was dropped and the session's own close
+// stood; and the retry applied its read, which carries no actor, so the engine took the session's
+// close for a person's, lingered the tree and freed its slot. Neither happens now: the read
+// decides whether to write and nothing else.
+func TestTheDaemonsReassertIsWrittenAfterDispatchRefusesItsFirstWrite(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	for _, tc := range []struct {
+		name string
+		key  string
+		// wrote is the status the session set, which the row observes and the re-read still shows.
+		wrote string
+	}{
+		{name: "a session closed its own issue", key: "LEGION-761", wrote: "done"},
+		{name: "a session parked its own issue to backlog", key: "LEGION-762", wrote: "backlog"},
+		{name: "a session parked its own issue to icebox", key: "LEGION-763", wrote: "icebox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The issue as the daemon is running it: recorded, in the workflow, at the status the
+			// record kept (workflow's keepStatus), which is the status this row restores. Without
+			// it the linger assertion below would hold whatever the code did, since an unrecorded
+			// issue has no tree to linger.
+			putOutboxIssue(t, pool, records, record.Issue{
+				Key: tc.key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+				Project: "LEGION", Tree: tc.key, Title: tc.key, Phase: phase.Implementing,
+				Generation: 1, Status: "in_progress",
+			})
+			shown := dispatch.Issue{Key: tc.key, Status: tc.wrote, Title: tc.key, Rank: "A", Labels: []string{dispatch.LegionLabel},
+				HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 4}
+			reread := shown
+			reread.LastSeq = shown.LastSeq + 1
+			client := &refusedOnceDispatch{outboxDispatch: outboxDispatch{issue: shown}, reread: reread}
+			runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission},
+				log: quietLogger()}
+			row := mustOutboxRow(t, tc.key, record.ReassertStatusWrite("in_progress", tc.wrote), time.Now())
+
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the re-assert: %v", err)
+			}
+
+			if client.refusals != 1 {
+				t.Fatalf("Dispatch refused %d writes, want the one interleaved change this test is about", client.refusals)
+			}
+			if !slices.Equal(client.statuses, []string{"in_progress"}) {
+				t.Fatalf("status writes = %v, want the daemon's own status written after the refusal", client.statuses)
+			}
+			if client.at != reread.LastSeq {
+				t.Fatalf("the retry wrote at sequence %d, want the re-read's %d", client.at, reread.LastSeq)
+			}
+			// Nothing of the read reached the engine, so the session's close ended no tree: the
+			// engine taking this issue out of the workflow would linger its tree, whose rows
+			// would be queued here. The record itself is asked in
+			// TestAReassertLeavesItsRecordedIssueInTheWorkflow.
+			if rows := outboxRowsOf(t, pool, tc.key); rows != 0 {
+				t.Fatalf("%d rows left for %s, want none: a linger would have queued its own", rows, tc.key)
+			}
+		})
+	}
+}
+
+// Every kind of status row has a rule, and ruleFor is the one place a kind is read to find it.
+// The kinds are read from record.StatusRowKinds rather than written out here, so a kind added to
+// that list and left out of the switch reaches its default and fails here rather than borrowing
+// another kind's rule at runtime.
+func TestEveryStatusRowKindHasARule(t *testing.T) {
+	for _, kind := range record.StatusRowKinds {
+		rule, err := ruleFor(kind)
+		if err != nil {
+			t.Fatalf("the rule of status row kind %q = %v, want a rule of its own", kind, err)
+		}
+		if rule == nil {
+			t.Fatalf("status row kind %q answered no rule and no error", kind)
+		}
+	}
+}
+
+// Every kind of status row has a rule its retry is judged by, and the value ruleFor answers for
+// the kind carries it. A kind added without one reaches ruleFor's default and fails its row
+// rather than being judged by another kind's rule, which is the mistake this case exists to make
+// loud. The kinds are read from record.StatusRowKinds rather than written out here, so a kind
+// added to that list and left out of the switch is asked here too; and each is asked for real,
+// against a record and a read that stand, so none may answer with that refusal — except a kind
+// whose first attempt finishes its row, which cannot reach a retry at all and says so.
+func TestEveryStatusRowKindHasAStillWantedRule(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	runner := &outbox{pool: pool, records: records, log: quietLogger()}
+	// A row of each kind as its own constructor builds it. A kind this table does not name is
+	// asked all the same, carrying its kind and a status pair: what is under test is whether its
+	// rule answers, and a kind with no rule reaches the default whatever else it carries.
+	payloads := map[record.StatusRowKind]record.StatusWrite{
+		record.OrdinaryStatusRow:       record.OrdinaryStatusWrite("testing", "in_progress", ""),
+		record.PersonHandoverStatusRow: record.PersonHandoverStatusWrite("todo", "triage"),
+		record.ReassertStatusRow:       record.ReassertStatusWrite("in_progress", "done"),
+		record.HandOverStatusRow:       record.HandOverStatusWrite("todo", "in_progress", "LEGION-207", 1),
+		record.CloseStatusRow:          record.CloseStatusWrite("done", "in_progress", "merged", 0),
+	}
+	// The hand-over's first attempt makes its own Dispatch write and finishes the row on every
+	// path, so no hand-over reaches the retry: its rule answers that the question cannot arise,
+	// and a kind this table does not name is held to answering for real.
+	retryCannotArise := map[record.StatusRowKind]bool{record.HandOverStatusRow: true}
+	for _, kind := range record.StatusRowKinds {
+		payload, named := payloads[kind]
+		if !named {
+			payload = record.StatusWrite{Kind: kind, Status: "testing", ObservedStatus: "in_progress"}
+		}
+		if payload.Kind != kind {
+			t.Fatalf("the row built for status row kind %q carries kind %q", kind, payload.Kind)
+		}
+		rule, err := ruleFor(kind)
+		if err != nil {
+			t.Fatalf("the rule of status row kind %q = %v, want a rule of its own", kind, err)
+		}
+		read := dispatch.Issue{Key: "LEGION-208", Status: payload.ObservedStatus, HandedOver: true}
+		_, err = rule.stillWanted(context.Background(), runner, record.OutboxRow{Issue: "LEGION-208"}, payload, read)
+		switch {
+		case retryCannotArise[kind] && err == nil:
+			t.Fatalf("the rule of status row kind %q answered its retry, want it to say the retry cannot arise", kind)
+		case !retryCannotArise[kind] && err != nil:
+			t.Fatalf("the rule of status row kind %q answered %v, want it to answer at all", kind, err)
+		}
+	}
+}
+
+// probeStatusRowKind is a kind of status row the probe below adds to record.StatusRowKinds and
+// gives no value in ruleFor: the kind somebody will one day add to that list and nowhere else.
+const probeStatusRowKind = record.StatusRowKind("probe")
+
+// A kind record.StatusRowKinds names and ruleFor has no value for fails its row, naming the
+// kind, on both paths a status row takes — its first attempt, and the retry an ISSUE_CHANGED
+// refusal sends it to — and reaches Dispatch with no write at all. Until the two decisions were
+// folded onto one value, such a row matched no branch of the first attempt and fell through to
+// the tail every ordinary row ends with: it wrote its status and answered nil, and only the
+// retry, which most rows never make, named it. The retry is handed the rule its caller resolved
+// for the row, so the retry's case resolves it the way the first attempt does (ruleFor) and
+// fails on that resolution, which is where a kind with no rule stops the row on that path. The
+// list and the switch are made to disagree from this file rather than in the production list, so
+// the hole is probed without one being left open.
+func TestAStatusRowKindWithNoRuleFailsBothPathsWithoutWriting(t *testing.T) {
+	listed := record.StatusRowKinds
+	record.StatusRowKinds = append(slices.Clone(listed), probeStatusRowKind)
+	t.Cleanup(func() { record.StatusRowKinds = listed })
+	payload := record.StatusWrite{Kind: probeStatusRowKind, Status: "testing", ObservedStatus: "in_progress"}
+	// The row is built the way every row is, which the patched list now lets through: a kind
+	// nothing refuses at the door is the one the outbox itself has to refuse.
+	row := mustOutboxRow(t, "LEGION-208", payload, time.Now())
+	row.ID = 9
+	shown := dispatch.Issue{Key: row.Issue, Status: payload.ObservedStatus, HandedOver: true}
+	const named = `status row kind "probe" has no rule`
+
+	for _, tc := range []struct {
+		name string
+		// refuseFirst is whether this case's Dispatch refuses the row's first write with
+		// ISSUE_CHANGED, which is the only thing that sends a row to the retry. The first
+		// attempt's own case must not: a Dispatch that refuses would hide the write a kind with
+		// no rule used to make, which is the defect this probe exists for.
+		refuseFirst bool
+		run         func(context.Context, *outbox) error
+	}{
+		{name: "the first attempt, through execute", run: func(ctx context.Context, runner *outbox) error {
+			return runner.execute(ctx, row)
+		}},
+		{name: "the retry an ISSUE_CHANGED refusal sends the row to", refuseFirst: true,
+			run: func(ctx context.Context, runner *outbox) error {
+				rule, err := ruleFor(payload.Kind)
+				if err != nil {
+					return fmt.Errorf("outbox row %d: %w", row.ID, err)
+				}
+				return runner.writeStatus(ctx, row, payload, rule, shown)
+			}},
+		{name: "the drop a permanent refusal makes", run: func(ctx context.Context, runner *outbox) error {
+			// finishRefused asks the kind what it leaves behind, so a kind with no rule fails
+			// there before the finishing transaction opens: the runner holds no pool, and the
+			// failure arriving all the same is what says the question is asked first.
+			return runner.finishRefused(ctx, row, &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CLOSED"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := outboxDispatch{issue: shown}
+			var client dispatch.Client = &plain
+			if tc.refuseFirst {
+				client = &refusedOnceDispatch{outboxDispatch: plain, reread: shown}
+			}
+			runner := &outbox{dispatch: client, log: quietLogger()}
+
+			err := tc.run(context.Background(), runner)
+
+			if err == nil || !strings.Contains(err.Error(), named) {
+				t.Fatalf("running the probe row = %v, want it failed naming the kind (%s)", err, named)
+			}
+			if want := fmt.Sprintf("outbox row %d", row.ID); !strings.Contains(err.Error(), want) {
+				t.Fatalf("the failure is %v, want it to name the row (%s)", err, want)
+			}
+			wrote, handedOver := writesOf(client)
+			if len(wrote) != 0 || len(handedOver) != 0 {
+				t.Fatalf("status writes = %v and hand-overs = %v, want a kind with no rule to reach Dispatch with nothing",
+					wrote, handedOver)
+			}
+		})
+	}
+}
+
+// writesOf is what the probe's Dispatch recorded, whichever of the two fakes it ran against.
+func writesOf(client dispatch.Client) (statuses, handOvers []string) {
+	switch fake := client.(type) {
+	case *outboxDispatch:
+		return fake.statuses, fake.handOvers
+	case *refusedOnceDispatch:
+		return fake.statuses, fake.handOvers
+	default:
+		return nil, nil
+	}
+}
+
+// A status row whose kind nothing has a rule for never runs quietly. The kind is refused where
+// the row is built (record's validateOutboxPayload), and one already in the outbox — hand-written,
+// or left by a release whose rows migration 20261102003600 did not reach — fails its run naming
+// the kind it carries, where a row of no mark was once read as ordinary and judged by the
+// ordinary rule. Both kinds go through execute, the path every row of the outbox takes.
+func TestAStatusRowOfAnUnknownKindFailsNamingItsKind(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, want string
+	}{
+		{name: "a row carrying no kind", kind: "", want: `unknown kind ""`},
+		{name: "a row of a kind nobody gave a rule", kind: "escalation", want: `unknown kind "escalation"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := record.NewOutboxRow("LEGION-208", record.StatusWrite{Kind: record.StatusRowKind(tc.kind),
+				Status: "testing", ObservedStatus: "in_progress"}, time.Now()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("queueing %s = %v, want it refused naming the kind (%s)", tc.name, err, tc.want)
+			}
+			client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "in_progress"}}
+			runner := &outbox{dispatch: client, log: quietLogger()}
+			stored := record.OutboxRow{ID: 7, Kind: record.OutboxKindDispatchStatus, Issue: "LEGION-208",
+				Payload: []byte(fmt.Sprintf(`{"kind":%q,"status":"testing","observedStatus":"in_progress"}`, tc.kind))}
+
+			err := runner.execute(context.Background(), stored)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("running %s = %v, want it failed naming the kind (%s)", tc.name, err, tc.want)
+			}
+			if len(client.statuses) != 0 {
+				t.Fatalf("status writes = %v, want none: a row whose kind has no rule reaches Dispatch with nothing", client.statuses)
+			}
+		})
+	}
+}
+
+// A dispatch_status row the release before this one queued carries the three old marks and no
+// kind. Migration 20261102003600 gives it the kind its marks named, and this is what the outbox
+// then makes of such a row: it decodes, it carries the kind the marks named, and it is judged by
+// the rule of that kind rather than by the ordinary one, which for three of the four would read
+// backwards. The rows are queued in the old shape and the migration's own statement is applied to
+// them, since this package's pool is migrated to the head before a test can write a row of the
+// old shape; the migration's place in the order, at the schema before it, is held by the store's
+// TestEveryQueuedStatusRowCarriesItsKindAfter20261102003600.
+func TestAMigratedStatusRowRunsUnderItsOwnRule(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	runner := &outbox{pool: pool, records: records, log: quietLogger()}
+	ctx := context.Background()
+	rows := []struct {
+		name, issue, payload string
+		want                 record.StatusRowKind
+		// wanted is whether the rule of the migrated row's kind answers that the write is still
+		// owed. The hand-over's retry cannot arise at all (its first attempt finishes the row),
+		// so its rule is asked for its refusal rather than for an answer.
+		wanted      bool
+		cannotArise bool
+	}{
+		{name: "a person's handover", issue: "LEGION-208", want: record.PersonHandoverStatusRow, wanted: true,
+			payload: `{"status":"todo","observedStatus":"triage","personHandover":true}`},
+		{name: "a re-assert", issue: "LEGION-209", want: record.ReassertStatusRow, wanted: true,
+			payload: `{"status":"in_progress","observedStatus":"done","reassert":true}`},
+		{name: "a hand-over", issue: "LEGION-210", want: record.HandOverStatusRow, cannotArise: true,
+			payload: `{"status":"todo","observedStatus":"in_progress","handOver":true,"handOverTree":"LEGION-200","handOverLinger":3}`},
+		{name: "an unmarked write", issue: "LEGION-211", want: record.OrdinaryStatusRow, wanted: true,
+			payload: `{"status":"testing","observedStatus":"in_progress"}`},
+		{name: "an unmarked re-assert, as the release before this one queued one", issue: "LEGION-212",
+			want: record.ReassertStatusRow, wanted: true,
+			payload: `{"status":"retro","observedStatus":"done"}`},
+		{name: "a person's handover of a parked root, which the re-assert arm would also match", issue: "LEGION-215",
+			want: record.PersonHandoverStatusRow, wanted: true,
+			payload: `{"status":"todo","observedStatus":"backlog","personHandover":true}`},
+		{name: "an unmarked close, as a merge queued one", issue: "LEGION-214", want: record.CloseStatusRow, wanted: true,
+			payload: `{"status":"done","observedStatus":"in_progress","reason":"merged"}`},
+		// A write of done observed at done matches the re-assert arm and the close arm alike. The
+		// re-assert arm is first and wins, which is right for the row main queued in that shape:
+		// its sessionStatusWrite re-asserting the daemon's own done over a session's.
+		{name: "a write that matches the re-assert arm and the close arm", issue: "LEGION-216",
+			want: record.ReassertStatusRow, wanted: true,
+			payload: `{"status":"done","observedStatus":"done"}`},
+	}
+	for _, row := range rows {
+		if _, err := pool.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+			values ('dispatch_status', $1, $2, 0, now(), '')`, row.issue, row.payload); err != nil {
+			t.Fatalf("queue %s in the old shape: %v", row.name, err)
+		}
+	}
+	if _, err := pool.Exec(ctx, migrationSQL(t, 20261102003600)); err != nil {
+		t.Fatalf("apply the kind migration: %v", err)
+	}
+
+	for _, row := range rows {
+		var payload []byte
+		if err := pool.QueryRow(ctx, "select payload from outbox where issue = $1", row.issue).Scan(&payload); err != nil {
+			t.Fatalf("read %s after the migration: %v", row.name, err)
+		}
+		stored := record.OutboxRow{Kind: record.OutboxKindDispatchStatus, Issue: row.issue, Payload: payload}
+		decoded, err := record.DecodeOutboxPayload(stored)
+		if err != nil {
+			t.Fatalf("%s does not decode after the migration (%s): %v", row.name, payload, err)
+		}
+		write := decoded.(record.StatusWrite)
+		if write.Kind != row.want {
+			t.Fatalf("%s carries kind %q after the migration, want %q", row.name, write.Kind, row.want)
+		}
+		read := dispatch.Issue{Key: row.issue, Status: write.ObservedStatus, HandedOver: true}
+		rule, err := ruleFor(write.Kind)
+		if err != nil {
+			t.Fatalf("%s has no rule after the migration: %v", row.name, err)
+		}
+		wanted, err := rule.stillWanted(ctx, runner, stored, write, read)
+		switch {
+		case row.cannotArise:
+			if err == nil {
+				t.Fatalf("the rule judging %s answered its retry, want it to say the retry cannot arise", row.name)
+			}
+		case err != nil:
+			t.Fatalf("the rule judging %s answered %v, want the rule of its own kind to answer", row.name, err)
+		case wanted != row.wanted:
+			t.Fatalf("the rule judging %s says the write is wanted = %v, want %v: a row the ordinary rule would drop is the defect this kind exists for", row.name, wanted, row.wanted)
+		}
+	}
+}
+
+// migrationSQL is the statement of the embedded migration version, which a test applies to rows
+// it queued in the shape an older release left: this package's pool is migrated to the head
+// before a test can write one.
+func migrationSQL(t *testing.T, version int) string {
+	t.Helper()
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	for _, migration := range all {
+		if migration.Version == version {
+			return migration.SQL
+		}
+	}
+	t.Fatalf("no embedded migration of version %d", version)
+	return ""
+}
+
+// refusedOnceDispatch refuses the first fenced status write with ISSUE_CHANGED, as Dispatch
+// refuses a write whose read an event overtook, and shows reread — the issue as it stands at the
+// sequence that event moved it to — to every read after that. refusals counts the refusals it
+// made, and at is the sequence of the last write it took.
+type refusedOnceDispatch struct {
+	outboxDispatch
+	reread   dispatch.Issue
+	refusals int
+	at       int64
+}
+
+func (d *refusedOnceDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	if d.refusals == 0 {
+		d.refusals, d.issue = 1, d.reread
+		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
+	}
+	d.at = issue.LastSeq
+	return d.outboxDispatch.SetStatusAt(ctx, issue, status)
+}
+
+// triageWakes counts the controller notices of kind triage the outbox holds for issue.
+func triageWakes(t *testing.T, pool *pgxpool.Pool, issue string) int {
+	t.Helper()
+	var wakes int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = $1 and issue = $2 and payload->>'kind' = $3`,
+		string(record.OutboxKindControllerNotice), issue, string(record.TriageNotice)).Scan(&wakes); err != nil {
+		t.Fatalf("count the triage wakes queued for %s: %v", issue, err)
+	}
+	return wakes
+}
+
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails
 // leaves the row due for the sweep, whose next tick runs it; a row whose finish fails keeps its
@@ -542,7 +1029,7 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 
 	// This outbox has no workflow writing through projectRecords, so the test wakes the lane the
 	// way the committed write would.
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now())
+	row := mustOutboxRow(t, "LEGION-208", record.OrdinaryStatusWrite("in_progress", "todo", ""), clock.Now())
 	enqueueOutbox(t, pool, records, row)
 	runner.wake(row.Issue, row.Kind)
 	testwait.Eventually(t, "the claim failed", func() bool { return records.failedClaims() == 1 })

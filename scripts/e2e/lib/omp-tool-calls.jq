@@ -1,6 +1,6 @@
 # How an Oh My Pi session's assistant calls a tool, read from the toolCall entries of its
 # transcript's messages: one definition for every live proof that asks whether an agent called one
-# (stage3-4b13b-acceptance.sh's merger_self_posted, stage4b-sandbox-tree.sh's report_after_tick),
+# (stage4b-sandbox-tree.sh's report_after_tick),
 # or ran a `dispatch` command through bash.
 # Loaded with `jq -L scripts/e2e/lib` and `include "omp-tool-calls";`. A module that includes this
 # one (lib/stage4b-tools.jq) may reach only a def that calls no other def of this file: jq 1.8.2
@@ -15,7 +15,7 @@
 # anywhere in the same code, assigns the device xd://<name> as a quoted string with `:` or `=`
 # (covering content built before path, a path keyword argument, or a path held in a variable). A
 # consumer that needs more than "this cell could write the device" — the report's issue key, or a
-# READY literal — still checks for that itself; calls() only says the device is in play.
+# message literal — still checks for that itself; calls() only says the device is in play.
 def calls(name):
   .type? == "toolCall" and (
     .name == name

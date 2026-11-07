@@ -40,9 +40,10 @@ func NewMirror(store record.Store, project string) *Mirror {
 	return &Mirror{store: store, project: project}
 }
 
-// Apply writes the row of a Dispatch issue fact and every row the periodic turn's re-read
-// observed, the claim of a claim event, and does nothing for every other kind of fact — a tick
-// that observed nothing, which is almost every turn, included.
+// Apply writes the row of a Dispatch issue fact, of every child a release of children adopts, as
+// that release's own read showed it, and of every row the periodic turn's re-read observed, the
+// claim of a claim event, and does nothing for every other kind of fact — a tick that observed
+// nothing, which is almost every turn, included.
 func (m *Mirror) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	switch fact := fact.(type) {
 	case intake.DispatchIssue:
@@ -54,6 +55,20 @@ func (m *Mirror) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 	case intake.DispatchClaim:
 		if err := m.store.PutDispatchClaim(ctx, tx, fact.Key, fact.ClaimedBy, fact.Seq); err != nil {
 			return intake.Result{}, err
+		}
+	case intake.ChildAdoption:
+		// An adopted root is recorded already, so no observation of it reaches a handler
+		// (intake's settleObserved) and nothing else would bring the release's read here. Without
+		// it the adoption's own promotion, judging by a row written before the person's edit,
+		// starts a root that edit blocked (dispatch://INFRA-714/spec R3).
+		for _, child := range fact.Children {
+			if child.Seq == 0 {
+				continue
+			}
+			observed := intake.IssueStatus{Key: child.Issue, Status: child.Status, Blockers: child.BlockedBy, Seq: child.Seq}
+			if err := m.put(ctx, tx, observed); err != nil {
+				return intake.Result{}, fmt.Errorf("mirror the release's read of %s: %w", child.Issue, err)
+			}
 		}
 	case intake.ControllerTick:
 		for _, observed := range fact.Observed {

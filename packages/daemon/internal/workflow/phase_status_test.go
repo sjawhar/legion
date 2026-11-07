@@ -27,7 +27,6 @@ func TestEachPhaseShowsItsOwnDispatchStatus(t *testing.T) {
 		phase.Accepting:      "needs_review",
 		phase.Retro:          "retro",
 		phase.Merging:        "retro",
-		phase.AwaitingMerge:  "",
 		phase.Done:           "done",
 		phase.Held:           "",
 	}

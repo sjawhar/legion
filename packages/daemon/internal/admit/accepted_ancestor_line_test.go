@@ -26,7 +26,7 @@ func TestAnIssueBeneathAnAcceptedAncestorIsHeldThoughTheParentBetweenThemIsDone(
 	// The root's own reviewed head is accepted and its merge awaited; the grandchild is the
 	// issue a person moved to todo, recorded at admitted beneath the done child.
 	issues := []record.Issue{
-		{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.AwaitingMerge, Generation: 1,
+		{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Merging, Generation: 1,
 			Status: "retro", DispatchStatus: "retro", Rank: "A", HandedOver: true,
 			Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"},
 		{Key: grandchild, Tree: root, Parent: &parentOfGrandchild, Project: testProject, Title: grandchild,

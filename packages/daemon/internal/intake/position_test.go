@@ -160,8 +160,9 @@ func TestAMissingDispatchServerConsumerStartsAtItsLastAppliedPosition(t *testing
 	}
 }
 
-// A consumer that has applied nothing — here the GitHub consumer, whose only message was acknowledged
-// without a transaction, which records no position — is created at the next message when it is
+// A consumer that has applied nothing — here the GitHub consumer, whose only message was a push to
+// a tag, which is no fact of either kind and is acknowledged without a transaction, recording no
+// position — is created at the next message when it is
 // found missing, as a consumer created for the first time is: what was published before it is
 // not replayed.
 func TestAMissingConsumerWithNoStoredPositionStartsAtTheNextMessage(t *testing.T) {
@@ -173,8 +174,8 @@ func TestAMissingConsumerWithNoStoredPositionStartsAtTheNextMessage(t *testing.T
 	github := githubConsumerName(spec.Project)
 
 	stop := startConsume(t, js, spec, pool, factMarks())
-	push := strings.ReplaceAll(string(capturedGitHubEnvelope(t, "push.json")), "refs/heads/legion/LEGION-208", "refs/heads/main")
-	publish(t, js, "notifications.github.sjawhar.legion.push.branch.main", []byte(push))
+	tag := strings.ReplaceAll(string(capturedGitHubEnvelope(t, "push.json")), "refs/heads/legion/LEGION-208", "refs/tags/v1.0.0")
+	publish(t, js, "notifications.github.sjawhar.legion.push.tag.v1.0.0", []byte(tag))
 	waitDelivered(t, stream, github)
 	stop()
 	var positions int
@@ -208,7 +209,8 @@ func TestAMissingConsumerWithNoStoredPositionStartsAtTheNextMessage(t *testing.T
 // stream keeps messages (72 hours), the stream was recreated, or the project was quiet, since only
 // an applied fact moves the position — starts the consumer at the stream's first message, and a
 // WARN line names the gap: the events published between may have been missed, the daemon applied
-// none of them, and the pass's read of each pull request heals those it would have acted on.
+// none of them, and the daemon's own read of each issue's pull request heals those it would have
+// acted on.
 func TestAStoredPositionOlderThanTheStreamWarnsOfEventsThatMayHaveBeenMissed(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)

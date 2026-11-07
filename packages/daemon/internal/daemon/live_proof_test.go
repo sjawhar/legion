@@ -1,9 +1,8 @@
-// The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go,
-// no_required_checks_live_test.go, child_adoption_live_test.go, ci_red_no_takeover_live_test.go,
-// handoff_records_live_test.go and admission_issues_live_test.go. The first five are built with
-// `-tags e2e` by scripts of their own (scripts/e2e/merged-root-waits.sh,
-// scripts/e2e/no-required-checks.sh, scripts/e2e/child-adoption.sh,
-// scripts/e2e/ci-red-no-takeover.sh and scripts/e2e/handoff-records.sh), which make the same run
+// The harness this package's whole-daemon live proofs share: child_adoption_live_test.go,
+// conflict_no_takeover_live_test.go, handoff_records_live_test.go and
+// admission_issues_live_test.go. The first three are built with `-tags e2e` by scripts of their
+// own (scripts/e2e/child-adoption.sh, scripts/e2e/conflict-no-takeover.sh and
+// scripts/e2e/handoff-records.sh), which make the same run
 // around them through scripts/e2e/lib/live-daemon-proof.sh; the sixth runs in the ordinary
 // `go test ./internal/daemon/` on the broker that package's other tests take (newLiveProofOn over
 // workflowNATS), which is why this file carries no build tag of its own.
