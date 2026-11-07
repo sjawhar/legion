@@ -967,7 +967,8 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 // is undone, the claim left launch_uncertain in both. A stop between the release and the launch's
 // own write leaves the claim stored queued at that generation, which ReleasedLaunch tells apart.
 // Because that undo puts the state back, the write goes through putClaim and leaves nothing owed:
-// a repair of it would write launch_uncertain's release after this call has already taken it back.
+// memory then holds launch_uncertain, which is what the store still holds, so there is no write
+// left to make, and the release is made again only by this call's own caller retrying it.
 func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.unlock()
