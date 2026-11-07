@@ -736,11 +736,11 @@ const memoryContract = 49
 const treeContract = 51
 
 // settingSourcesContract is the daemon contract that added `settingSources`, the `daemon` block's
-// `commit` and each pull request's `requiresChecks` to the state (version.go's 52): a plugin
+// `commit` and each pull request's `requiresChecks` to the state (version.go's 53): a plugin
 // before it reads the state with a strict schema that knows none of the three — every schema of
 // `packages/contracts/src/legion-api.ts` was strict until INFRA-1048 — and refuses the whole body
 // for one of them.
-const settingSourcesContract = 52
+const settingSourcesContract = 53
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

@@ -2081,7 +2081,7 @@ Four roots run under `admission_cap: 4`, a cap of issues at work rather than of 
   Children 3 and 4, filed while the root stands in `accepting` and holds no slot of its own, hold its sign-off:
   the daemon refuses it `SIGNOFF_CHILD_IN_WORKFLOW` naming both, the proof human parks them one at a time, the refusal after the first park names the one that remains, and the sign-off lands only once the last has left.
 
-- Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and a Python root, and a `.omp/config.yml`), whose tools its planner uses in its checkout (`repository-tools`), supplies the capability report every session sends at its start (`full-agent`), and is then moved to backlog.
+- Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the repository-configuration fixture (the loading paths' markers, two skills, a Go, a TypeScript and a Python root, and a `.omp/config.yml`), whose tools its planner uses in its checkout (`repository-tools`), supplies the capability report every session measures at an idle tick of the 5 s interval it already runs rather than at its boot (`full-agent`, INFRA-927), and is then moved to backlog.
 
 - Tree 3 is set todo while tree 1's root, its two children and tree 2's root hold the whole cap, and waits in the line until the first two of those children leave.
   It supplies the held phase the controller checkpoint needs and, held, the planner whose workspace turns a capability off and on again (`full-agent-negative`), and is taken out from an operator shell (`controller-walk`).
@@ -2365,9 +2365,9 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
 - `full-agent`
 
-  every live session measured the six live capability rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) at its boot and reported them with its ready (LEGION-663).
+  every live session measured the six live capability rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) at an idle tick of the 5 s interval it already runs and sent them on a `claims/ready` of its own (LEGION-663, INFRA-927).
   With tree 1's and tree 2's roles live and tree 2's finished planner still the process of its first boot, `legion state --json` renders all six `present` (waited for:
-  the newest session's report may be seconds away), each row's detail naming the pod of a live claim;
+  each live session's first idle measurement, which follows its boot rather than happening at it), each row's detail naming the pod of a live claim;
   tree 2's planner's claim view carries `capabilities` with all six under `ok`, `open` empty and `incarnation` equal to its locator's;
   the daemon log's `capabilities: session reported` line for that incarnation carries `rows` whose `mcp` detail names `fixture-omp-mcp` and `fixture-root-mcp` and whose `repository-extensions` detail names `fixture.ts`;
   and no `capability <live row> is open` line has been logged.
@@ -3878,7 +3878,8 @@ It starts a NATS of its own (`internal/testnats/cmd/natsd`, JetStream on, on a p
 The App key is what makes the delivery intake run at all, and every GitHub call it makes goes to the fake.
 
 The driver, `verification-results.ts`, acts as one session with the agent token (each write naming the session as `actor`) and as the person `alice` through `GET /auth/_dev/signin`.
-Its setup seeds the fake GitHub with two repositories — `acme/verification-live`, whose default branch `main` holds one of the run's commits, and `acme/verification-hidden`, which the installation lookup answers 404 for — maps each as a project's default repository, and writes the one `delivery_settings` row the intake needs before it binds its durable.
+Its setup seeds the fake GitHub with two repositories — `acme/verification-live`, whose default branch `main` holds two of the run's commits, and `acme/verification-hidden`, which the installation lookup answers 404 for — maps each as a project's default repository, and writes the one `delivery_settings` row the intake needs before it binds its durable.
+`acme/verification-live`'s `commits` names every commit a case records at, since the record route asks GitHub whether the repository holds a result's commit and refuses one it does not; the one commit it names nowhere is what the refusal case drives.
 `commit_pulls` is empty on purpose:
 the record route's read-through asks GitHub which pull requests name a result's commit, so with no answer there the only thing that can teach Dispatch a head is the envelope a case publishes.
 Each case after the first seeds the issue it drives, with a spec that marks one requirement and a Verification document holding that case's checks.
@@ -3905,6 +3906,10 @@ Each item below names a case and how it is driven, then what must hold for it to
 - `a10-a-default-branch-result-follows-the-branch` — one `default_branch` check with a result at a commit the fake's compare calls `behind` and another at a commit it calls `diverged`
 
   `current` for the first and not `current` for the second
+
+- `a-result-at-a-commit-the-repository-does-not-hold-is-refused` — a result at a 40-hex commit the fake GitHub was seeded with nowhere, against a `before_merge` check of an issue that resolves to `acme/verification-live`
+
+  `400 RESULT_COMMIT_UNKNOWN`, naming the whole commit and `acme/verification-live`, and no result under that check afterwards
 
 - `an-unreadable-repository-leaves-the-result-unmarked` — a `default_branch` result on an issue whose project maps to `acme/verification-hidden`
 

@@ -648,9 +648,10 @@ func TestRegisterResponseGolden(t *testing.T) {
 	})
 }
 
-// The ready request is what the plugin posts once its session can be prompted, with the capability
-// report the session measured while it booted (LEGION-663): the one request body of the claim
-// routes the contract pins, since the report is the one with a shape of its own.
+// The ready request is what the plugin posts once its session can be prompted, and again carrying
+// the capability report the session measured at an idle tick of the 5 s interval it already runs
+// (LEGION-663, INFRA-927): the one request body of the claim routes the contract pins, since the
+// report is the one with a shape of its own.
 func TestReadyRequestGolden(t *testing.T) {
 	golden(t, "ready.json", claim.ReadyRequest{
 		ClaimToken: "legion-legion-legion-208-implementer",

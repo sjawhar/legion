@@ -400,15 +400,21 @@ func (issuePod) mainVolumes(r *Runtime) []corev1.Volume {
 	return volumes
 }
 
-// agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and
-// uv's directories on the issue's volume.
+// agentEnv tells each agent its tree, issue and workspace, the issue key it stamps into its
+// commits where the project names its repository (LEGION_ISSUE_TRAILER, left out of an agent that
+// stamps none), where its gh reads its credentials, and uv's directories on the issue's volume.
 func (issuePod) agentEnv(l launch) []corev1.EnvVar {
+	var trailer []corev1.EnvVar
+	if l.spec.IssueTrailer != "" {
+		trailer = []corev1.EnvVar{{Name: "LEGION_ISSUE_TRAILER", Value: l.spec.IssueTrailer}}
+	}
 	return slices.Concat(
 		[]corev1.EnvVar{
 			{Name: "LEGION_TREE", Value: l.spec.Tree},
 			{Name: "LEGION_ISSUE", Value: l.spec.Issue},
-			{Name: "LEGION_WORKSPACE", Value: l.workspace},
 		},
+		trailer,
+		[]corev1.EnvVar{{Name: "LEGION_WORKSPACE", Value: l.workspace}},
 		ghAgentEnv(l),
 		[]corev1.EnvVar{
 			{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},

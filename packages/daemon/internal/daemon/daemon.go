@@ -1335,6 +1335,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   c.Gates.Design, slackChannels: c.Projects[c.Project].SlackChannels,
 			mergeRules: c.Projects[c.Project].Merge, runtimeName: c.Runtime.Name, plugins: p.plugins,
+			commitIssueTrailerRepos: c.Projects[c.Project].CommitIssueTrailerRepos, same: p.repositories.same,
 			backend: c.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 			memoryInstructions: p.memoryInstructions, memoryGroup: treeMemoryGroup(st),
 		}, nil

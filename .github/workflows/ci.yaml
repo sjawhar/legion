@@ -284,6 +284,9 @@ jobs:
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
               - 'packages/envoy/oidc/**'
+              # The reasons the listener refuses a publish to a role no session holds, which the
+              # daemon's notify path reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The daemon reads the Envoy session timings (heartbeat, live window, claim
               # staleness and the listener call's attempts) through this one public package: it
               # is a module of its own, so Go's internal rule bars it from internal/contracts,
@@ -370,6 +373,7 @@ jobs:
               - 'packages/envoy/internal/store/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
             # The daemon's `legion` command, `go list -deps ./cmd/legion` in packages/daemon (its
             # embedded probes, turnscope.yml and role prompts included, and the envoy package it
             # serves its held listener through): what docs/site/scripts/build-binaries.sh:17 builds
@@ -457,6 +461,9 @@ jobs:
               # daemon's settings route verifies Dispatch's projected token with
               # (internal/api/settings_route.go:11).
               - 'packages/envoy/oidc/*'
+              # packages/envoy/roleholder names the reasons the listener refuses a role publish
+              # with, which internal/notify reads as notify.ErrNoHolder.
+              - 'packages/envoy/roleholder/*'
               # The one public door onto the generated Envoy session timings the daemon's
               # liveness and notice rules read: it sits in the envoy module because the
               # daemon, a module of its own, cannot reach internal/contracts, where they are.
@@ -492,6 +499,7 @@ jobs:
               - 'packages/envoy/internal/verify/*'
               - 'packages/envoy/internal/webhook/*'
               - 'packages/envoy/listenfd/*'
+              - 'packages/envoy/roleholder/*'
             # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
             # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
             # .go files cmd/dispatch/settings_test.go:137 walks, and the pod spec
@@ -535,6 +543,7 @@ jobs:
               - 'packages/envoy/internal/testsocks5/*'
               - 'packages/envoy/listenfd/*'
               - 'packages/envoy/migrationid/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
             # Oh My Pi, which .github/actions/install-omp installs at the version .omp-pin names,
             # through the mise .github/actions/install-jj leaves.
@@ -872,6 +881,7 @@ jobs:
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/migrationid/*'
               - 'packages/envoy/oidc/*'
+              - 'packages/envoy/roleholder/*'
               - 'packages/envoy/sessiontiming/*'
               - *go_workspace
               # The guides and docs the skills guard sweeps (src/skills-guard.test.ts:143-148).
@@ -1261,6 +1271,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/migrationid/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/docker/rds-global-bundle.pem'
               # TestSmoke compiles in the root workspace.
               - 'go.work'
@@ -1373,6 +1384,7 @@ jobs:
               - 'packages/envoy/loadtest/**'
               - 'packages/envoy/migrationid/**'
               - 'packages/envoy/oidc/**'
+              - 'packages/envoy/roleholder/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/sessiontiming/**'
               - 'packages/envoy/testnatsimages/**'
@@ -2063,11 +2075,12 @@ jobs:
       # cgo, which the runners have gcc for. The lane tests hold a fake clock, so they are
       # deterministic under it.
       #
-      # The step carries a package deadline of its own, as the envoy race lanes do: under go test's
-      # ten-minute default, internal/daemon, by far the slowest of the four packages, took up to
-      # 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on main at
-      # 2201840998 (run 41562777668). No single test dominates it: a local run timed 648 tests one
-      # after another, the slowest at 44 s. The 30 minutes leave it three times its slowest run.
+      # The step carries a package deadline of its own, as the envoy race lanes do: under go
+      # test's ten-minute default, internal/daemon, by far the slowest of the four packages, took
+      # up to 570 s on the green runs of 2026-11-02 and 2026-11-03 and ran the ten minutes out on
+      # main at job 125691048644 (run 41562777668). No single test dominates it: a local run timed
+      # 648 tests one after another, the slowest at 44 s. The 30 minutes leave it three times its
+      # slowest run.
       - name: Test the concurrent packages under the race detector
         run: go test -count=1 -race -timeout 30m ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
