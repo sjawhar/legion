@@ -148,18 +148,23 @@ func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactI
 // them (getArtifactVersionPage). Both answers carry the same headers, Content-Length included.
 //
 // The answer is `inline` to a request whose Sec-Fetch-Dest is `iframe`, the frame a view block
-// inserts. Every other request, and a request that sends no Sec-Fetch-Dest, gets `attachment`: a
-// reader who opens the address in a tab saves the file, and the browser runs none of it. `Vary`
-// names the header so no cache gives one of those answers to the other request. `no-cache` makes
-// the browser ask again on each load, under the version's ETag, so a later change to these
-// headers reaches every page.
+// inserts, and that answer alone is `text/html`. Every other request, and a request that sends
+// no Sec-Fetch-Dest, gets `attachment` AND `application/octet-stream`: a reader who opens the
+// address in a tab saves the file, and the browser runs none of it. The type carries that rule
+// rather than the disposition alone, because `Content-Disposition` is advice an engine may
+// decline - WebKit displays an attachment it believes it can render, so a page served as
+// `text/html` was drawn in a tab there while Chromium and Firefox downloaded it (A4,
+// dispatch://INFRA-682). A type no browser renders leaves no engine that choice, and `nosniff`
+// stops one guessing `text/html` back from the bytes. `Vary` names the header so no cache gives
+// one of those answers to the other request. `no-cache` makes the browser ask again on each
+// load, under the version's ETag, so a later change to these headers reaches every page.
 func pageHeaders(w http.ResponseWriter, r *http.Request, sha *string) func(length int64) {
-	disposition := "attachment"
+	disposition, contentType := "attachment", "application/octet-stream"
 	if r.Header.Get("Sec-Fetch-Dest") == "iframe" {
-		disposition = "inline"
+		disposition, contentType = "inline", "text/html; charset=utf-8"
 	}
 	return func(length int64) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", disposition)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")

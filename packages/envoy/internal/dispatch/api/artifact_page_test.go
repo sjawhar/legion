@@ -97,8 +97,8 @@ func requirePageRefusal(t *testing.T, handler http.Handler, what, target string,
 // TestArtifactPageHeadersForAFrameAndForEveryOtherRequest: a frame's request is answered inline
 // under the policy that gives the page an opaque origin and lets it reach nothing, and every
 // other request - a reader opening the address in a tab - is answered the same bytes as an
-// attachment, so no page runs under Dispatch's own address. Nothing but Content-Disposition
-// differs between the two.
+// attachment of a type no browser renders, so no page runs under Dispatch's own address in any
+// engine. Content-Type and Content-Disposition are what differ between the two, and nothing else.
 func TestArtifactPageHeadersForAFrameAndForEveryOtherRequest(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := pageTestIssue(t, handler)
@@ -112,6 +112,10 @@ func TestArtifactPageHeadersForAFrameAndForEveryOtherRequest(t *testing.T) {
 		"inline":     pageRequest(t, handler, http.MethodGet, target, "iframe"),
 		"attachment": pageRequest(t, handler, http.MethodGet, target, ""),
 	}
+	wantType := map[string]string{
+		"inline":     "text/html; charset=utf-8",
+		"attachment": "application/octet-stream",
+	}
 	for disposition, response := range answers {
 		if response.Code != http.StatusOK {
 			t.Fatalf("the %s answer: status=%d body=%s, want 200", disposition, response.Code, response.Body.String())
@@ -120,7 +124,7 @@ func TestArtifactPageHeadersForAFrameAndForEveryOtherRequest(t *testing.T) {
 			t.Errorf("the %s answer's body = %q, want the page's own bytes", got, page)
 		}
 		for header, want := range map[string]string{
-			"Content-Type":            "text/html; charset=utf-8",
+			"Content-Type":            wantType[disposition],
 			"Content-Disposition":     disposition,
 			"X-Content-Type-Options":  "nosniff",
 			"Referrer-Policy":         "no-referrer",
@@ -135,21 +139,27 @@ func TestArtifactPageHeadersForAFrameAndForEveryOtherRequest(t *testing.T) {
 		}
 	}
 
-	// Sec-Fetch-Dest decides the disposition and nothing else, so a cache keyed on Vary serves
-	// one of these answers to the other kind of request only in that one header.
+	// Sec-Fetch-Dest decides the type and the disposition and nothing else, so a cache keyed on
+	// Vary serves one of these answers to the other kind of request only in those two headers.
 	frame, tab := answers["inline"].Header().Clone(), answers["attachment"].Header().Clone()
-	frame.Del("Content-Disposition")
-	tab.Del("Content-Disposition")
+	for _, header := range []string{"Content-Disposition", "Content-Type"} {
+		frame.Del(header)
+		tab.Del(header)
+	}
 	if !maps.EqualFunc(frame, tab, slices.Equal) {
-		t.Errorf("the two answers differ beyond Content-Disposition:\nframe %v\ntab   %v", frame, tab)
+		t.Errorf("the two answers differ beyond Content-Disposition and Content-Type:\nframe %v\ntab   %v", frame, tab)
 	}
 
 	// A dest that is not a frame is every other request: a document load, a script load, a
-	// fetch, each saved rather than run.
+	// fetch, each saved rather than run, and none of them served a type a browser draws.
 	for _, dest := range []string{"document", "empty", "script", "frame"} {
 		response := pageRequest(t, handler, http.MethodGet, target, dest)
-		if response.Code != http.StatusOK || response.Header().Get("Content-Disposition") != "attachment" {
-			t.Errorf("Sec-Fetch-Dest: %s = %d %q, want 200 attachment", dest, response.Code, response.Header().Get("Content-Disposition"))
+		if response.Code != http.StatusOK ||
+			response.Header().Get("Content-Disposition") != "attachment" ||
+			response.Header().Get("Content-Type") != "application/octet-stream" {
+			t.Errorf("Sec-Fetch-Dest: %s = %d %q %q, want 200 attachment application/octet-stream",
+				dest, response.Code, response.Header().Get("Content-Disposition"),
+				response.Header().Get("Content-Type"))
 		}
 	}
 }
