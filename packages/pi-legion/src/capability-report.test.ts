@@ -882,15 +882,22 @@ describe("cleanDetail", () => {
   // A rule that may start inside a run its own value class reads through makes JavaScriptCore,
   // which backtracks, read that run once per start: time quadratic in the detail, which the plugin
   // cleans before it cuts it to 1,024 bytes, so one such detail stalls a session's start. Each
-  // fixture unit, repeated, holds a start for every repetition. At 64 KiB a linear rule takes a few
-  // milliseconds and a quadratic one takes seconds, so the 1 s bound separates them on any machine.
+  // fixture unit, repeated, holds a start for every repetition. Measured from 4 to 128 KiB, every
+  // case here doubles its cost when its text doubles, below and above one step where the engine
+  // leaves a fast path and the cost jumps about 40x in a single doubling; a quadratic rule would
+  // read four times the cost at every doubling instead. That step falls at a different size for
+  // each case, so at the 64 KiB this row cleans two cases land just above it and take about 369 and
+  // 383 ms on an idle machine: no margin here separates the two shapes, so the row reads none. It
+  // cleans the text, and its limit guards only against a rule that does not come back at all.
   for (const { name, unit } of redaction.linear) {
-    test(`stays linear: ${name}, 64 KiB in under 1 s`, () => {
+    test(`cleans 64 KiB of ${name} without stalling`, () => {
       const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
-      const started = performance.now();
       cleanDetail(text);
-      expect(performance.now() - started).toBeLessThan(1_000);
-    });
+      // The limit is a hang guard, not a margin for a loaded machine: a rule that blows up never
+      // returns, and a limit far above the work catches that without reading a margin. Bun's own
+      // per-test default would be 5,000 ms, inside the range this row reads on a loaded machine;
+      // the worst measured run is 1.6 s, about a sixth of this one.
+    }, 10_000);
   }
 });
 
