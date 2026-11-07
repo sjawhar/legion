@@ -64,7 +64,7 @@ test("a human adds an architecture source and the verified row appears", async (
     .mockResolvedValueOnce([])
     .mockResolvedValue([architectureSource]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
   ]);
   const putArchitectureSource = spyOn(api, "putArchitectureSource").mockResolvedValue(
     architectureSource
@@ -108,7 +108,7 @@ test("a human adds an architecture source and the verified row appears", async (
 test("a failed architecture source access check shows the server's reason inline", async () => {
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
   ]);
   const putArchitectureSource = spyOn(api, "putArchitectureSource").mockRejectedValue(
     new ApiError(409, {
@@ -169,7 +169,7 @@ test("each architecture source of a project is its own row, refreshed and delete
     server.list
   );
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
   ]);
   const putArchitectureSource = spyOn(api, "putArchitectureSource").mockImplementation(server.put);
   const syncArchitectureSource = spyOn(api, "syncArchitectureSource").mockImplementation(

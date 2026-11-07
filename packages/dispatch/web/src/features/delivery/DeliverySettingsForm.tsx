@@ -146,10 +146,10 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
   const [draft, setDraft] = useState<Draft>(() => ({
     deploy_repo: record?.deploy_repo ?? "",
     deploy_workflow_path: record?.deploy_workflow_path ?? "",
-    excluded_repos: record?.excluded_repos.join("\n") ?? "",
-    population_authors: record?.population_authors.join("\n") ?? "",
+    excluded_repos: record?.excluded_repos?.join("\n") ?? "",
+    population_authors: record?.population_authors?.join("\n") ?? "",
     pr_checks_workflow_path: record?.pr_checks_workflow_path ?? "",
-    production_job_names: record?.production_job_names.join("\n") ?? "",
+    production_job_names: record?.production_job_names?.join("\n") ?? "",
     production_apply_step_name: record?.production_apply_step_name ?? "",
     pr_checks_rollup_job_name: record?.pr_checks_rollup_job_name ?? "",
     staging_apply_job_name: record?.staging_apply_job_name ?? "",

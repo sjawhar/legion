@@ -100,7 +100,7 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
     const thread = await seed(issue.key);
     await thread.reply("Done: the build is green.");
     // The fixture puts exactly this thread on alice's page, and nothing on bob's.
-    expect((await listMyReplies()).rows.map((row) => row.thread_id)).toEqual([thread.id]);
+    expect(((await listMyReplies()).rows ?? []).map((row) => row.thread_id)).toEqual([thread.id]);
     expect((await listMyReplies({}, { login: "bob" })).total).toBe(0);
 
     const alice = await asUser(browser, "alice");

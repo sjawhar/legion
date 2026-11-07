@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { cleanup, waitFor, within } from "@testing-library/react";
-
+import { graphNode } from "../../__tests__/graph-fixture";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -57,7 +57,7 @@ const decisions: IssueDecisions = {
           created_version: 1,
           from_block: "d-1-para",
           stale: true,
-          to: { block_id: "p-plan", id: "CORE-1/spec#p-plan", kind: "block" },
+          to: graphNode({ block_id: "p-plan", id: "CORE-1/spec#p-plan", kind: "block" }),
         },
       ],
       ref: "dispatch://CORE-1/artifact/decisions-md#b-d-1",
@@ -78,12 +78,12 @@ function part(blockId: string, changedVersion: number, text: string) {
     direction: "in" as const,
     excerpt: { block_id: blockId, text },
     kind: "part_of",
-    node: {
+    node: graphNode({
       block_id: blockId,
       changed_version: changedVersion,
       id: `CORE-1/spec#${blockId}`,
       kind: "block" as const,
-    },
+    }),
     source_seq: null,
   };
 }
@@ -95,11 +95,18 @@ const parts: GraphReferences = {
     part("h-rollout", 1, "## Rollout"),
     part("p-rollout", 4, "Behind a flag."),
   ],
-  node: { id: "artifact-1", kind: "artifact" },
+  node: graphNode({ id: "artifact-1", kind: "artifact" }),
 };
 
 function block(id: string, type: string, from: number): ArtifactBlock {
-  return { from, id, references: { asks: 0, comments: 0 }, to: from + 10, type };
+  return {
+    from,
+    id,
+    references: { asks: 0, comments: 0 },
+    to: from + 10,
+    token: `sha256:${id}`,
+    type,
+  };
 }
 
 const blocks = [

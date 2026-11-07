@@ -24,6 +24,7 @@ export function AskApprovalLink({ ask }: { ask: Ask }): ReactNode {
       kind: "doc",
       primary: artifact.primary,
       project: artifact.project,
+      session_id: null,
       slug: artifact.slug,
     },
     { id: ask.id, kind: "ask" }

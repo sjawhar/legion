@@ -6,7 +6,7 @@ import type { Artifact, DocumentRole, Issue, IssueDetails } from "./types";
 export function primarySpec(
   issue: Pick<IssueDetails, "artifacts" | "primary_artifact_id"> | undefined
 ): Artifact | undefined {
-  return issue?.artifacts.find((artifact) => artifact.id === issue.primary_artifact_id);
+  return issue?.artifacts?.find((artifact) => artifact.id === issue.primary_artifact_id);
 }
 
 /** The issue's document in `role` - `verification.md` or `plan.md`, which the issue names in
@@ -23,7 +23,7 @@ export function roleDocument(
   const id = role === "plan" ? issue?.plan_artifact_id : issue?.verification_artifact_id;
   return id === undefined || id === ""
     ? undefined
-    : issue?.artifacts.find((artifact) => artifact.id === id);
+    : issue?.artifacts?.find((artifact) => artifact.id === id);
 }
 
 /**

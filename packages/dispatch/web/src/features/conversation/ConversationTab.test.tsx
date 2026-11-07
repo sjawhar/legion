@@ -20,7 +20,7 @@ import type {
   Ask,
   Comment,
   CommentDelivery,
-  Event,
+  DispatchEvent,
   Handoff,
   IssueAskThreadRow,
   Message,
@@ -50,6 +50,9 @@ function issueState(dismissed: string[] = [], lastReadSeq = 0): UserIssueState {
 function comment(id: string, overrides: Partial<Comment> = {}): Comment {
   return {
     anchor: null,
+    answers: null,
+    artifact_id: null,
+    reply_block: null,
     ask_id: null,
     author: alice,
     body: `Body of ${id}`,
@@ -72,6 +75,8 @@ function comment(id: string, overrides: Partial<Comment> = {}): Comment {
 function message(id: string, overrides: Partial<Message> = {}): Message {
   return {
     author: alice,
+    broadcast_id: null,
+    reply_block: null,
     body: `Body of ${id}`,
     created_at: "2026-09-09T00:00:00Z",
     deliveries: [],
@@ -89,12 +94,16 @@ function thread(root: Message, replies: Message[] = []): MessageRead {
 
 function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
   return {
+    accepted_as: null,
+    accepted_at: null,
+    duplicate: false,
     attempt: 1,
     created_at: recentAttemptAt,
     delivery: "btw",
     envelope_id: null,
     error: null,
     message_id: "message-1",
+    requested_by: null,
     reply_id: null,
     session_id: "s1",
     state: "sent",
@@ -104,6 +113,7 @@ function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
 
 function mentionAttempt(overrides: Partial<CommentDelivery> = {}): CommentDelivery {
   return {
+    duplicate: false,
     attempt: 1,
     comment_id: "comment-1",
     created_at: recentAttemptAt,
@@ -121,6 +131,8 @@ function mentionAttempt(overrides: Partial<CommentDelivery> = {}): CommentDelive
 
 const baseAsk: Ask = {
   anchor: null,
+  artifact_id: null,
+  block_id: null,
   answer: null,
   author: { id: "s1", kind: "session" },
   created_at: "2026-09-10T09:00:00Z",
@@ -155,7 +167,7 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
   };
 }
 
-function headEvent(seq: number, at = "2026-09-20T00:00:00Z"): Event {
+function headEvent(seq: number, at = "2026-09-20T00:00:00Z"): DispatchEvent {
   return {
     actor: alice,
     created_at: at,
@@ -165,7 +177,7 @@ function headEvent(seq: number, at = "2026-09-20T00:00:00Z"): Event {
     payload: {},
     seq,
     type: "issue.created",
-  } as Event;
+  } as DispatchEvent;
 }
 
 function agent(sessionId: string, title: string, capabilities: string[] = []): Agent {
@@ -178,6 +190,7 @@ function agent(sessionId: string, title: string, capabilities: string[] = []): A
     machine_id: "m",
     open_asks: 0,
     roles: [],
+    state: "live",
     session_id: sessionId,
     title,
   };
@@ -192,6 +205,8 @@ const primaryDocument: Artifact = {
   name: "spec.md",
   primary: true,
   project: "CORE",
+  ref_key: "CORE-1/spec",
+  session_id: null,
   slug: "spec",
   versions: [],
 };
@@ -212,10 +227,10 @@ interface Lists {
    *  to a summary), and `getHandoff` answers one by id. */
   handoffs?: Handoff[];
   /** The issue's newest event, which a dwell on the newest card marks read through. */
-  head?: Event[];
+  head?: DispatchEvent[];
   messages?: MessageRead[];
   /** The first event the reader has not read: its moment is the unread boundary. */
-  unread?: Event[];
+  unread?: DispatchEvent[];
 }
 
 /** The four reads the Conversation builds its list from, plus the two one-row event reads that

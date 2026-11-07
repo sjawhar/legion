@@ -3,6 +3,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { InboxRow, IssueDetails, IssuePriority, IssueSummary } from "../../api/types";
 import { inboxKey, projectListsKey, useIssueFieldWrite } from "./useIssueFieldWrite";
 
+/** `value` as a priority. The route table carries it as a plain number; Dispatch writes 0 to 3
+ *  and nothing else, and a number outside that reads as no priority rather than as a lane and a
+ *  label no surface has. */
+export function issuePriority(value: number | null | undefined): IssuePriority | null {
+  return value === 0 || value === 1 || value === 2 || value === 3 ? value : null;
+}
+
 export interface IssuePriorityWrite {
   /** True after a save failed until the next attempt starts. */
   failed: boolean;

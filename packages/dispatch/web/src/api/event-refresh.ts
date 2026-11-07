@@ -18,8 +18,8 @@ import type {
   Artifact,
   AskRead,
   ChangedReference,
+  DispatchEvent,
   DocumentReferenceSummary,
-  Event,
   EventType,
   GraphReferences,
   InboxRow,
@@ -45,18 +45,18 @@ const projectsKey = projectsQuery().queryKey;
 const pinnedKey = ["issues", "pinned"] as const;
 
 /** One untyped-payload read for the fields the rules take off an event. */
-function payloadValue(event: Event, key: string): unknown {
+function payloadValue(event: DispatchEvent, key: string): unknown {
   const payload = event.payload;
   return typeof payload === "object" && payload !== null ? Reflect.get(payload, key) : undefined;
 }
 
-function payloadString(event: Event, key: string): string | undefined {
+function payloadString(event: DispatchEvent, key: string): string | undefined {
   const value = payloadValue(event, key);
   return typeof value === "string" ? value : undefined;
 }
 
 /** A list field the server writes, or undefined on an event written before it existed. */
-function payloadStrings(event: Event, key: string): readonly string[] | undefined {
+function payloadStrings(event: DispatchEvent, key: string): readonly string[] | undefined {
   const value = payloadValue(event, key);
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
@@ -156,7 +156,7 @@ function referencePanel(reference: string): RefreshTarget {
 // The document an ask or comment event touches: a block ask names the document that holds its
 // block, an anchored ask or comment names the document its mark lives in, and an ask or comment
 // with neither touches no document at all.
-function eventDocument(event: Event): string | undefined {
+function eventDocument(event: DispatchEvent): string | undefined {
   switch (event.type) {
     case "ask.opened":
     case "ask.edited":
@@ -183,7 +183,7 @@ function eventDocument(event: Event): string | undefined {
 // Follower events carry the ask under `ask_id`; every other ask event is the ask itself and
 // carries its `id`. Both refresh the ask's read (a reference to it, an ask page) and its thread,
 // which lists followers.
-function appendAskReads(targets: RefreshTarget[], event: Event): void {
+function appendAskReads(targets: RefreshTarget[], event: DispatchEvent): void {
   const id =
     event.type === "ask.follower_added" || event.type === "ask.follower_removed"
       ? payloadString(event, "ask_id")
@@ -197,7 +197,7 @@ function appendAskReads(targets: RefreshTarget[], event: Event): void {
 // whose read carries its replies, and the ask whose thread holds it. An edit rewrites the
 // comment's blocks, so every read of one of them; a reply that names a block moves that block's
 // read, which lists the reply.
-function appendCommentReads(targets: RefreshTarget[], event: Event): void {
+function appendCommentReads(targets: RefreshTarget[], event: DispatchEvent): void {
   const id =
     event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
   if (id !== undefined) {
@@ -231,7 +231,7 @@ function commentBlockReads(id: string): RefreshTarget {
 
 /** The read of the block of a comment or message a reply names (`reply_block`, its node id),
  *  which lists the reply under the block. */
-function appendRepliedBlock(targets: RefreshTarget[], event: Event): void {
+function appendRepliedBlock(targets: RefreshTarget[], event: DispatchEvent): void {
   const replied = payloadValue(event, "reply_block");
   const node =
     typeof replied === "object" && replied !== null ? Reflect.get(replied, "node") : undefined;
@@ -242,7 +242,7 @@ function appendRepliedBlock(targets: RefreshTarget[], event: Event): void {
 
 /** The signed-in person's answers page lists every answer and every reply on an ask, so the
  *  two events that write one refresh it. The query exists only while that page is open. */
-function appendAnswersPage(targets: RefreshTarget[], event: Event): void {
+function appendAnswersPage(targets: RefreshTarget[], event: DispatchEvent): void {
   if (
     event.type === "ask.answered" ||
     (event.type === "comment.created" && payloadString(event, "ask_id") !== undefined)
@@ -255,7 +255,7 @@ function appendAnswersPage(targets: RefreshTarget[], event: Event): void {
 // into it, and one a project document owns an `owned_by` edge: that document's backlink panel
 // lists both, each row showing the head of the item's text, which an edit moves. A resolution, a
 // reopen, an answer, a hand-back or a suggestion's verdict moves neither the edge nor its text.
-function appendDocumentPanel(targets: RefreshTarget[], event: Event): void {
+function appendDocumentPanel(targets: RefreshTarget[], event: DispatchEvent): void {
   if (
     event.type !== "ask.opened" &&
     event.type !== "ask.edited" &&
@@ -277,7 +277,7 @@ function appendDocumentPanel(targets: RefreshTarget[], event: Event): void {
 
 // The ask lifecycle events, listed rather than matched on the `ask.` prefix so a new one falls
 // to the default branch instead of silently routing here.
-function isAskEvent(event: Event): boolean {
+function isAskEvent(event: DispatchEvent): boolean {
   return (
     event.type === "ask.opened" ||
     event.type === "ask.anchor_refreshed" ||
@@ -293,7 +293,7 @@ function isAskEvent(event: Event): boolean {
 /** The ask events that open or close an ask: the sidebar's per-project open-ask counts and an
  *  issue's pinned row (`open_asks`) move with them. An edit, a hand-back, an anchor refresh or a
  *  follower change moves neither. A block event can open or retract a decision block's ask. */
-function movesOpenAsks(event: Event): boolean {
+function movesOpenAsks(event: DispatchEvent): boolean {
   return (
     event.type === "ask.opened" ||
     event.type === "ask.answered" ||
@@ -305,7 +305,7 @@ function movesOpenAsks(event: Event): boolean {
 
 // The events that change a comment thread: creation, deliveries, lifecycle, suggestion
 // verdicts, and a cascaded anchor refresh (a document version orphaned or re-anchored it).
-function isCommentLikeEvent(event: Event): boolean {
+function isCommentLikeEvent(event: DispatchEvent): boolean {
   return (
     event.type === "comment.created" ||
     event.type === "comment.delivery" ||
@@ -325,7 +325,7 @@ function isCommentLikeEvent(event: Event): boolean {
  *  row: both write paths file a reply under the ask at the head of its thread (`ask_id`), and a
  *  delivery receipt names that ask too. A citation of an ask moves its row's backlink count, which
  *  the targets the event names restore (`changedReferenceTargets`). */
-function movesInboxRows(event: Event): boolean {
+function movesInboxRows(event: DispatchEvent): boolean {
   return (
     isAskEvent(event) ||
     (isCommentLikeEvent(event) && payloadString(event, "ask_id") !== undefined) ||
@@ -353,7 +353,7 @@ function appendAgentConversation(targets: RefreshTarget[], target: string | unde
   }
 }
 
-function isMessageEvent(event: Event): boolean {
+function isMessageEvent(event: DispatchEvent): boolean {
   return (
     event.type === "message.created" ||
     event.type === "message.delivery" ||
@@ -384,7 +384,7 @@ const REPLIES_WRITES: Partial<Record<EventType, true>> = {
  * Without it every one of those writes refreshes, except an `issue.updated` that says it moved no
  * status: the server names the logins on every status move, a close and a reopen among them.
  */
-function movesReplies(event: Event, viewer: string | undefined): boolean {
+function movesReplies(event: DispatchEvent, viewer: string | undefined): boolean {
   const issueWrite = event.type === "issue.closed" || event.type === "issue.updated";
   if (REPLIES_WRITES[event.type] !== true && !issueWrite) {
     return false;
@@ -404,7 +404,7 @@ function movesReplies(event: Event, viewer: string | undefined): boolean {
 
 /** The fields an `issue.created|updated|closed` write moved, or undefined when the event does not
  *  say, in which case any of them may have. */
-function issueChanges(event: Event): ReadonlySet<string> | undefined {
+function issueChanges(event: DispatchEvent): ReadonlySet<string> | undefined {
   const changed = payloadStrings(event, "changed");
   return changed === undefined ? undefined : new Set(changed);
 }
@@ -416,7 +416,7 @@ function issueChanges(event: Event): ReadonlySet<string> | undefined {
  * link, and an issue write that moved a structural edge (its parent, its blockers, its components)
  * or the title every one of them shows as its excerpt.
  */
-function changesReferenceGraph(event: Event): boolean {
+function changesReferenceGraph(event: DispatchEvent): boolean {
   switch (event.type) {
     case "artifact.created":
     case "artifact.version":
@@ -452,7 +452,7 @@ function changesReferenceGraph(event: Event): boolean {
  * event of the issue does.
  */
 function issueWriteTargets(
-  event: Event,
+  event: DispatchEvent,
   key: string,
   project: string | undefined
 ): RefreshTarget[] {
@@ -546,7 +546,7 @@ function issueWriteTargets(
           node.kind === "issue" &&
           (node.id === parent ||
             blockers.includes(node.id) ||
-            edges.some(
+            (edges ?? []).some(
               (edge) =>
                 edge.node.kind === "issue" &&
                 edge.node.id === key &&
@@ -560,7 +560,7 @@ function issueWriteTargets(
 
 /** What a project document's event refreshes: an ask, a comment, a version or a review on a
  *  document that belongs to no issue. */
-function documentTargets(event: Event, viewer: string | undefined): RefreshTarget[] {
+function documentTargets(event: DispatchEvent, viewer: string | undefined): RefreshTarget[] {
   if (event.artifact_id === null || event.artifact_id === undefined) {
     throw new Error("document event is missing its artifact id");
   }
@@ -612,7 +612,7 @@ function documentTargets(event: Event, viewer: string | undefined): RefreshTarge
   return targets;
 }
 
-function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[] {
+function ownerTargets(event: DispatchEvent, viewer: string | undefined): RefreshTarget[] {
   if (
     event.type === "project.created" ||
     event.type === "project.updated" ||
@@ -896,7 +896,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
 
 /** What the server says one write moved in the reference graph, read the same way on every
  *  event; an event recorded before the field existed carries nothing. */
-function changedReferences(event: Event): readonly ChangedReference[] {
+function changedReferences(event: DispatchEvent): readonly ChangedReference[] {
   const changed = payloadValue(event, "references_changed");
   return Array.isArray(changed) ? (changed as ChangedReference[]) : [];
 }
@@ -947,7 +947,7 @@ const TRUNCATED_KIND_READS: Readonly<Partial<Record<string, readonly RefreshTarg
  * without the list (an older server), or lists a kind this build does not know, refreshes every
  * read that holds a count or a panel.
  */
-function changedReferenceTargets(event: Event): RefreshTarget[] {
+function changedReferenceTargets(event: DispatchEvent): RefreshTarget[] {
   const truncatedKinds = payloadStrings(event, "references_changed_truncated_kinds");
   if (
     (truncatedKinds === undefined &&
@@ -1025,7 +1025,7 @@ function changedReferenceTargets(event: Event): RefreshTarget[] {
  * the status `done` emits `issue.closed` alone). Without `changed` (an older server) every update
  * and close may have. A deploy moves neither.
  */
-export function askThreadsIssue(event: Event): string | null {
+export function askThreadsIssue(event: DispatchEvent): string | null {
   switch (event.type) {
     case "issue.claimed":
     case "issue.released":
@@ -1060,7 +1060,7 @@ function askThreadsOn(issue: string): RefreshTarget {
  * only some of a family's reads can have moved, a test of the read's data. `signedInLogin` is the
  * viewer's: the per-viewer events and the Replies rule read it.
  */
-export function eventRefreshTargets(event: Event, signedInLogin?: string): RefreshTarget[] {
+export function eventRefreshTargets(event: DispatchEvent, signedInLogin?: string): RefreshTarget[] {
   const targets = [...ownerTargets(event, signedInLogin), ...changedReferenceTargets(event)];
   const threadsIssue = askThreadsIssue(event);
   if (threadsIssue !== null) {

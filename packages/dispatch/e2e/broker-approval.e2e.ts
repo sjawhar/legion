@@ -63,6 +63,7 @@ async function listForAlice(requests: readonly SeededRequest[]): Promise<void> {
       kind: "agent_secret",
       record_id: request.record_id,
       requested_at: new Date().toISOString(),
+      session: { enrollment: null, request: null },
     }))
   );
 }

@@ -17,6 +17,7 @@ function pendingSecretRow(overrides: Partial<CredentialPendingRow> = {}): Creden
     kind: "agent_secret",
     record_id: "req-1",
     requested_at: "2026-09-27T00:00:00Z",
+    session: { enrollment: null, request: null },
     ...overrides,
   };
 }
@@ -41,6 +42,7 @@ test("renders every pending credential request, linking a secret row to its brok
     kind: "launcher_credential",
     record_id: "req-2",
     requested_at: "2026-09-27T01:00:00Z",
+    session: { enrollment: null, request: null },
   };
   const capabilities = spyOn(api, "getCredentialCapabilities").mockResolvedValue({
     machine_code_page: true,

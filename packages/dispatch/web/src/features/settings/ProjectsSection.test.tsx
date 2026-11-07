@@ -6,7 +6,12 @@ import { ApiError, api } from "../../api/client";
 import type { Project } from "../../api/types";
 import { ProjectsSection } from "./ProjectsSection";
 
-const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
+const core: Project = {
+  created_at: "2026-09-01T00:00:00Z",
+  key: "CORE",
+  name: "Core",
+  open_asks: 0,
+};
 
 // Dispatch made the project and lost its answer (`409 KEY_COMMITTED`): the form lets go of the key
 // and name and says what was made, the list is read again, and a second press - with nothing in

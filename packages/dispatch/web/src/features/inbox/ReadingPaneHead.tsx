@@ -5,6 +5,7 @@ import type { Artifact, InboxRow } from "../../api/types";
 import { linkHoverText, linkText, secondaryButtonCompact } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { PriorityControl } from "../issue/PriorityControl";
+import { issuePriority } from "../issue/useIssuePriority";
 import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
@@ -108,7 +109,7 @@ export function ReadingPaneHead({
         </Link>
       )}
       {ask.issue_key === null ? null : (
-        <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+        <PriorityControl issueKey={ask.issue_key} priority={issuePriority(ask.priority)} />
       )}
       {ask.issue_key !== null && viewer !== undefined && (isUnassigned(ask) || assignLive) ? (
         <AssignToMe askId={ask.id} issueKey={ask.issue_key} onLive={onAssignLive} viewer={viewer} />

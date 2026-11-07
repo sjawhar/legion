@@ -2,7 +2,7 @@ import type { UseMutationResult } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { apiErrorMessage } from "../../api/client";
-import type { CredentialDecisionResponse } from "../../api/types";
+import type { DecisionResponse, StateResponse } from "../../api/types";
 import type { SubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -26,8 +26,8 @@ export function CredentialDecisionButtons({
   deny,
   submitGuard,
 }: {
-  approve?: UseMutationResult<CredentialDecisionResponse | null, Error, void>;
-  deny: UseMutationResult<CredentialDecisionResponse | null, Error, void>;
+  approve?: UseMutationResult<DecisionResponse | null, Error, void>;
+  deny: UseMutationResult<StateResponse | null, Error, void>;
   submitGuard: SubmitGuard;
 }): ReactNode {
   const deciding = approve?.isPending === true || deny.isPending;

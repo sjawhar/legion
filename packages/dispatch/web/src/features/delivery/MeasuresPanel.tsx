@@ -152,7 +152,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
               format={(v) => `${v} deploys`}
               max={targets.deploys_per_day}
               met={(v) => v >= targets.deploys_per_day}
-              points={measures.daily.map((d) => ({
+              points={(measures.daily ?? []).map((d) => ({
                 label: d.day,
                 value: d.deploys,
                 partial: d.partial,
@@ -283,7 +283,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
                 format={pct}
                 max={1}
                 met={(v) => v >= targets.deploy_run_success_rate}
-                points={measures.daily.map((d) => ({
+                points={(measures.daily ?? []).map((d) => ({
                   label: d.day,
                   value: d.run_success_rate,
                   partial: d.partial,
@@ -304,7 +304,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
         >
           <div className="flex items-baseline gap-2">
             <BigNumber className={toneOf((d) => d.status.unowned_p0)}>
-              {show((d) => `${d.unowned_p0.length}`)}
+              {show((d) => `${(d.unowned_p0 ?? []).length}`)}
             </BigNumber>
             {data === undefined ? null : (
               <span className={`text-xs ${textMutedOnSurface}`}>
@@ -318,7 +318,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
           </div>
           {data === undefined ? null : (
             <div className="flex flex-wrap gap-x-2 text-xs">
-              {data.unowned_p0.slice(0, UNOWNED_P0_SHOWN).map((issue) => (
+              {(data.unowned_p0 ?? []).slice(0, UNOWNED_P0_SHOWN).map((issue) => (
                 <Link
                   className={`hover:underline ${linkText}`}
                   key={issue.key}
@@ -328,15 +328,15 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
                   {issue.key}
                 </Link>
               ))}
-              {data.unowned_p0.length > UNOWNED_P0_SHOWN ? (
+              {(data.unowned_p0 ?? []).length > UNOWNED_P0_SHOWN ? (
                 <span
                   className={textMutedOnSurface}
-                  title={data.unowned_p0
+                  title={(data.unowned_p0 ?? [])
                     .slice(UNOWNED_P0_SHOWN)
                     .map((issue) => issue.key)
                     .join(", ")}
                 >
-                  +{data.unowned_p0.length - UNOWNED_P0_SHOWN} more
+                  +{(data.unowned_p0 ?? []).length - UNOWNED_P0_SHOWN} more
                 </span>
               ) : null}
             </div>
@@ -377,7 +377,7 @@ export function MeasuresPanel({ data }: { data: DeliveryMeasuresResponse | undef
 function Definitions({ data }: { data: DeliveryMeasuresResponse }): ReactNode {
   const { measures, targets } = data;
   // Newest first, copied once per answer rather than on every render of the open fold.
-  const newestFirst = useMemo(() => [...measures.daily].reverse(), [measures.daily]);
+  const newestFirst = useMemo(() => [...(measures.daily ?? [])].reverse(), [measures.daily]);
   const frequency = measures.deploy_frequency;
   const lead = measures.lead_time;
   const perPR = measures.change_failure_rate.per_pr;

@@ -36,7 +36,7 @@ function newestSessionReply(
 ): string | undefined {
   let newest: string | undefined;
   for (const read of exchanges) {
-    for (const reply of read.replies) {
+    for (const reply of read.replies ?? []) {
       // A session id and a person's email are disjoint namespaces, so the id test implies the kind.
       // The server's rule tests the kind and this one tests the id; a reader restoring the
       // symmetry by dropping the other side's clause would break it.
@@ -123,7 +123,7 @@ const readThrough = (newest: string): UserAgentStateInput => ({ read_through: ne
 
 const joinedIds = (ids: readonly string[]): string => ids.join(" ");
 
-const readReplies = (ids: readonly string[]): UserAgentStateInput => ({ read_replies: ids });
+const readReplies = (ids: readonly string[]): UserAgentStateInput => ({ read_replies: [...ids] });
 
 /**
  * Records that the viewer has read a session's conversation, through the newest reply the

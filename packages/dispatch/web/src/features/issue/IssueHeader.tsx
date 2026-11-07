@@ -81,7 +81,7 @@ import {
 } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
-import type { IssuePriorityWrite } from "./useIssuePriority";
+import { type IssuePriorityWrite, issuePriority } from "./useIssuePriority";
 
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
@@ -267,7 +267,7 @@ export function IssueHeader({
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
   const selectableStatuses = isClosed ? issueStatuses : openIssueStatuses;
-  const openAsks = issue.open_asks.filter((ask) => ask.state === "open");
+  const openAsks = (issue.open_asks ?? []).filter((ask) => ask.state === "open");
   // The detail carries waiting_on on every open ask; a response without it cannot say whose
   // turn it is, so the indicator stays off rather than shown wrong.
   const knowsWhoseTurn = openAsks.every((ask) => ask.waiting_on !== undefined);
@@ -504,7 +504,7 @@ export function IssueHeader({
           <PriorityEditor
             disabled={isClosed || updateIssue.isPending}
             issueKey={issue.key}
-            priority={issue.priority}
+            priority={issuePriority(issue.priority)}
             write={priorityWrite}
           />
           <AssigneeControl
@@ -616,7 +616,7 @@ export function IssueHeader({
             <span className="font-medium">Labels:</span>
             <IssueLabels
               disabled={isClosed}
-              labels={issue.labels}
+              labels={issue.labels ?? []}
               onSave={(labels) => labelsMutation.mutateAsync(labels)}
               project={issue.project}
               saving={labelsMutation.isPending}
@@ -690,7 +690,7 @@ export function IssueHeader({
             resolvedRepo={issue.resolved_repo}
           />
           <IssueComponentsLine issue={issue} />
-          {issue.external_links.map((link) => (
+          {(issue.external_links ?? []).map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>
               <GitHubLink link={link} />
             </div>

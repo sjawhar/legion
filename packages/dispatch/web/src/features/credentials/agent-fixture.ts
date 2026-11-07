@@ -14,6 +14,7 @@ export function runningAgent(overrides: Partial<Agent> = {}): Agent {
     open_asks: 0,
     roles: [],
     session_id: "sess-1",
+    state: "live",
     title: "Reviewing LEGION-587",
     ...overrides,
   };

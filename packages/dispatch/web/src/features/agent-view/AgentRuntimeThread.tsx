@@ -83,7 +83,7 @@ export function AgentRuntimeThread({
   viewer: string | undefined;
 }): ReactNode {
   const messages = useMemo(() => {
-    const storedMessages = stored.flatMap((read) => [read.message, ...read.replies]);
+    const storedMessages = stored.flatMap((read) => [read.message, ...(read.replies ?? [])]);
     // A person's direct message the session took as its own user turn is in the stream too,
     // normally tagged with its Dispatch id: then it shows once, where the session took it, still
     // naming whoever wrote it. An untagged one is returned unchanged and its stored copy is never

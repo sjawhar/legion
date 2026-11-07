@@ -60,6 +60,9 @@ type routeShape struct {
 	Opaque string
 	// OpaqueContentType is the media type an Opaque answer is served as; empty where Opaque is.
 	OpaqueContentType string
+	// OpaqueRequest is why this route's body carries no schema, for a route that reads the bytes
+	// whole rather than modelling them; empty for every other route, and never beside Request.
+	OpaqueRequest string
 }
 
 // --- the query-parameter structs -------------------------------------------------------------
@@ -285,9 +288,11 @@ type sessionAnswersQuery struct {
 type issueAsksQuery struct {
 	// State filters the list: all, open or answered.
 	State string `query:"state" json:"-"`
-	// Thread, `1`, adds each ask's thread: replies, rewordings, answers, followers, claimant,
-	// route and route_holder.
-	Thread bool `query:"thread" json:"-"`
+	// Thread adds each ask's thread: replies, rewordings, answers, followers, claimant, route
+	// and route_holder. It is the literal `1` or absent, never a boolean: parseAskListThread
+	// (asks.go) refuses every other value with 400 INVALID_ASK_THREAD, so a client that sent
+	// `true` would be refused.
+	Thread string `query:"thread" json:"-" enum:"1"`
 }
 
 // artifactAsksQuery is GET /api/v1/artifacts/{id}/asks's query.
@@ -725,9 +730,10 @@ var routeShapes = map[string]routeShape{
 		Status: http.StatusOK, Response: wire.StateResponse{}, Request: credentialDecisionInput{},
 	},
 	"POST /api/v1/credential-requests/machine-lookup": {
-		// POST /v1/machine-logins/lookup (agentsecrets.Client.MachineLookup). The request body
-		// is forwarded to the broker unparsed (readRelayBody), so Dispatch models none of it.
-		Status: http.StatusOK, Response: wire.RecordResponse{},
+		// POST /v1/machine-logins/lookup (agentsecrets.Client.MachineLookup). Dispatch forwards
+		// the body to the broker unparsed (readRelayBody) rather than reading it, but the broker
+		// does read it, so the route takes the shape the broker declares.
+		Status: http.StatusOK, Response: wire.RecordResponse{}, Request: wire.MachineLookupRequest{},
 	},
 	"GET /api/v1/credential-grants": {
 		// GET /v1/grants (agentsecrets.Client.Grants).
@@ -765,9 +771,12 @@ var routeShapes = map[string]routeShape{
 	"POST /api/v1/artifacts/{id}/_test/outside-schema": {Status: http.StatusNoContent},
 	"POST /api/v1/agents/{session_id}/stream/_test/publish": {
 		Status: http.StatusOK, Response: testHookOK{}, Params: publishFrameQuery{},
-		// The body is the frame's own bytes, read whole and relayed; only ?as=responder reads
-		// it as JSON (agent_stream.go).
-		Request: publishFrameResponderInput{},
+		// The body is the frame's own bytes, read whole and published unparsed; only
+		// ?as=responder reads it, as {"responding"} (publishFrameResponderInput,
+		// agent_stream.go). Naming that one arm would state a contract the route does not
+		// hold its caller to, so the body is an object of any shape.
+		OpaqueRequest: "the frame to publish, read whole and published unparsed; under " +
+			"?as=responder it is read as {\"responding\": bool} instead",
 	},
 	"GET /api/v1/artifacts/_test/rooms":                          {Status: http.StatusOK, Response: residentRooms{}},
 	"GET /api/v1/artifacts/{id}/_test/room-counters":             {Status: http.StatusOK, Response: docs.RoomCounters{}},

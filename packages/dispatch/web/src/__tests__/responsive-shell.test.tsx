@@ -24,6 +24,8 @@ const issue: IssueDetails = {
       kind: "doc",
       name: "Spec",
       primary: true,
+      ref_key: "CORE-1/spec",
+      session_id: null,
       slug: "spec",
       versions: [],
     },
@@ -44,7 +46,9 @@ const issue: IssueDetails = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   project: "CORE",
   referenced_by_count: 0,
   route: null,
@@ -89,7 +93,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
   setViewport(width);
   api.whoAmI = async () => ({ event_head: "0", kind: "user", login: "alice" });
   api.listMyReplies = async (query) => ({
-    limit: query.limit,
+    limit: query.limit ?? 50,
     offset: 0,
     rows: [],
     total: unreadThreads,
@@ -106,6 +110,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
       open_asks: 0,
       progress: { tasks: null, children: null },
       last_seq: 0,
+      labels: [],
       parent: issue.parent,
       blocked_by: issue.blocked_by,
       primary_artifact_id: issue.primary_artifact_id,
@@ -184,13 +189,16 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
     {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "session-1", kind: "session" },
+      block_id: null,
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-waiting",
       // The badge counts the reader's own: the shell signs in as `alice`.
       issue: { assignee: "alice", key: "CORE-1", title: "Responsive shell" },
       issue_key: "CORE-1",
+      last_reply: null,
       kind: "question",
       multiple: false,
       opened_event_id: 1,
@@ -216,7 +224,9 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
     {
       anchor: null,
       answer: null,
+      artifact_id: null,
       author: { id: "session-2", kind: "session" },
+      block_id: null,
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-answered",

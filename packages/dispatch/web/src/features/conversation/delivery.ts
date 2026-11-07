@@ -24,6 +24,21 @@ export function capabilityLabel(capability: string): string {
   return mode === undefined ? capability : MODE_LABELS[mode];
 }
 
+/** `value` as a delivery mode, or `undefined` where this dashboard knows no such mode: a mode
+ *  reaches the browser as the string the route table declares, and `DELIVERY_CAPABILITIES` is the
+ *  closed list that string is one of. Every surface that needs the mode itself narrows here. */
+export function deliveryMode(value: string): MessageDeliveryMode | undefined {
+  return DELIVERY_CAPABILITIES.find((known) => known === value);
+}
+
+/** `value` as an attempt's state. Dispatch writes one of the three the route table carries as a
+ *  plain string; one this build does not know reads as `sent`, which is what every surface
+ *  already showed for it - each tests for `failed` and for `pending`, and draws anything else as
+ *  sent. */
+export function deliveryOutcomeState(value: string): DeliveryOutcome["state"] {
+  return value === "failed" || value === "pending" ? value : "sent";
+}
+
 /**
  * The mode a message with no `/aside ` or `/btw ` command goes in when it answers no thread, from
  * the capabilities of each live session it addresses: Send when every one of them advertises it,

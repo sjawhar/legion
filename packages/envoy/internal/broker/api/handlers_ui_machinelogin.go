@@ -19,10 +19,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/wire"
 )
 
-type lookupMachineLoginBody struct {
-	// The XXXX-XXXX confirmation code the machine shows, as the approver typed it.
-	Code string `json:"code"`
-}
+// lookupMachineLoginBody is wire.MachineLookupRequest under the name cmd/broker-refgen reads
+// from the call site (bodies.go), as the eight answers above are.
+type lookupMachineLoginBody = wire.MachineLookupRequest
 
 // lookupMachineLogin resolves a pending machine login by its human-readable confirmation code, the
 // user code the machine's device authorization minted, and is the only route

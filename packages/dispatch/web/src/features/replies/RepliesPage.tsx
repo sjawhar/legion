@@ -101,7 +101,9 @@ export function RepliesPage(): ReactNode {
   useDocumentTitle("Replies · Dispatch");
   const replies = useInfiniteQuery({
     getNextPageParam: (last: MyRepliesResponse) =>
-      last.offset + last.rows.length < last.total ? last.offset + last.rows.length : undefined,
+      last.offset + (last.rows ?? []).length < last.total
+        ? last.offset + (last.rows ?? []).length
+        : undefined,
     initialPageParam: 0,
     queryFn: ({ pageParam }) => api.listMyReplies({ limit: PAGE_SIZE, offset: pageParam }),
     queryKey: PAGE_KEY,
@@ -116,7 +118,7 @@ export function RepliesPage(): ReactNode {
   // loaded page from the top, and until then the thread shows once, where it was first listed.
   const seen = new Set<string>();
   const rows = replies.data.pages
-    .flatMap((page) => page.rows)
+    .flatMap((page) => page.rows ?? [])
     .filter((row) => !seen.has(row.thread_id) && seen.add(row.thread_id));
 
   return (

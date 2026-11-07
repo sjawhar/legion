@@ -8,6 +8,8 @@ export type {
   Anchor,
   AnchorInput,
   AnswerAskInput,
+  ApproverGrantResp,
+  ApproverGrantsResponse,
   ArchitectureSource,
   ArchitectureTree,
   ArchitectureTreeComponent,
@@ -81,6 +83,7 @@ export type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCapabilities,
   CredentialPendingResponse,
   CredentialPendingRow,
   CredentialRequestKind,
@@ -88,6 +91,7 @@ export type {
   Decision,
   DecisionKeep,
   DecisionLink,
+  DecisionResponse,
   DeliveryCapability,
   DeliveryColorFacet,
   DeliveryComponent,
@@ -178,6 +182,8 @@ export type {
   IssueSummary,
   ItemBlock,
   ItemBlocks,
+  LauncherCredentialResp,
+  LauncherCredentialsResponse,
   ListUsersResponse,
   LiveAgentFrame,
   LiveClientFrame,
@@ -201,10 +207,15 @@ export type {
   MyRepliesResponse,
   MyReplyRow,
   OpenAskOwner,
+  PersonSignInResp,
+  PersonSignInsResponse,
   ProgressCount,
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  RecordDecisionResp,
+  RecordEnrollmentResp,
+  RecordResponse,
   RepoProject,
   RequirementCoverage,
   SearchArtifactRef,
@@ -214,6 +225,7 @@ export type {
   SearchResult,
   SearchResultKind,
   SearchResultsPage,
+  StateResponse,
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,
@@ -229,144 +241,3 @@ export type {
   Version,
   WriteSuggestion,
 } from "@legion/contracts";
-
-import type { CredentialRequestKind, CredentialSession } from "@legion/contracts";
-
-// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
-// broker's HTTP API reference: https://cybermonklabs.github.io/legion/broker/reference/api/). These have
-// no reason to live in the shared @legion/contracts package, which is for Envoy event contracts.
-export type CredentialRequestState =
-  | "pending"
-  | "approved"
-  | "denied"
-  | "expired"
-  | "cancelled"
-  | "revoked";
-
-export interface CredentialEnrollment {
-  kind: string;
-  runtime_id: string;
-  operator: string | null;
-  /** A pod enrollment's slot: one of several independent identities in one pod, chosen by the
-   *  launcher that enrolled it. Null for every enrollment without one. */
-  slot: string | null;
-}
-export interface CredentialDecisionEvent {
-  event: string; // "approved" | "denied" | "expired" | "cancelled" | "revoked"
-  at: string;
-  credential_id: string | null;
-}
-export interface CredentialRecord {
-  record_id: string;
-  kind: CredentialRequestKind;
-  state: CredentialRequestState;
-  approver: string;
-  enrollment: CredentialEnrollment | null;
-  identifiers: string[];
-  service: string | null;
-  reason: string;
-  /** How many seconds the grant or credential lasts once approved; null for a grant that lasts
-   *  until its session ends. */
-  lifetime_seconds: number | null;
-  rules_version: string;
-  expires_at: string;
-  requested_at: string;
-  decided: CredentialDecisionEvent | null;
-  session?: CredentialSession;
-}
-
-export interface CredentialApproval {
-  state: "approved";
-  credential_id: string | null;
-}
-export interface CredentialDenial {
-  state: "denied";
-}
-/** What a machine login's approve and deny answer, relayed verbatim from the broker: an approval
- *  names the launcher credential it made, and a denial is `{state: "denied"}` alone. */
-export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
-
-interface CredentialGrantFields {
-  grant_id: string;
-  enrollment: CredentialEnrollment;
-  names: string[];
-  /** When it expires; null for a grant that lasts until its session ends. */
-  expires_at: string | null;
-  created_at: string;
-}
-/** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
- *  has no approver and rests on no record. */
-export interface AutomaticCredentialGrant extends CredentialGrantFields {
-  granted: "automatic";
-  approver: null;
-  record_id: null;
-}
-/** A grant someone approved: `approver` names the login that did (another person's, on a session
- *  the viewer operates), and `record_id` the record the approval rests on. */
-export interface ApprovedCredentialGrant extends CredentialGrantFields {
-  granted: "approval";
-  approver: string;
-  record_id: string;
-}
-/** A live grant on `GET /api/v1/credential-grants?approver=me`: one on a session the viewer
- *  operates, given automatically or approved by anyone, or one the viewer approved on anyone's
- *  session. */
-export type CredentialGrant = AutomaticCredentialGrant | ApprovedCredentialGrant;
-export interface CredentialGrantsResponse {
-  grants: CredentialGrant[];
-}
-
-/** One of the machine logins the viewer may revoke on `GET /api/v1/machine-logins`: the launcher
- *  credential it minted, for one of the viewer's machines or for a service, whoever approved a
- *  service's, not revoked, and either unexpired or expired with a session it started still
- *  running. */
-export interface MachineLogin {
-  credential_id: string;
-  host: string;
-  /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
-   *  null for the viewer's own machine. */
-  service: string | null;
-  /** The Kubernetes ServiceAccount a service's token login proved
-   *  (`system:serviceaccount:<namespace>:<name>`); null for every login a person approved, and
-   *  absent from a broker older than token logins. */
-  subject?: string | null;
-  /** The login of the person who approved it; empty for a service's token login, which no person
-   *  approves. */
-  approved_by: string;
-  issued_at: string;
-  expires_at: string;
-  /** True once `expires_at` has passed: the login starts no more sessions, but sessions it
-   *  started renew with their own keys and still run until they end or it is revoked. */
-  expired: boolean;
-}
-export interface MachineLoginsResponse {
-  credentials: MachineLogin[];
-}
-
-/** One of the viewer's own sign-ins on `GET /api/v1/signins`: a machine they ran `agent-secrets
- *  login` on and have not revoked. Nobody else's is ever listed. */
-export interface SignIn {
-  signin_id: string;
-  /** The Google account of the machine the person signed in on, as the broker's fleet list names
-   *  it: what says which box this is. */
-  machine: string;
-  /** The RFC 7638 thumbprint of the box key the sign-in is bound to, which tells two sign-ins on
-   *  one fleet apart. It is public: the box's own DPoP proofs carry it. */
-  thumbprint: string;
-  /** When the person first signed in on that machine. */
-  created_at: string;
-  /** When that machine last traded a token under this sign-in. */
-  last_used_at: string;
-}
-export interface SignInsResponse {
-  signins: SignIn[];
-}
-
-/** What the credential pages may offer against this deployment's secrets broker, from
- *  `GET /api/v1/credentials/capabilities`: Dispatch's relay of the broker's own RFC 8414
- *  metadata, since a browser reaches no broker. */
-export interface CredentialCapabilities {
-  /** Whether the broker still serves the device grant, so whether a machine ever prints a code
-   *  for a person to type on `/credentials/machine`. False for a Dispatch with no broker. */
-  machine_code_page: boolean;
-}

@@ -44,7 +44,7 @@ import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { AskHitStatus } from "./AskHitStatus";
-import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
+import { groupResults, kindLabel, optionId, searchResultKind, stepActive } from "./search-model";
 
 const emptyResults: SearchResult[] = [];
 const emptyProjects: Project[] = [];
@@ -202,6 +202,9 @@ function ResultOption({
   const source = segments.map((segment) => segment.text).join("");
   const snippet = searchSnippetMarkdown(source);
   const hits = segments.flatMap((segment) => (segment.mark ? [segment.text] : []));
+  // The route table carries the kind as a plain string; a kind this build has no icon or label
+  // for keeps its own word and draws no icon, rather than borrowing another kind's.
+  const kind = searchResultKind(result.kind);
 
   return (
     <PaletteOption
@@ -215,9 +218,9 @@ function ResultOption({
           muted ? textMutedOnSelectedCard : textSecondaryOnSurface
         }`}
       >
-        <SearchResultIcon kind={result.kind} />
+        {kind === undefined ? null : <SearchResultIcon kind={kind} />}
         <span className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}>
-          {kindLabel(result.kind)}
+          {kind === undefined ? result.kind : kindLabel(kind)}
         </span>
         {result.artifact === undefined ? null : (
           <span className="truncate">{result.artifact.name}</span>

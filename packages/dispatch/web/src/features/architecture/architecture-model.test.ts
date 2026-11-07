@@ -221,7 +221,10 @@ describe("predictTree (the optimistic move)", () => {
     expect(next.unassigned).toEqual([]);
     expect(next.totals.unassigned).toBe(0);
     const counts = Object.fromEntries(
-      next.components.map((c) => [c.id, `${c.done}/${c.total} own ${c.own_done}/${c.own_total}`])
+      (next.components ?? []).map((c) => [
+        c.id,
+        `${c.done}/${c.total} own ${c.own_done}/${c.own_total}`,
+      ])
     );
     expect(counts).toEqual({
       dispatch: "1/1 own 0/0",
@@ -230,7 +233,10 @@ describe("predictTree (the optimistic move)", () => {
       web: "1/1 own 1/1",
     });
     const rows = Object.fromEntries(
-      next.components.map((c) => [c.id, c.issues.map((row) => `${row.attached}:${row.via ?? ""}`)])
+      (next.components ?? []).map((c) => [
+        c.id,
+        (c.issues ?? []).map((row) => `${row.attached}:${row.via ?? ""}`),
+      ])
     );
     expect(rows).toEqual({
       dispatch: ["contained:web"],
@@ -253,9 +259,11 @@ describe("predictTree (the optimistic move)", () => {
   test("a reattach removes the issue's old rows and counts before adding the new ones", () => {
     const attached = predictTree(base, loose, { ids: ["web"], mode: "explicit" }, "now");
     const moved = predictTree(attached, loose, { ids: ["server"], mode: "explicit" }, "now");
-    const counts = Object.fromEntries(moved.components.map((c) => [c.id, `${c.done}/${c.total}`]));
+    const counts = Object.fromEntries(
+      (moved.components ?? []).map((c) => [c.id, `${c.done}/${c.total}`])
+    );
     expect(counts).toEqual({ dispatch: "1/1", legion: "1/1", server: "1/1", web: "0/0" });
-    expect(moved.components.find((c) => c.id === "web")?.issues).toEqual([]);
+    expect((moved.components ?? []).find((c) => c.id === "web")?.issues).toEqual([]);
   });
 
   test("an inherit write only removes the issue; where it lands is the refetch's to say", () => {

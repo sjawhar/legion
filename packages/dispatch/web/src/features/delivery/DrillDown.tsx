@@ -56,9 +56,9 @@ function PRDetail({
   let componentText = PLACEHOLDER_LABELS[NO_ISSUE];
   if (pr.issue !== null) {
     componentText =
-      pr.components.length === 0
+      (pr.components ?? []).length === 0
         ? PLACEHOLDER_LABELS[NO_COMPONENT]
-        : pr.components.map((id) => components[id]?.title ?? id).join(", ");
+        : (pr.components ?? []).map((id) => components[id]?.title ?? id).join(", ");
   }
   return (
     <div className="flex flex-col gap-2">
@@ -107,9 +107,9 @@ function PRDetail({
         {/* Each session wraps onto its own line rather than being cut, so every one stays
             reachable; the delivery read's titles hold a session's id when it has no title. */}
         <dd className="flex min-w-0 flex-col items-start break-words">
-          {pr.sessions.length === 0
+          {(pr.sessions ?? []).length === 0
             ? "\u2014"
-            : pr.sessions.map((session) => (
+            : (pr.sessions ?? []).map((session) => (
                 <AgentName
                   className="max-w-full"
                   key={session}
@@ -146,7 +146,7 @@ function RunJobs({ runId, durations }: { runId: number; durations: boolean }): R
   if (detail.isError) {
     return <div className={`text-sm ${textMutedOnSurface}`}>The run's jobs could not be read.</div>;
   }
-  return detail.data.jobs.map((job) => {
+  return (detail.data.jobs ?? []).map((job) => {
     const durationMs = jobDurationMs(job);
     return (
       <div className="flex justify-between gap-2 text-sm" key={job.name}>
@@ -170,8 +170,8 @@ function DeployDetail({ run }: { run: DeliveryRun }): ReactNode {
         Open run
       </a>
       <div>
-        <div className={sectionLabel}>PRs shipped ({run.prs.length})</div>
-        {run.prs.map((pr) => (
+        <div className={sectionLabel}>PRs shipped ({(run.prs ?? []).length})</div>
+        {(run.prs ?? []).map((pr) => (
           <div className={`text-sm ${textPrimaryOnSurface}`} key={pr.id}>
             {pr.id} {`\u2014 ${pr.title}`}
           </div>
@@ -196,12 +196,12 @@ function FailureDetail({ run }: { run: DeliveryRun }): ReactNode {
       </a>
       <div>
         <div className={sectionLabel}>Failed jobs</div>
-        {run.failed_jobs.map((job) => (
+        {(run.failed_jobs ?? []).map((job) => (
           <div className={`text-sm ${dangerText}`} key={job.name}>
             {job.name} at {fmt(job.completed_at)}
           </div>
         ))}
-        {run.failed_jobs.length === 0 && run.production?.conclusion === "failure" ? (
+        {(run.failed_jobs ?? []).length === 0 && run.production?.conclusion === "failure" ? (
           <div className={`text-sm ${dangerText}`}>
             the production job at {fmt(run.production.completed_at)}
           </div>

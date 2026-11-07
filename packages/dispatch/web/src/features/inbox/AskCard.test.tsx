@@ -27,7 +27,16 @@ beforeEach(() => {
   });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
-    node: { id: "ask-1", kind: "ask" },
+    node: {
+      changed_at: null,
+      changed_by: null,
+      id: "ask-1",
+      kind: "ask",
+      made_at: null,
+      made_by: null,
+      parent: null,
+      parent_version: null,
+    },
   });
 });
 
@@ -48,7 +57,9 @@ function answeredAsk(overrides: Partial<Ask> = {}): Ask {
   return {
     anchor: null,
     answer: firstAnswer,
+    artifact_id: null,
     author: { id: "session-1", kind: "session" },
+    block_id: null,
     created_at: "2026-10-08T00:00:00Z",
     edited_at: null,
     id: "ask-1",
@@ -305,7 +316,6 @@ test("Change answer then Cancel leaves the recorded answer alone and no draft be
 function askReply(id: string, createdAt: string): Comment {
   return {
     anchor: null,
-    artifact_id: null,
     ask_id: "ask-1",
     author: { id: "session-1", kind: "session" },
     body: `Reply ${id}`,
@@ -446,6 +456,7 @@ function approvalAsk(approval: Partial<NonNullable<Ask["approval"]>> = {}): Ask 
     answer: null,
     approval: {
       artifact_id: "artifact-1",
+      documents: null,
       name: "spec.md",
       requested_version: 12,
       version: 12,

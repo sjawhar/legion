@@ -171,6 +171,8 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
 test("Unfurl unfurls a dispatch ask reference with the question, reading no issue", async () => {
   const askRead: AskRead = {
     ask: {
+      artifact_id: null,
+      block_id: null,
       id: "ask-1",
       issue_key: "CORE-1",
       kind: "question",

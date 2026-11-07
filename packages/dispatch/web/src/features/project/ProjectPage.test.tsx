@@ -29,13 +29,16 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
   return {
     anchor: null,
     answer: null,
+    artifact_id: null,
     author: { id: "session-1", kind: "session" },
+    block_id: null,
     created_at: "2026-09-11T00:00:00Z",
     edited_at: null,
     id: "ask-1",
     // The pill counts the reader's own: `renderPage` signs in as `alice`.
     issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
     issue_key: "CORE-1",
+    last_reply: null,
     kind: "question",
     multiple: false,
     opened_event_id: 1,

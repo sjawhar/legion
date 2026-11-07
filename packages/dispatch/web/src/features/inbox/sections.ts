@@ -1,4 +1,5 @@
 import type { AskTurn, InboxRow } from "../../api/types";
+import { askTurn } from "./ask-turn";
 import { isSnoozed } from "./snooze";
 
 /** Where a row sits: whose turn it is, or the Later band the reader deferred it into. */
@@ -91,5 +92,5 @@ export function isTurnSection(section: InboxSection): section is AskTurn {
  */
 export function sectionOf(row: InboxRow, now: number): InboxSection | undefined {
   if (isSnoozed(row, now)) return "later";
-  return row.waiting_on;
+  return askTurn(row.waiting_on);
 }

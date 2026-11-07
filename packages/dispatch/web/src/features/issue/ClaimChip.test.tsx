@@ -33,7 +33,9 @@ const base: Issue = {
   number: 1,
   parent: null,
   blocked_by: [],
+  plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   priority: null,
   project: "CORE",
   rank: "U",
@@ -111,6 +113,7 @@ function running(sessionID: string, title: string): Agent {
     last_seen: 1,
     open_asks: 0,
     last_activity: null,
+    state: "live",
   };
 }
 
@@ -213,6 +216,7 @@ test("the claim shows the holder's live title, not the one stamped on the claim"
       last_seen: 1,
       open_asks: 0,
       last_activity: null,
+      state: "live",
     },
   ]);
   const view = header({ ...base, claim });

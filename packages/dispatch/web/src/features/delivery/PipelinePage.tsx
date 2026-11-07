@@ -114,8 +114,9 @@ export function PipelineView({
   readAtMs: number;
   nowMs: number;
 }): ReactNode {
-  const first = pipeline.days[0];
-  const last = pipeline.days[pipeline.days.length - 1];
+  const days = pipeline.days ?? [];
+  const first = days[0];
+  const last = days[days.length - 1];
   if (first === undefined || last === undefined) throw new Error("the pipeline has no days");
   const { pr_checks: checks } = pipeline;
 
@@ -186,7 +187,7 @@ export function PipelineView({
         <p className={`text-xs ${textMutedOnCanvas}`}>
           Ranked by their 7-day median; a job needs 50 timed results in the 7 days to be ranked.
         </p>
-        {checks.slowest_jobs.length === 0 ? (
+        {(checks.slowest_jobs ?? []).length === 0 ? (
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>No job has 50 timed results yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -205,7 +206,7 @@ export function PipelineView({
                 </tr>
               </thead>
               <tbody className={textSecondaryOnCanvas}>
-                {checks.slowest_jobs.map((job) => {
+                {(checks.slowest_jobs ?? []).map((job) => {
                   const today = lastDay(job);
                   return (
                     <tr className={`border-t ${borderDefault}`} data-job={job.name} key={job.name}>
@@ -224,7 +225,7 @@ export function PipelineView({
                       <td className={`px-2 py-1 text-right ${textMutedOnCanvas}`}>{job.total.n}</td>
                       <td className="px-2 py-1 text-right">{formatRate(job.total.success_rate)}</td>
                       <td className="px-2 py-1">
-                        <SpreadBars days={job.days} format={formatDuration} noun="results" />
+                        <SpreadBars days={job.days ?? []} format={formatDuration} noun="results" />
                       </td>
                     </tr>
                   );
@@ -243,7 +244,7 @@ export function PipelineView({
           Every failed job but the roll-up job the settings name, most failures first; a failure is
           often the pull request&apos;s own change.
         </p>
-        {checks.failing_jobs.length === 0 ? (
+        {(checks.failing_jobs ?? []).length === 0 ? (
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>No job failed in the last 24 hours.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -258,7 +259,7 @@ export function PipelineView({
                 </tr>
               </thead>
               <tbody className={textSecondaryOnCanvas}>
-                {checks.failing_jobs.map((job) => (
+                {(checks.failing_jobs ?? []).map((job) => (
                   <tr
                     className={`border-t ${borderDefault}`}
                     data-failing-job={job.name}
@@ -294,8 +295,9 @@ export function PipelineView({
 }
 
 /** Today: the last shown day. */
-function lastDay<T>(timing: { readonly days: readonly T[] }): T {
-  const today = timing.days[timing.days.length - 1];
+function lastDay<T>(timing: { readonly days: readonly T[] | null }): T {
+  const days = timing.days ?? [];
+  const today = days[days.length - 1];
   if (today === undefined) throw new Error("a pipeline timing has no days");
   return today;
 }
@@ -362,7 +364,7 @@ function TimingCard(props: {
           p90={timing.total.p90_minutes}
         />
       </div>
-      <SpreadBars days={timing.days} format={formatDuration} noun="runs" />
+      <SpreadBars days={timing.days ?? []} format={formatDuration} noun="runs" />
       <div className={`text-xs ${textSecondaryOnSurface}`} data-health>
         Success today <span className="font-semibold">{formatRate(today.success_rate)}</span>
         <span className={textMutedOnSurface}>
@@ -378,7 +380,7 @@ function TimingCard(props: {
       <Sparkbars
         format={(v) => `${formatRate(v)} success`}
         max={1}
-        points={timing.days.map((d) => ({
+        points={(timing.days ?? []).map((d) => ({
           label: d.day,
           partial: d.partial,
           value: d.success_rate,
@@ -398,7 +400,10 @@ function LeadTimeCard(props: {
   metric: string;
   title: string;
   detail: string;
-  timing: { readonly days: readonly DeliveryLeadTimeDay[]; readonly total: DeliveryLeadTimeCell };
+  timing: {
+    readonly days: readonly DeliveryLeadTimeDay[] | null;
+    readonly total: DeliveryLeadTimeCell;
+  };
   target: number;
   judged: "longest" | "median";
 }): ReactNode {
@@ -429,7 +434,7 @@ function LeadTimeCard(props: {
           p90={total.p90_minutes}
         />
       </div>
-      <SpreadBars days={timing.days} format={formatDuration} noun="PRs" target={target} />
+      <SpreadBars days={timing.days ?? []} format={formatDuration} noun="PRs" target={target} />
       <div className={`text-xs ${textSecondaryOnSurface}`}>
         {judged === "longest" ? "Longest" : "Median"} today{" "}
         <span className="font-semibold">

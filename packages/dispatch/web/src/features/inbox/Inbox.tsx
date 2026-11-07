@@ -32,6 +32,7 @@ import { searchWords } from "../agents/agent-search";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { type CredentialRequests, useCredentialRequests } from "../credentials/pending";
 import { PriorityControl } from "../issue/PriorityControl";
+import { issuePriority } from "../issue/useIssuePriority";
 import { AgentName, useAgentText } from "../refs/AgentName";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { buildInboxPath, type InboxRoute, parseInboxSearch } from "../refs/routes";
@@ -347,7 +348,7 @@ function InboxCardRow({
             the group's width and widen the whole document past the viewport on a phone. */}
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {ask.issue_key === null ? null : (
-            <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+            <PriorityControl issueKey={ask.issue_key} priority={issuePriority(ask.priority)} />
           )}
           {ask.issue_key !== null && (isUnassigned(ask) || assignLive) ? (
             <AssignToMe

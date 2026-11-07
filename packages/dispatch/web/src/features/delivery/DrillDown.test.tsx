@@ -43,6 +43,7 @@ const helper: Agent = {
   open_asks: 0,
   roles: [],
   session_id: "sess-helper-2",
+  state: "running",
   title: "Helper",
 };
 
@@ -84,7 +85,7 @@ function detail(term: string): HTMLElement {
 // registry title, else the title the delivery read stored, else its short id (a stored title
 // that is the session's own id is no title).
 test("a pull request's sessions each link to their live conversation", () => {
-  renderDrillDown(pr.sessions);
+  renderDrillDown(pr.sessions ?? []);
   try {
     const sessions = within(detail("Sessions"));
     const links = sessions.getAllByRole("link");

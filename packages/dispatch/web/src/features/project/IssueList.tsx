@@ -22,6 +22,7 @@ import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { ProgressChips } from "../issue/ProgressChips";
 import { UnreachableRouteMarker } from "../issue/RouteReach";
+import { issuePriority } from "../issue/useIssuePriority";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -75,7 +76,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
           <PriorityControl
             disabled={issue.status === "done"}
             issueKey={issue.key}
-            priority={issue.priority}
+            priority={issuePriority(issue.priority)}
           />
           <ClaimChip claim={issue.claim} />
           <ProgressChips progress={issue.progress} />

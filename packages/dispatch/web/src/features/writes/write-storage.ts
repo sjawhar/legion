@@ -105,9 +105,12 @@ export type ShapeOf<S> = S extends Shape<infer T> ? T : never;
  *  one reads as undefined, and others are not read), and `either` fits a value that one of its
  *  shapes fits. */
 export const shape = {
+  // `T[]`, not `readonly T[]`: `Array.isArray` proves a real array, and a kept record whose shape
+  // is checked against a request body the route table types (`CarriedBlockIds`) needs the mutable
+  // one — `readonly T[]` does not fit it, while `T[]` fits both.
   array:
-    <T>(item: Shape<T>): Shape<readonly T[]> =>
-    (value): value is readonly T[] =>
+    <T>(item: Shape<T>): Shape<T[]> =>
+    (value): value is T[] =>
       Array.isArray(value) && value.every(item),
   boolean: ((value) => typeof value === "boolean") as Shape<boolean>,
   either:

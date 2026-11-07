@@ -25,7 +25,16 @@ beforeEach(() => {
   });
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [],
-    node: { id: "ask-1", kind: "ask" },
+    node: {
+      changed_at: null,
+      changed_by: null,
+      id: "ask-1",
+      kind: "ask",
+      made_at: null,
+      made_by: null,
+      parent: null,
+      parent_version: null,
+    },
   });
 });
 
@@ -66,7 +75,9 @@ function answeredAsk(answer: AskAnswer, overrides: Partial<Ask> = {}): Ask {
   return {
     anchor: null,
     answer,
+    artifact_id: null,
     author: { id: "session-1", kind: "session" },
+    block_id: null,
     created_at: "2026-10-08T00:00:00Z",
     edited_at: null,
     id: "ask-1",

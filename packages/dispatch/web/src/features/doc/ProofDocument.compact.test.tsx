@@ -19,6 +19,8 @@ const artifact: Artifact = {
   kind: "doc",
   name: "spec.md",
   primary: true,
+  ref_key: "CORE-1/spec",
+  session_id: null,
   slug: "spec",
   versions: [],
 };
@@ -35,6 +37,7 @@ test("ProofDocument keeps transport active without cursor decorations in the com
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "",
+    token: "sha256:empty-spec",
     version: null,
   });
   const view = render(

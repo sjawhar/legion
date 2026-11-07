@@ -548,7 +548,7 @@ export async function indexedBlockAsk(issueKey: string, block: string): Promise<
   await expect
     .poll(
       async () => {
-        blockAsk = (await getIssue(issueKey)).open_asks.find(
+        blockAsk = ((await getIssue(issueKey)).open_asks ?? []).find(
           (candidate) => candidate.block_id === block
         );
         return blockAsk !== undefined;

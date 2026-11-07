@@ -18,6 +18,7 @@ import {
   replyToMessageDelivery,
   requestApproval,
   snoozeAsk,
+  withOpenedAsk,
 } from "./api";
 import { cliSession, runDispatch } from "./dispatch-cli";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
@@ -194,7 +195,7 @@ async function seedInbox(): Promise<SeededInbox> {
   await snoozeAsk(deferredAsk.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), {
     login: "alice",
   });
-  const approval = await requestApproval(gate.primary_artifact_id, {}, asker);
+  const approval = withOpenedAsk(await requestApproval(gate.primary_artifact_id, {}, asker));
   await createAsk(elsewhere.key, { question: "Does this block bob's release?" }, asker);
 
   // A document has no assignee, so its question is nobody's own: neither list holds it.

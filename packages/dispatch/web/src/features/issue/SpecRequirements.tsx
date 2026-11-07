@@ -20,7 +20,7 @@ function Requirement({ requirement }: { requirement: RequirementCoverage }): Rea
   // What the server says this requirement lacks, in the server's own words. The server decides
   // which lacks count - a requirement with no plan task is no gap until the issue has a plan
   // document - so nothing is judged again here.
-  const gaps = requirement.gaps;
+  const gaps = requirement.gaps ?? [];
   return (
     <li
       className={`space-y-2 rounded-lg p-3 ${card}`}
@@ -67,7 +67,8 @@ export function SpecRequirements({ issueKey }: { issueKey: string }): ReactNode 
       </p>
     );
   }
-  if (coverage.data.requirements.length === 0) {
+  const requirements = coverage.data.requirements ?? [];
+  if (requirements.length === 0) {
     return (
       <div data-testid="spec-no-requirements">
         <EmptyState label="Requirements empty state" message="This spec marks no requirements." />
@@ -79,7 +80,7 @@ export function SpecRequirements({ issueKey }: { issueKey: string }): ReactNode 
     <section className="space-y-2" data-testid="spec-requirements">
       <h2 className={`text-sm font-semibold ${textMutedOnSurface}`}>Requirements</h2>
       <ul aria-label="Requirements" className="space-y-3">
-        {coverage.data.requirements.map((requirement) => (
+        {requirements.map((requirement) => (
           <Requirement key={requirement.block_id} requirement={requirement} />
         ))}
       </ul>

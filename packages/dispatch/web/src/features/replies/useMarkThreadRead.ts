@@ -65,7 +65,8 @@ export function useMarkThreadRead({
   const unread =
     watching &&
     rows !== undefined &&
-    (rows.total > rows.rows.length || rows.rows.some((row) => row.thread_id === threadId));
+    (rows.total > (rows.rows ?? []).length ||
+      (rows.rows ?? []).some((row) => row.thread_id === threadId));
   // The newest reply this surface saw dwell, for the thread it saw it in.
   const [seen, setSeen] = useState<{ readonly at: string; readonly threadId: string }>();
   const ref = useDwell({

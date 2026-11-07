@@ -4,7 +4,15 @@ import { useLocation } from "react-router-dom";
 
 import { api, type WriteBounds } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
-import type { Actor, Anchor, Artifact, Ask, Comment, Decision, Event } from "../../api/types";
+import type {
+  Actor,
+  Anchor,
+  Artifact,
+  Ask,
+  Comment,
+  Decision,
+  DispatchEvent,
+} from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
@@ -108,19 +116,19 @@ const NO_PINS: string[] = [];
 
 const pinnedEventBatchSize = 50;
 
-type IssueEventsFetcher = (issueKey: string, options: { ids: string[] }) => Promise<Event[]>;
+type IssueEventsFetcher = (issueKey: string, options: { ids: string }) => Promise<DispatchEvent[]>;
 
 export async function fetchPinnedEvents(
   listIssueEvents: IssueEventsFetcher,
   issueKey: string,
   ids: string[]
-): Promise<Event[]> {
+): Promise<DispatchEvent[]> {
   const batches: string[][] = [];
   for (let index = 0; index < ids.length; index += pinnedEventBatchSize) {
     batches.push(ids.slice(index, index + pinnedEventBatchSize));
   }
   const events = await Promise.all(
-    batches.map((batch) => listIssueEvents(issueKey, { ids: batch }))
+    batches.map((batch) => listIssueEvents(issueKey, { ids: batch.join(",") }))
   );
   return events.flat().sort((left, right) => left.seq - right.seq);
 }
@@ -479,7 +487,9 @@ export function useMarginItems(
     const decisionItems = (decisionsView.data?.decisions ?? []).flatMap((decision) => {
       if (decision.replaced) return [];
       const blockIds = new Set(
-        decision.links.flatMap((link) => (link.to.block_id === undefined ? [] : [link.to.block_id]))
+        (decision.links ?? []).flatMap((link) =>
+          link.to.block_id === undefined ? [] : [link.to.block_id]
+        )
       );
       return [...blockIds]
         .filter((blockId) => blockFilterId === undefined || blockId === blockFilterId)

@@ -661,7 +661,7 @@ test("on a phone, a thread reply the server never answers lets Back go at the de
     await landed;
     await send.settled();
     const { replies } = await getComment(earlier.id);
-    expect(replies.filter((reply) => reply.body === "Reply into the void")).toHaveLength(1);
+    expect((replies ?? []).filter((reply) => reply.body === "Reply into the void")).toHaveLength(1);
   } finally {
     await alice.close();
   }

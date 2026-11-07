@@ -24,6 +24,8 @@ export const artifact: Artifact = {
   kind: "doc",
   name: "spec.md",
   primary: true,
+  ref_key: "CORE-1/spec",
+  session_id: null,
   slug: "spec",
   versions: [],
 };
@@ -59,6 +61,7 @@ export function answerTextReadsWithTheSeededText(): void {
   beforeEach(() => {
     const getArtifactText = spyOn(api, "getArtifactText").mockImplementation(async () => ({
       markdown: defaultText,
+      token: "sha256:spec-text",
       version: null,
     }));
     restore = () => getArtifactText.mockRestore();

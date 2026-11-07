@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 
-import type { Event } from "../../api/types";
+import type { DispatchEvent } from "../../api/types";
 import { activityDescription, buildActivityItems, dateKey } from "./activity-model";
 
-function message(seq: number, at: string): Event {
+function message(seq: number, at: string): DispatchEvent {
   const actor = { id: "alice", kind: "user" as const };
   return {
     actor,
@@ -14,6 +14,8 @@ function message(seq: number, at: string): Event {
     payload: {
       author: actor,
       body: `Message ${seq}`,
+      broadcast_id: null,
+      reply_block: null,
       created_at: at,
       deliveries: [],
       id: `message-${seq}`,

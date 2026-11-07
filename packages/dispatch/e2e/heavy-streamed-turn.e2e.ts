@@ -126,7 +126,7 @@ function streamedBody(count: number): string {
 
 /** One snapshot of the one turn: every frame carries the same message id, so each replaces the
  *  turn's whole text, and `seq` orders the snapshots. */
-function turnFrame(seq: number, paragraphs: number, streaming: boolean): object {
+function turnFrame(seq: number, paragraphs: number, streaming: boolean): Record<string, unknown> {
   return {
     kind: "message",
     message: {

@@ -1,6 +1,6 @@
 import { expect, type Locator, test } from "@playwright/test";
 
-import type { CredentialRecord } from "../web/src/api/types";
+import type { RecordResponse } from "../web/src/api/types";
 import { setBrokerDeviceGrant, setMachineLogins } from "./fake-broker-helpers";
 import { resetDatabase } from "./seed";
 import { withAlice } from "./users";
@@ -15,7 +15,7 @@ const typedCode = "wxyz4321";
 
 /** The machine login `agent-secrets machine login` opened, as the broker's lookup answers it:
  *  waiting on alice, who is the only person it admits. */
-const pendingLogin: CredentialRecord = {
+const pendingLogin: RecordResponse = {
   approver: "alice",
   decided: null,
   enrollment: null,
@@ -27,6 +27,9 @@ const pendingLogin: CredentialRecord = {
   record_id: "record-machine-login",
   requested_at: "2026-09-27T00:00:00Z",
   rules_version: "v3",
+  // The broker names the session a request stands for; a machine login opened by
+  // `agent-secrets machine login` has enrolled none and made none of its own.
+  session: { enrollment: null, request: null },
   service: null,
   state: "pending",
 };

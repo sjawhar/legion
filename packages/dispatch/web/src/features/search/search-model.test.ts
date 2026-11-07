@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 
-import type { SearchResult } from "../../api/types";
+import type { SearchOwner, SearchResult } from "../../api/types";
 import { firstHighlightTerm, groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
-type IssueOwner = Extract<SearchResult["owner"], { kind: "issue" }>;
+/** An issue owner as the one flat owner record carries it: the route table leaves `kind` a plain
+ *  string and makes every arm's own field optional, and an issue owner is the one naming `key`. */
+type IssueOwner = SearchOwner & { kind: "issue" };
 
 function result(
   id: string,

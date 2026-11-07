@@ -17,8 +17,14 @@ import { totalUnreadReplies, useMarkShownRepliesRead } from "./unread";
 // An API older than the unread count answers a session's state with its Clear alone. The badge
 // then counts that session as nothing unread rather than reading "New replies NaN".
 test("the unread total counts a state with no unread count as none", () => {
+  // The route table declares `unread_replies` on every state, because the server this build
+  // talks to sends one; a server older than the count answers a session's Clear alone, which a
+  // browser of this build still meets while two builds are up, so the key is dropped from the
+  // value rather than set to anything.
+  const old: UserAgentState = { cleared_before: "2026-09-27T20:00:00Z", unread_replies: 0 };
+  Reflect.deleteProperty(old, "unread_replies");
   const states: UserAgentStates = {
-    old: { cleared_before: "2026-09-27T20:00:00Z" },
+    old,
     s1: { unread_replies: 2 },
   };
   expect(totalUnreadReplies(states)).toBe(2);
@@ -30,11 +36,13 @@ function reply(id: string): Message {
   return {
     author: { id: SESSION, kind: "session" },
     body: "Done.",
+    broadcast_id: null,
     created_at: "2026-10-03T12:00:00Z",
     deliveries: [],
     id,
     in_reply_to: "message-1",
     issue_key: null,
+    reply_block: null,
     target: null,
   };
 }

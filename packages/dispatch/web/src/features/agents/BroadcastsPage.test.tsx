@@ -18,6 +18,7 @@ const planner: Agent = {
   open_asks: 0,
   roles: [],
   session_id: "planner-session",
+  state: "live",
   title: "Planner",
 };
 

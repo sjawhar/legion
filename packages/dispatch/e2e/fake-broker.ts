@@ -1,10 +1,11 @@
 import type {
-  CredentialDecisionResponse,
   CredentialPendingResponse,
   CredentialPendingRow,
-  CredentialRecord,
-  SignIn,
-  SignInsResponse,
+  DecisionResponse,
+  PersonSignInResp,
+  PersonSignInsResponse,
+  RecordResponse,
+  StateResponse,
 } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 
@@ -37,13 +38,13 @@ export type FakePendingRequest = CredentialPendingRow & { readonly approver: str
  *  same code reports what the broker recorded. */
 export interface FakeMachineLogin {
   readonly code: string;
-  record: CredentialRecord;
+  record: RecordResponse;
 }
 
 /** One person's sign-in on one machine, as `GET /v1/person-signins` lists it beside the person it
  *  belongs to: the row is the SPA's own type, so a change to the contract fails the typecheck
  *  here too. Revoking it drops it from the list, as the real broker's revoke does. */
-export type FakeSignIn = SignIn & { readonly person: string };
+export type FakeSignIn = PersonSignInResp & { readonly person: string };
 
 /** Every piece of fixture state this listener holds; `PUT /__fixture/reset` replaces it whole. */
 interface FakeBrokerState {
@@ -101,7 +102,9 @@ async function decide(recordID: string, approve: boolean, request: Request): Pro
     },
     state: approve ? "approved" : "denied",
   };
-  const answer: CredentialDecisionResponse = approve
+  // The two decisions answer two different shapes: an approval names the credential it
+  // minted (DecisionResponse), a denial names the state alone (StateResponse).
+  const answer: DecisionResponse | StateResponse = approve
     ? { credential_id: credentialID, state: "approved" }
     : { state: "denied" };
   return Response.json(answer);
@@ -159,7 +162,7 @@ const server = Bun.serve({
       if ((person ?? "") === "") {
         return brokerError(400, "PERSON_REQUIRED", "person is required");
       }
-      const body: SignInsResponse = {
+      const body: PersonSignInsResponse = {
         signins: state.signIns
           .filter((row) => row.person === person)
           .map(({ person: _, ...row }) => row),

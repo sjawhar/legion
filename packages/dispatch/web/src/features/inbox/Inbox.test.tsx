@@ -37,10 +37,12 @@ function artifactAsk(): InboxRow {
     author: { id: "session-1", kind: "session" },
     created_at: "2026-09-11T00:00:00Z",
     document: { name: "Design notes", project: "CORE", slug: "design-notes" },
+    block_id: null,
     edited_at: null,
     id: "ask-1",
     issue_key: null,
     kind: "question",
+    last_reply: null,
     multiple: false,
     opened_event_id: 1,
     options: [],
@@ -95,6 +97,7 @@ function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
     number: 3,
     parent: null,
     blocked_by: [],
+    plan_artifact_id: "artifact-plan",
     primary_artifact_id: "artifact-3",
     priority: null,
     project: "CORE",
@@ -105,6 +108,7 @@ function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
     status: "todo",
     title: row.issue?.title ?? "",
     updated_at: row.created_at,
+    verification_artifact_id: "artifact-verification",
   };
 }
 
@@ -164,9 +168,9 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
     await waitFor(() =>
       expect(
         rows.map(
-          (row) => queryClient.getQueryData<AskRead>(["ask-thread", row.id])?.replies[0]?.body
+          (row) => queryClient.getQueryData<AskRead>(["ask-thread", row.id])?.replies?.[0]?.body
         )
-      ).toEqual(rows.map((row) => row.thread.replies[0]?.body))
+      ).toEqual(rows.map((row) => row.thread.replies?.[0]?.body))
     );
     expect(getInbox).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
@@ -782,6 +786,7 @@ function secretRequest(overrides: Partial<CredentialPendingRow> = {}): Credentia
     kind: "agent_secret",
     record_id: "record-1",
     requested_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    session: { enrollment: null, request: null },
     ...overrides,
   };
 }
@@ -875,6 +880,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
       open_asks: 2,
       roles: [],
       session_id: "session-1",
+      state: "live",
       title: "Planner",
     },
   ]);
@@ -1132,7 +1138,7 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
       anchor: null,
       ask_id: input.ask_id ?? null,
       author: { id: "alice", kind: "user" },
-      body: input.body,
+      body: input.body ?? "",
       created_at: "2026-09-11T02:00:00Z",
       edited_at: null,
       id: "reply-1",
@@ -2367,7 +2373,13 @@ test("a short row names its kind: a decision block, an approval request, and any
     block_id: "ship_it",
   });
   const approval = inboxIssue("ask-approval", "CORE-3", "Approve spec.md (version 4)?", {
-    approval: { artifact_id: "artifact-1", name: "spec.md", requested_version: 4, version: 4 },
+    approval: {
+      artifact_id: "artifact-1",
+      documents: null,
+      name: "spec.md",
+      requested_version: 4,
+      version: 4,
+    },
     approval_artifact: { name: "spec.md", primary: true, project: "CORE", slug: "spec" },
     kind: "approval",
   });
@@ -3994,6 +4006,8 @@ const SPEC_DOCUMENT: Artifact = {
   name: "spec.md",
   primary: true,
   project: "CORE",
+  ref_key: "CORE-1/spec",
+  session_id: null,
   slug: "spec",
   versions: [],
 };
@@ -4021,6 +4035,7 @@ test("the answer keys act on the selected decision block, not the first one in t
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue(SPEC_DOCUMENT);
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "",
+    token: "",
     version: null,
   });
   const getArtifactBlocks = spyOn(api, "getArtifactBlocks").mockResolvedValue([]);

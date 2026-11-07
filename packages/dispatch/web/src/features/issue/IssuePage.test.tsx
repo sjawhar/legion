@@ -21,7 +21,7 @@ import { MarginProvider } from "../margin/margin-context";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { IssuePage } from "./IssuePage";
 
-const issue: IssueDetails = {
+const issue = {
   route_status: null,
   route_holder: null,
   route_status_reason: null,
@@ -38,6 +38,8 @@ const issue: IssueDetails = {
       kind: "doc",
       name: "spec.md",
       primary: true,
+      ref_key: "CORE-1/spec",
+      session_id: null,
       slug: "spec",
       versions: [],
     },
@@ -58,6 +60,7 @@ const issue: IssueDetails = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
   project: "CORE",
   referenced_by_count: 0,
@@ -69,7 +72,10 @@ const issue: IssueDetails = {
   rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
-};
+  verification_artifact_id: "",
+  // `satisfies`, not an annotation: the tests below read `issue.artifacts[0]` and spread the
+  // list, which the route table's `Artifact[] | null` would not let them.
+} satisfies IssueDetails;
 
 const itemComment = {
   // Anchored: the landing has to wait on the issue to learn which document the anchor names,
@@ -120,6 +126,7 @@ function listedAgent(sessionId: string, title: string): Agent {
     open_asks: 0,
     roles: [],
     session_id: sessionId,
+    state: "live",
     title,
   };
 }
@@ -127,7 +134,9 @@ function listedAgent(sessionId: string, title: string): Agent {
 const openIssueAsk: Ask = {
   anchor: null,
   answer: null,
+  artifact_id: null,
   author: { id: "session-1", kind: "session" },
+  block_id: null,
   created_at: "2026-09-10T00:00:00Z",
   edited_at: null,
   id: "ask-open",
@@ -272,6 +281,7 @@ test("IssuePage shows a session creator's live title and personal-token owner", 
         open_asks: 0,
         roles: [],
         session_id: "creator-session",
+        state: "live",
         title: "chief of staff",
       },
     ]
@@ -1006,6 +1016,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
   const restore = stubIssuePage(issue, [
     {
       ...openIssueAsk,
+      last_reply: null,
       priority: issue.priority,
       snoozed_until: null,
       thread: {
@@ -1172,6 +1183,8 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
         kind: "doc",
         name: "spec.md",
         primary: true,
+        ref_key: "CORE-2/spec",
+        session_id: null,
         slug: "spec",
         versions: [],
       },
@@ -1396,6 +1409,8 @@ test("IssuePage renders an image artifact in the Artifacts tab", async () => {
     kind: "image" as const,
     name: "diagram.png",
     primary: false,
+    ref_key: "CORE-1/diagram-png",
+    session_id: null,
     slug: "diagram-png",
     versions: [
       {
@@ -1433,6 +1448,8 @@ test("IssuePage does not mount an image as the hidden Spec document", async () =
     kind: "image" as const,
     name: "diagram.png",
     primary: false,
+    ref_key: "CORE-1/diagram-png",
+    session_id: null,
     slug: "diagram-png",
     versions: [
       {
@@ -1479,6 +1496,8 @@ test("IssuePage opens a non-spec document at its version route", async () => {
     kind: "doc" as const,
     name: "design.md",
     primary: false,
+    ref_key: "CORE-1/design",
+    session_id: null,
     slug: "design",
     versions: [
       {
@@ -1534,6 +1553,8 @@ test("IssuePage shows an unavailable image version instead of the latest image",
     kind: "image" as const,
     name: "diagram.png",
     primary: false,
+    ref_key: "CORE-1/diagram-png",
+    session_id: null,
     slug: "diagram-png",
     versions: [
       {
@@ -1796,7 +1817,7 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
 test("IssuePage hides whose turn when the server sent open asks without waiting_on", async () => {
   const restore = stubIssuePage({
     ...issue,
-    open_asks: [{ ...openIssueAsk, waiting_on: undefined }],
+    open_asks: [{ ...openIssueAsk, last_reply: null, waiting_on: undefined }],
   });
   const view = renderIssuePage("/issues/CORE-1");
 

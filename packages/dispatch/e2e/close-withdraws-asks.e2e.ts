@@ -12,6 +12,7 @@ import {
   getIssue,
   patchIssue,
   requestApproval,
+  withOpenedAsk,
 } from "./api";
 import { connectedDot, countDocumentSockets, documentEditor } from "./editor";
 import { inboxRow } from "./inbox-pane";
@@ -59,19 +60,23 @@ async function seedIssue(project: string): Promise<Seeded> {
   // The block is an ask once settlement has indexed it.
   await expect
     .poll(
-      async () => (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "decision"),
+      async () =>
+        ((await getIssue(issue.key)).open_asks ?? []).some((ask) => ask.block_id === "decision"),
       PROBE
     )
     .toBe(true);
-  const block = (await getIssue(issue.key)).open_asks.find((ask) => ask.block_id === "decision");
+  const block = ((await getIssue(issue.key)).open_asks ?? []).find(
+    (ask) => ask.block_id === "decision"
+  );
   if (block === undefined) {
     throw new Error("the decision block was not indexed");
   }
   // Neither write reads the other, and the ids they return are the only order the row keeps.
-  const [plain, approval] = await Promise.all([
+  const [plain, requested] = await Promise.all([
     createAsk(issue.key, { question: "Which region first?" }, asker),
     requestApproval(issue.primary_artifact_id, {}, asker),
   ]);
+  const approval = withOpenedAsk(requested);
   return {
     askIds: [plain.id, block.id, approval.ask.id],
     artifactId: issue.primary_artifact_id,
@@ -177,7 +182,7 @@ test("a person's Close withdraws the issue's asks, an earlier version keeps its 
     // The newest saved version predates the close: opened from the history, it still shows the
     // decision as it was then, open, and nothing of the withdrawal.
     const { versions } = await getArtifact(seeded.artifactId, { login: "alice" });
-    const latest = Math.max(...versions.map((version) => version.number));
+    const latest = Math.max(...(versions ?? []).map((version) => version.number));
     expect((await getArtifactVersion(seeded.artifactId, latest)).markdown).toContain(
       ":::ask{#decision"
     );

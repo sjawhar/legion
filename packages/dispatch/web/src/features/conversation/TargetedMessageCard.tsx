@@ -28,12 +28,16 @@ export function capabilitiesForTarget(
   agents: readonly Agent[] | undefined
 ): readonly string[] | undefined {
   if (target === null || target === undefined || agents === undefined) return undefined;
+  // A session the roster names that advertises no capability takes none, so its empty list is
+  // the answer; only a target the roster does not name leaves every capability unknown.
   if (target.startsWith("session:")) {
-    return agents.find((agent) => `session:${agent.session_id}` === target)?.capabilities;
+    const held = agents.find((agent) => `session:${agent.session_id}` === target);
+    return held === undefined ? undefined : (held.capabilities ?? []);
   }
   if (target.startsWith("role:")) {
     const role = target.slice("role:".length);
-    return agents.find((agent) => agent.roles.includes(role))?.capabilities;
+    const held = agents.find((agent) => (agent.roles ?? []).includes(role));
+    return held === undefined ? undefined : (held.capabilities ?? []);
   }
   return undefined;
 }

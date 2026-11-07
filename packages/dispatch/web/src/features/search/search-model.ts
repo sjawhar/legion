@@ -1,5 +1,15 @@
 import type { SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
 
+/** The kinds a search result and a write suggestion are one of. The route table carries `kind`
+ *  as a plain string, and this is the closed list it means. */
+const SEARCH_RESULT_KINDS = ["issue", "document", "comment", "ask", "message"] as const;
+
+/** `value` as a result kind, or `undefined` where this dashboard knows no such kind. Every
+ *  surface that needs the kind itself - the palette, the related-items list - narrows here. */
+export function searchResultKind(value: string): SearchResultKind | undefined {
+  return SEARCH_RESULT_KINDS.find((known) => known === value);
+}
+
 export interface ResultGroup {
   readonly owner: SearchOwner;
   readonly results: SearchResult[];
@@ -11,8 +21,10 @@ export function groupResults(results: readonly SearchResult[]): ResultGroup[] {
 
   for (const result of results) {
     const { owner } = result;
+    // The owner is one flat record carrying the fields of whichever arm it is: an issue owner
+    // names `key`, a document owner `artifact_id`.
     const ownerKey =
-      owner.kind === "issue" ? `issue:${owner.key}` : `document:${owner.artifact_id}`;
+      owner.kind === "issue" ? `issue:${owner.key ?? ""}` : `document:${owner.artifact_id ?? ""}`;
     const group = groups.get(ownerKey);
     if (group === undefined) {
       groups.set(ownerKey, { owner, results: [result] });

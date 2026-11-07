@@ -159,7 +159,7 @@ test("a project with two architecture sources shows both in Settings, on its Arc
     await expect
       .poll(() =>
         getIssue(issue.key).then(({ components }) => ({
-          ids: [...components.ids].sort(),
+          ids: [...(components.ids ?? [])].sort(),
           mode: components.mode,
         }))
       )

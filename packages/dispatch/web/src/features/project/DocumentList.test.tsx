@@ -17,6 +17,8 @@ function document(overrides: Partial<Artifact> = {}): Artifact {
     name: "Design notes",
     primary: false,
     project: "CORE",
+    ref_key: "CORE/design-notes",
+    session_id: null,
     slug: "design-notes",
     versions: [
       {
@@ -37,7 +39,7 @@ function Location() {
 
 function uploadResponse() {
   const artifact = document();
-  const version = artifact.versions.at(0);
+  const version = artifact.versions?.at(0);
   if (version === undefined) {
     throw new Error("document fixture requires a version");
   }
@@ -76,7 +78,11 @@ test("Documents requests unlinked project artifacts and links a document to its 
 });
 
 test("a document's row names its latest version's stored size", async () => {
-  const latest = { ...document().versions[0], number: 2, size: 1_048_475 };
+  const [first] = document().versions ?? [];
+  if (first === undefined) {
+    throw new Error("document fixture requires a version");
+  }
+  const latest = { ...first, number: 2, size: 1_048_475 };
   const { listProjectArtifacts, view } = renderList([
     document({ versions: [{ ...latest, number: 1, size: 12 }, latest] }),
   ]);

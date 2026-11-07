@@ -47,7 +47,7 @@ export function matchesFilters(
   issueKeys: readonly string[]
 ): boolean {
   if (filters.machine !== "" && agent.host !== filters.machine) return false;
-  if (filters.role !== "" && !agent.roles.includes(filters.role)) return false;
+  if (filters.role !== "" && !(agent.roles ?? []).includes(filters.role)) return false;
   if (words.length === 0) return true;
   const haystack = searchHaystack(agent, issueKeys);
   return words.every((word) => haystack.includes(word));
@@ -63,7 +63,7 @@ export function filterOptions(agents: readonly Agent[]): {
   const roles = new Set<string>();
   for (const agent of agents) {
     if (agent.host !== "") machines.add(agent.host);
-    for (const role of agent.roles) roles.add(role);
+    for (const role of agent.roles ?? []) roles.add(role);
   }
   return { machines: [...machines].sort(), roles: [...roles].sort() };
 }

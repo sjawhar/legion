@@ -218,7 +218,7 @@ export const projectIssuesQuery = (project: string, labels: readonly string[]) =
     queryKey: projectIssuesQueryKey(project, labels),
     queryFn: async (context) => {
       await boardMovesSettled(context, project);
-      return api.listIssues(labels.length === 0 ? { project } : { labels, project });
+      return api.listIssues(labels.length === 0 ? { project } : { label: [...labels], project });
     },
   });
 

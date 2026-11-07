@@ -3373,10 +3373,10 @@ export interface components {
       labels?: string[] | null;
       parent?: null | string;
       priority?: number | null;
-      project: string;
+      project?: string;
       repo?: string | null;
       spec?: null | string;
-      title: string;
+      title?: string;
     };
     CreateMessageInput: {
       actor?: components["schemas"]["Actor"] | null;
@@ -4397,6 +4397,9 @@ export interface components {
     LiveWritePauseState: {
       parked: boolean;
     };
+    MachineLookupRequest: {
+      code: string;
+    };
     Message: {
       author: components["schemas"]["Actor"];
       body: string;
@@ -4581,9 +4584,6 @@ export interface components {
     };
     ProjectDefaultAssigneeInput: {
       assignee: string | null;
-    };
-    PublishFrameResponderInput: {
-      responding?: boolean;
     };
     PutArchitectureSourceInput: {
       actor?: components["schemas"]["Actor"] | null;
@@ -5338,9 +5338,12 @@ export interface operations {
       };
       cookie?: never;
     };
+    /** @description the frame to publish, read whole and published unparsed; under ?as=responder it is read as {"responding": bool} instead */
     requestBody?: {
       content: {
-        "application/json": components["schemas"]["PublishFrameResponderInput"];
+        "application/json": {
+          [key: string]: unknown;
+        };
       };
     };
     responses: {
@@ -7302,7 +7305,11 @@ export interface operations {
       path?: never;
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MachineLookupRequest"];
+      };
+    };
     responses: {
       /** @description OK */
       200: {
@@ -8465,7 +8472,7 @@ export interface operations {
     parameters: {
       query?: {
         state?: string;
-        thread?: boolean;
+        thread?: "1";
         /** @description the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH) */
         session?: string;
       };
@@ -11754,6 +11761,7 @@ export type LauncherCredentialsResponse = components["schemas"]["LauncherCredent
 export type LeadTime = components["schemas"]["LeadTime"];
 export type ListUsersResponse = components["schemas"]["ListUsersResponse"];
 export type LiveWritePauseState = components["schemas"]["LiveWritePauseState"];
+export type MachineLookupRequest = components["schemas"]["MachineLookupRequest"];
 export type Message = components["schemas"]["Message"];
 export type MessageDelivery = components["schemas"]["MessageDelivery"];
 export type MessageRead = components["schemas"]["MessageRead"];
@@ -11779,7 +11787,6 @@ export type ProgressCount = components["schemas"]["ProgressCount"];
 export type Project = components["schemas"]["Project"];
 export type ProjectDefaultAssignee = components["schemas"]["ProjectDefaultAssignee"];
 export type ProjectDefaultAssigneeInput = components["schemas"]["ProjectDefaultAssigneeInput"];
-export type PublishFrameResponderInput = components["schemas"]["PublishFrameResponderInput"];
 export type PutArchitectureSourceInput = components["schemas"]["PutArchitectureSourceInput"];
 export type PutRepoProjectInput = components["schemas"]["PutRepoProjectInput"];
 export type RebuildArtifactInput = components["schemas"]["RebuildArtifactInput"];

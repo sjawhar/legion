@@ -761,7 +761,7 @@ func (e *openAPIEmitter) operation(route apiRoute, hook bool) (*openapi31.Operat
 	}
 	operation.Parameters = parameters
 
-	if route.Shape.Request != nil || route.Shape.Multipart {
+	if route.Shape.Request != nil || route.Shape.Multipart || route.Shape.OpaqueRequest != "" {
 		body, err := e.requestBody(route)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
@@ -880,6 +880,14 @@ func (e *openAPIEmitter) queryParameters(params any) ([]openapi31.ParameterOrRef
 			return nil, fmt.Errorf("reflect %s.%s: %w", structure.Name(), field.Name, err)
 		}
 		reflected.RemoveType(jsonschema.Null)
+		// The reflector is handed the field's type alone, so the field's own tags do not reach
+		// it: a parameter the handler takes one spelling of carries that spelling in an `enum`
+		// tag, and this is where it is read.
+		if values, tagged := field.Tag.Lookup("enum"); tagged {
+			for _, value := range strings.Split(values, ",") {
+				reflected.Enum = append(reflected.Enum, value)
+			}
+		}
 		schema, err := reflected.ToSchemaOrBool().ToSimpleMap()
 		if err != nil {
 			return nil, fmt.Errorf("render the schema of %s.%s: %w", structure.Name(), field.Name, err)
@@ -895,9 +903,26 @@ func (e *openAPIEmitter) queryParameters(params any) ([]openapi31.ParameterOrRef
 
 // requestBody is the row's JSON body, and the multipart body beside it where the route takes one.
 // It is required where the handler refuses an empty body and optional where it takes one
-// (openAPIOptionalRequestBodies).
+// (openAPIOptionalRequestBodies). A route whose body Dispatch does not model carries
+// OpaqueRequest, and the body is an object of any shape with that reason on it: saying nothing
+// is honest, where naming a type that covers one arm of the body would promise a client a
+// contract the route does not hold it to.
 func (e *openAPIEmitter) requestBody(route apiRoute) (*openapi31.RequestBody, error) {
 	body := &openapi31.RequestBody{Content: map[string]openapi31.MediaType{}}
+	if route.Shape.OpaqueRequest != "" {
+		if route.Shape.Request != nil {
+			return nil, fmt.Errorf("%s %s names both a request type and OpaqueRequest",
+				route.Method, route.Pattern)
+		}
+		body.WithDescription(route.Shape.OpaqueRequest)
+		// `{"type": "object"}` alone is an object that may hold no key at all, which renders as
+		// Record<string, never> and refuses every body there is; additionalProperties says what
+		// is meant, a JSON object of any shape, as EditOp.attributes already does.
+		body.Content["application/json"] = openapi31.MediaType{
+			Schema: map[string]any{"type": "object", "additionalProperties": map[string]any{}},
+		}
+		return body, nil
+	}
 	if route.Shape.Request != nil {
 		schema, err := e.schema(route.Shape.Request)
 		if err != nil {

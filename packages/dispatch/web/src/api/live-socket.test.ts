@@ -217,7 +217,7 @@ test("a delta updates the cached data and nothing refetches", async () => {
     await settle();
     const data = queryClient.getQueryData<DeliveryTimelineWithMeasures>(key);
     expect(data?.prs).toEqual([pr]);
-    expect(data?.facet_counts.repo).toEqual({ "acme/widgets": 1 });
+    expect(data?.facet_counts?.repo).toEqual({ "acme/widgets": 1 });
     // A field the delta did not name is the very object the page already held.
     expect(data?.window).toBe(before?.window);
     expect(queryClient.getQueryState(key)?.dataUpdateCount).toBe((fetches ?? 0) + 1);

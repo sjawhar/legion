@@ -34,7 +34,7 @@ test("a decision links the spec blocks it shaped, goes out of date with them, an
   const spec = await getArtifact(issue.primary_artifact_id ?? "");
   const stored = await blockId(spec.id, "Store each notice.");
   const newest = await blockId(spec.id, "Show the newest first.");
-  const specVersions = spec.versions.length;
+  const specVersions = (spec.versions ?? []).length;
 
   const reference = `dispatch://${issue.key}/spec`;
   const decisions = await createIssueArtifact(issue.key, {

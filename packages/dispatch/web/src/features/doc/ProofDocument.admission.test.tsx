@@ -64,7 +64,11 @@ test("ProofDocument repairs a document outside the schema by an upload under its
     expect(connections).toHaveLength(0);
     const picked = new File(["repaired\n"], "spec (1).md", { type: "text/markdown" });
     fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [picked] } });
-    getArtifactText.mockResolvedValue({ markdown: "repaired\n", version: 2 });
+    getArtifactText.mockResolvedValue({
+      markdown: "repaired\n",
+      token: "sha256:repaired",
+      version: 2,
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
     await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
     expect(uploadArtifact.mock.calls[0]).toEqual([
@@ -140,7 +144,7 @@ test("ProofDocument waits for a fresh text read before reconnecting from cached 
     expect(connections).toHaveLength(0);
 
     await act(async () => {
-      resolveText({ markdown: "fresh document", version: null });
+      resolveText({ markdown: "fresh document", token: "sha256:fresh-document", version: null });
       await textRead;
     });
     await waitFor(() => expect(connections).toHaveLength(1));
@@ -359,7 +363,11 @@ test("ProofDocument offers a rebuild for a history that cannot load and reconnec
       )
     ).not.toBeNull();
     expect(connections).toHaveLength(0);
-    getArtifactText.mockResolvedValue({ markdown: "The live document", version: 1 });
+    getArtifactText.mockResolvedValue({
+      markdown: "The live document",
+      token: "sha256:live-document",
+      version: 1,
+    });
     fireEvent.click(screen.getByRole("button", { name: "Rebuild from the latest version" }));
     await waitFor(() => expect(rebuildArtifact).toHaveBeenCalledTimes(1));
     expect(rebuildArtifact.mock.calls[0]).toEqual([artifact.id, undefined, keyedAttempt]);

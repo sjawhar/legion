@@ -29,6 +29,8 @@ const issue: IssueDetails = {
       kind: "doc",
       name: "spec.md",
       primary: true,
+      ref_key: "CORE-1/spec",
+      session_id: null,
       slug: "spec",
       versions: [],
     },
@@ -49,7 +51,9 @@ const issue: IssueDetails = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   project: "CORE",
   referenced_by_count: 0,
   route: null,
@@ -105,8 +109,15 @@ function stubIssueApi() {
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
   const patchIssue = answerIssuePatches().mockImplementation(
-    async (_key, { rank: _rank, components: _components, ...update }) =>
-      narrowIssue({ ...issue, ...update })
+    // A null `status` or `title` in the body means "leave it as it is", which is what the server
+    // does with it; every other field the body names is written through.
+    async (_key, { rank: _rank, components: _components, status, title, ...update }) =>
+      narrowIssue({
+        ...issue,
+        ...update,
+        status: status ?? issue.status,
+        title: title ?? issue.title,
+      })
   );
 
   return {

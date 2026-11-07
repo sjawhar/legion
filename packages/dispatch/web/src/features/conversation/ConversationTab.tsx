@@ -72,7 +72,14 @@ import {
   type MessageConversation,
   matchesFilter,
 } from "./conversation-model";
-import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
+import {
+  deliveryMode,
+  duplicateText,
+  failureGuidance,
+  isSafeRetry,
+  MODE_LABELS,
+  withGuidance,
+} from "./delivery";
 import {
   redirectedReplyTarget,
   useHeldReplyTo,
@@ -145,14 +152,15 @@ function threadDelivery(root: MessageConversation): ReplyTarget["thread"] | unde
   }
   let last: MessageDelivery | undefined;
   for (const attempt of [
-    ...root.root.deliveries,
-    ...root.replies.flatMap((reply) => reply.deliveries),
+    ...(root.root.deliveries ?? []),
+    ...root.replies.flatMap((reply) => reply.deliveries ?? []),
   ]) {
     if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
       last = attempt;
     }
   }
-  return { delivery: last?.delivery ?? "steer", target: root.root.target };
+  const mode = last === undefined ? undefined : deliveryMode(last.delivery);
+  return { delivery: mode ?? "steer", target: root.root.target };
 }
 
 /** What the composer quotes when the reader replies to `message`. */
@@ -199,7 +207,7 @@ function ConversationReply({
 }): ReactNode {
   const queryClient = useQueryClient();
   const text = useAgentText();
-  const targetName = recipientOf(reply.deliveries, root.root.target);
+  const targetName = recipientOf(reply.deliveries ?? [], root.root.target);
   const retry = useKeyedWrite({
     label: (delivery: MessageDeliveryMode) =>
       `Delivery to ${text.part(targetName)} again, as ${MODE_LABELS[delivery]}`,
@@ -207,7 +215,7 @@ function ConversationReply({
     write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
   const capabilities = capabilitiesForTarget(root.root.target, agents);
-  const lastAttempt = reply.deliveries.at(-1);
+  const lastAttempt = (reply.deliveries ?? []).at(-1);
   const answer = root.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
@@ -225,7 +233,7 @@ function ConversationReply({
           ? undefined
           : {
               answeredBy: answer?.author,
-              attempts: deliveryAttempts(reply.deliveries, targetName),
+              attempts: deliveryAttempts(reply.deliveries ?? [], targetName),
               retry: isClosed
                 ? undefined
                 : {
@@ -494,7 +502,7 @@ function commentReplyTarget(
   const targets =
     author.kind === "session"
       ? [`session:${author.id}`]
-      : comment.mentions.map((mention) => mention.target);
+      : (comment.mentions ?? []).map((mention) => mention.target);
   const mentions = [...new Set(targets)].map((target) => {
     const sessionId = sessionOfAddress(target);
     return {
@@ -820,7 +828,7 @@ function TargetedMessageTurn({
 }): ReactNode {
   const queryClient = useQueryClient();
   const text = useAgentText();
-  const targetName = recipientOf(item.root.deliveries, item.root.target);
+  const targetName = recipientOf(item.root.deliveries ?? [], item.root.target);
   const retry = useKeyedWrite({
     label: (delivery: MessageDeliveryMode) =>
       `Delivery to ${text.part(targetName)} again, as ${MODE_LABELS[delivery]}`,
@@ -848,7 +856,7 @@ function TargetedMessageTurn({
       canBtw={capabilities?.includes("btw") !== false}
       canSteer={capabilities?.includes("steer") !== false}
       current={current}
-      deliveries={deliveryAttempts(item.root.deliveries, targetName)}
+      deliveries={deliveryAttempts(item.root.deliveries ?? [], targetName)}
       header={<Avatar actor={asker} />}
       isClosed={isClosed}
       onReply={() => onReply(replyTargetFor(item.root, item, issueKey))}
@@ -1244,7 +1252,7 @@ export function ConversationTab({
         {shown.map((item) => {
           const current = item.id === focus?.id;
           const currentReplyId = current ? focus?.replyId : undefined;
-          const pinned = isPinnedConversation(issueState.dismissed, item.id);
+          const pinned = isPinnedConversation(issueState.dismissed ?? [], item.id);
           const register = item.id === newestId ? registerNewest : undefined;
 
           if (item.kind === "targeted-message") {
@@ -1412,7 +1420,7 @@ export function ConversationTab({
                 pendingAction={commentActions.pendingActionIds.has(phoneThread.root.id)}
                 onPin={() => pinConversation(phoneThread.id)}
                 onReply={phone.beginReply}
-                pinned={isPinnedConversation(issueState.dismissed, phoneThread.id)}
+                pinned={isPinnedConversation(issueState.dismissed ?? [], phoneThread.id)}
                 replyDisabled={composerSending}
                 sendKey={sendKey}
                 setExpanded={(open) => setThreadOpen(phoneThread.root.id, open)}

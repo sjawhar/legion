@@ -489,10 +489,12 @@
           }
         ],
         "requestBody": {
+          "description": "the frame to publish, read whole and published unparsed; under ?as=responder it is read as {\"responding\": bool} instead",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PublishFrameResponderInput"
+                "additionalProperties": {},
+                "type": "object"
               }
             }
           }
@@ -3500,6 +3502,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "default": {
             "description": "A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError).",
@@ -5493,7 +5505,10 @@
             "name": "thread",
             "in": "query",
             "schema": {
-              "type": "boolean"
+              "enum": [
+                "1"
+              ],
+              "type": "string"
             }
           },
           {
@@ -14077,10 +14092,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "project",
-          "title"
-        ],
         "type": "object"
       },
       "CreateMessageInput": {
@@ -18773,6 +18784,17 @@
         ],
         "type": "object"
       },
+      "MachineLookupRequest": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
       "Message": {
         "properties": {
           "author": {
@@ -19577,14 +19599,6 @@
         "required": [
           "assignee"
         ],
-        "type": "object"
-      },
-      "PublishFrameResponderInput": {
-        "properties": {
-          "responding": {
-            "type": "boolean"
-          }
-        },
         "type": "object"
       },
       "PutArchitectureSourceInput": {

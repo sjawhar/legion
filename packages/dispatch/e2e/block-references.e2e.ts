@@ -34,7 +34,7 @@ test.beforeEach(async ({ context }) => {
 
 async function latestVersion(artifactId: string): Promise<number> {
   const artifact = await getArtifact(artifactId);
-  return Math.max(...artifact.versions.map((version) => version.number));
+  return Math.max(...(artifact.versions ?? []).map((version) => version.number));
 }
 
 /** Opens the hover card of `link` from the keyboard, which every project can do (the phone
@@ -169,7 +169,7 @@ test("a pinned link keeps the text of the version it pins, says how the block st
   const specId = issue.primary_artifact_id;
   const paragraph = await blockId(specId, "P ships on Friday.");
   const pinned = await latestVersion(specId);
-  const slug = (await getIssue(issue.key)).artifacts.find(
+  const slug = ((await getIssue(issue.key)).artifacts ?? []).find(
     (artifact) => artifact.id === specId
   )?.slug;
   expect(slug).toBeDefined();
@@ -228,7 +228,9 @@ test("a block reference a person made keeps resolving after an upload that leave
   const specId = issue.primary_artifact_id;
   const cited = "The retry cap holds at three attempts.";
   const citedId = await blockId(specId, cited);
-  const spec = (await getIssue(issue.key)).artifacts.find((artifact) => artifact.id === specId);
+  const spec = ((await getIssue(issue.key)).artifacts ?? []).find(
+    (artifact) => artifact.id === specId
+  );
   if (spec === undefined) {
     throw new Error(`${issue.key} has no primary document`);
   }

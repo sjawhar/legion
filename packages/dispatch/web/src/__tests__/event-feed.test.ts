@@ -21,7 +21,7 @@ import {
   userStateQuery,
 } from "../api/queries";
 import { refreshQueries } from "../api/query-refresh";
-import type { Ask, AskRead, Event, EventType, InboxRow } from "../api/types";
+import type { Ask, AskRead, DispatchEvent, EventType, InboxRow } from "../api/types";
 import { hasPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 import { issueAsk } from "../features/inbox/inbox-fixture";
 import { useAskAnswerForm } from "../features/inbox/useAskAnswerForm";
@@ -212,7 +212,7 @@ function dataFor(name: ReadName, page: PageOptions): unknown {
 }
 
 /** The reads of the page `event` marks stale, signed in as alice. */
-function refreshedReads(event: Event, page: Partial<PageOptions> = {}): ReadName[] {
+function refreshedReads(event: DispatchEvent, page: Partial<PageOptions> = {}): ReadName[] {
   const options: PageOptions = {
     inboxHolds: true,
     pinned: true,
@@ -230,10 +230,10 @@ function refreshedReads(event: Event, page: Partial<PageOptions> = {}): ReadName
 }
 
 function event(
-  type: Event["type"],
+  type: DispatchEvent["type"],
   payload: Record<string, unknown> = {},
-  overrides: Partial<Event> = {}
-): Event {
+  overrides: Partial<DispatchEvent> = {}
+): DispatchEvent {
   return {
     actor: { id: "planner", kind: "session" },
     created_at: "2026-10-26T00:00:00Z",
@@ -245,7 +245,7 @@ function event(
     seq: 4,
     type,
     ...overrides,
-  } as Event;
+  } as DispatchEvent;
 }
 
 /** An `issue.*` payload as the server writes it: the issue after the write, flat. */
@@ -268,7 +268,7 @@ function issue(fields: Record<string, unknown> = {}): Record<string, unknown> {
 const documentOwner = { artifact_id: "artifact-1", issue_key: null, project: "CORE" } as const;
 
 interface Rule {
-  readonly event: Event;
+  readonly event: DispatchEvent;
   readonly page?: Partial<PageOptions>;
   readonly refreshes: readonly ReadName[];
   readonly spares: readonly ReadName[];
@@ -1078,7 +1078,7 @@ test("a document version refreshes the issue's coverage and its recorded results
 
 /** One event of every type the feed can carry, keyed by type so a new one fails to compile here
  *  until it has a row. */
-const eventsByType: Record<EventType, Event> = {
+const eventsByType: Record<EventType, DispatchEvent> = {
   "architecture.sync_failed": event("architecture.sync_failed", {}, { issue_key: null }),
   "architecture.synced": event("architecture.synced", {}, { issue_key: null }),
   "artifact.approved": event("artifact.approved", { artifact_id: "artifact-3", ask_id: null }),
@@ -1190,10 +1190,12 @@ test("a feed event prepends a newer event to the loaded log page", () => {
     pages: [[event("message.created", {}, { id: 7, seq: 7 })]],
   });
   prependEventToLog(client, event("message.created", {}, { id: 8, seq: 8 }));
-  expect(client.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
-    event("message.created", {}, { id: 8, seq: 8 }),
-    event("message.created", {}, { id: 7, seq: 7 }),
-  ]);
+  expect(client.getQueryData<{ pages: DispatchEvent[][] }>(["events", "CORE-1"])?.pages[0]).toEqual(
+    [
+      event("message.created", {}, { id: 8, seq: 8 }),
+      event("message.created", {}, { id: 7, seq: 7 }),
+    ]
+  );
 });
 
 test("a log page that predates streamed events keeps them in front of it", () => {
@@ -1228,7 +1230,7 @@ function cacheThread(client: QueryClient, id: string, issueKey: string | null): 
   client.setQueryData(["ask-thread", id], { ask: { id, issue_key: issueKey } });
 }
 
-function refreshedThreads(incoming: Event): string[] {
+function refreshedThreads(incoming: DispatchEvent): string[] {
   const client = new QueryClient();
   cacheThread(client, "ask-1", "CORE-1");
   cacheThread(client, "ask-2", "CORE-2");

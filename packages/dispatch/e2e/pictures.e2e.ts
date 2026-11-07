@@ -277,7 +277,9 @@ test("a picture written into a spec draws in the editor and in a past version, w
     );
     const newestVersion = async () =>
       Math.max(
-        ...(await getArtifact(issue.primary_artifact_id)).versions.map(({ number }) => number)
+        ...((await getArtifact(issue.primary_artifact_id)).versions ?? []).map(
+          ({ number }) => number
+        )
       );
     await expect.poll(newestVersion).toBeGreaterThan(1);
     const pictured = await newestVersion();

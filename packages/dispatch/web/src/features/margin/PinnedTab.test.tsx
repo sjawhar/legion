@@ -4,10 +4,10 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Event } from "../../api/types";
+import type { DispatchEvent } from "../../api/types";
 import { PinnedTab } from "./PinnedTab";
 
-const messageEvent: Event = {
+const messageEvent: DispatchEvent = {
   actor: { id: "alice", kind: "user" },
   created_at: "2026-09-10T00:00:00Z",
   id: 1,
@@ -16,6 +16,8 @@ const messageEvent: Event = {
   payload: {
     author: { id: "alice", kind: "user" },
     body: "Pinned message\n\n- item",
+    broadcast_id: null,
+    reply_block: null,
     created_at: "2026-09-10T00:00:00Z",
     deliveries: [],
     id: "message-1",
@@ -54,7 +56,7 @@ test("a pinned lifecycle event remains removable", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  const lifecycleEvent: Extract<Event, { type: "comment.resolved" }> = {
+  const lifecycleEvent: Extract<DispatchEvent, { type: "comment.resolved" }> = {
     actor: { id: "alice", kind: "user" },
     created_at: "2026-09-10T00:01:00Z",
     id: 2,
@@ -65,7 +67,10 @@ test("a pinned lifecycle event remains removable", async () => {
       artifact_name: "spec",
       ask_id: null,
       author: { id: "alice", kind: "user" },
+      answers: null,
+      artifact_id: null,
       body: "Pinned lifecycle comment",
+      reply_block: null,
       created_at: "2026-09-10T00:00:00Z",
       deliveries: [],
       edited_at: null,

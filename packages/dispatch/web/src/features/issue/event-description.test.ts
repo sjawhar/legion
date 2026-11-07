@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 
-import type { Event } from "../../api/types";
+import type { DispatchEvent } from "../../api/types";
 import { activityDescription } from "../activity/activity-model";
 import { eventDescription } from "./event-description";
 
-function commentEvent(type: "comment.reopened" | "comment.edited"): Event {
+function commentEvent(type: "comment.reopened" | "comment.edited"): DispatchEvent {
   return {
     actor: { id: "alice", kind: "user" },
     created_at: "2026-09-11T00:00:00Z",
@@ -29,10 +29,10 @@ function commentEvent(type: "comment.reopened" | "comment.edited"): Event {
     },
     seq: 1,
     type,
-  } as Event;
+  } as DispatchEvent;
 }
 
-function editedAskEvent(): Extract<Event, { type: "ask.edited" }> {
+function editedAskEvent(): Extract<DispatchEvent, { type: "ask.edited" }> {
   return {
     actor: { id: "session-1", kind: "session" },
     created_at: "2026-09-11T00:00:00Z",
@@ -41,6 +41,8 @@ function editedAskEvent(): Extract<Event, { type: "ask.edited" }> {
     notify: false,
     payload: {
       anchor: null,
+      artifact_id: null,
+      block_id: null,
       answer: null,
       author: { id: "session-1", kind: "session" },
       created_at: "2026-09-10T00:00:00Z",
@@ -75,8 +77,8 @@ test("eventDescription labels an edited ask with its new question", () => {
 });
 
 function answeredAskEvent(
-  previousAnswer?: Extract<Event, { type: "ask.answered" }>["payload"]["previous_answer"]
-): Extract<Event, { type: "ask.answered" }> {
+  previousAnswer?: Extract<DispatchEvent, { type: "ask.answered" }>["payload"]["previous_answer"]
+): Extract<DispatchEvent, { type: "ask.answered" }> {
   return {
     actor: { id: "alice", kind: "user" },
     created_at: "2026-09-11T00:00:00Z",
@@ -85,6 +87,8 @@ function answeredAskEvent(
     notify: true,
     payload: {
       anchor: null,
+      artifact_id: null,
+      block_id: null,
       answer: { at: "2026-09-11T00:00:00Z", selected: ["Hold"], text: null, user: "alice" },
       author: { id: "session-1", kind: "session" },
       created_at: "2026-09-10T00:00:00Z",
@@ -120,7 +124,7 @@ test("eventDescription says an answer changed when it replaced an earlier one", 
 });
 
 test("eventDescription labels a malformed decision", () => {
-  const event: Extract<Event, { type: "block.invalid" }> = {
+  const event: Extract<DispatchEvent, { type: "block.invalid" }> = {
     actor: { id: "session-1", kind: "session" },
     created_at: "2026-09-13T17:00:00Z",
     id: 3,
@@ -142,7 +146,7 @@ test("eventDescription labels a malformed decision", () => {
 });
 
 test("eventDescription names an added artifact", () => {
-  const event: Extract<Event, { type: "artifact.created" }> = {
+  const event: Extract<DispatchEvent, { type: "artifact.created" }> = {
     actor: { id: "session-1", kind: "session" },
     created_at: "2026-09-15T00:00:00Z",
     id: 4,
@@ -158,6 +162,8 @@ test("eventDescription names an added artifact", () => {
         name: "cu-update-2026-09-15.md",
         primary: false,
         project: "OPS",
+        ref_key: "OPS-52/cu-update-2026-09-15-md",
+        session_id: null,
         slug: "cu-update-2026-09-15-md",
         versions: [],
       },
@@ -170,7 +176,7 @@ test("eventDescription names an added artifact", () => {
 });
 
 test("eventDescription names a saved artifact version", () => {
-  const event: Extract<Event, { type: "artifact.version" }> = {
+  const event: Extract<DispatchEvent, { type: "artifact.version" }> = {
     actor: { id: "session-1", kind: "session" },
     created_at: "2026-09-15T00:00:00Z",
     id: 5,
@@ -195,7 +201,7 @@ test("eventDescription names a saved artifact version", () => {
 });
 
 test("eventDescription names the phase and version of a recorded handoff", () => {
-  const event: Extract<Event, { type: "handoff.recorded" }> = {
+  const event: Extract<DispatchEvent, { type: "handoff.recorded" }> = {
     actor: { id: "session-1", kind: "session" },
     created_at: "2026-10-26T00:00:00Z",
     id: 6,
@@ -210,7 +216,7 @@ test("eventDescription names the phase and version of a recorded handoff", () =>
 });
 
 test("eventDescription and the activity line name a person's spec edit by its versions", () => {
-  const event: Extract<Event, { type: "artifact.human_edited" }> = {
+  const event: Extract<DispatchEvent, { type: "artifact.human_edited" }> = {
     actor: { id: "person@example.com", kind: "user" },
     created_at: "2026-10-24T00:00:00Z",
     id: 6,
@@ -243,10 +249,10 @@ test("eventDescription names the child a reparent adds or removes", () => {
     payload: { child_key: "CORE-12" },
     seq: 2,
   };
-  expect(eventDescription({ ...base, type: "child.added" } as Event)).toEqual([
+  expect(eventDescription({ ...base, type: "child.added" } as DispatchEvent)).toEqual([
     "Added child CORE-12",
   ]);
-  expect(eventDescription({ ...base, type: "child.removed" } as Event)).toEqual([
+  expect(eventDescription({ ...base, type: "child.removed" } as DispatchEvent)).toEqual([
     "Removed child CORE-12",
   ]);
 });
@@ -262,10 +268,11 @@ test("eventDescription names the repository an architecture import came from; a 
     seq: 3,
   } as const;
   const commit = "3be61df5be90aa11bb22";
-  const synced = (payload: Extract<Event, { type: "architecture.synced" }>["payload"]) =>
+  const synced = (payload: Extract<DispatchEvent, { type: "architecture.synced" }>["payload"]) =>
     eventDescription({ ...base, payload, type: "architecture.synced" });
-  const failed = (payload: Extract<Event, { type: "architecture.sync_failed" }>["payload"]) =>
-    eventDescription({ ...base, payload, type: "architecture.sync_failed" });
+  const failed = (
+    payload: Extract<DispatchEvent, { type: "architecture.sync_failed" }>["payload"]
+  ) => eventDescription({ ...base, payload, type: "architecture.sync_failed" });
 
   expect(synced({ branch: "main", commit, components: 1, repo: "acme/infra" })).toEqual([
     "Architecture synced from acme/infra: 1 component at 3be61df5be90",
@@ -283,7 +290,7 @@ test("eventDescription names the repository an architecture import came from; a 
 
 // The issue log names the same five movements, in its own voice: it has no actor column beside
 // the line, so a release says what happened and a takeover names who lost the claim.
-type ClaimLogEvent = Extract<Event, { type: "issue.claimed" | "issue.released" }>;
+type ClaimLogEvent = Extract<DispatchEvent, { type: "issue.claimed" | "issue.released" }>;
 
 const claimLogEvent = (
   type: ClaimLogEvent["type"],
@@ -344,7 +351,7 @@ test("the issue log keeps the session an unsubscribe or a follower names", () =>
       payload: { ask_id: "ask-1", by: { id: "alice", kind: "user" }, session_id: "session-two" },
       seq: 10,
       type,
-    }) as Event;
+    }) as DispatchEvent;
   const agent = { sessionId: "session-two", storedTitle: undefined };
 
   expect(eventDescription(sessionEvent("subscription.removed"))).toEqual(["Unsubscribed ", agent]);

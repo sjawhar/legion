@@ -40,7 +40,7 @@ import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function documentUpdatedAt(document: Artifact): string {
-  return document.versions.at(-1)?.created_at ?? document.created_at;
+  return document.versions?.at(-1)?.created_at ?? document.created_at;
 }
 
 function DocumentRow({ document }: { document: Artifact }): ReactNode {

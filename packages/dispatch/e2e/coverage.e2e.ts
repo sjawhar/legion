@@ -20,7 +20,7 @@ A requirement nothing checks is flagged.
  *  waits for lands rather than trusting the first read. */
 async function coverageOf(issue: string, blockId: string): Promise<RequirementCoverage> {
   const coverage = await getIssueCoverage(issue);
-  const requirement = coverage.requirements.find((row) => row.block_id === blockId);
+  const requirement = (coverage.requirements ?? []).find((row) => row.block_id === blockId);
   if (requirement === undefined) {
     throw new Error(`${issue} has no requirement ${blockId}: ${JSON.stringify(coverage)}`);
   }

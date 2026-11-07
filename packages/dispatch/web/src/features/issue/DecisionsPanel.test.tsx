@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { graphNode } from "../../__tests__/graph-fixture";
 import { api } from "../../api/client";
 import type {
   Artifact,
@@ -57,14 +58,24 @@ const table = decision({
       created_version: 1,
       from_block: "store-why",
       stale: false,
-      to: { block_id: "p1", id: "CORE-1/spec#p1", kind: "block", text: "Notices are stored." },
+      to: graphNode({
+        block_id: "p1",
+        id: "CORE-1/spec#p1",
+        kind: "block",
+        text: "Notices are stored.",
+      }),
     },
     {
       created_at: "2026-11-01T00:00:00Z",
       created_version: 1,
       from_block: "store-why",
       stale: true,
-      to: { block_id: "p 2", id: "CORE-1/spec#p 2", kind: "block", text: "Old rows expire." },
+      to: graphNode({
+        block_id: "p 2",
+        id: "CORE-1/spec#p 2",
+        kind: "block",
+        text: "Old rows expire.",
+      }),
     },
   ],
   text: "## Store notices in a table\n\nA table keeps them queryable.\n\nUnsure: the index may be slow.",

@@ -1,65 +1,17 @@
-import type {
-  CheckResultRecorded,
-  EditArtifactInput,
-  RecordCheckResultInput,
-} from "@legion/contracts";
+import type { DispatchEvent, paths } from "@legion/contracts";
 import type { Cookie } from "@playwright/test";
-import type {
-  Actor,
-  Agent,
-  AnswerAskInput,
-  ArchitectureSource,
-  ArchitectureTree,
-  Artifact,
-  ArtifactBlock,
-  ArtifactReview,
-  ArtifactReviewState,
-  ArtifactText,
-  ArtifactUploadResponse,
-  ArtifactVersionText,
-  Ask,
-  AskFollower,
-  AskRead,
-  AskSnooze,
-  BroadcastCreated,
-  BroadcastRead,
-  BroadcastSummary,
-  Comment,
-  CommentDelivery,
-  CreateAgentMessageInput,
-  CreateArtifactInput,
-  CreateAskInput,
-  CreateBroadcastInput,
-  CreateCommentInput,
-  CreateMessageInput,
-  CreateProjectInput,
-  EditAskInput,
-  Event,
-  HandoffSummary,
-  InboxRow,
-  Issue,
-  IssueCoverage,
-  IssueDetails,
-  IssueSummary,
-  ItemBlocks,
-  Message,
-  MessageDelivery,
-  MessageRead,
-  MyAnswersResponse,
-  MyRepliesResponse,
-  Project,
-  ProjectDefaultAssignee,
-  ProjectDefaultAssigneeInput,
-  RepoProject,
-  SearchResponse,
-  UpdateIssueInput,
-  UserAgentState,
-  UserAgentStateInput,
-  UserAgentStates,
-  UserIssueState,
-  UserState,
-  Version,
-} from "../web/src/api/types";
+import {
+  type Body,
+  type Op,
+  type PathParams,
+  type PathsOf,
+  type Query,
+  type QueryParams,
+  type RequestBody,
+  type Result,
+  routeUrl,
+} from "../web/src/api/paths";
+import type { Actor } from "../web/src/api/types";
 import { harnessPorts } from "./harness-ports";
 import { type DispatchProcess, pinnedTo } from "./harness-processes";
 
@@ -307,72 +259,159 @@ async function request<T>(
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 
-export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
-  return request<Project>("/api/v1/projects", "POST", input, { login });
+// Every wrapper below names its route's own path pattern, and reads that route's path
+// parameters, its query parameters, its request body and its answer from the generated document
+// (`paths`, rendered from the Go route table): nothing here spells a shape of its own. A route
+// the document no longer holds, a renamed path parameter and a changed query parameter are then
+// errors at the wrapper, and a changed response body an error at the row that reads it. The
+// helpers that read the document are the dashboard client's own (web/src/api/paths.ts), so the
+// two clients cannot drift apart.
+
+/** One call's own arguments. A route with no path parameter takes no `params`, and one the
+ *  document gives no request body takes no `body`; `& object` keeps each an object type, which
+ *  is what `request` takes. */
+type CallArgs<P extends keyof paths, M extends string> = {
+  body?: RequestBody<Op<P, M>> & object;
+  query?: QueryParams<Op<P, M>> & object;
+} & ([keyof PathParams<Op<P, M>>] extends [never]
+  ? { params?: Record<never, never> }
+  : { params: PathParams<Op<P, M>> & object });
+
+/** The one place a route's path pattern becomes a request: `request` sends it, with the harness
+ *  half's sign-in, bearer, `Origin`, `Idempotency-Key` and process pinning. */
+function send<T>(
+  pattern: string,
+  method: string,
+  args: { body?: object; params?: object; query?: object },
+  options: ApiOptions
+): Promise<T> {
+  return request<T>(
+    routeUrl(pattern, args.params ?? {}, args.query ?? {}),
+    method,
+    args.body,
+    options
+  );
+}
+
+function get<P extends PathsOf<"get">>(
+  pattern: P,
+  args: CallArgs<P, "get">,
+  options: ApiOptions = {}
+): Promise<Result<P, "get">> {
+  return send(pattern, "GET", args, options);
+}
+
+/** A read the document cannot type, taken under the type `@legion/contracts` holds for it. Its
+ *  path pattern, path parameters and query parameters are still the document's, and only the
+ *  answer is the caller's, which has to name both type arguments. */
+function getAnswering<T, P extends PathsOf<"get">>(
+  pattern: P,
+  args: CallArgs<P, "get">,
+  options: ApiOptions = {}
+): Promise<T> {
+  return send(pattern, "GET", args, options);
+}
+
+function post<P extends PathsOf<"post">>(
+  pattern: P,
+  args: CallArgs<P, "post">,
+  options: ApiOptions = {}
+): Promise<Result<P, "post">> {
+  return send(pattern, "POST", args, options);
+}
+
+function put<P extends PathsOf<"put">>(
+  pattern: P,
+  args: CallArgs<P, "put">,
+  options: ApiOptions = {}
+): Promise<Result<P, "put">> {
+  return send(pattern, "PUT", args, options);
+}
+
+function patch<P extends PathsOf<"patch">>(
+  pattern: P,
+  args: CallArgs<P, "patch">,
+  options: ApiOptions = {}
+): Promise<Result<P, "patch">> {
+  return send(pattern, "PATCH", args, options);
+}
+
+function del<P extends PathsOf<"delete">>(
+  pattern: P,
+  args: CallArgs<P, "delete">,
+  options: ApiOptions = {}
+): Promise<Result<P, "delete">> {
+  return send(pattern, "DELETE", args, options);
+}
+
+/** The `{owner}` and `{repo}` of a repository named `owner/name`, the two path parameters every
+ *  route that addresses a repository takes it in. */
+function repoParams(repo: string): { owner: string; repo: string } {
+  const [owner = "", name = ""] = repo.split("/");
+  return { owner, repo: name };
+}
+
+export function createProject(input: Body<"/api/v1/projects", "post">, login = "alice") {
+  return post("/api/v1/projects", { body: input }, { login });
 }
 
 /** Maps `repo` (`owner/name`) to a project, as the Settings page does; `default: true` makes it the
  *  project's default repository. */
 export function putRepoProject(
   repo: string,
-  input: { project: string; default?: boolean },
+  input: Body<"/api/v1/settings/repo-projects/{owner}/{repo}", "put">,
   login = "alice"
-): Promise<RepoProject> {
-  return request<RepoProject>(`/api/v1/settings/repo-projects/${repo}`, "PUT", input, { login });
+) {
+  return put(
+    "/api/v1/settings/repo-projects/{owner}/{repo}",
+    { body: input, params: repoParams(repo) },
+    { login }
+  );
 }
 
 /** Removes `repo`'s mapping, as the Settings page's Delete does. */
-export function deleteRepoProject(repo: string, login = "alice"): Promise<void> {
-  return request<void>(`/api/v1/settings/repo-projects/${repo}`, "DELETE", {}, { login });
+export function deleteRepoProject(repo: string, login = "alice") {
+  return del(
+    "/api/v1/settings/repo-projects/{owner}/{repo}",
+    { body: {}, params: repoParams(repo) },
+    { login }
+  );
 }
 
 /** Mints a personal agent token for `login`; the returned bearer acts for that human. */
 export async function mintAgentToken(name: string, login: string): Promise<string> {
-  const minted = await request<{ token: string }>(
-    "/api/v1/me/agent-tokens",
-    "POST",
-    { name },
-    { login }
-  );
+  const minted = await post("/api/v1/me/agent-tokens", { body: { name } }, { login });
   return minted.token;
 }
 
-export function getIssue(key: string, options: ApiOptions = {}): Promise<IssueDetails> {
-  return request<IssueDetails>(
-    `/api/v1/issues/${encodeURIComponent(key)}`,
-    "GET",
-    undefined,
-    options
-  );
+export function getIssue(key: string, options: ApiOptions = {}) {
+  return get("/api/v1/issues/{key}", { params: { key } }, options);
 }
 
+/** `GET /api/v1/issues/{key}/events`: the issue's events in the server's order.
+ *
+ *  The answer is typed `DispatchEvent[]`, not the document's `Event[]`: Go's `model.Event.Payload`
+ *  is bytes, so the document carries `payload` as `unknown` and cannot say which payload each
+ *  `type` brings, while `DispatchEvent` is exactly that union. The route, its path parameter and
+ *  its query parameters are still the document's. */
 export function getIssueEvents(
   key: string,
-  options: { after?: number; limit?: number } = {},
-  requestOptions: ApiOptions = {}
-): Promise<Event[]> {
-  const query = new URLSearchParams();
-  if (options.after !== undefined) {
-    query.set("after", String(options.after));
-  }
-  if (options.limit !== undefined) {
-    query.set("limit", String(options.limit));
-  }
-  const suffix = query.size === 0 ? "" : `?${query}`;
-  return request<Event[]>(
-    `/api/v1/issues/${encodeURIComponent(key)}/events${suffix}`,
-    "GET",
-    undefined,
-    requestOptions
+  page: Query<"/api/v1/issues/{key}/events", "get"> = {},
+  options: ApiOptions = {}
+): Promise<DispatchEvent[]> {
+  return getAnswering<DispatchEvent[], "/api/v1/issues/{key}/events">(
+    "/api/v1/issues/{key}/events",
+    { params: { key }, query: page },
+    options
   );
 }
 
 export function patchIssue(
   key: string,
-  input: UpdateIssueInput,
+  input: Body<"/api/v1/issues/{key}", "patch">,
   options: ApiOptions = {}
-): Promise<Issue> {
-  return request<Issue>(`/api/v1/issues/${encodeURIComponent(key)}`, "PATCH", input, options);
+) {
+  return patch("/api/v1/issues/{key}", { body: input, params: { key } }, options);
 }
 
 /** `POST /api/v1/issues/{key}/results`: one result of one check, recorded on `issue`, which
@@ -380,322 +419,232 @@ export function patchIssue(
  *  stored result and the pull-request body line it implies. */
 export function recordCheckResult(
   issue: string,
-  input: RecordCheckResultInput,
+  input: Body<"/api/v1/issues/{key}/results", "post">,
   options: ApiOptions = { as: "agent" }
-): Promise<CheckResultRecorded> {
-  return request<CheckResultRecorded>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/results`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/issues/{key}/results", { body: input, params: { key: issue } }, options);
 }
 
 /** `GET /api/v1/issues/{key}/coverage`: what each requirement of the issue's spec lacks. */
-export function getIssueCoverage(issue: string, options: ApiOptions = {}): Promise<IssueCoverage> {
-  return request<IssueCoverage>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/coverage`,
-    "GET",
-    undefined,
-    options
-  );
+export function getIssueCoverage(issue: string, options: ApiOptions = {}) {
+  return get("/api/v1/issues/{key}/coverage", { params: { key: issue } }, options);
 }
 
-/** The project list in the server's order: lifecycle status, then rank. */
-export function listIssues(project: string, options: ApiOptions = {}): Promise<IssueSummary[]> {
-  return request<IssueSummary[]>(
-    `/api/v1/issues?project=${encodeURIComponent(project)}`,
-    "GET",
-    undefined,
-    options
-  );
+/** The project list in the server's order: lifecycle status, then rank.
+ *
+ *  The route answers the page object where the call asks for one with `limit` or `offset`, and
+ *  the whole list otherwise; this read asks for neither. */
+export async function listIssues(project: string, options: ApiOptions = {}) {
+  const answered = await get("/api/v1/issues", { query: { project } }, options);
+  if (!Array.isArray(answered)) {
+    throw new Error("GET /api/v1/issues answered a page where the whole list was asked for");
+  }
+  return answered;
 }
 
 /** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
-export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
-  return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+export function getInbox(options: ApiOptions = {}) {
+  return get("/api/v1/inbox", {}, options);
 }
 
 /** `GET /api/v1/search`: the palette's own read, so a row's `href` here is the path a reader
  *  lands on by clicking that hit. */
-export function search(query: string, options: ApiOptions = {}): Promise<SearchResponse> {
-  return request<SearchResponse>(
-    `/api/v1/search?q=${encodeURIComponent(query)}`,
-    "GET",
-    undefined,
-    options
-  );
+export function search(query: string, options: ApiOptions = {}) {
+  return get("/api/v1/search", { query: { q: query } }, options);
 }
 
 /** `GET /api/v1/me/answers`: the caller's own answers and ask replies, newest first, one page. */
 export function listMyAnswers(
-  page: { limit?: number; offset?: number } = {},
+  page: Query<"/api/v1/me/answers", "get"> = {},
   options: ApiOptions = {}
-): Promise<MyAnswersResponse> {
-  const query = new URLSearchParams();
-  if (page.limit !== undefined) query.set("limit", String(page.limit));
-  if (page.offset !== undefined) query.set("offset", String(page.offset));
-  const suffix = query.size === 0 ? "" : `?${query}`;
-  return request<MyAnswersResponse>(`/api/v1/me/answers${suffix}`, "GET", undefined, options);
+) {
+  return get("/api/v1/me/answers", { query: page }, options);
 }
 
 /** `GET /api/v1/me/replies`: the threads the caller wrote in where someone else has written since
  *  they last read it, newest reply first, one page. */
 export function listMyReplies(
-  page: { limit?: number; offset?: number } = {},
+  page: Query<"/api/v1/me/replies", "get"> = {},
   options: ApiOptions = {}
-): Promise<MyRepliesResponse> {
-  const query = new URLSearchParams();
-  if (page.limit !== undefined) query.set("limit", String(page.limit));
-  if (page.offset !== undefined) query.set("offset", String(page.offset));
-  const suffix = query.size === 0 ? "" : `?${query}`;
-  return request<MyRepliesResponse>(`/api/v1/me/replies${suffix}`, "GET", undefined, options);
+) {
+  return get("/api/v1/me/replies", { query: page }, options);
 }
 
 /** `PUT /api/v1/me/threads/{id}/read`: move the caller's read mark on one thread forward. */
-export function markThreadRead(
-  threadId: string,
-  readThrough: string,
-  options: ApiOptions = {}
-): Promise<void> {
-  return request<void>(
-    `/api/v1/me/threads/${encodeURIComponent(threadId)}/read`,
-    "PUT",
-    { read_through: readThrough },
+export function markThreadRead(threadId: string, readThrough: string, options: ApiOptions = {}) {
+  return put(
+    "/api/v1/me/threads/{id}/read",
+    { body: { read_through: readThrough }, params: { id: threadId } },
     options
   );
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
  *  `snoozedUntil` (RFC 3339, in the future). */
-export function snoozeAsk(
-  id: string,
-  snoozedUntil: string,
-  options: ApiOptions = {}
-): Promise<AskSnooze> {
-  return request<AskSnooze>(
-    `/api/v1/me/asks/${encodeURIComponent(id)}/snooze`,
-    "PUT",
-    { snoozed_until: snoozedUntil },
+export function snoozeAsk(id: string, snoozedUntil: string, options: ApiOptions = {}) {
+  return put(
+    "/api/v1/me/asks/{id}/snooze",
+    { body: { snoozed_until: snoozedUntil }, params: { id } },
     options
   );
 }
 
 /** The Agents page's rows: every live Envoy session merged with its Dispatch activity. */
-export function listAgents(options: ApiOptions = {}): Promise<Agent[]> {
-  return request<Agent[]>("/api/v1/agents", "GET", undefined, options);
+export function listAgents(options: ApiOptions = {}) {
+  return get("/api/v1/agents", {}, options);
 }
 
 /** A session's conversation as the Agents page reads it: its exchanges in the server's order. */
-export function listAgentMessages(
-  sessionID: string,
-  options: ApiOptions = {}
-): Promise<MessageRead[]> {
-  return request<MessageRead[]>(
-    `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
-    "GET",
-    undefined,
+export function listAgentMessages(sessionID: string, options: ApiOptions = {}) {
+  return get(
+    "/api/v1/agents/{session_id}/messages",
+    { params: { session_id: sessionID } },
     options
   );
 }
 
-export function createIssue(
-  input: Partial<Pick<Issue, "project" | "title">> & {
-    external?: string;
-    force?: boolean;
-    parent?: string;
-    repo?: string;
-    spec?: string;
-  },
-  options: ApiOptions = {}
-): Promise<Issue> {
-  return request<Issue>("/api/v1/issues", "POST", input, options);
+export function createIssue(input: Body<"/api/v1/issues", "post">, options: ApiOptions = {}) {
+  return post("/api/v1/issues", { body: input }, options);
 }
 
 export function createAsk(
   issue: string,
-  input: CreateAskInput,
+  input: Body<"/api/v1/issues/{key}/asks", "post">,
   options: ApiOptions = {}
-): Promise<Ask> {
-  return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
+) {
+  return post("/api/v1/issues/{key}/asks", { body: input, params: { key: issue } }, options);
 }
 
 /** Every ask on the issue, whatever its state (the route's default `state=all`). */
-export function listIssueAsks(issue: string, options: ApiOptions = {}): Promise<Ask[]> {
-  return request<Ask[]>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/asks`,
-    "GET",
-    undefined,
-    options
-  );
+export function listIssueAsks(issue: string, options: ApiOptions = {}) {
+  return get("/api/v1/issues/{key}/asks", { params: { key: issue } }, options);
 }
 
 export function createProjectDocument(
   project: string,
-  input: CreateArtifactInput,
+  input: Body<"/api/v1/projects/{key}/artifacts", "post">,
   options: ApiOptions = {}
-): Promise<ArtifactUploadResponse> {
-  return request<ArtifactUploadResponse>(
-    `/api/v1/projects/${encodeURIComponent(project)}/artifacts`,
-    "POST",
-    input,
+) {
+  return post(
+    "/api/v1/projects/{key}/artifacts",
+    { body: input, params: { key: project } },
     options
   );
 }
 
 export function createIssueArtifact(
   issue: string,
-  input: CreateArtifactInput,
+  input: Body<"/api/v1/issues/{key}/artifacts", "post">,
   options: ApiOptions = {}
-): Promise<ArtifactUploadResponse> {
-  return request<ArtifactUploadResponse>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/artifacts`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/issues/{key}/artifacts", { body: input, params: { key: issue } }, options);
 }
 
-export function getProjectArtifact(
-  project: string,
-  slug: string,
-  options: ApiOptions = {}
-): Promise<Artifact> {
-  return request<Artifact>(
-    `/api/v1/projects/${encodeURIComponent(project)}/artifacts/${encodeURIComponent(slug)}`,
-    "GET",
-    undefined,
+export function getProjectArtifact(project: string, slug: string, options: ApiOptions = {}) {
+  return get(
+    "/api/v1/projects/{key}/artifacts/{slug}",
+    { params: { key: project, slug } },
     options
   );
 }
 
 export function createArtifactAsk(
   artifactID: string,
-  input: CreateAskInput,
+  input: Body<"/api/v1/artifacts/{id}/asks", "post">,
   options: ApiOptions = {}
-): Promise<Ask> {
-  return request<Ask>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/asks`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/artifacts/{id}/asks", { body: input, params: { id: artifactID } }, options);
 }
 
 export function createArtifactComment(
   artifactID: string,
-  input: CreateCommentInput,
+  input: Body<"/api/v1/artifacts/{id}/comments", "post">,
   options: ApiOptions = {}
-): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
-    "POST",
-    input,
+) {
+  return post(
+    "/api/v1/artifacts/{id}/comments",
+    { body: input, params: { id: artifactID } },
     options
   );
 }
 
-export function listArtifactComments(
-  artifactID: string,
-  options: ApiOptions = {}
-): Promise<Comment[]> {
-  return request<Comment[]>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
-    "GET",
-    undefined,
-    options
-  );
+export function listArtifactComments(artifactID: string, options: ApiOptions = {}) {
+  return get("/api/v1/artifacts/{id}/comments", { params: { id: artifactID } }, options);
 }
 
-export function editAsk(id: string, input: EditAskInput, options: ApiOptions = {}): Promise<Ask> {
-  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "PATCH", input, options);
+export function editAsk(
+  id: string,
+  input: Body<"/api/v1/asks/{id}", "patch">,
+  options: ApiOptions = {}
+) {
+  return patch("/api/v1/asks/{id}", { body: input, params: { id } }, options);
 }
 
 export function answerAsk(
   id: string,
-  input: AnswerAskInput,
+  input: Body<"/api/v1/asks/{id}/answer", "post">,
   options: ApiOptions = {}
-): Promise<Ask> {
-  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}/answer`, "POST", input, options);
+) {
+  return post("/api/v1/asks/{id}/answer", { body: input, params: { id } }, options);
 }
 
 export function resolveAsk(
   id: string,
-  input: { kind: "retracted" | "resolved"; reason: string },
+  input: Body<"/api/v1/asks/{id}/resolve", "post">,
   options: ApiOptions = {}
-): Promise<Ask> {
-  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}/resolve`, "POST", input, options);
+) {
+  return post("/api/v1/asks/{id}/resolve", { body: input, params: { id } }, options);
 }
 
 export function createComment(
   issue: string,
-  input: CreateCommentInput,
+  input: Body<"/api/v1/issues/{key}/comments", "post">,
   options: ApiOptions = {}
-): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/comments`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/issues/{key}/comments", { body: input, params: { key: issue } }, options);
 }
 
-export function acceptSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
-  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
+export function acceptSuggestion(id: string, options: ApiOptions = {}) {
+  return post("/api/v1/comments/{id}/accept", { body: {}, params: { id } }, options);
 }
 
-export function rejectSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
-  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/reject`, "POST", {}, options);
+export function rejectSuggestion(id: string, options: ApiOptions = {}) {
+  return post("/api/v1/comments/{id}/reject", { body: {}, params: { id } }, options);
 }
 
-export function resolveComment(id: string, options: ApiOptions = {}): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/comments/${encodeURIComponent(id)}/resolve`,
-    "POST",
-    {},
-    options
-  );
+export function resolveComment(id: string, options: ApiOptions = {}) {
+  return post("/api/v1/comments/{id}/resolve", { body: {}, params: { id } }, options);
 }
 
 export function editComment(
   id: string,
-  input: { body: string },
+  input: Body<"/api/v1/comments/{id}", "patch">,
   options: ApiOptions = {}
-): Promise<Comment> {
-  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}`, "PATCH", input, options);
+) {
+  return patch("/api/v1/comments/{id}", { body: input, params: { id } }, options);
 }
 
 export function listComments(
   issue: string,
   artifact: string | undefined = undefined,
   options: ApiOptions = {}
-): Promise<Comment[]> {
-  const suffix = artifact === undefined ? "" : `?artifact=${encodeURIComponent(artifact)}`;
-  return request<Comment[]>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/comments${suffix}`,
-    "GET",
-    undefined,
+) {
+  return get(
+    "/api/v1/issues/{key}/comments",
+    { params: { key: issue }, query: { artifact } },
     options
   );
 }
 
 /** One comment and its reply chain, as the server holds them now: its anchor's quote included. */
-export function getComment(
-  id: string,
-  options: ApiOptions = {}
-): Promise<{ comment: Comment; replies: Comment[] }> {
-  return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
+export function getComment(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/comments/{id}", { params: { id } }, options);
 }
 
 /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks in body order, each with its
  *  span in the stored body, its revision, and whether the blocks are indexed from that body. */
-export function getCommentBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
-  return request<ItemBlocks>(
-    `/api/v1/comments/${encodeURIComponent(id)}/blocks`,
-    "GET",
-    undefined,
-    options
-  );
+export function getCommentBlocks(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/comments/{id}/blocks", { params: { id } }, options);
 }
 
 /** A reply to comment `comment` of `issue` that answers its block `block` (`b2`): `reply_to`
@@ -704,74 +653,50 @@ export function replyToCommentBlock(
   issue: string,
   comment: string,
   block: string,
-  input: Omit<CreateCommentInput, "reply_to" | "reply_to_block">,
+  input: Omit<Body<"/api/v1/issues/{key}/comments", "post">, "reply_to" | "reply_to_block">,
   options: ApiOptions = {}
-): Promise<Comment> {
+) {
   return createComment(issue, { ...input, reply_to: comment, reply_to_block: block }, options);
 }
 
-export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
-  return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
+export function getAsk(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/asks/{id}", { params: { id } }, options);
 }
 
-export function listAskFollowers(
-  id: string,
-  options: ApiOptions = {}
-): Promise<{ followers: AskFollower[] }> {
-  return request(`/api/v1/asks/${encodeURIComponent(id)}/followers`, "GET", undefined, options);
+export function listAskFollowers(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/asks/{id}/followers", { params: { id } }, options);
 }
 
 /** A session follows an ask: the bearer body names the session, which must equal the path. */
-export function followAsk(id: string, sessionID: string, actor: Actor): Promise<void> {
-  return request(
-    `/api/v1/asks/${encodeURIComponent(id)}/followers/${encodeURIComponent(sessionID)}`,
-    "PUT",
-    {},
+export function followAsk(id: string, sessionID: string, actor: Actor) {
+  return put(
+    "/api/v1/asks/{id}/followers/{session_id}",
+    { body: {}, params: { id, session_id: sessionID } },
     { actor, as: "agent" }
   );
 }
 
 /** The document's current canonical markdown, as the server's live room holds it. */
-export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
-  return request<ArtifactText>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
-    "GET",
-    undefined,
-    options
-  );
+export function getArtifactText(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/artifacts/{id}/text", { params: { id } }, options);
 }
 
 /** The blocks of the document's current version, each with the span of markdown it covers. */
-export function getArtifactBlocks(id: string, options: ApiOptions = {}): Promise<ArtifactBlock[]> {
-  return request<ArtifactBlock[]>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/blocks`,
-    "GET",
-    undefined,
-    options
-  );
+export function getArtifactBlocks(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/artifacts/{id}/blocks", { params: { id } }, options);
 }
 
 /** The same markdown by the slug route, `GET /api/v1/issues/{key}/artifacts/{slug}/text`. */
-export function getIssueArtifactText(
-  issue: string,
-  slug: string,
-  options: ApiOptions = {}
-): Promise<ArtifactText> {
-  return request<ArtifactText>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/artifacts/${encodeURIComponent(slug)}/text`,
-    "GET",
-    undefined,
+export function getIssueArtifactText(issue: string, slug: string, options: ApiOptions = {}) {
+  return get(
+    "/api/v1/issues/{key}/artifacts/{slug}/text",
+    { params: { key: issue, slug } },
     options
   );
 }
 
-export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artifact> {
-  return request<Artifact>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}`,
-    "GET",
-    undefined,
-    options
-  );
+export function getArtifact(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/artifacts/{id}", { params: { id } }, options);
 }
 
 /**
@@ -786,15 +711,28 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
  */
 export function requestApproval(
   id: string,
-  input: { summary?: string; include_verification?: boolean } = {},
+  input: Body<"/api/v1/artifacts/{id}/approval-requests", "post"> = {},
   options: ApiOptions = {}
-): Promise<{ ask: Ask; artifact_id: string; version: number }> {
-  return request(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/artifacts/{id}/approval-requests", { body: input, params: { id } }, options);
+}
+
+/** What `POST /api/v1/artifacts/{id}/approval-requests` answers. */
+export type ApprovalRequested = Result<"/api/v1/artifacts/{id}/approval-requests", "post">;
+
+/** That answer with the ask the request opened, for a row that reads the ask: the route answers
+ *  `ask: null` where the version it names is already approved, so it opened none, and a row that
+ *  goes on to read the ask would otherwise read null. */
+export function withOpenedAsk(
+  requested: ApprovalRequested
+): ApprovalRequested & { ask: NonNullable<ApprovalRequested["ask"]> } {
+  const ask = requested.ask;
+  if (ask === null) {
+    throw new Error(
+      `the approval request on ${requested.artifact_id} version ${requested.version} opened no ask`
+    );
+  }
+  return { ...requested, ask };
 }
 
 /** `POST /api/v1/artifacts/{id}/plan-reviews`: the plan review's approval of one plan version,
@@ -803,11 +741,10 @@ export function createPlanReview(
   id: string,
   version: number,
   options: ApiOptions = { as: "agent" }
-): Promise<ArtifactReview> {
-  return request<ArtifactReview>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/plan-reviews`,
-    "POST",
-    { version },
+) {
+  return post(
+    "/api/v1/artifacts/{id}/plan-reviews",
+    { body: { version }, params: { id } },
     options
   );
 }
@@ -816,96 +753,61 @@ export function createPlanReview(
  *  approval request needed: Approve, or Request changes with a reason. */
 export function reviewArtifact(
   id: string,
-  input: { state: ArtifactReviewState; reason?: string },
+  input: Body<"/api/v1/artifacts/{id}/reviews", "post">,
   options: ApiOptions = {}
-): Promise<ArtifactReview> {
-  return request<ArtifactReview>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/reviews`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/artifacts/{id}/reviews", { body: input, params: { id } }, options);
 }
 
-export function createNamedVersion(
-  id: string,
-  summary: string,
-  options: ApiOptions = {}
-): Promise<Version> {
-  return request<Version>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/versions`,
-    "POST",
-    { summary },
-    options
-  );
+export function createNamedVersion(id: string, summary: string, options: ApiOptions = {}) {
+  return post("/api/v1/artifacts/{id}/versions", { body: { summary }, params: { id } }, options);
 }
 
-export function getArtifactVersion(
-  id: string,
-  version: number,
-  options: ApiOptions = {}
-): Promise<ArtifactVersionText> {
-  return request<ArtifactVersionText>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${version}`,
-    "GET",
-    undefined,
+export function getArtifactVersion(id: string, version: number, options: ApiOptions = {}) {
+  return get(
+    "/api/v1/artifacts/{id}/versions/{number}",
+    { params: { id, number: String(version) } },
     options
   );
 }
 
 export function editArtifact(
   id: string,
-  input: EditArtifactInput,
+  input: Body<"/api/v1/artifacts/{id}/edits", "post">,
   options: ApiOptions = {}
-): Promise<{ applied: number }> {
-  return request<{ applied: number }>(
-    `/api/v1/artifacts/${encodeURIComponent(id)}/edits`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/artifacts/{id}/edits", { body: input, params: { id } }, options);
 }
 
 /** `POST /api/v1/issues/{key}/claim`: the claimant is the caller itself, so `options.actor`
  *  (the session a bearer names, as on every other write) is the holder recorded. */
-export function claimIssue(issue: string, options: ApiOptions = {}): Promise<IssueDetails> {
-  return request<IssueDetails>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/claim`,
-    "POST",
-    {},
-    options
-  );
+export function claimIssue(issue: string, options: ApiOptions = {}) {
+  return post("/api/v1/issues/{key}/claim", { body: {}, params: { key: issue } }, options);
 }
 
 /** `DELETE /api/v1/issues/{key}/claim`: the holder, `options.actor` with the agent bearer, gives
  *  the issue up. */
-export function releaseClaim(issue: string, options: ApiOptions = {}): Promise<Issue> {
-  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "DELETE", {}, options);
+export function releaseClaim(issue: string, options: ApiOptions = {}) {
+  return del("/api/v1/issues/{key}/claim", { body: {}, params: { key: issue } }, options);
 }
 
 export function createMessage(
   issue: string,
-  input: CreateMessageInput,
+  input: Body<"/api/v1/issues/{key}/messages", "post">,
   options: ApiOptions = {}
-): Promise<{ id: string }> {
-  return request<{ id: string }>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
-    "POST",
-    input,
-    options
-  );
+) {
+  return post("/api/v1/issues/{key}/messages", { body: input, params: { key: issue } }, options);
 }
 
 /** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
-  input: CreateAgentMessageInput,
+  input: Body<"/api/v1/agents/{session_id}/messages", "post">,
   options: ApiOptions = {}
-): Promise<Message> {
-  return request<Message>(
-    `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
-    "POST",
-    input,
+) {
+  return post(
+    "/api/v1/agents/{session_id}/messages",
+    { body: input, params: { session_id: sessionID } },
     options
   );
 }
@@ -913,58 +815,38 @@ export function createAgentMessage(
 /** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
  *  request the page made does. */
 export function createBroadcast(
-  input: CreateBroadcastInput,
+  input: Body<"/api/v1/broadcasts", "post">,
   options: ApiOptions = {}
-): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+) {
+  return post("/api/v1/broadcasts", { body: input }, options);
 }
 
-export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
-  return request<BroadcastSummary[]>("/api/v1/broadcasts", "GET", undefined, options);
+export function listBroadcasts(options: ApiOptions = {}) {
+  return get("/api/v1/broadcasts", {}, options);
 }
 
-export function getBroadcast(id: string, options: ApiOptions = {}): Promise<BroadcastRead> {
-  return request<BroadcastRead>(
-    `/api/v1/broadcasts/${encodeURIComponent(id)}`,
-    "GET",
-    undefined,
-    options
-  );
+export function getBroadcast(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/broadcasts/{id}", { params: { id } }, options);
 }
 
 /** `GET /api/v1/issues/{key}/messages`: every root message of the issue, oldest first, each with
  *  its replies, as the Conversation reads them. */
-export function listIssueMessages(issue: string, options: ApiOptions = {}): Promise<MessageRead[]> {
-  return request<MessageRead[]>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
-    "GET",
-    undefined,
-    options
-  );
+export function listIssueMessages(issue: string, options: ApiOptions = {}) {
+  return get("/api/v1/issues/{key}/messages", { params: { key: issue } }, options);
 }
 
-export function getMessage(
-  issue: string,
-  messageID: string,
-  options: ApiOptions = {}
-): Promise<MessageRead> {
-  return request<MessageRead>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/messages/${encodeURIComponent(messageID)}`,
-    "GET",
-    undefined,
+export function getMessage(issue: string, messageID: string, options: ApiOptions = {}) {
+  return get(
+    "/api/v1/issues/{key}/messages/{id}",
+    { params: { id: messageID, key: issue } },
     options
   );
 }
 
 /** `GET /api/v1/messages/{id}/blocks`: the message's blocks in body order, each with its span in
  *  the stored body, and whether they are indexed from that body. */
-export function getMessageBlocks(id: string, options: ApiOptions = {}): Promise<ItemBlocks> {
-  return request<ItemBlocks>(
-    `/api/v1/messages/${encodeURIComponent(id)}/blocks`,
-    "GET",
-    undefined,
-    options
-  );
+export function getMessageBlocks(id: string, options: ApiOptions = {}) {
+  return get("/api/v1/messages/{id}/blocks", { params: { id } }, options);
 }
 
 /** A reply to message `message` of `issue` that answers its block `block` (`b2`): `in_reply_to`
@@ -973,9 +855,9 @@ export function replyToMessageBlock(
   issue: string,
   message: string,
   block: string,
-  input: Omit<CreateMessageInput, "in_reply_to" | "in_reply_to_block">,
+  input: Omit<Body<"/api/v1/issues/{key}/messages", "post">, "in_reply_to" | "in_reply_to_block">,
   options: ApiOptions = {}
-): Promise<{ id: string }> {
+) {
   return createMessage(
     issue,
     { ...input, in_reply_to: message, in_reply_to_block: block },
@@ -988,35 +870,27 @@ export function replyToMessageBlock(
  *  handing back the stored reply. */
 export function replyToMessageDelivery(
   messageID: string,
-  input: { attempt: number; body?: string; error?: string },
+  input: Body<"/api/v1/messages/{id}/reply", "post">,
   actor: Actor,
   { followUp = false }: { followUp?: boolean } = {}
-): Promise<Message | MessageDelivery> {
-  return request<Message | MessageDelivery>(
-    `/api/v1/messages/${encodeURIComponent(messageID)}/reply${followUp ? "?follow_up=true" : ""}`,
-    "POST",
-    input,
-    {
-      actor,
-      as: "agent",
-    }
+) {
+  return post(
+    "/api/v1/messages/{id}/reply",
+    { body: input, params: { id: messageID }, query: followUp ? { follow_up: true } : {} },
+    { actor, as: "agent" }
   );
 }
 
 /** A session answers a mention delivered to it, the way the callback path does. */
 export function replyToCommentDelivery(
   commentID: string,
-  input: { attempt: number; body?: string; error?: string; target?: string },
+  input: Body<"/api/v1/comments/{id}/reply", "post">,
   actor: Actor
-): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/comments/${encodeURIComponent(commentID)}/reply`,
-    "POST",
-    input,
-    {
-      actor,
-      as: "agent",
-    }
+) {
+  return post(
+    "/api/v1/comments/{id}/reply",
+    { body: input, params: { id: commentID } },
+    { actor, as: "agent" }
   );
 }
 
@@ -1028,11 +902,10 @@ export function createHandoff(
   phase: string,
   body: object,
   actor: Actor = seedActor
-): Promise<HandoffSummary> {
-  return request<HandoffSummary>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/handoffs/${encodeURIComponent(phase)}`,
-    "POST",
-    { body: JSON.stringify(body) },
+) {
+  return post(
+    "/api/v1/issues/{key}/handoffs/{phase}",
+    { body: { body: JSON.stringify(body) }, params: { key: issue, phase } },
     { actor, as: "agent" }
   );
 }
@@ -1040,39 +913,33 @@ export function createHandoff(
 /** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
 export function putAgentState(
   sessionID: string,
-  input: UserAgentStateInput,
+  input: Body<"/api/v1/me/agents/{session_id}/state", "put">,
   options: ApiOptions = {}
-): Promise<UserAgentState> {
-  return request<UserAgentState>(
-    `/api/v1/me/agents/${encodeURIComponent(sessionID)}/state`,
-    "PUT",
-    input,
+) {
+  return put(
+    "/api/v1/me/agents/{session_id}/state",
+    { body: input, params: { session_id: sessionID } },
     options
   );
 }
 
 /** The signed-in human's own conversation state with every session, unread counts included. */
-export function getAgentStates(options: ApiOptions = {}): Promise<UserAgentStates> {
-  return request<UserAgentStates>("/api/v1/me/agents/state", "GET", undefined, options);
+export function getAgentStates(options: ApiOptions = {}) {
+  return get("/api/v1/me/agents/state", {}, options);
 }
 
 export function putIssueState(
   key: string,
-  input: Partial<UserIssueState>,
+  input: Body<"/api/v1/me/issues/{key}/state", "put">,
   options: ApiOptions = {}
-): Promise<UserIssueState> {
-  return request<UserIssueState>(
-    `/api/v1/me/issues/${encodeURIComponent(key)}/state`,
-    "PUT",
-    input,
-    options
-  );
+) {
+  return put("/api/v1/me/issues/{key}/state", { body: input, params: { key } }, options);
 }
 
 /** `login`'s own state on every issue, `GET /api/v1/me/state`: each issue's pin and its pinned
  *  items (`dismissed`), as the page reads them. */
-export function getMyState(login = "alice"): Promise<UserState> {
-  return request<UserState>("/api/v1/me/state", "GET", undefined, { login });
+export function getMyState(login = "alice") {
+  return get("/api/v1/me/state", {}, { login });
 }
 
 /**
@@ -1080,29 +947,13 @@ export function getMyState(login = "alice"): Promise<UserState> {
  * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh) that
  * proves the page resumes every subscription after an unplanned gap.
  */
-export function disconnectLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    "/api/v1/live/_test/disconnect",
-    "POST",
-    {},
-    {
-      as: "agent",
-      ...options,
-    }
-  );
+export function disconnectLiveSockets(options: ApiOptions = {}) {
+  return post("/api/v1/live/_test/disconnect", {}, { as: "agent", ...options });
 }
 
 /** Forces every open live socket closed with 4001, as its bounded age does. */
-export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    "/api/v1/live/_test/rotate",
-    "POST",
-    {},
-    {
-      as: "agent",
-      ...options,
-    }
-  );
+export function rotateLiveSockets(options: ApiOptions = {}) {
+  return post("/api/v1/live/_test/rotate", {}, { as: "agent", ...options });
 }
 
 /**
@@ -1111,16 +962,8 @@ export function rotateLiveSockets(options: ApiOptions = {}): Promise<{ ok: boole
  * run-server.sh) that resetDatabase uses so its TRUNCATE cannot cross lock order with a
  * settlement still running from the scenario before it.
  */
-export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    "/api/v1/artifacts/_test/quiesce",
-    "POST",
-    {},
-    {
-      as: "agent",
-      ...options,
-    }
-  );
+export function quiesceDocuments(options: ApiOptions = {}) {
+  return post("/api/v1/artifacts/_test/quiesce", {}, { as: "agent", ...options });
 }
 
 /**
@@ -1137,19 +980,8 @@ export function slowWrites(
   path: string,
   delayMs: number,
   options: ApiOptions = {}
-): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    "/api/v1/writes/_test/slow",
-    "POST",
-    { delay_ms: delayMs, method, path },
-    options
-  );
-}
-
-/** The route of `project`'s source `repo` (`owner/name`): a source is addressed by its repository. */
-function architectureSourcePath(project: string, repo: string): string {
-  const [owner = "", name = ""] = repo.split("/");
-  return `/api/v1/projects/${encodeURIComponent(project)}/architecture-sources/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+) {
+  return post("/api/v1/writes/_test/slow", { body: { delay_ms: delayMs, method, path } }, options);
 }
 
 /** Adds `repo`'s `.dispatch/architecture` on `branch` as one of `project`'s sources, or moves that
@@ -1158,11 +990,10 @@ export function putArchitectureSource(
   project: string,
   input: { branch: string; repo: string },
   options: ApiOptions = {}
-): Promise<ArchitectureSource> {
-  return request<ArchitectureSource>(
-    architectureSourcePath(project, input.repo),
-    "PUT",
-    { branch: input.branch },
+) {
+  return put(
+    "/api/v1/projects/{key}/architecture-sources/{owner}/{repo}",
+    { body: { branch: input.branch }, params: { key: project, ...repoParams(input.repo) } },
     options
   );
 }
@@ -1170,66 +1001,44 @@ export function putArchitectureSource(
 /** Names the person a project's unowned new issues fall to, or clears it with `assignee: null`. */
 export function putProjectDefaultAssignee(
   project: string,
-  input: ProjectDefaultAssigneeInput,
+  input: Body<"/api/v1/projects/{key}/default-assignee", "put">,
   options: ApiOptions = {}
-): Promise<ProjectDefaultAssignee> {
-  return request<ProjectDefaultAssignee>(
-    `/api/v1/projects/${encodeURIComponent(project)}/default-assignee`,
-    "PUT",
-    input,
+) {
+  return put(
+    "/api/v1/projects/{key}/default-assignee",
+    { body: input, params: { key: project } },
     options
   );
 }
 
 /** Every project that names a default assignee, as the Settings page reads them. */
-export function listProjectDefaultAssignees(
-  options: ApiOptions = {}
-): Promise<ProjectDefaultAssignee[]> {
-  return request<ProjectDefaultAssignee[]>(
-    "/api/v1/settings/project-default-assignees",
-    "GET",
-    undefined,
-    options
-  );
+export function listProjectDefaultAssignees(options: ApiOptions = {}) {
+  return get("/api/v1/settings/project-default-assignees", {}, options);
 }
 
 /** Imports `project`'s source `repo` now; a rejected model answers 200 with the reason in
  *  `last_error`. */
-export function syncArchitectureSource(
-  project: string,
-  repo: string,
-  options: ApiOptions = {}
-): Promise<ArchitectureSource> {
-  return request<ArchitectureSource>(
-    `${architectureSourcePath(project, repo)}/sync`,
-    "POST",
-    undefined,
+export function syncArchitectureSource(project: string, repo: string, options: ApiOptions = {}) {
+  return post(
+    "/api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync",
+    { params: { key: project, ...repoParams(repo) } },
     options
   );
 }
 
-export function getArchitecture(
-  project: string,
-  options: ApiOptions = {}
-): Promise<ArchitectureTree> {
-  return request<ArchitectureTree>(
-    `/api/v1/projects/${encodeURIComponent(project)}/architecture`,
-    "GET",
-    undefined,
-    options
-  );
+export function getArchitecture(project: string, options: ApiOptions = {}) {
+  return get("/api/v1/projects/{key}/architecture", { params: { key: project } }, options);
 }
 
 /** Retry one comment mention's delivery, the endpoint the "Mention deliveries" Retry posts to. */
 export function retryCommentDelivery(
   comment: string,
-  input: { delivery: "aside" | "btw" | "steer"; target: string },
+  input: Body<"/api/v1/comments/{id}/deliveries", "post">,
   options: ApiOptions = {}
-): Promise<CommentDelivery> {
-  return request<CommentDelivery>(
-    `/api/v1/comments/${encodeURIComponent(comment)}/deliveries`,
-    "POST",
-    input,
+) {
+  return post(
+    "/api/v1/comments/{id}/deliveries",
+    { body: input, params: { id: comment } },
     options
   );
 }
@@ -1248,26 +1057,23 @@ export function setAgentStreamResponder(
   sessionID: string,
   responding: boolean,
   options: ApiOptions = {}
-): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish?as=responder`,
-    "POST",
-    { responding },
+) {
+  return post(
+    "/api/v1/agents/{session_id}/stream/_test/publish",
+    { body: { responding }, params: { session_id: sessionID }, query: { as: "responder" } },
     options
   );
 }
 
 export function publishAgentStreamFrame(
   sessionID: string,
-  frame: object,
+  frame: Record<string, unknown>,
   as: "frame" | "replay" | "drop" = "frame",
   options: ApiOptions = {}
-): Promise<{ ok: boolean }> {
-  const query = as === "frame" ? "" : `?as=${as}`;
-  return request<{ ok: boolean }>(
-    `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish${query}`,
-    "POST",
-    frame,
+) {
+  return post(
+    "/api/v1/agents/{session_id}/stream/_test/publish",
+    { body: frame, params: { session_id: sessionID }, query: as === "frame" ? {} : { as } },
     options
   );
 }
@@ -1276,9 +1082,6 @@ export function publishAgentStreamFrame(
  * socket, which asks the session for its replay again and rebuilds the transcript: this is how a
  * test gets a second replay into a page that is already open, which a published frame alone
  * cannot do. */
-export function dropAgentStreamViewers(
-  sessionID: string,
-  options: ApiOptions = {}
-): Promise<{ ok: boolean }> {
+export function dropAgentStreamViewers(sessionID: string, options: ApiOptions = {}) {
   return publishAgentStreamFrame(sessionID, {}, "drop", options);
 }

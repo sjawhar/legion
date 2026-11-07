@@ -1,6 +1,6 @@
 import { type ReactNode, type RefObject, useRef } from "react";
 
-import type { Artifact, Ask, Event } from "../../api/types";
+import type { Artifact, Ask, DispatchEvent } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   activeTabIndicatorBorder,
@@ -75,7 +75,7 @@ export interface MarginSheetModel {
     onSelectCard: (id: string, blockID?: string) => void;
     openAskCount: number;
     pendingActionIds: ReadonlySet<string>;
-    pinned: Event[];
+    pinned: DispatchEvent[];
     pinnedConversations: PinnedConversationCard[];
     pinnedIds: string[];
     resolvedThreads: Thread[];

@@ -53,7 +53,7 @@ function pinAttempt({ issueKey, operation }: PinWrite) {
       try {
         const next = await api.putIssueState(
           issueKey,
-          { dismissed: applyPinStateOperation(base.dismissed, operation), seq: base.seq + 1 },
+          { dismissed: applyPinStateOperation(base.dismissed ?? [], operation), seq: base.seq + 1 },
           bounds
         );
         authoritative.set(issueKey, next);
@@ -123,10 +123,13 @@ export function writePin(
   let applied: PinStateOperation | undefined;
   client.setQueryData<UserState>(["user-state"], (current) => {
     const state = stateForIssue(current, issueKey);
-    applied = typeof operation === "function" ? operation(state.dismissed) : operation;
+    applied = typeof operation === "function" ? operation(state.dismissed ?? []) : operation;
     return {
       ...current,
-      [issueKey]: { ...state, dismissed: applyPinStateOperation(state.dismissed, applied) },
+      [issueKey]: {
+        ...state,
+        dismissed: applyPinStateOperation(state.dismissed ?? [], applied),
+      },
     };
   });
   if (applied === undefined) return;

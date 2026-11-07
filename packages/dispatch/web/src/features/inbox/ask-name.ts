@@ -5,10 +5,14 @@
  * so the checkbox, the Snooze control and the grouping that counts twins cannot disagree.
  */
 
-import type { Ask } from "../../api/types";
+import type { Ask, InboxRow } from "../../api/types";
+
+/** An ask as a surface may be handed one: the ask itself, and - only on an Inbox row, which is
+ *  the one read that carries them - the issue and the document it was asked on. */
+export type OwnedAsk = Ask & Pick<InboxRow, "document" | "issue">;
 
 /** What the naming rules read off a row: the ask's own fields, not a copy of their shapes. */
-export type NamedAsk = Pick<Ask, "id" | "question" | "issue" | "issue_key" | "document">;
+export type NamedAsk = Pick<InboxRow, "document" | "id" | "issue" | "issue_key" | "question">;
 
 /** How much of a question a control's name can carry before it stops being a name. */
 const CONTROL_NAME_QUESTION_CHARS = 48;

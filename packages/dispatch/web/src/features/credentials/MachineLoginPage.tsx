@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
-import type { CredentialDecisionResponse } from "../../api/types";
+import type { DecisionResponse, StateResponse } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -82,7 +82,7 @@ export function MachineLoginPage(): ReactNode {
   const lookedUpCode = lookup.variables ?? "";
 
   // Each is typed by its answer, which its callbacks read.
-  const approve = useKeyedWrite<CredentialDecisionResponse>({
+  const approve = useKeyedWrite<DecisionResponse>({
     write: (_variables, bounds) =>
       api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
     inline: true,
@@ -95,7 +95,7 @@ export function MachineLoginPage(): ReactNode {
       if (decided === null) lookup.mutate(lookedUpCode);
     },
   });
-  const deny = useKeyedWrite<CredentialDecisionResponse>({
+  const deny = useKeyedWrite<StateResponse>({
     write: (_variables, bounds) =>
       api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
     inline: true,
@@ -117,7 +117,16 @@ export function MachineLoginPage(): ReactNode {
       lookup.mutate(code);
     });
   };
-  const madeHere = approve.data ?? deny.data ?? undefined;
+  // What a decision made on this page left: an approval names the launcher credential it minted,
+  // and a denial names none, which is the broker's own split between the two answers.
+  const approved = approve.data ?? undefined;
+  const denied = deny.data ?? undefined;
+  const madeHere =
+    approved !== undefined
+      ? { credential_id: approved.credential_id, state: approved.state }
+      : denied === undefined
+        ? undefined
+        : { credential_id: null, state: denied.state };
   // The looked-up record and its decision as the page now knows them: a decision made here leaves
   // the record decided, with the credential an approval minted.
   const view =
@@ -126,10 +135,7 @@ export function MachineLoginPage(): ReactNode {
       : madeHere === undefined
         ? { decided: record.decided, record }
         : {
-            decided: {
-              credential_id: madeHere.state === "approved" ? madeHere.credential_id : null,
-              event: madeHere.state,
-            },
+            decided: { credential_id: madeHere.credential_id, event: madeHere.state },
             record: { ...record, state: madeHere.state },
           };
 
@@ -181,7 +187,7 @@ export function MachineLoginPage(): ReactNode {
             <MachineLoginDecision
               credentialId={view.decided.credential_id}
               event={view.decided.event}
-              host={view.record.identifiers[0] ?? ""}
+              host={view.record.identifiers?.[0] ?? ""}
               service={view.record.service}
             />
           )}

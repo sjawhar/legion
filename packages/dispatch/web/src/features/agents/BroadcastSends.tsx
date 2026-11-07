@@ -256,7 +256,10 @@ function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
     queryFn: () => api.getBroadcast(created.id),
     queryKey: ["broadcast", created.id],
   }).data;
-  const states = read.recipients.map((recipient) => recipient.message.deliveries.at(-1)?.state);
+  const states = (read.recipients ?? []).map(
+    (recipient) => (recipient.message.deliveries ?? []).at(-1)?.state
+  );
+  const excluded = created.excluded ?? [];
   const delivering = states.filter((state) => state === "pending").length;
   const failed = states.filter((state) => state === "failed").length;
   return (
@@ -266,9 +269,9 @@ function SentBroadcast({ created }: { created: BroadcastCreated }): ReactNode {
         state={{ excluded: created.excluded }}
         to={`/agents/broadcasts/${created.id}`}
       >
-        Sent to {agentCount(created.recipients.length)}
+        Sent to {agentCount((created.recipients ?? []).length)}
       </Link>
-      {created.excluded.length === 0 ? null : `, ${created.excluded.length} excluded`}
+      {excluded.length === 0 ? null : `, ${excluded.length} excluded`}
       {delivering > 0
         ? ` — delivering to ${agentCount(delivering)}…`
         : failed > 0

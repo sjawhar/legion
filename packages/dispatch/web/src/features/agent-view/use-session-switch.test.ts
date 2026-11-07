@@ -16,13 +16,17 @@ afterEach(() => {
 
 function attempt(overrides: Partial<MessageDelivery> = {}): MessageDelivery {
   return {
+    accepted_as: null,
+    accepted_at: null,
     attempt: 1,
     created_at: "2026-10-25T10:00:00Z",
     delivery: "steer",
+    duplicate: false,
     envelope_id: "envelope-1",
     error: null,
     message_id: "s1",
     reply_id: null,
+    requested_by: null,
     session_id: SESSION,
     state: "sent",
     ...overrides,
@@ -34,11 +38,13 @@ function switchMessage(id: string, body: string, deliveries = [attempt()]): Mess
   return {
     author: { id: "sami", kind: "user" },
     body,
+    broadcast_id: null,
     created_at: "2026-10-25T10:00:00Z",
     deliveries,
     id,
     in_reply_to: null,
     issue_key: null,
+    reply_block: null,
     target: `session:${SESSION}`,
   };
 }
@@ -47,11 +53,13 @@ function reply(id: string, inReplyTo: string, body: string, author = SESSION): M
   return {
     author: author === SESSION ? { id: SESSION, kind: "session" } : { id: author, kind: "user" },
     body,
+    broadcast_id: null,
     created_at: "2026-10-25T10:00:01Z",
     deliveries: [],
     id,
     in_reply_to: inReplyTo,
     issue_key: null,
+    reply_block: null,
     target: null,
   };
 }

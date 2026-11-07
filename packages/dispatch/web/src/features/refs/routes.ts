@@ -761,7 +761,7 @@ export function itemRoute(
  *  the shape every in-app thread link already uses. A typed ask block is named by its block
  *  fragment, which is how a decision block is focused, rather than by the ask's id. */
 export function documentItemPath(
-  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug">,
+  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "session_id" | "slug">,
   item: { blockID?: string; id: string; kind: "ask" | "comment" }
 ): string {
   const path = buildReferencePath(documentRoute(artifact));

@@ -35,7 +35,7 @@ export type ComponentTone =
 export type ComponentIndex = ReadonlyMap<string, ArchitectureTreeComponent>;
 
 export function indexComponents(tree: Pick<ArchitectureTree, "components">): ComponentIndex {
-  return new Map(tree.components.map((component) => [component.id, component]));
+  return new Map((tree.components ?? []).map((component) => [component.id, component]));
 }
 
 /** The components whose `parent` is `parent` (`null` for the roots), in the server's order. */
@@ -163,21 +163,21 @@ export type ChildPlacement =
   | { kind: "uncounted" };
 
 export function placeChild(tree: ArchitectureTree, component: string, key: string): ChildPlacement {
-  const here = tree.components
+  const here = (tree.components ?? [])
     .find((candidate) => candidate.id === component)
-    ?.issues.find((issue) => issue.key === key);
+    ?.issues?.find((issue) => issue.key === key);
   if (here !== undefined) {
     return { issue: here, kind: "here" };
   }
-  for (const candidate of tree.components) {
-    if (candidate.issues.some((issue) => issue.key === key)) {
+  for (const candidate of tree.components ?? []) {
+    if ((candidate.issues ?? []).some((issue) => issue.key === key)) {
       return { component: candidate.id, kind: "elsewhere" };
     }
   }
-  if (tree.not_architectural.some((issue) => issue.key === key)) {
+  if ((tree.not_architectural ?? []).some((issue) => issue.key === key)) {
     return { kind: "not-architectural" };
   }
-  if (tree.unassigned.some((issue) => issue.key === key)) {
+  if ((tree.unassigned ?? []).some((issue) => issue.key === key)) {
     return { kind: "unassigned" };
   }
   return { kind: "uncounted" };
@@ -210,25 +210,25 @@ export function predictTree(
   now: string
 ): ArchitectureTree {
   const isDone = issue.status === "done" ? 1 : 0;
-  const components: PredictedComponent[] = tree.components.map((component) => {
-    const row = component.issues.find((candidate) => candidate.key === issue.key);
+  const components: PredictedComponent[] = (tree.components ?? []).map((component) => {
+    const row = (component.issues ?? []).find((candidate) => candidate.key === issue.key);
     if (row === undefined) {
-      return { ...component, issues: [...component.issues] };
+      return { ...component, issues: [...(component.issues ?? [])] };
     }
     const own = row.attached === "direct" ? 1 : 0;
     return {
       ...component,
       done: component.done - isDone,
-      issues: component.issues.filter((candidate) => candidate.key !== issue.key),
+      issues: (component.issues ?? []).filter((candidate) => candidate.key !== issue.key),
       own_done: component.own_done - isDone * own,
       own_total: component.own_total - own,
       total: component.total - 1,
     };
   });
   const index = new Map(components.map((component) => [component.id, component]));
-  const notArchitectural = tree.not_architectural.filter((row) => row.key !== issue.key);
-  const unassigned = tree.unassigned.filter((row) => row.key !== issue.key);
-  const retired = tree.retired_links.filter((row) => row.key !== issue.key);
+  const notArchitectural = (tree.not_architectural ?? []).filter((row) => row.key !== issue.key);
+  const unassigned = (tree.unassigned ?? []).filter((row) => row.key !== issue.key);
+  const retired = (tree.retired_links ?? []).filter((row) => row.key !== issue.key);
 
   const rowBase = {
     external_links: [],

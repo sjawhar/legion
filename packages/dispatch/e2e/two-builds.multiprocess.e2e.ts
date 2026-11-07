@@ -813,7 +813,7 @@ test("a windowed item keeps the whole-text row the older build's meaning search 
   // so both builds find it while the row is there.
   const hits = await search("astrolabe wharf canary", { as: "agent" });
   expect(
-    hits.results.filter((hit) => hit.kind === "comment" && hit.id === comment.id),
+    (hits.results ?? []).filter((hit) => hit.kind === "comment" && hit.id === comment.id),
     "the newer build's hit for the comment"
   ).not.toEqual([]);
 

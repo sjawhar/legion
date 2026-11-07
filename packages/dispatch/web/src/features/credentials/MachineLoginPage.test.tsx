@@ -4,10 +4,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
-import type { CredentialRecord } from "../../api/types";
+import type { RecordResponse } from "../../api/types";
 import { MachineLoginPage } from "./MachineLoginPage";
 
-function machineRecord(overrides: Partial<CredentialRecord> = {}): CredentialRecord {
+function machineRecord(overrides: Partial<RecordResponse> = {}): RecordResponse {
   return {
     approver: "sami",
     decided: null,
@@ -21,6 +21,7 @@ function machineRecord(overrides: Partial<CredentialRecord> = {}): CredentialRec
     requested_at: "2026-09-27T00:00:00Z",
     rules_version: "v3",
     service: null,
+    session: { enrollment: null, request: null },
     state: "pending",
     ...overrides,
   };

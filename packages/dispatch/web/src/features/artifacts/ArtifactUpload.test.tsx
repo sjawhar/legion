@@ -58,6 +58,8 @@ test("confirming the staged file uploads it with the typed summary", async () =>
       name: "notes.md",
       primary: false,
       project: "CORE",
+      ref_key: "CORE-1/notes-md",
+      session_id: null,
       slug: "notes-md",
       versions: [],
     },

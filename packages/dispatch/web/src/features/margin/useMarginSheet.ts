@@ -153,7 +153,7 @@ export function useMarginSheet(): MarginSheetModel {
     documentRoute === undefined
       ? routeArtifactSlug === undefined
         ? primarySpec(issue.data)
-        : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
+        : issue.data?.artifacts?.find((artifact) => artifact.slug === routeArtifactSlug)
       : documentArtifact.data;
   const visibleArtifactId = visibleArtifact?.id;
   const removePin = useCallback(

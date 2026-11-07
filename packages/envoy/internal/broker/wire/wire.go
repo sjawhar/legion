@@ -231,3 +231,10 @@ type StateResponse struct {
 	// The state the call left the request, record or grant in: "denied", "cancelled" or "revoked".
 	State string `json:"state"`
 }
+
+// MachineLookupRequest is the body POST /v1/machine-logins/lookup takes, which Dispatch relays
+// to the broker unparsed (its own POST /api/v1/credential-requests/machine-lookup).
+type MachineLookupRequest struct {
+	// The XXXX-XXXX confirmation code the machine shows, as the approver typed it.
+	Code string `json:"code" required:"true"`
+}

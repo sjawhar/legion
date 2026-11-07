@@ -78,11 +78,12 @@ export function ComponentDetails({
       return next;
     });
   };
-  const { done, open } = splitWork(component.issues);
+  const issues = component.issues ?? [];
+  const { done, open } = splitWork(issues);
   const headingId = `component-details-${component.id}`;
-  const dependencies = component.depends_on.map((id) => ({
+  const dependencies = (component.depends_on ?? []).map((id) => ({
     id,
-    title: tree.components.find((candidate) => candidate.id === id)?.title,
+    title: (tree.components ?? []).find((candidate) => candidate.id === id)?.title,
   }));
   return (
     <section
@@ -114,7 +115,7 @@ export function ComponentDetails({
       </header>
 
       <h3 className={`mt-4 text-sm font-semibold ${textSecondaryOnSurface}`}>Work</h3>
-      {component.issues.length === 0 ? (
+      {issues.length === 0 ? (
         <p className={`mt-1 text-sm ${textMutedOnSurface}`}>
           {component.external
             ? "External components carry no work."
@@ -186,11 +187,11 @@ export function ComponentDetails({
         </dd>
         <dt className="font-medium">Paths</dt>
         <dd>
-          {component.paths.length === 0 ? (
+          {(component.paths ?? []).length === 0 ? (
             <span className={textMutedOnSurface}>None declared</span>
           ) : (
             <ul className="flex flex-wrap gap-x-3 gap-y-1">
-              {component.paths.map((path) => (
+              {(component.paths ?? []).map((path) => (
                 <li key={path}>
                   <code className="text-xs">{path}</code>
                 </li>
@@ -285,7 +286,7 @@ function WorkRow({
         </div>
         <StatusPill>{statusText(issue.status)}</StatusPill>
         <Timestamp at={issue.updated_at} className={`text-xs ${textMutedOnSurface}`} />
-        {issue.external_links.map((link) => (
+        {(issue.external_links ?? []).map((link) => (
           <span className="flex items-center" key={link.url}>
             <GitHubLink link={link} />
           </span>

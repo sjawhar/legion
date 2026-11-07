@@ -49,7 +49,7 @@ export function AskThreadDisclosure({
     );
   }
 
-  const replyCount = thread.data?.replies.length ?? 0;
+  const replyCount = (thread.data?.replies ?? []).length;
   if (replyCount === 0 && ask.state !== "answered") return null;
 
   // The composer follows the control that reveals it, so the next Tab from the control lands in

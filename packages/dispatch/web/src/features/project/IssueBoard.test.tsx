@@ -68,7 +68,7 @@ function renderBoard(
   lanes?: boolean
 ) {
   const listIssues = spyOn(api, "listIssues").mockImplementation(async (options = {}) => {
-    const labels = options.labels ?? [];
+    const labels = options.label ?? [];
     return labels.length === 0
       ? list
       : list.filter((entry) => labels.every((label) => (entry.labels ?? []).includes(label)));
@@ -205,7 +205,9 @@ const patched: Issue = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
+  verification_artifact_id: "",
   priority: null,
   project: "CORE",
   rank: "U",

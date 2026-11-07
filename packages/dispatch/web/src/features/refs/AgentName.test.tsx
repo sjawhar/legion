@@ -15,6 +15,7 @@ import { AGENT_REGISTRY_POLL_MS, AgentRegistryPoller } from "./agent-registry";
 function listed(sessionId: string, title: string, lastSeen = Date.now() - 3 * 60_000): Agent {
   return {
     session_id: sessionId,
+    state: "live",
     title,
     dir: "/w",
     host: "host",
