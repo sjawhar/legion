@@ -12,6 +12,15 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 ## Send a message to another session
 
 - Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
+
+- Address a session by its full id; an 8-character prefix is a display label, not an address.
+  Prefixes collide across live sessions, so resolve a prefix only against a full session listing (`envoy_sessions`, or `envoy ps --json`) and refuse it when it matches more than one, because a send that resolves to the wrong session succeeds silently.
+
+- Absence from `envoy_sessions` is not evidence a session is gone: the host that shows a tool's result can cut a long one to a partial list.
+  Look the session up directly, or use `envoy_role_get(role=...)` for a role, and read its `state` for whether it is live (see 'Whether a session is live').
+
+- To learn a session's project, owner or current work, ask the session over Envoy and read its answer; do not infer it from a name, a working directory, or a script.
+
 - Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
 - Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
 - When `envoy_send` says the send is not confirmed delivered, send the same message again with the `idempotency_key` the error names, within 72 hours: Envoy drops it as a repeat if the first copy arrived, and the result says when an earlier attempt was already stored. A resend without that key can deliver the message twice. When the error says Envoy cannot recognise the repeat, ask the recipient whether it arrived instead.
