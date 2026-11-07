@@ -238,6 +238,10 @@ const parallelProjects = [
   // picker's and the live header pickers' keyboard-step rule rests on: the six rows of
   // `keyboard-agents-picker` that step a select from the keyboard or leave one without Enter,
   // and all five of `keyboard-session-pickers`.
+  // A send held open across two in-app navigations, with the row's draft, its picker and its
+  // Reply held until the server answers: `keyboard-agents-picker`'s row back after the reader
+  // left mid-send, which carries `@webkit` alone because each of its six measured failures was
+  // in WebKit.
   // The engine's cancellation of a chunk the navigation away from it left downloading, and the
   // margin hold's frame and scroll order: seven `deep-links` rows - the held chunk's, the press
   // raced against the landing's own frames, the two hidden-editor rows that run with the page's
@@ -255,7 +259,9 @@ const parallelProjects = [
   // The one-socket invariant: `live-socket`'s row that a tab holds one live socket for every live
   // view, since WebKit is the engine iOS Safari opens every subscription in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
-  // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // ask before a tab unloads: six `keyed-writes` rows and two `keyed-send` rows. The sixth
+  // `keyed-writes` row, the ask answer whose answer is lost, carries `@webkit` alone: both of
+  // its measured failures were in WebKit.
   // Without a `testMatch` the project would see every spec in this directory, so it names the
   // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
   // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.

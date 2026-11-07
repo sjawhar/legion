@@ -1996,7 +1996,7 @@ The `webkit` Playwright project runs the rows tagged `@webkit` (`webkitTagged` i
 `e2e/playwright.config.ts`) of `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/heavy-streamed-turn.e2e.ts`, `e2e/keyboard-agents-picker.e2e.ts`,
 `e2e/keyboard-session-pickers.e2e.ts`, `e2e/keyed-send.e2e.ts`, `e2e/keyed-writes.e2e.ts`,
-`e2e/live-socket.e2e.ts`, `e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, 33 rows; the comment
+`e2e/live-socket.e2e.ts`, `e2e/mermaid.e2e.ts` and `e2e/offline-edits.e2e.ts`, 36 rows; the comment
 above the project names each engine behaviour and the rows that exercise it, and a comment above
 each tagged row names which. Every row of the live-socket spec runs in `chromium`, and its one-socket
 row also runs in `firefox`, `webkit` and `webkit-iphone`: a tab holds one live socket in every
@@ -2013,7 +2013,10 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. Its rows on a message in flight (the picker and Reply held, no sent text back in the
+send still name one issue. Its row back after the reader left mid-send carries `@webkit` alone, for a
+reason of its own: the send it holds across two in-app navigations is the same in every engine, but each
+of that row's six measured failures was in WebKit, so it is kept on the engine they were seen on. Its
+other rows on a message in flight (the picker and Reply held, no sent text back in the
 composer, and a refusal shown beside the draft that was sent) and on an issue closed after its pick (still named,
 marked closed) carry no engine tag and run in Chromium alone: the config's clause names only the rows that step a
 select from the keyboard or leave one without Enter. All five rows of `e2e/keyboard-session-pickers.e2e.ts` run
@@ -2025,8 +2028,9 @@ by the tag in the title, so a row that loses the tag drops out with no failure: 
 renaming one, run `bunx playwright test --config e2e/playwright.config.ts --project=webkit --list`
 and check that it is listed. The three tagged offline-edits rows exercise browser-held IndexedDB updates and the
 WebSocket acknowledgement flow in WebKit as they do in Firefox and Chromium. The keyed write path
-(five rows of `e2e/keyed-writes.e2e.ts`, two of `e2e/keyed-send.e2e.ts`) runs here and in `firefox`
-as well: each engine fails a request whose network is down, aborts one the page gives up on, reads an
+runs here and in `firefox` as well: six rows of `e2e/keyed-writes.e2e.ts` here and five there, the
+lost-answer row being WebKit's alone, and two of `e2e/keyed-send.e2e.ts` in both.
+Each engine fails a request whose network is down, aborts one the page gives up on, reads an
 upload's answer (an answer Dispatch wrote with the body still coming, then closed on, reached WebKit
 as `Error sending data: Broken pipe` and Firefox as `NS_ERROR_NET_RESET` until Dispatch drained the
 body first, which the 20 MB in-flight upload row holds), keeps a tab's `sessionStorage` across a
@@ -2036,7 +2040,7 @@ whose DevTools protocol paces a page's own upload; the in-flight upload row runs
 engines and is throttled only in Chromium.
 CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `webkit` and `firefox` projects run six rows of `e2e/deep-links.e2e.ts`, tagged for two
+The `webkit` and `firefox` projects run seven rows of `e2e/deep-links.e2e.ts`, tagged for two
 reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
 (`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
@@ -2058,8 +2062,8 @@ The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four row
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs the rows tagged `@firefox` (`firefoxTagged` in
-`e2e/playwright.config.ts`), 33 rows: the same rows of the same specs as `webkit` but
-`e2e/collab-cursor.e2e.ts`'s, and the rows of `e2e/code-line-replace.e2e.ts` and
+`e2e/playwright.config.ts`), 34 rows: the same rows of the same specs as `webkit` but
+`e2e/collab-cursor.e2e.ts`'s and the two `webkit` alone carries, and the rows of `e2e/code-line-replace.e2e.ts` and
 `e2e/picture-link-click.e2e.ts`. Firefox's native editing puts text
 typed over a code block's last line before that line's newline, and deletes a paragraph's hard break
 along with the text after it, which Chromium and WebKit never do, so that spec is the one that needs

@@ -284,9 +284,28 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "a finger drag exercises the phone project");
   await seedDeliveryFixture();
+  // The reconcile pass the server runs on its own five-minute tick (`ReconcileInterval`,
+  // `delivery/reconcile.go`) can land anywhere inside this row: the fake GitHub holds no
+  // installation for acme/widgets, so the pass fails its permission check and
+  // RecordReconcileError writes that failure, which the page's live socket carries to the
+  // freshness rows. Measured with the timeline open and no finger on the page: the `prs` row
+  // grows from `PRs never checked` to that sentence, the Source freshness block rewraps
+  // 56 px -> 96 px, and the page, scrolled to the chart, follows it from 2186 to 2226. Written
+  // here, word for word what that pass writes, so the page the finger meets is already the one
+  // the pass leaves and a pass landing mid-row moves nothing (INFRA-1260).
+  await sql(
+    `UPDATE delivery_settings
+       SET last_error = 'the GitHub App is not installed on acme/widgets'
+     WHERE singleton`
+  );
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   await openTimeline(page);
+  // The settle `before` is read after: the page's first body already carries that failure, and
+  // this is what says so, rather than the drag being measured against rows still rewrapping.
+  await expect(page.locator('[data-source="prs"]')).toHaveText(
+    /the GitHub App is not installed on acme\/widgets/
+  );
 
   // A real touch through Chromium's Input.dispatchTouchEvent (touch.ts), not page.mouse, which
   // the other rows use on this project too. The finger lands on #1's merge dot, so its first
@@ -313,7 +332,12 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
   // Up the time axis (later times) from the dot, which sits near the chart's foot.
   await finger.moveTo({ x: dot.x, y: Math.max(box.y + 20, dot.y - box.height * 0.4) }, 8);
   await expect(page.getByTestId("delivery-brush-band")).toBeVisible();
-  // The chart claims the finger (touch-action: none): the page does not scroll under it.
+  // The chart claims the finger: the page neither scrolls nor widens under it. Measured on this
+  // project, the chart's own handlers are what hold it - with `touch-none` taken off
+  // `Timeline.tsx` and the bundle rebuilt, a finger dragged down the chart with 2,226 px of room
+  // above still moved the page 2,226 -> 2,226, while the same drag on the heading moved it
+  // 0 -> 285 - so the class declares the intent and this reading catches a page moving under a
+  // finger that is down, which is what it last failed on (INFRA-1260).
   expect(await layout()).toEqual(before);
   await finger.lift();
 
@@ -326,11 +350,10 @@ test("on a phone a finger dragged along the chart sets a brush window and moves 
 // `truncate` line, so a flex item's automatic minimum size is the whole sentence, and without
 // that class a row naming a reconcile error stands past the column and a phone, which lays its
 // page out to its widest content, widens and scrolls the whole page under the reader. The row
-// above reads the same width, but only over the scene the fixture seeds, which holds no
-// reconcile error: it catches this only on the rare run where a real failure happens to arrive
-// while the finger is down, so removing `min-w-0` leaves it green nearly every run. Here the
-// failure is written while the finger is down, so the longest text the row can carry is always
-// on the page when the width is read.
+// above carries that failure too, but written before its page opens, so what it reads is a page
+// laid out once around the longest text the rows can carry; here the failure is written while
+// the finger is down, so the rewrap itself happens under the finger and the width is read
+// across it.
 test("on a phone a reconcile error arriving under the finger widens nothing @phone", async ({
   browser,
 }, testInfo) => {
