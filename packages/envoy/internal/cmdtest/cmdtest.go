@@ -18,11 +18,10 @@ import (
 )
 
 // Build builds the main package in the test's working directory, its own command's, into a binary
-// named name that is removed when the test ends. ENVOY_TEST_GO_OVERLAY, when set, is passed to go
-// build -overlay, so a probe can build the binary from changed sources without editing the tree.
+// named name that is removed when the test ends.
 func Build(t testing.TB, name string) string {
 	t.Helper()
-	return build(t, name)
+	return BuildCommand(t, Command{Name: name})
 }
 
 // BuildStamped is Build with the binary stamped with commit as the image build stamps it:
@@ -31,21 +30,41 @@ func Build(t testing.TB, name string) string {
 // binary per commit.
 func BuildStamped(t testing.TB, name, commit string) string {
 	t.Helper()
-	return build(t, name, "-ldflags", "-X main.buildCommit="+commit)
+	return BuildCommand(t, Command{Name: name, Flags: []string{"-ldflags", "-X main.buildCommit=" + commit}})
 }
 
-// build is Build with flags passed to go build before the package.
-func build(t testing.TB, name string, flags ...string) string {
+// Command is a binary to build: Name is what the binary is called under the test's own
+// directory, Dir the directory go build runs in (the test's own when empty), Target what it
+// builds ("." when empty), Flags the flags before the target, and Env the whole environment of
+// the go command (the process's when nil).
+type Command struct {
+	Name   string
+	Dir    string
+	Target string
+	Flags  []string
+	Env    []string
+}
+
+// BuildCommand builds c and returns the binary's path. The binary is removed when the test ends,
+// and ENVOY_TEST_GO_OVERLAY, when set, is passed to go build -overlay, so a probe can build it
+// from changed sources without editing the tree.
+func BuildCommand(t testing.TB, c Command) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), name)
+	binary := filepath.Join(t.TempDir(), c.Name)
 	args := []string{"build", "-o", binary}
 	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}
-	args = append(args, flags...)
-	args = append(args, ".")
-	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", name, err, out)
+	args = append(args, c.Flags...)
+	target := c.Target
+	if target == "" {
+		target = "."
+	}
+	args = append(args, target)
+	cmd := exec.Command("go", args...)
+	cmd.Dir, cmd.Env = c.Dir, c.Env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build %s: %v\n%s", c.Name, err, out)
 	}
 	return binary
 }

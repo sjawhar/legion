@@ -320,14 +320,11 @@ func TestABrokerOutageLongerThanALease(t *testing.T) {
 // buildBroker builds this command.
 func buildAgentSecrets(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "agent-secrets")
-	build := exec.Command("go", "build", "-o", binPath, ".")
-	build.Dir = filepath.Join("..", "agent-secrets")
-	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.27.3")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/agent-secrets: %v\n%s", err, out)
-	}
-	return binPath
+	return cmdtest.BuildCommand(t, cmdtest.Command{
+		Name: "agent-secrets",
+		Dir:  filepath.Join("..", "agent-secrets"),
+		Env:  append(os.Environ(), "GOTOOLCHAIN=go1.27.3"),
+	})
 }
 
 // agentSecretsEnv is the environment an agent-secrets process of a pod runs with: the test's own,

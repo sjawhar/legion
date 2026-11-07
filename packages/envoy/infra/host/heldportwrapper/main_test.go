@@ -109,13 +109,7 @@ func skipOffLinux(t *testing.T) {
 // workspace of the repository's root go.work, and returns the binary.
 func buildListener(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-listener")
-	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = filepath.Join("..", "..", "..", "cmd", "listener")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build envoy-listener: %v\n%s", err, out)
-	}
-	return binary
+	return cmdtest.BuildCommand(t, cmdtest.Command{Name: "envoy-listener", Dir: filepath.Join("..", "..", "..", "cmd", "listener")})
 }
 
 // startWrapper runs the wrapper as the held-port image runs it on the container's PORT, executing

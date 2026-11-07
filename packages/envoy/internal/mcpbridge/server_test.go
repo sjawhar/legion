@@ -2,23 +2,16 @@ package mcpbridge
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/cmdtest"
 )
 
 func buildMockBinary(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	srcPath := writeMockServer(dir)
-	binPath := filepath.Join(dir, "mock_mcp_server")
-	cmd := exec.Command("go", "build", "-o", binPath, srcPath)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to build mock server: %v", err)
-	}
-	return binPath
+	return cmdtest.BuildCommand(t, cmdtest.Command{Name: "mock_mcp_server", Target: writeMockServer(t.TempDir())})
 }
 
 func TestManagedServer_StartAndStop(t *testing.T) {
