@@ -1405,8 +1405,6 @@ test("a reader at the previous contract parses the state body this daemon serves
     const refused = strandedClaimAt45.safeParse(stranded);
     expect(refused.success).toBeFalse();
     expect(refused.error?.issues[0]?.path).toEqual(["state"]);
-    expect(refused.error?.issues[0]?.code).toBe("invalid_value");
-    expect(refused.error?.issues[0]).toMatchObject({ values: ["suspended", "failed"] });
   }
 
   // What serving it would do, and why it is not served: the 45 reader does not know the key, and

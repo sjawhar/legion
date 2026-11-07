@@ -183,13 +183,23 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// served none). That is exactly the state a busy refusal, a late refusal, a lost prompt or a
 	// failed adoption leaves behind while the agent goes on and does the phase's work in a turn of
 	// its own, and refusing its completion costs the issue a phase for nothing. So the run and the
-	// assignment are taken from the task the claim is holding, which is safe because the state is
-	// that narrow: a claim that has served no run has no earlier run this completion could be
-	// confused with, and the task it is holding names the generation and the phase itself, so the
-	// route can answer from the task rather than from the turn that never announced itself. The
-	// fallback applies only when that task's generation and phase are the issue's own; a task of
-	// another run, of another phase, or of no phase at all — an operator's own, which carries
-	// generation 0 — is none of this issue's current work, and the completion is refused below.
+	// assignment are taken from the task the claim is holding: that task names the generation and
+	// the phase itself, so the route can answer from it rather than from the turn that never
+	// announced itself. The fallback applies only when that task's generation and phase are the
+	// issue's own; a task of another run, of another phase, or of no phase at all — an operator's
+	// own, which carries generation 0 — is none of this issue's current work, and the completion
+	// is refused below.
+	//
+	// What the narrowness does not buy is a claim with no earlier run to confuse this completion
+	// with. Nothing on this route confirms a delivery or retires a run, so a claim whose held task
+	// stays unconfirmed still serves no run after a completion this fallback admitted, and a later
+	// entry of the same generation and the same phase takes the fallback again from that same
+	// task. What keeps such an entry's completion from being the entry before it is the held
+	// task's own assignment — each entry hands the role an assignment of its own, and the
+	// stale-assignment fence below compares the task's against the row's — and, for a phase that
+	// ends with a handoff record, the workflow's HANDOFF_NOT_NEW, which refuses a completion
+	// naming the record the role wrote for its previous entry. Neither fence is this fallback's
+	// doing; they are the ones every completion passes.
 	//
 	// Every other fence reads what it read before. The adopted run is the issue's own generation,
 	// so the stale-generation refusal and its two tails never fire for it, the phase the engine
@@ -201,11 +211,20 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// sides name an assignment, so it would have quietly stopped comparing for every completion
 	// this fallback admits. It does not, because the adopted task's own assignment is read into
 	// the one variable that fence reads — one value for both paths, not a second comparison.
-	if serving == 0 && c.Pending != nil && c.Pending.Generation == issue.Generation && c.Pending.Phase == issue.Phase {
-		serving, assignment = c.Pending.Generation, c.Pending.Assignment
+	//
+	// Why the task this claim holds is not the issue's current task is one question with one
+	// answer (heldTaskNotCurrent), and both readers of the rule take it: the fallback applies
+	// when there is no such reason, and the refusal below is written from the same answer, so the
+	// 409 can never describe a rule this route does not apply. It is asked only of a claim
+	// serving no run, the one state either reader is reached in.
+	var notCurrent string
+	if serving == 0 {
+		if notCurrent = heldTaskNotCurrent(grant.Issue, issue.Generation, issue.Phase, c.Pending); notCurrent == "" {
+			serving, assignment = c.Pending.Generation, c.Pending.Assignment
+		}
 	}
 	if serving == 0 {
-		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN", noRunCompletion(grant.Issue, issue.Generation, issue.Phase, c.Pending))
+		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN", noRunCompletion(grant.Issue, issue.Generation, issue.Phase, notCurrent))
 		return
 	}
 	// A completion of a run that is over is refused here, before the fact is applied, so nothing is
@@ -401,33 +420,44 @@ func (s *server) handoffRecord(w http.ResponseWriter, r *http.Request, session s
 	return false
 }
 
-// noRunCompletion is the refusal of a completion the route can attribute to no run: the claim has
-// retired none, and the task it is holding — if it holds one at all — is not of the issue's
-// current generation and phase, so the fallback that would have taken the run and the assignment
-// from it does not apply. It says what the claim holds, that nothing was recorded, and what the
-// worker does next, which is what skills/legion-worker/SKILL.md tells it for this code: push
-// nothing further, end the turn without completing, tell the architect, and call the same
-// completion in the turn the issue's own task arrives in rather than redoing the work.
-func noRunCompletion(issue string, current uint64, p phase.Phase, pending *supervise.Delivery) string {
-	var held string
+// heldTaskNotCurrent says why the task a claim is holding is not the issue's current task — it is
+// of another run, of another phase, or there is no task at all — and answers "" when it is that
+// task: one of the issue's own generation and its own phase. The one rule has two readers, and
+// this is the one place it is written. The completion route's fallback to the held task's run and
+// assignment applies exactly on the empty answer (handoffComplete), and the HANDOFF_NO_RUN
+// refusal is written from the answer itself (noRunCompletion), so a change to which held task may
+// back a completion cannot leave the 409 describing a rule the route no longer applies.
+//
+// An empty answer also says the claim holds a task at all, which is what lets the route read
+// Pending on the strength of it: every case that returns a reason covers the nil.
+func heldTaskNotCurrent(issue string, current uint64, p phase.Phase, pending *supervise.Delivery) string {
 	switch {
 	case pending == nil:
-		held = fmt.Sprintf("this claim holds no task at all, and %s is on generation %d in %s", issue, current, p)
+		return fmt.Sprintf("this claim holds no task at all, and %s is on generation %d in %s", issue, current, p)
 	case pending.Generation != current:
 		run := fmt.Sprintf("generation %d's", pending.Generation)
 		if pending.Generation == 0 {
 			run = "no run's (an operator's own task carries no generation)"
 		}
-		held = fmt.Sprintf("the task this claim holds (%s) is %s, and %s is on generation %d", pending.ID, run, issue, current)
+		return fmt.Sprintf("the task this claim holds (%s) is %s, and %s is on generation %d", pending.ID, run, issue, current)
 	case pending.Phase != p:
 		of := "names no phase"
 		if pending.Phase != "" {
 			of = fmt.Sprintf("is the %s phase's", pending.Phase)
 		}
-		held = fmt.Sprintf("the task this claim holds (%s) %s, and %s is in %s", pending.ID, of, issue, p)
-	default:
-		held = fmt.Sprintf("the task this claim holds (%s) belongs to no run, and %s is on none either", pending.ID, issue)
+		return fmt.Sprintf("the task this claim holds (%s) %s, and %s is in %s", pending.ID, of, issue, p)
 	}
+	return ""
+}
+
+// noRunCompletion is the refusal of a completion the route can attribute to no run: the claim has
+// retired none, and held is heldTaskNotCurrent's answer for the task it is holding — the very
+// reason the fallback that would have taken the run and the assignment from that task does not
+// apply. It says what the claim holds, that nothing was recorded, and what the worker does next,
+// which is what skills/legion-worker/SKILL.md tells it for this code: push nothing further, end
+// the turn without completing, tell the architect, and call the same completion in the turn the
+// issue's own task arrives in rather than redoing the work.
+func noRunCompletion(issue string, current uint64, p phase.Phase, held string) string {
 	return fmt.Sprintf("this completion belongs to no run of %s: %s; nothing was recorded. Push nothing further, end this turn without completing and tell the architect; if the daemon queues this claim a generation-%d %s task (none may: this run's phase can be another claim's) and its work and handoff are already done, call the same handoff_complete in that task's turn, and never redo the work or write a second handoff",
 		issue, held, current, p)
 }

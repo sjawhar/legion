@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -19,6 +20,19 @@ import (
 // another role's container left: the shim's own words, which name the lock and its age.
 const staleLockRefusal = "Command failed (exit 1): jj metaedit: the git lock " +
 	"/legion/workspaces/acme/widgets/legion-480/.git/index.lock was last written 31m ago"
+
+// staleLockRefusalWithNUL is that same answer with a NUL byte in it, which is what reaches the
+// daemon when the far side's JSON holds a `\u0000`: Oh My Pi decodes it into the `error` string,
+// and the shim relays the wedged command's own bytes whatever they are. No Postgres encoding
+// stores a NUL ("invalid byte sequence for encoding \"UTF8\": 0x00"), so a daemon that recorded
+// it raw could not write the record of the failed send at all.
+const staleLockRefusalWithNUL = "Command failed (exit 1): jj metaedit: the git lock " +
+	"/legion/workspaces/acme/widgets/legion-480/.git/index.lock\x00 was last written 31m ago"
+
+// staleLockRefusalWithRawByte is that answer carrying a byte that begins no UTF-8 sequence, as a
+// command whose output is not text at all gives it.
+const staleLockRefusalWithRawByte = "Command failed (exit 1): jj metaedit: the git lock " +
+	"/legion/workspaces/acme/widgets/legion-480/.git/index.lock\xff was last written 31m ago"
 
 // adoptingHarness is a machine whose role has an App identity to adopt its working copy with, at
 // ready with nothing pending: without an Identity the daemon adopts nothing at all (Machine.adopt)
@@ -42,6 +56,10 @@ func adoptingHarness(t *testing.T) *harness {
 // them would retire a healthy worker for its cluster's weather; charging neither of the first two
 // leaves a claim re-sending for ever, which is what held two planning tasks 31 and 33 hours
 // (INFRA-1480).
+//
+// Each row names its own failure in the log, the uncharged ones included: an operator reading a
+// claim that waits is told whether the prompt was lost on the way or the GitHub App would mint
+// no identity for it, which are looked for in different places.
 func TestDeliveryBudgets(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -78,7 +96,8 @@ func TestDeliveryBudgets(t *testing.T) {
 				h.restart()
 				h.reach(StateReady)
 			},
-			logged: `msg="supervise: the prompt was lost to the transport; the delivery waits"`, text: errBoom.Error()},
+			logged: `msg="supervise: the role's GitHub App identity could not be minted; the prompt was never sent and the delivery waits"`,
+			text:   errBoom.Error()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := adoptingHarness(t)
@@ -130,6 +149,103 @@ func TestDeliveryBudgets(t *testing.T) {
 		}
 		if p := h.pending(); p.Task != "the task" {
 			t.Fatalf("pending %+v, want the undelivered task kept on the failed claim", p)
+		}
+	})
+
+	// The charge is what bounds the re-sends, and the record of the failed send beside it is only
+	// a diagnosis, so a record the store will not take decides nothing about the charge. The write
+	// of that record used to return before the split that charges, and a refused adoption whose
+	// text the store refused was then charged nothing and re-sent with no bound — the very stall
+	// the split exists to end (INFRA-1480). The store refuses the write itself here, rather than
+	// the text being one a UTF8 server rejects, so the claim holds for every reason a write can
+	// fail and not for one encoding's quirk.
+	t.Run("a refused adoption is charged though its record is not written", func(t *testing.T) {
+		h := adoptingHarness(t)
+		h.rt.FailAdoptWorkingCopy(adoptRefusal(staleLockRefusalWithNUL))
+
+		// The first send writes its record: this same call queues the task, and a store refusing
+		// every delivery write would refuse the queue's own write and leave no task to re-send.
+		h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+		h.wantBudgets(Budgets{PromptFailures: 1})
+
+		h.store.fail("PutDelivery", errBoom)
+		h.observe(runtime.Alive) // the sweep's re-send, whose record the store refuses
+
+		h.wantBudgets(Budgets{PromptFailures: 2})
+		if p := h.pending(); p.SendFailures != 2 {
+			t.Fatalf("pending %+v, want the second failed send counted in memory", p)
+		}
+		if lines := h.logs.lines("level=WARN",
+			`msg="supervise: the failed send was not recorded on the delivery; settle writes it again and the charge goes on"`,
+			errBoom.Error()); len(lines) != 1 {
+			t.Fatalf("logged %v, want the unwritten record named once", lines)
+		}
+	})
+
+	// The far side's text never reaches the store as it arrived (scrubSendError). It is the
+	// wedged command's own output, relayed whole, and the store takes only some of what a command
+	// can write: the rule is valid UTF-8, with no NUL, and the column holds a diagnosis rather
+	// than a log. What the scrub cuts still goes to the log line beside it, which has no store to
+	// refuse it, so nothing is lost and only moved.
+	t.Run("the text a failed send records is scrubbed and bounded", func(t *testing.T) {
+		// About a megabyte of relayed stderr, as a jj wedged on a lock writes it, ending in a
+		// line the log must still carry and the record must not.
+		hugeRefusal := "Command failed (exit 1): jj metaedit: " +
+			strings.Repeat("the git lock is held by another container; ", 24000) +
+			"and this is the last line of the megabyte"
+		for _, tc := range []struct {
+			name string
+			// reason is what the shim's `ok: false` answer carries.
+			reason string
+			// want is the whole text the delivery must hold once the scrub has run.
+			want string
+			// logged is a fragment of the far side's text the log line must still carry.
+			logged string
+		}{
+			{name: "a NUL byte, which no Postgres encoding stores",
+				reason: staleLockRefusalWithNUL,
+				want:   adoptRefusal(strings.ReplaceAll(staleLockRefusalWithNUL, "\x00", "")).Error(),
+				logged: "index.lock"},
+			// Not the row above again, and not to be deleted as a duplicate of it: a NUL is valid
+			// UTF-8 and a lone 0xff begins no UTF-8 sequence at all, so the two are refused by
+			// different servers. An SQL_ASCII server takes the 0xff, a UTF8 server — production's
+			// encoding — refuses it ("invalid byte sequence for encoding "UTF8": 0xff"), and every
+			// encoding refuses the NUL. The rule the scrub holds is valid UTF-8, and this is the
+			// row that reads it.
+			{name: "a byte that begins no UTF-8 sequence",
+				reason: staleLockRefusalWithRawByte,
+				want:   adoptRefusal(strings.ReplaceAll(staleLockRefusalWithRawByte, "\xff", "\uFFFD")).Error(),
+				logged: "index.lock"},
+			{name: "about a megabyte of the wedged command's stderr",
+				reason: hugeRefusal,
+				want:   string([]rune(adoptRefusal(hugeRefusal).Error())[:maxSendErrorRunes]) + "…",
+				logged: "and this is the last line of the megabyte"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := adoptingHarness(t)
+				h.rt.FailAdoptWorkingCopy(adoptRefusal(tc.reason))
+
+				h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+
+				got := h.pending().LastSendError
+				if got != tc.want {
+					t.Fatalf("recorded %.300q, want %.300q", got, tc.want)
+				}
+				if !utf8.ValidString(got) || strings.ContainsRune(got, 0) || len([]rune(got)) > maxSendErrorRunes+1 {
+					t.Fatalf("recorded %.300q of %d runes, want valid UTF-8, no NUL, and at most %d runes",
+						got, len([]rune(got)), maxSendErrorRunes)
+				}
+				if stored, ok := h.store.delivery(testToken); !ok || stored.LastSendError != got {
+					t.Fatalf("stored delivery's text = %.300q (held %t), want the scrubbed text persisted with it",
+						stored.LastSendError, ok)
+				}
+				if lines := h.logs.lines("level=WARN",
+					`msg="supervise: the shim refused to adopt the working copy; the prompt was never sent"`,
+					tc.logged); len(lines) != 1 {
+					t.Fatalf("logged %d warnings carrying %q, want the one refusal with the far side's whole text",
+						len(lines), tc.logged)
+				}
+			})
 		}
 	})
 }

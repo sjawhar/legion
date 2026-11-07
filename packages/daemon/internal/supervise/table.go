@@ -1099,7 +1099,10 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 // which workflow.Stranded and `legion state` report.
 //
 // A send lost to the transport is not charged and waits for the shim's next hello — which may
-// already have come while the send was out.
+// already have come while the send was out. So does an identity the daemon could not mint
+// (runtime.ErrIdentityUnavailable), which is uncharged for the same reason and logged under a
+// name of its own: it is raised before any frame leaves, and an operator told the transport lost
+// the prompt would look at the network while the GitHub App is the thing that is down.
 //
 // Every failure here, charged or not, is recorded on the pending delivery before the split is
 // read: how many sends of this task have failed, when this one failed and the error it failed
@@ -1110,6 +1113,22 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 // makes of the delivery, so one persist covers the taken-back confirmation and the record alike;
 // that write is unconditional because the record changes on every failed send, where the
 // confirmation it takes back is there to clear only on some.
+//
+// Two things keep that record from deciding anything about the charge, because the charge is
+// what bounds the re-sends and the record is only a diagnosis.
+//
+// The text is the far side's own, so it is scrubbed and bounded before it is stored
+// (scrubSendError): a refused adoption carries the wedged command's whole stderr and a refused
+// prompt Oh My Pi's decoded `error`, neither of which the store is obliged to take. The log
+// lines below carry the whole text as it arrived.
+//
+// The write may still fail — the store has its own weather — and a failed write is logged and
+// carried past rather than returned, so the split below is always read. A return there would
+// charge a refused adoption nothing and re-send it with no bound, which is the stall this split
+// exists to end. Nothing of the delivery is lost by carrying on: the failed write left it
+// unsaved (saved), and settle writes the claim and the delivery together before the next
+// decision, so the taken-back confirmation and this record reach the store on the first write
+// the store takes.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
@@ -1118,9 +1137,10 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 	p.ConfirmedAt = time.Time{}
 	p.SendFailures++
 	p.LastSendFailureAt = m.deps.Clock.Now()
-	p.LastSendError = r.Err.Error()
+	p.LastSendError = scrubSendError(r.Err.Error())
 	if err := m.putPending(ctx); err != nil {
-		return err
+		m.log.Warn("supervise: the failed send was not recorded on the delivery; settle writes it again and the charge goes on",
+			"delivery", r.DeliveryID, "error", err)
 	}
 	if errors.Is(r.Err, runtime.ErrPromptRefused) {
 		if agentBusy(runtime.RefusalReason(r.Err)) {
@@ -1136,7 +1156,12 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 			"delivery", r.DeliveryID, "error", r.Err)
 		return m.chargePrompt(ctx, "the working copy was not adopted: "+r.Err.Error())
 	}
-	m.log.Warn("supervise: the prompt was lost to the transport; the delivery waits", "delivery", r.DeliveryID, "error", r.Err)
+	if errors.Is(r.Err, runtime.ErrIdentityUnavailable) {
+		m.log.Warn("supervise: the role's GitHub App identity could not be minted; the prompt was never sent and the delivery waits",
+			"delivery", r.DeliveryID, "error", r.Err)
+	} else {
+		m.log.Warn("supervise: the prompt was lost to the transport; the delivery waits", "delivery", r.DeliveryID, "error", r.Err)
+	}
 	if resend {
 		return m.sendPending(ctx)
 	}
