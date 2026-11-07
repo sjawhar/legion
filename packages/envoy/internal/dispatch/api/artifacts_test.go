@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/fixtureenv"
 )
 
 func createArtifactIssue(t *testing.T, handler http.Handler) model.Issue {
@@ -1002,12 +1003,22 @@ func sendUpload(t *testing.T, handler http.Handler, issueKey, key string, file [
 
 // unspooled runs send with the temporary directory gone, where a request that spooled a body past
 // a megabyte - the keyed layer's spool, the multipart parser's - is answered 500
-// (TestAnUploadTheServerCannotSpoolIsItsOwnFailure). t.Setenv registers Go's own restore, which
-// puts TMPDIR back as the test found it, set or absent, when the test ends.
+// (TestAnUploadTheServerCannotSpoolIsItsOwnFailure), and puts it back once send has answered:
+// TestARepeatOfAnUploadStillRunningWaitsForItsAnswerAfterTheIssueCloses sends a second keyed
+// upload of four megabytes after this one, which spools in its turn and would be answered 500
+// rather than the replay it asserts. Go's own restore, which t.Setenv registers, comes too late
+// for that, since it runs when the test ends; the absent case goes through fixtureenv.Unset
+// rather than a bare os.Unsetenv, which docs/testing.md refuses.
 func unspooled(t *testing.T, send func()) {
 	t.Helper()
+	previous, had := os.LookupEnv("TMPDIR")
 	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
 	send()
+	if had {
+		t.Setenv("TMPDIR", previous)
+		return
+	}
+	fixtureenv.Unset(t, "TMPDIR")
 }
 
 // closeArtifactIssue closes the issue as alice.
