@@ -4,10 +4,10 @@ import { harnessPorts } from "./harness-ports";
 // architecture importer, the delivery reconcile and the issue header's GitHub link:
 // the installation lookup, the installation-token mint, the repository read that
 // proves the minted token works, the exact branch read a source's save makes, the
-// commit/tree/blob reads a sync walks, empty delivery listings, and a seeded pull
-// request with its head's check runs and workflow runs. Tests seed per-repository
-// state through /__fixture/repos; the server reaches this via
-// DISPATCH_GITHUB_API_BASE.
+// commit/tree/blob reads a sync walks, the commits read whose 422 says a repository
+// holds no such commit, empty delivery listings, and a seeded pull request with its
+// head's check runs and workflow runs. Tests seed per-repository state through
+// /__fixture/repos; the server reaches this via DISPATCH_GITHUB_API_BASE.
 
 const ARCHITECTURE_DIR = ".dispatch/architecture";
 
@@ -82,6 +82,10 @@ interface FakeRepo {
   /** The commits each branch holds, keyed by branch name: what the compare read answers
    *  `behind` (or `identical`, for the last of them) about, and `diverged` about any other. */
   readonly branch_commits?: Record<string, readonly string[]>;
+  /** Commits the repository holds with nothing else attached to them: what the commits read
+   *  answers 200 for beside the commits the fields above imply. A fixture that wants a commit
+   *  refused simply leaves it out of every one of them. */
+  readonly commits?: readonly string[];
   /** A repository Dispatch's App is not installed on: every read of it answers, but the
    *  installation lookup is GitHub's 404, so the server can reach no token for it. */
   readonly installation_missing?: boolean;
@@ -92,6 +96,22 @@ function commitFor(repo: FakeRepo): string {
   const hasher = new Bun.CryptoHasher("sha1");
   hasher.update(JSON.stringify(repo.files ?? {}));
   return hasher.digest("hex");
+}
+
+/** Every commit a repository holds, which the commits read answers 200 for: each commit the
+ *  fixture attaches something to — the pull requests GitHub names for a commit, each pull
+ *  request's head, the commits a branch holds, and the commits check runs and workflow runs
+ *  hang off — the commit `files` derives, and the bare `commits` the fixture names. */
+function heldCommits(repo: FakeRepo): Set<string> {
+  return new Set([
+    commitFor(repo),
+    ...Object.keys(repo.commit_pulls ?? {}),
+    ...Object.values(repo.pulls ?? {}).map((pull) => pull.head_sha),
+    ...Object.values(repo.branch_commits ?? {}).flat(),
+    ...Object.keys(repo.check_runs ?? {}),
+    ...Object.keys(repo.workflow_runs ?? {}),
+    ...(repo.commits ?? []),
+  ]);
 }
 
 /** The permissions an installation reports for a repository, in both installation answers. */
@@ -311,19 +331,26 @@ const server = Bun.serve({
     }
 
     // As GitHub does: the bare sha for `Accept: application/vnd.github.sha` (what the Go
-    // client's Ref asks for), the commit's JSON otherwise.
+    // client's Ref asks for), the commit's JSON otherwise, and `422 No commit found for SHA`
+    // for a commit the repository does not hold — the one answer HasCommit reads as absence.
+    // Only a 40-hex ref can be refused: any other ref is a commit-ish, which a branch read asks
+    // this route for, and answers the repository's head as it always has.
     const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);
     if (request.method === "GET" && commit !== null) {
       const repo = repos.get(`${commit[1]}/${commit[2]}`);
       if (repo === undefined) {
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
-      if (request.headers.get("Accept") === "application/vnd.github.sha") {
-        return new Response(commitFor(repo), {
-          headers: { "Content-Type": "application/vnd.github.sha" },
-        });
+      const ref = decodeURIComponent(commit[3] ?? "");
+      const isSHA = /^[0-9a-f]{40}$/.test(ref);
+      if (isSHA && !heldCommits(repo).has(ref)) {
+        return Response.json({ message: `No commit found for SHA: ${ref}` }, { status: 422 });
       }
-      return Response.json({ sha: commitFor(repo) });
+      const sha = isSHA ? ref : commitFor(repo);
+      if (request.headers.get("Accept") === "application/vnd.github.sha") {
+        return new Response(sha, { headers: { "Content-Type": "application/vnd.github.sha" } });
+      }
+      return Response.json({ sha });
     }
 
     // The architecture directory's subtree at a commit

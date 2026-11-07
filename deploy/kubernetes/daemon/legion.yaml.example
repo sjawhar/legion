@@ -55,6 +55,11 @@ projects:
   #                                    # and what a project that names no key gets) runs the check
   #                                    # as the tester; off opens none. The key decides the checks
   #                                    # opened after a load, never one already open
+  #   commit_issue_trailer_repos: [acme/widgets] # optional: the repositories whose commits carry
+  #                                    # their issue key, as the Dispatch: <KEY> trailer the pane's
+  #                                    # jj appends, so a squash landing the branch carries the key.
+  #                                    # Each must be one Dispatch maps to this project; a pane of
+  #                                    # any other repository stamps nothing
   #   memory:                          # optional: what each tree this project opens runs with:
   #     mode: on                       # off (the default, and what a project with no memory block
   #                                    # gets), on, or random, a fair coin for each tree. The draw is

@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -57,6 +58,11 @@ type Project struct {
 	// SlackChannels are `slack_channels`, the Slack channel ids whose app mentions the project's
 	// controller subscribes to, in the file's order; nil when the file names none.
 	SlackChannels []string
+	// CommitIssueTrailerRepos are `commit_issue_trailer_repos`, the repositories whose commits a
+	// pane stamps with the issue key, in the file's order; nil when the file names none. The
+	// project's repositories are Dispatch's mapping (Settings → Repositories → Projects), and this
+	// key only selects among them, so a name the project does not serve stamps nothing.
+	CommitIssueTrailerRepos []ghrepo.Repository
 	// Memory is `memory`, the project's per-tree memory setting; its zero value is off, which a
 	// file that names no block leaves.
 	Memory Memory
@@ -195,7 +201,7 @@ func readProject(value *yaml.Node, key string) (Project, []string, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, nil, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "deploys", "memory", "merge", "merge_queue_role", "mergeQueueRole", "production_check", "slack_channels")
+	fields, err := members(value, key, "commit_issue_trailer_repos", "deploys", "memory", "merge", "merge_queue_role", "mergeQueueRole", "production_check", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		if unknown.name == "repo" {
@@ -235,6 +241,11 @@ func readProject(value *yaml.Node, key string) (Project, []string, error) {
 	}
 	if channels := fields["slack_channels"]; channels != nil {
 		if project.SlackChannels, err = readSlackChannels(channels, key+".slack_channels"); err != nil {
+			return Project{}, nil, err
+		}
+	}
+	if repos := fields["commit_issue_trailer_repos"]; repos != nil {
+		if project.CommitIssueTrailerRepos, err = readCommitIssueTrailerRepos(repos, key+".commit_issue_trailer_repos"); err != nil {
 			return Project{}, nil, err
 		}
 	}
@@ -280,6 +291,32 @@ func readSlackChannels(value *yaml.Node, key string) ([]string, error) {
 		}
 	}
 	return channels, nil
+}
+
+// readCommitIssueTrailerRepos is a project's `commit_issue_trailer_repos`: a list of strings, each
+// exactly a repository Parse takes, whose commits a pane stamps with the issue key. One repository
+// is named once, compared as GitHub compares names, without case: a second entry stamps the same
+// commits the first does, so it is the file saying one thing twice rather than a second rule. An
+// empty list is no repository, as an absent key is.
+func readCommitIssueTrailerRepos(value *yaml.Node, key string) ([]ghrepo.Repository, error) {
+	names, err := readStrings(value, key)
+	if err != nil || len(names) == 0 {
+		return nil, err
+	}
+	repos := make([]ghrepo.Repository, 0, len(names))
+	for index, name := range names {
+		repo, err := ghrepo.Parse(fmt.Sprintf("%s[%d]", key, index), name)
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(repos, func(named ghrepo.Repository) bool {
+			return strings.EqualFold(named.String(), repo.String())
+		}) {
+			return nil, fmt.Errorf("%s names %s twice", key, repo)
+		}
+		repos = append(repos, repo)
+	}
+	return repos, nil
 }
 
 func readMergeRules(value *yaml.Node, key string) (MergeRules, error) {

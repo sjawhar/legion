@@ -13,12 +13,44 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
+
+// backDateKeyLease moves the lease the row under key holds back by, past the lease a repeat
+// judges it against (contracts.IdempotencyLease), and returns the moment it lapsed. Nothing
+// renews that lease - the process that took it is dead - so the minute it has left is wall clock
+// and nothing about the take-over, which is what the row is for; the webhook redelivery row moves
+// its claim's time the same way (backDateRedeliveryClaim).
+func backDateKeyLease(t *testing.T, database *store.Store, key string, by time.Duration) time.Time {
+	t.Helper()
+	tag, err := database.Pool.Exec(context.Background(), `
+		update request_keys set leased_at = leased_at - make_interval(secs => $2)
+		where idempotency_key = $1 and status is null and leased_at is not null
+	`, key, by.Seconds())
+	if err != nil {
+		t.Fatalf("back-date the lease of %s: %v", key, err)
+	}
+	if rows := tag.RowsAffected(); rows != 1 {
+		t.Fatalf("back-date the lease of %s: %d rows, want the one the dead process holds", key, rows)
+	}
+	return time.Now()
+}
+
+// leaseMargin is how far short of the dead run's lease the row stops on its way past it: the
+// lease is moved back to leaseMargin before its end, where a repeat must still be refused, and
+// then the rest of the way, where the take-over must happen. It is the boundary's resolution -
+// a lease judged at anything below contracts.IdempotencyLease-leaseMargin takes the key over at
+// the first step and fails the row - and it is also the slack the two repeats around it have on
+// a loaded machine, which is why it is ten seconds and not one.
+const leaseMargin = 10 * time.Second
 
 // INFRA-258. A process killed while it runs a keyed write leaves the write's key held under a lease
 // nothing renews any more. The other process answers a repeat under that key 409 KEY_IN_FLIGHT while
 // the lease lasts - the first run might still be alive - and, once the lease has lapsed with nothing
-// committed, takes the key over and makes the write, once; a repeat after that is its replay.
+// committed, takes the key over and makes the write, once; a repeat after that is its replay. The
+// lease is moved back rather than waited out (backDateKeyLease), in two steps, so the row keeps the
+// lease's end and not only what happens past it: to leaseMargin before the end, where the repeat
+// must still be refused, and then past the end, where the take-over must come.
 //
 // The slow-write test hook holds A's run after its key is claimed and before its handler writes,
 // which is where a process dies with nothing of the write committed; the kill is SIGKILL, so no
@@ -54,7 +86,6 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 			t.Fatalf("process A never claimed the key:\n%s", pair.a.Output.String())
 		}
 	}
-	killed := time.Now()
 	if err := pair.a.Cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill process A: %v", err)
 	}
@@ -74,19 +105,28 @@ func TestAKeyedWriteAProcessDiedRunningIsTakenOverOnceItsLeaseLapses(t *testing.
 	if answer.code() != contracts.IdempotencyKeyInFlight {
 		t.Fatalf("a repeat inside the dead run's lease: code %s, want %s", answer.code(), contracts.IdempotencyKeyInFlight)
 	}
+	// The refusal under a lease just taken is read; the rest of the lease is wall clock, since
+	// nothing renews a lease whose process is gone, so it is moved back rather than waited out -
+	// first to leaseMargin before its end, where the key is still the dead run's and a repeat
+	// must still be refused. A lease judged shorter than it is lapses here, and the row says so.
+	backDateKeyLease(t, pair.database, "killed-press", contracts.IdempotencyLease-leaseMargin)
+	if answer = repeat(); answer.status != http.StatusConflict || answer.code() != contracts.IdempotencyKeyInFlight {
+		t.Fatalf("a repeat %v before the dead run's lease ends: %v, want 409 %s: the key is still the dead run's "+
+			"until its %v lease is out", leaseMargin, answer, contracts.IdempotencyKeyInFlight, contracts.IdempotencyLease)
+	}
+	// Then the rest of the way, past the end, where the take-over must come.
+	lapsed := backDateKeyLease(t, pair.database, "killed-press", leaseMargin+time.Second)
 	for answer.status == http.StatusConflict {
-		if time.Since(killed) > contracts.IdempotencyLease+30*time.Second {
-			t.Fatalf("process B never took the key over: still %v %v after the kill", answer, time.Since(killed))
+		if time.Since(lapsed) > 30*time.Second {
+			t.Fatalf("process B never took the key over: still %v %v after the dead run's lease lapsed",
+				answer, time.Since(lapsed))
 		}
-		time.Sleep(time.Second)
+		time.Sleep(200 * time.Millisecond)
 		answer = repeat()
 	}
 	if answer.status != http.StatusCreated || answer.header.Get(contracts.IdempotencyReplayedHeader) != "" {
 		t.Fatalf("the repeat once the lease lapsed: %v replayed=%q, want the write made by process B", answer,
 			answer.header.Get(contracts.IdempotencyReplayedHeader))
-	}
-	if waited := time.Since(killed); waited < contracts.IdempotencyLease-5*time.Second {
-		t.Fatalf("process B took the key over %v after the kill, inside the dead run's %v lease", waited, contracts.IdempotencyLease)
 	}
 	if answer = repeat(); answer.status != http.StatusCreated || answer.header.Get(contracts.IdempotencyReplayedHeader) != "?1" {
 		t.Fatalf("a repeat after the takeover: %v, want the takeover's answer replayed", answer)

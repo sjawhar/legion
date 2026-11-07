@@ -127,6 +127,18 @@ type bootConfig struct {
 	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
 	// no process-level test can wait five minutes for a pass.
 	CIReconcileInterval time.Duration
+	// MaintenanceSweepInterval is how often the maintenance sweep runs - the Idempotency-Keys and
+	// spent DPoP proofs past their windows, and the deliveries a process that died left owed -
+	// zero for api.MaintenanceSweepInterval's minute; only
+	// DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL, under the test hooks, sets it, since no
+	// process-level test can wait a minute for a pass.
+	MaintenanceSweepInterval time.Duration
+	// ProcessHeartbeat is how often this process stamps its row in the registry of live server
+	// processes, zero for processes.HeartbeatInterval's five seconds; only
+	// DISPATCH_TEST_PROCESS_HEARTBEAT, under the test hooks, sets it, and processes.LiveWindow
+	// keeps its ratio of three beats to it, since no process-level test can wait a live window
+	// and a heartbeat for a refusal to stand.
+	ProcessHeartbeat time.Duration
 	// ListenerRosterUncached makes every read of the listener's session list ask the listener
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
@@ -204,6 +216,14 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
 		os.Exit(1)
+	}
+	// The registry's pace, before anything registers or reads what is live. The live window stays
+	// three beats, as processes.LiveWindow is of processes.HeartbeatInterval, so a run cannot give
+	// itself a window shorter than its own heartbeat, and the wait a refused process makes
+	// (Register: one live window and one heartbeat) shortens with it.
+	if boot.ProcessHeartbeat > 0 {
+		processes.HeartbeatInterval = boot.ProcessHeartbeat
+		processes.LiveWindow = 3 * boot.ProcessHeartbeat
 	}
 
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
@@ -810,7 +830,11 @@ func main() {
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because
 	// it resumes those deliveries through the API server built just above.
-	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, leases, background.ResumeDeliveries)
+	maintenanceInterval := api.MaintenanceSweepInterval
+	if boot.MaintenanceSweepInterval > 0 {
+		maintenanceInterval = boot.MaintenanceSweepInterval
+	}
+	go api.RunMaintenanceSweep(ctx, database.Pool, maintenanceInterval, leases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
@@ -1044,6 +1068,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
+		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
+		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
