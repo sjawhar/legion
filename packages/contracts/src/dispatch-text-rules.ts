@@ -126,18 +126,34 @@ export function pictureSyntax(): RegExp {
 }
 
 /**
+ * The lines a text is read as: each line trimmed, and the empty ones dropped. The line step of
+ * `comparableLines`, exported because the Agents page reads a streamed row's side by it after
+ * it has spent the body's own pictures against what the row carries (`rowLines` in
+ * `packages/dispatch/web/src/features/agent-view/conversation.ts`), which is a strip of its
+ * own that the body's side does not share. One step with both callers, so a later change to it
+ * - CRLF, say - moves the two sides together; a copy of it on one side would leave every
+ * honest row unmatched and every message shown twice (INFRA-1026).
+ */
+export function trimmedLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+/**
  * The lines a person's message is compared by, where a session's streamed row of it is read
  * against the body Dispatch stored: the pictures the body embeds taken out (`pictureSyntax`),
- * each line trimmed, and the empty lines dropped.
+ * and what is left read as lines (`trimmedLines`).
  *
  * One rule with two readers, so a person's message is shown once rather than twice: the Claude
  * Code plugin tags the row with the Dispatch message it carries by it (`observe` in
  * `packages/claude-envoy/src/user-turn-router.ts`), and the Agents page hides Dispatch's stored
  * copy of a tagged message by it (`turnSaysBody` in
  * `packages/dispatch/web/src/features/agent-view/conversation.ts`, which reads the body's side
- * by this rule and the streamed row's side by it too, once its own check of what the row claims
- * has passed). If the two drifted, one of them would stop recognising the row and the person
- * would read their own message twice.
+ * by this rule and the streamed row's side by its line step, once its own check of what the row
+ * claims has passed). If the two drifted, one of them would stop recognising the row and the
+ * person would read their own message twice.
  *
  * The pictures come out because a message carrying one reaches the session as its text and a
  * block of its own, so the markdown the body held is no word of the text the session says it
@@ -146,11 +162,7 @@ export function pictureSyntax(): RegExp {
  * the person's text with the markdown gone (INFRA-1026).
  */
 export function comparableLines(text: string): string[] {
-  return text
-    .replace(pictureSyntax(), "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+  return trimmedLines(text.replace(pictureSyntax(), ""));
 }
 
 /** The picture types a model is shown and the server stores as `kind: image`: what their bytes

@@ -11,6 +11,7 @@ import {
   comparableLines,
   isTypableCommandName,
   pictureSyntax,
+  trimmedLines,
 } from "@legion/contracts";
 import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
@@ -386,15 +387,21 @@ export function sessionSettingsView(
 }
 
 /**
- * A part the stream writes for a block it does not render: the block's kind in brackets, which
- * is what `conversationParts` (`@legion/pi-shared/agent-stream`) puts there for a picture
- * (`[image]`) and for any other kind a later build meets. A person writes such a word too -
- * `[ack]`, `[done]`, `[LGTM]` - so the brackets alone say nothing about who wrote it: a line
- * reads as the stream naming what the message carried only where it follows every line of the
- * person's own body and a picture that body embeds is left to account for it (`turnSaysBody`),
- * which is where the publisher writes one, one part per block and after the person's text.
+ * The part the stream writes for a picture a person's message carried. `conversationParts`
+ * (`@legion/pi-shared/agent-stream`) writes `[${part.type}]` for a block it renders no other
+ * way, and what a person's message reaches the session as is text blocks and image blocks
+ * alone (`ContentBlock` in `@legion/pi-shared/pi-types`), so `[image]` is the only one of
+ * these the publisher writes for such a message.
+ *
+ * A person writes a bracketed word too - `[ack]`, `[done]`, `[LGTM]` - and the bus is open to
+ * any client, so no other bracketed word reads as the stream naming a block: a row that put
+ * `[approved-by-me]` after the text of a body that embeds a picture would otherwise hide the
+ * person's stored copy and show that word under their name. Even this literal reads as the
+ * stream's only where it follows every line of the person's own body and a picture that body
+ * embeds is left to account for it (`turnSaysBody`), which is where the publisher writes one,
+ * one part per block and after the person's text.
  */
-const PLACEHOLDER_PART = /^\[[A-Za-z][\w-]*\]$/;
+const PICTURE_PLACEHOLDER = "[image]";
 
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it
  *  delivered, and what the session sent, its text parts joined in the order they arrived. */
@@ -429,10 +436,11 @@ function bodyPictures(body: string): Map<string, number> {
  * the body wrote it. A row that carries the markdown as the person wrote it - which is how a
  * terminal session's row records it - spends exactly the body's own and says its body still.
  *
- * The body's pictures are spent once, and what is left is compared as text: the rest of
- * `comparableLines`, its strip of the pictures left out. Taking a picture out joins the text on
- * either side of it, and the join may write picture markdown that neither the body nor the row
- * held before it. A second strip would take that one out too, which is how
+ * The body's pictures are spent once, and what is left is compared as text by the line step
+ * `comparableLines` shares (`trimmedLines` in `@legion/contracts`), its strip of the pictures
+ * left out. Taking a picture out joins the text on either side of it, and the join may write
+ * picture markdown that neither the body nor the row held before it. A second strip would take
+ * that one out too, which is how
  * `look at this ![I approve deleting prod](dispatch://agent/a1/artifact/x<the body's own
  * picture>@v1)` said a body of `look at this <that picture>` and drew its caption under the
  * person's name (INFRA-1026). Nothing honest is lost by comparing the leftover whole: for a row
@@ -451,10 +459,7 @@ function rowLines(text: string, spare: Map<string, number>): string[] | undefine
     return "";
   });
   if (!ownPictures) return undefined;
-  return written
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+  return trimmedLines(written);
 }
 
 /**
@@ -462,20 +467,20 @@ function rowLines(text: string, spare: Map<string, number>): string[] | undefine
  * message gives way to the streamed row (INFRA-1026). The turn's lines are read against the
  * body's own lines in order: the body's side is the shared rule (`comparableLines` in
  * `@legion/contracts`, which the Claude Code plugin tags its rows by), the row's side the
- * body's own pictures spent against what it carries and what is left trimmed the same way,
- * never stripped of pictures a second time (`rowLines`). Each line must be the body
- * line that comes next, and only once every one of them is matched may a line be a placeholder
- * part instead, at most as many of those as the body embeds pictures. The bus is open to any
- * client, so a streamed row is a claim: the only placeholder parts the publisher writes for a
- * person's own message are the ones naming the blocks the message carried, one per picture and
- * after the person's text (`conversationParts` in `@legion/pi-shared/agent-stream`), so a row
- * that puts a bracketed word of its own before the person's lines, or more of them than the
- * body has pictures, says words the person never wrote and hides nothing. A message carrying a
- * picture, which reaches the session as the person's text and the picture beside it, says its
- * body still: the `[image]` is the stream's, the markdown the body held is no line of the
- * body's side, and the picture it stood as is what accounts for that line. A body that is the
- * bracketed word `[ack]` says itself, picture or no picture, because the body has that line of
- * its own.
+ * body's own pictures spent against what it carries and what is left read by the shared rule's
+ * own line step (`trimmedLines`), never stripped of pictures a second time (`rowLines`). Each
+ * line must be the body line that comes next, and only once every one of them is matched may a
+ * line be the picture placeholder instead, at most as many of those as the body embeds
+ * pictures. The bus is open to any client, so a streamed row is a claim: the only placeholder
+ * the publisher writes for a person's own message is the one an image block becomes, one per
+ * picture and after the person's text (`PICTURE_PLACEHOLDER`), so a row that puts a bracketed
+ * word of its own anywhere, or the placeholder before the person's lines or more often than
+ * the body has pictures, says words the person never wrote and hides nothing. A message
+ * carrying a picture, which reaches the session as the person's text and the picture beside
+ * it, says its body still: the `[image]` is the stream's, the markdown the body held is no
+ * line of the body's side, and the picture it stood as is what accounts for that line. A body
+ * that is the bracketed word `[ack]` says itself, picture or no picture, because the body has
+ * that line of its own.
  */
 export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
   const lines = comparableLines(body);
@@ -490,7 +495,7 @@ export function turnSaysBody(turn: DispatchTurn, body: string): boolean {
       next += 1;
       continue;
     }
-    if (next < lines.length || pictures === 0 || !PLACEHOLDER_PART.test(line)) return false;
+    if (next < lines.length || pictures === 0 || line !== PICTURE_PLACEHOLDER) return false;
     pictures -= 1;
   }
   return next === lines.length;

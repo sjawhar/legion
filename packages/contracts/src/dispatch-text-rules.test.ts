@@ -8,6 +8,7 @@ import {
   pictureSyntax,
   referenceTargetFits,
   SESSION_ID_PATTERN,
+  trimmedLines,
   utf8Bytes,
 } from "./dispatch-text-rules";
 
@@ -151,6 +152,31 @@ describe("comparableLines", () => {
   test("leaves text that only looks like a picture, which is no picture at all", () => {
     expect(comparableLines("![shot.png](https://example.test/shot.png)")).toEqual([
       "![shot.png](https://example.test/shot.png)",
+    ]);
+  });
+
+  test("is the exported line step applied to the text its pictures are out of", () => {
+    const text = `  Look at this ![blue](${address})  \n\n  and this  \n`;
+    expect(comparableLines(text)).toEqual(trimmedLines(text.replace(pictureSyntax(), "")));
+  });
+});
+
+// The line step both sides of the Agents page's comparison share: the body's through
+// `comparableLines`, the streamed row's through `rowLines`, which strips the row's pictures its
+// own way first (INFRA-1026).
+describe("trimmedLines", () => {
+  const address = "dispatch://agent/s1/artifact/i3-blue96-png@v1";
+
+  test("trims each line and drops the empty ones, whatever the line endings", () => {
+    expect(trimmedLines("  Look at this  \r\n\r\n\tand this\n")).toEqual([
+      "Look at this",
+      "and this",
+    ]);
+  });
+
+  test("takes no picture out: that step is `comparableLines`'s own", () => {
+    expect(trimmedLines(`Look at this ![blue](${address})`)).toEqual([
+      `Look at this ![blue](${address})`,
     ]);
   });
 });

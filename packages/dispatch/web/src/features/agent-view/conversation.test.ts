@@ -221,15 +221,24 @@ describe("a user message a person's Dispatch message became", () => {
 
 // Whether a streamed row says what the person wrote is what decides their stored copy gives way,
 // and any bus client can publish that row, so it may say no more than the body and what the
-// stream names of the blocks the message carried: a placeholder part only after every line of
-// the body is matched, and at most one per picture the body embeds, which is how
-// `conversationParts` (`@legion/pi-shared/agent-stream`) writes them (INFRA-1026).
+// stream names of the blocks the message carried: the `[image]` an image block becomes, only
+// after every line of the body is matched, and at most one per picture the body embeds, which
+// is what `conversationParts` (`@legion/pi-shared/agent-stream`) writes for it (INFRA-1026).
 describe("a streamed row read against the body it says it delivered", () => {
   const picture = (name: string) => `![${name}](dispatch://agent/s1/artifact/i3-${name}96-png@v1)`;
   const row = (text: string) => ({ dispatchMessageId: "m-1", text });
 
   test("a bracketed word no picture accounts for is a word the person never wrote", () => {
     expect(turnSaysBody(row("Ship it?\n[shipped]"), "Ship it?")).toBe(false);
+  });
+
+  // The stream names a picture `[image]` and nothing else of a person's message, so any other
+  // bracketed word after the body's lines is the row's own: taking one would put it under the
+  // person's name in place of their stored copy (INFRA-1026, reviewer).
+  test("a bracketed word of the row's own is no block the stream named, picture or not", () => {
+    const body = `Look at this ${picture("blue")}`;
+    expect(turnSaysBody(row("Look at this\n[approved-by-me]"), body)).toBe(false);
+    expect(turnSaysBody(row("Look at this\n[Image]"), body)).toBe(false);
   });
 
   test("a placeholder before the body's own lines names no block the stream dropped", () => {
@@ -252,6 +261,18 @@ describe("a streamed row read against the body it says it delivered", () => {
   test("a row carrying the body's own picture markdown says its body", () => {
     const body = `Look at this ${picture("blue")}`;
     expect(turnSaysBody(row(body), body)).toBe(true);
+  });
+
+  // Both sides of the comparison are the one line step (`trimmedLines` in `@legion/contracts`,
+  // which `comparableLines` calls after it strips the pictures), so whatever that step makes of
+  // the body's side it makes of the row's: a row the session wrote with its own line endings,
+  // indenting and blank lines says the body still. Were the page to keep a copy of the step,
+  // a later change to the shared rule - dropping no empty line, collapsing the spaces inside a
+  // line as `pictureCaption` does - would reach the body's side alone, no honest row would
+  // match, and every message would show twice (INFRA-1026, reviewer).
+  test("the row's lines are read by the shared step, so its own spacing says the body", () => {
+    const body = "  Look at  this  \n\n\tand this\n";
+    expect(turnSaysBody(row("Look at  this\r\n\r\n   and this\r\n"), body)).toBe(true);
   });
 
   // The row is rendered as markdown under the person's name, so a picture in it that the body
