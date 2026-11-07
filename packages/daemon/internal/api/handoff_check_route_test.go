@@ -254,6 +254,52 @@ func TestACompletionOfADoneIssueFromASessionWorkingNoLookIsRefused(t *testing.T)
 	}
 }
 
+// The other arm of the same refusal, which the sibling above does not reach: a done issue whose
+// production check has closed, or that never had one, has no look to send anybody. So the role
+// that completes here is told it has nothing to report, rather than being pointed at a look task
+// of its own that will never arrive — the answer the open arm gives, where the check names one
+// role and only a turn of that role's look reports on it. Both ways of having no open check read
+// alike: a check its last report closed, and an issue with no check row at all. Nothing of the
+// call is recorded either way.
+func TestACompletionOfADoneIssueWithNoOpenProductionCheckIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		check func(t *testing.T, h *harness)
+	}{
+		{name: "a production check that opened and has since closed", check: func(t *testing.T, h *harness) {
+			seedCheck(t, h, "LEGION-208", claim.RoleTester, true, false)
+		}},
+		{name: "an issue that never had a production check", check: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+			seedIssueAt(t, h, "LEGION-208", phase.Done)
+			if tc.check != nil {
+				tc.check(t, h)
+			}
+			implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+			message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t),
+				Summary: "production carries it", Verdict: "pass"}), http.StatusConflict, "CHECK_LOOK_NOT_SERVED")
+			for _, want := range []string{"LEGION-208 is done", "works no look", "recorded nothing",
+				"no open production check", "nothing here for any role to report"} {
+				if !strings.Contains(message, want) {
+					t.Fatalf("the refusal is %q, want it to say %q", message, want)
+				}
+			}
+			if strings.Contains(message, "pass, pending or fail") {
+				t.Fatalf("the refusal is %q, want none of the open check's arm: no look of this issue reaches any role, so there is no verdict to name", message)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("facts = %#v, want none: the refusal is written before any fact is applied", got)
+			}
+			if got := checkEvents(t, h, "LEGION-208"); got != 0 {
+				t.Fatalf("processed check events = %d, want none", got)
+			}
+		})
+	}
+}
+
 // A phase completion carries no wakeAt: the field names when a production check's next look is
 // due, and a phase ends with no look to follow it. The contract says so for every client, so the
 // daemon refuses one rather than dropping the field unread, before any fact is applied, and the
