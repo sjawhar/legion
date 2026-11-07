@@ -336,17 +336,21 @@ above says how to run it).
   `logs/mod3-q1q3q5.jsonl:36,64`, two calls whose uuids no hook ever carried), so a card
   delivered during a turn reached no mapper and the live view drew nothing for it. `hooks/mod.ts`
   sends an `append` event built from what `$.session.append` answered (`{message, uuid}`), by
-  the `note` door under a `plugin` origin, and the server ignores an `append` event whose row
-  id it has already read (`AGENT_STREAM_SEEN_ROWS_MAX`, `src/agent-stream-runner.ts`) in case a
-  host fires the hook as well.
+  the `note` door under a `plugin` origin naming this plugin (`MOD_PLUGIN_NAME`), and the
+  server ignores an `append` event whose row id it has already read
+  (`AGENT_STREAM_SEEN_ROWS_MAX`, `src/agent-stream-runner.ts`) in case a host fires the hook as
+  well.
 - Claim every row of the conversation this session wrote by its uuid, never by what the row says
-  or whose origin it carries (`src/mod-session.ts`, `appendedRow`, `runsUnreadPrompt`,
-  `runsCommandRow`). Draw a row Claude Code marks `isMeta` only where this session appended it:
-  the engine marks every row `$.session.append` writes, so a card delivered during a turn —
-  which is that row and nothing else — is the one `isMeta` row the page must show, while a
-  terminal `/rename`'s `<system-reminder>` and the `<local-command-caveat>` row of a run stay
-  model-facing and are drawn nothing for. `origin` cannot stand in for the claim: the mod
-  reports its own appended rows under a `plugin` origin with no name, and another installed
+  (`src/mod-session.ts`, `appendedRow`, `runsUnreadPrompt`, `runsCommandRow`). Draw a row
+  Claude Code marks `isMeta` only where this session appended it: the engine marks every row
+  `$.session.append` writes, so a card delivered during a turn — which is that row and nothing
+  else — is the one `isMeta` row the page must show, while a terminal `/rename`'s
+  `<system-reminder>` and the `<local-command-caveat>` row of a run stay model-facing and are
+  drawn nothing for. The appended row is claimed as its own event arrives, by the plugin name
+  the mod puts on it — the mod posts that event before it posts the call's result, so a claim
+  made from the answer alone landed after the view had read the row and dropped it (INFRA-1026
+  k2, measured live on 2.1.310), and the server hands the session every event before the view
+  records it (`src/envoy-channel-server.ts`). The name is the whole signal: another installed
   mod's appends reach this mod's hook under that mod's own name, so a rule on `origin.kind`
   drew another mod's context as the person's words. Of the two prompts this plugin submits
   without `asUser`, the card an idle session is handed is drawn, because it is the card, and

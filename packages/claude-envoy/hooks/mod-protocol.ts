@@ -79,14 +79,22 @@ const MOD_SOCKET_HOME_VARIABLE = "HOME"
  *  pair for this plugin's envoy.json). */
 const MOD_SOCKET_HOME_CONFIG = "/.claude"
 
-/** The directory under the base that holds this user's sockets. No other local user can create
- *  anything inside a home or a run directory, which is where ssh's `ControlPath` and gpg-agent
- *  put theirs and is why no co-user can plant this directory and get the socket; the server
- *  checks the directory it finds is its own and `0700` all the same before it binds
- *  (`../src/mod-link.ts`). The mod makes no such check, and could not: `$.fs.stat` answers
- *  `{kind, size, mtimeMs, isLink, realPath?}` (`FsStat` in Claude Code 2.1.310's declarations)
- *  and carries neither owner nor mode. */
-const MOD_SOCKET_DIRECTORY = "claude-envoy"
+/** This plugin's own name, as its manifest spells it (`.claude-plugin/plugin.json`) and as
+ *  Claude Code stamps it on a row of this plugin's: a prompt row of this plugin arrived live on
+ *  2.1.310 under `{"kind": "plugin", "name": "claude-envoy"}`, and with `"asUser": true` where
+ *  the prompt carried a person's own words (`/legion/scratch/tmp/v-run.log:218,229`). The mod
+ *  names itself the same way on the rows it reports itself, which is what tells its own
+ *  appended row from another installed mod's (`./mod.ts`, `../src/mod-session.ts`). */
+export const MOD_PLUGIN_NAME = "claude-envoy"
+
+/** The directory under the base that holds this user's sockets, named for the plugin. No other
+ *  local user can create anything inside a home or a run directory, which is where ssh's
+ *  `ControlPath` and gpg-agent put theirs and is why no co-user can plant this directory and
+ *  get the socket; the server checks the directory it finds is its own and `0700` all the same
+ *  before it binds (`../src/mod-link.ts`). The mod makes no such check, and could not:
+ *  `$.fs.stat` answers `{kind, size, mtimeMs, isLink, realPath?}` (`FsStat` in Claude Code
+ *  2.1.310's declarations) and carries neither owner nor mode. */
+const MOD_SOCKET_DIRECTORY = MOD_PLUGIN_NAME
 
 /** FNV-1a's prime, 16777619, in the two halves `fnv1a32` multiplies by. */
 const MOD_HASH_PRIME_HIGH = 0x0100
@@ -427,8 +435,9 @@ export type ModEvent =
    * One row of the conversation, as `session.append` handed it — or, for a row the mod itself
    * appended, as `$.session.append` answered: Claude Code does not re-enter a mod's own
    * `session.append` hook for such a row (measured, `./mod.ts`), so the mod reports it, by the
-   * `note` door and under a `plugin` origin with no name, which is what the engine gives a
-   * plugin's own append and all the call's answer leaves the mod to say.
+   * `note` door and under a `plugin` origin naming this plugin (`MOD_PLUGIN_NAME`), which is
+   * the origin the engine gives a plugin's own row and is what the server reads to tell this
+   * mod's appended row from another installed mod's (`../src/mod-session.ts`).
    */
   | {
       readonly kind: "append"

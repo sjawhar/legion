@@ -306,10 +306,14 @@ test("the mod reports the row it appends itself, as the row this plugin wrote", 
 
   const row = await nextAppend()
   expect(row.uuid).toBe(APPENDED_ROW)
-  // The door and the origin the engine gives a plugin's own append, which is what the mapper
-  // reads to draw the row rather than dropping it as a meta row of Claude Code's own.
+  // The door and the origin the engine gives a plugin's own append, which is what the server
+  // reads to claim the row as this session's rather than dropping it as a meta row of Claude
+  // Code's own: the name is this plugin's, as Claude Code stamps it on a row of this plugin's
+  // (`{"kind": "plugin", "name": "claude-envoy"}`, measured live on 2.1.310,
+  // `/legion/scratch/tmp/v-run.log:218`), and another installed mod's append carries that
+  // mod's name instead (`../src/mod-session.ts`, `observe`).
   expect(row.door).toBe("note")
-  expect(row.origin).toEqual({ kind: "plugin" })
+  expect(row.origin).toEqual({ kind: "plugin", name: "claude-envoy" })
   // The row as the call answered it, `isMeta` and all.
   expect(row.message).toEqual({ content, isMeta: true, role: "user", type: "user" })
 })

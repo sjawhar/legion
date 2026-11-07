@@ -86,8 +86,9 @@ export interface AgentStreamOptions {
   /** Whether a row is one this session appended into the conversation (`./mod-session`,
    *  `appendedRow`), asked by the row's own id: the one `isMeta` row the view draws, since the
    *  card a running turn is handed is such a row and nothing else. Answered for the row being
-   *  recorded by the same order `runsCommandRow` relies on - the append has answered with the
-   *  uuid before Claude Code's own report of that row arrives. */
+   *  recorded by the same order `runsCommandRow` relies on - the session takes the row's event
+   *  and claims it there, before the view records that event (`./envoy-channel-server`), since
+   *  the mod posts the event before the answer of the append that wrote the row. */
   readonly appendedRow?: (row: string) => boolean
 }
 

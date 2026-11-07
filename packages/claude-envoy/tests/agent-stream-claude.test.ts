@@ -448,9 +448,10 @@ test("a card carrying the unread prompt's own words is drawn for the person", as
 // 2.1.310 recordings of the issue's spike (`/legion/scratch/tmp/infra-1026-spike/logs`). The
 // rule before this one kept every `isMeta` row whose origin was a plugin's, so that mod's
 // context was drawn as the person's own words (INFRA-1026 review, round ten). This session's
-// own appended rows carry no name at all - the mod reports them out of what the append
-// answered, which has no origin in it (`../hooks/mod.ts`) - so what separates them is the uuid
-// the append answered with, and nothing on the row.
+// own appended row names this plugin instead: the mod reports it under
+// `{"kind":"plugin","name":"claude-envoy"}`, the origin Claude Code itself stamps on a row of
+// this plugin's (`../hooks/mod.ts`), and the session claims that row's uuid by that name,
+// which is what tells the two apart - nothing else on either row does.
 test("another plugin's meta row is not the person's, and this session's appended card is", async () => {
   const session = modSession({
     link: {
@@ -474,7 +475,7 @@ test("another plugin's meta row is not the person's, and this session's appended
   feed({ kind: "turn-start", turnId: "turn-1" })
   await session.show({ content: [{ text: card, type: "text" }], text: card })
   // What the mod reports of the row it appended: the `note` door, `isMeta`, and a `plugin`
-  // origin with no name (`../hooks/mod.ts`).
+  // origin naming this plugin (`../hooks/mod.ts`).
   feed(
     appendRow("note", [{ text: card, type: "text" }], {
       message: {
@@ -483,7 +484,7 @@ test("another plugin's meta row is not the person's, and this session's appended
         role: "user",
         type: "user",
       },
-      origin: { kind: "plugin" },
+      origin: { kind: "plugin", name: "claude-envoy" },
       uuid: "row-card",
     }),
   )
@@ -502,6 +503,56 @@ test("another plugin's meta row is not the person's, and this session's appended
   )
 
   expect(messages(live.replay()).map(textOf)).toEqual([card])
+})
+
+// The order of the live stack, which the test above cannot show: the mod posts the row's
+// event before it posts the result of the `$.session.append` call that wrote the row
+// (`../hooks/mod.ts`, `invoke`), so the server reads the row while that call is still
+// unanswered and a claim made from its answer is not there yet. Driven live on real Claude
+// Code 2.1.310 against this stack, a card delivered into a running turn reached the model and
+// was drawn nowhere in the view at all (INFRA-1026 k2, session
+// 1cdb849c-cfa4-458f-91a9-6f2c09653222). The session claims the row as it handles the row's
+// own event, and the server hands it every event before the view records it
+// (`../src/envoy-channel-server`), so the claim is in place when the mapper asks.
+test("a card appended during a turn is drawn when its row arrives before the append answers", async () => {
+  const appending = Promise.withResolvers<ModCallResults["session.append"]>()
+  const session = modSession({
+    link: {
+      connected: () => true,
+      request: <N extends ModCallName>(call: N): Promise<ModCallResults[N]> =>
+        call === "session.append"
+          ? (appending.promise as unknown as Promise<ModCallResults[N]>)
+          : Promise.reject(new Error(`no answer for ${call}`)),
+    },
+    warn: () => undefined,
+  })
+  const live = harness({ appendedRow: (row) => session.appendedRow(row) })
+  const feed = (event: ModEvent): void => {
+    session.observe(event)
+    live.feed(event)
+  }
+  const card = "Dispatch message from alice: the migration is approved."
+
+  // A turn is running, so the card is a row of the conversation rather than a prompt.
+  feed({ kind: "turn-start", turnId: "turn-1" })
+  const showing = session.show({ content: [{ text: card, type: "text" }], text: card })
+  feed(
+    appendRow("note", [{ text: card, type: "text" }], {
+      message: {
+        content: [{ text: card, type: "text" }],
+        isMeta: true,
+        role: "user",
+        type: "user",
+      },
+      origin: { kind: "plugin", name: "claude-envoy" },
+      uuid: "row-card",
+    }),
+  )
+
+  // Drawn out of the event alone: the call has answered nothing yet.
+  expect(messages(live.replay()).map(textOf)).toEqual([card])
+  appending.resolve({ uuid: "row-card" })
+  await showing
 })
 
 test("a command row keeps the row's own role and a note row an assistant one", () => {

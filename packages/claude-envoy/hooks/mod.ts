@@ -53,6 +53,7 @@ import {
   MOD_HEALTH_MARKER,
   MOD_INSTANCE_HEADER,
   MOD_MIN_CLAUDE_VERSION,
+  MOD_PLUGIN_NAME,
   MOD_ROUTE_EVENTS,
   MOD_ROUTE_HEALTH,
   MOD_ROUTE_REQUESTS,
@@ -311,14 +312,22 @@ function createLink(): SessionLink {
         //
         // The door and the origin are the engine's to set and the result carries neither: a
         // plugin's own append comes in by `note`, under the calling plugin (same file,
-        // lines 11095-11099), and this mod has no call that answers its own plugin name, so
-        // the origin names the kind alone. Both are what the mapper reads to treat the row as
-        // what it is: a row this plugin wrote (`../src/agent-stream-claude`).
+        // lines 11095-11099). So the mod names itself, as the engine names it on the rows it
+        // stamps for this plugin: a prompt row of this plugin arrived live on 2.1.310 under
+        // `{"kind": "plugin", "name": "claude-envoy"}` (`/legion/scratch/tmp/v-run.log:218`).
+        // The name is the whole signal the server has for this row, and it must be here rather
+        // than on the answer: this event is posted before `invoke` returns, so it reaches the
+        // server before the call's answer does, and a claim made from that answer lands after
+        // the live view has already read the row and dropped it as a meta row of Claude Code's
+        // own (INFRA-1026 k2, measured live at the head before this change). The server claims
+        // the row while it handles this event, by this name (`../src/mod-session.ts`,
+        // `observe`), and another installed mod's appended row reaches this hook under that
+        // mod's own name, so it is claimed by nothing.
         send({
           kind: "append",
           uuid: answer.uuid,
           door: "note",
-          origin: { kind: "plugin" },
+          origin: { kind: "plugin", name: MOD_PLUGIN_NAME },
           message: answer.message,
         })
         return { uuid: answer.uuid }

@@ -401,12 +401,13 @@ export function createClaudeAgentStream(deps: ClaudeAgentStreamDeps): ClaudeAgen
     //     leaves the viewer an answer to a message they never saw. It reaches this mapper
     //     because the mod reports the rows it appends itself - Claude Code does not re-enter a
     //     mod's own `session.append` hook for them (`hooks/mod.ts`) - and `appendedRow` names
-    //     it by the uuid that append answered with. The row's own `origin` cannot: the mod
-    //     reports it under a `plugin` origin with no name, where the engine gives another
-    //     installed mod's appended rows `{"kind":"plugin","name":"<that mod>"}`
-    //     (`/legion/scratch/tmp/infra-1026-spike/logs`, where `spike-mod2` and `spike-mod3p`
-    //     name themselves), so a rule keeping every `plugin` row drew another mod's
-    //     model-facing context as the person's own words (INFRA-1026 review, round ten);
+    //     it by the uuid the session claimed, which it does as that report arrives, under this
+    //     plugin's own name, and again at what the append answered (`./mod-session`). A rule
+    //     keeping every `isMeta` row of a `plugin` origin cannot stand in for the claim: the
+    //     engine gives another installed mod's appended rows `{"kind":"plugin","name":"<that
+    //     mod>"}` (`/legion/scratch/tmp/infra-1026-spike/logs`, where `spike-mod2` and
+    //     `spike-mod3p` name themselves), so it drew that mod's model-facing context as the
+    //     person's own words (INFRA-1026 review, round ten);
     //   - a `/rename` typed at a terminal left, behind its echo and its
     //     `<local-command-stdout>` row, a `type: "user"` row carrying `isMeta: true` and
     //     `origin.kind` `engine` whose whole text is `<system-reminder> The user named this

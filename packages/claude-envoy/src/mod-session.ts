@@ -37,12 +37,13 @@
 // consumer: the live view reads them and hands each one here (`observe`), so nothing in this file
 // opens a socket or reads the link's stream.
 import { messageFor } from "@legion/envoy-client/errors"
-import type {
-  ModCallResults,
-  ModConfigValue,
-  ModContentBlock,
-  ModEffort,
-  ModEvent,
+import {
+  MOD_PLUGIN_NAME,
+  type ModCallResults,
+  type ModConfigValue,
+  type ModContentBlock,
+  type ModEffort,
+  type ModEvent,
 } from "../hooks/mod-protocol"
 import { rememberBounded } from "./bounded-set"
 import { claudeCommandOutput, claudeEchoedCommandLine, claudeRowText } from "./claude-rows"
@@ -255,13 +256,16 @@ export interface ModSession {
    * one. Claude Code marks such a row `isMeta`, which the live view draws nothing of otherwise,
    * so this is the one `isMeta` row it must draw (`./agent-stream-claude`).
    *
-   * Claimed by uuid, which the append itself answers with. The row's `origin` cannot say it:
-   * this mod reports its own appended rows out of what the call answered, under a `plugin`
-   * origin with no name at all (`../hooks/mod.ts`), while another installed plugin's appends
-   * reach this mod's hook under the engine's own origin - `{"kind":"plugin","name":"<the other
-   * plugin>"}`, measured in the issue's spike (`/legion/scratch/tmp/infra-1026-spike/logs`,
-   * where `spike-mod2` and `spike-mod3p` name themselves). So a rule reading `origin` draws
-   * another mod's model-facing context as the person's words (INFRA-1026 review, round ten).
+   * Claimed by uuid, at the `note`-door event that reports the row under this plugin's own
+   * name (`observe`, `MOD_PLUGIN_NAME`) and again at what the append answered. That name is
+   * this mod reporting a row only it wrote (`../hooks/mod.ts`), and it is what separates the
+   * row from another installed plugin's append, which reaches this mod's hook under the
+   * engine's own origin - `{"kind":"plugin","name":"<the other plugin>"}`, measured in the
+   * issue's spike (`/legion/scratch/tmp/infra-1026-spike/logs`, where `spike-mod2` and
+   * `spike-mod3p` name themselves). So a rule keeping every `plugin` origin drew another
+   * mod's model-facing context as the person's words (INFRA-1026 review, round ten), while
+   * the claim from the call's answer came too late on its own: the mod posts the row's event
+   * before the call's result, so the view had read the row and dropped it (INFRA-1026 k2).
    */
   appendedRow(row: string): boolean
   /**
@@ -432,7 +436,8 @@ export function modSession(options: ModSessionOptions): ModSession {
    *  bounded by `CLAIMED_ROWS_MAX`: what `runsUnreadPrompt` answers from. */
   const claimedUnreadPrompts = new Set<string>()
   /** The rows this session appended into the conversation, newest last and bounded by
-   *  `CLAIMED_ROWS_MAX`: what `appendedRow` answers from. */
+   *  `CLAIMED_ROWS_MAX`: what `appendedRow` answers from. Claimed as each row's event arrives
+   *  (`observe`) and at what the append answered (`append`). */
   const claimedAppends = new Set<string>()
   /** The run whose claimed echo row was the last row of the `command` door to arrive, so the
    *  output row directly behind that echo is read as its output and no later row is. */
@@ -580,9 +585,11 @@ export function modSession(options: ModSessionOptions): ModSession {
 
   /** One row of the conversation, stored, and claimed as this session's by the uuid the append
    *  answers with: Claude Code marks an appended row `isMeta`, and the live view draws nothing
-   *  of such a row unless this session appended it (`appendedRow`). The model reads the row at
-   *  the turn's next request, and not at all when no request follows it, which is what
-   *  `handToTurn` watches it for. */
+   *  of such a row unless this session appended it (`appendedRow`). The row itself is claimed
+   *  where its event arrives, which is before this call answers (`observe`); this second claim
+   *  is the first-hand one, and covers a copy of the row that reaches this session later under
+   *  an origin that names no plugin. The model reads the row at the turn's next request, and
+   *  not at all when no request follows it, which is what `handToTurn` watches it for. */
   const append = async (content: readonly ModContentBlock[]): Promise<string> => {
     const result = await link.request("session.append", { message: { type: "user", content } })
     if (result.deny !== undefined) {
@@ -750,6 +757,19 @@ export function modSession(options: ModSessionOptions): ModSession {
         // session submitted: what a card handed to an idle session is answered on, or the row
         // of a prompt at unread rows, which the live view must draw nothing of.
         if (event.door === "prompt") promptRowArrived(event.uuid, event.message.content)
+        // A row of the `note` door under this plugin's own name is a row this session
+        // appended: the mod reports every row its `$.session.append` wrote, naming this plugin
+        // as the engine names it (`../hooks/mod.ts`, `MOD_PLUGIN_NAME`), while another
+        // installed mod's append reaches that hook under that mod's own name. Claimed here,
+        // and not only where the call answers: the mod posts this event before it posts the
+        // call's result, so the row reaches the live view first and a claim made from the
+        // answer lands after the view has dropped it (INFRA-1026 k2, measured live on 2.1.310
+        // — a card delivered into a running turn reached the model and was drawn nowhere).
+        // The server hands every event here before the view records it
+        // (`./envoy-channel-server`), so a claim made in this line is in place for it.
+        if (event.door === "note" && event.origin.name === MOD_PLUGIN_NAME) {
+          rememberBounded(claimedAppends, event.uuid, CLAIMED_ROWS_MAX)
+        }
         return
       }
       if (event.kind === "turn-complete") turnEnded(event.turnId)
