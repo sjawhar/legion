@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -91,6 +92,27 @@ var outsideSchemaCorruptions = slices.Concat(docs.OutsideSchemaCorruptionsForTes
 // the schema refusal that names what is wrong.
 const outsideSchemaRefusal = "document is outside the Proof schema; replace the document from markdown to repair it: outside Proof schema: "
 
+// storedTreeServer is the server the two tables below run their stored trees on. Its settlement
+// delay is one the test cannot reach, because a settlement of a tree only the renderer refuses
+// fails the room, and a failed room answers a route alike no longer.
+//
+// Such a tree reads, so the settlement gets past its first read, stamps the block ids the crafted
+// tree left out into the room - a suppressed update, so a write of the settlement's own - and
+// only then renders the version, where the renderer refuses it (renderTreeWithOffsets). A
+// settlement that already wrote into the room abandons by failing it, since what it wrote will
+// never reach the store. Until the forced eviction that follows has run, every operation inside a
+// database transaction is refused ErrServiceUnavailable rather than waiting for it
+// (docs.Service.awaitRoomRecovery), which is 503 DOC_SERVICE_UNAVAILABLE on the comment routes
+// here. With the default 20 ms delay that eviction is the only thing between the settlement and
+// the next route, so under a loaded race lane a route reaches the window and reads 503 where the
+// stored tree earns 409 (run 42342555091, job 128313251577). What a failed room answers is
+// block_path_test.go's subject, not these tables': theirs is what each route makes of the stored
+// tree, so here the settlement never runs.
+func storedTreeServer(t *testing.T) (http.Handler, *store.Store, Deps) {
+	t.Helper()
+	return newTestServer(t, testServerOptions{settle: time.Hour})
+}
+
 // createCorruptedDocument creates a document holding "before" and gives it corrupt's stored tree,
 // written while no room holds the document.
 func createCorruptedDocument(t *testing.T, handler http.Handler, database *store.Store, deps Deps, issueKey, name string, corrupt func(context.Context, *store.Store, string) error) model.Artifact {
@@ -152,7 +174,7 @@ func TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike(t *testing.T) {
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
 			t.Parallel()
-			handler, database, deps := newTestServer(t, testServerOptions{})
+			handler, database, deps := storedTreeServer(t)
 			issue := createArtifactIssue(t, handler)
 			artifact := createBeforeDocument(t, handler, issue.Key, "routes.md")
 			open := createAnchoredComment(t, handler, issue.Key, artifact.ID, "open thread")
@@ -234,7 +256,7 @@ func TestOutsideSchemaArtifactIsRepairableThroughUpload(t *testing.T) {
 	for _, test := range outsideSchemaCorruptions {
 		t.Run(test.Name, func(t *testing.T) {
 			t.Parallel()
-			handler, database, deps := newTestServer(t, testServerOptions{})
+			handler, database, deps := storedTreeServer(t)
 			issue := createArtifactIssue(t, handler)
 			artifact := createCorruptedDocument(t, handler, database, deps, issue.Key, "repair.md", test.Corrupt)
 

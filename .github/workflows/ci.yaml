@@ -3881,8 +3881,28 @@ jobs:
       # out, so the log still carries the --- FAIL lines and the package's own line. -count=1
       # because the job restores the Go build cache above, and a cached pass must not stand in
       # for a run.
+      #
+      # -parallel 2 rather than go test's default of GOMAXPROCS, which is four here, is what
+      # holds the peak under that limit: this package's memory is what its parallel cases hold at
+      # once. At four slots the sampler read a peak of 14,189,716 kB. Its highest sample,
+      # 14,174,324 kB at 738.6 s, had TestAMarginWriteMatchesTheWholeDocumentWrite's
+      # generated-390KiB and generated-600KiB cases running together beside
+      # TestReadsOfALiveDocumentRunBesideItsPeers; the plateau before them, 11,555,172 kB, had
+      # the four parallel passes of TestACaptureNeverReusesARenderingTheForkHasMovedPast; and
+      # before any of those cases ran the step stood at 5,101,120 kB (run 42342555091, job
+      # 128313251577). Each such case holds a document of hundreds of kilobytes with the whole
+      # update history it writes, which the detector shadows at about four bytes a byte, so the
+      # nine gigabytes those two families added are two slots' worth more than this limit has
+      # room for. Two slots were measured rather than chosen: those same three families under
+      # this sampler at -parallel 2 peaked at 1,534,288 kB, and the rest of the package at
+      # -parallel 2 reached 6,240,116 kB, so even added as though nothing were reused they stay
+      # under 8388608 kB. What it costs is this step's own time, about twice the 965 s the run
+      # above spent at four slots, which the -timeout 60m below and the job's 70 minutes hold.
+      # No -p beside it: one package is one build lane, so go test's package parallelism has
+      # nothing to divide. No GOMEMLIMIT either: two slots leave the heap it would bound below
+      # the 2 GiB this step once set, so it would only make the detector's work slower.
       - name: Race-test the document service
-        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
+        run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -parallel 2 -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
