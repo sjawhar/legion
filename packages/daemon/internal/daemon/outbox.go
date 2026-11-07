@@ -176,7 +176,8 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, live: live, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
+		handlers: handlers, live: live,
+		project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI, repositories: repositories,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -842,9 +843,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // topic, and to nothing else. Every notice kind is for an architect, and no claim subscribes to an
 // issue topic (packages/pi-legion/src/claim-session.ts), so no issue topic carries one. The
 // owner, the earlier notices it waits behind, and whether its tree lingers are read from one
-// snapshot of the tree (notice_routing.go). A notice waits
-// (errNoticeWaits) behind an earlier notice of its tree that is held for the same architect, so
-// each architect is told in the order the notices were written. A role topic with no live holder
+// snapshot of the tree (notice_routing.go). A notice waits behind an earlier notice of its tree
+// that is held for the same architect, so each architect is told in the order the notices were
+// written: on its backoff (errNoticeWaits), or, when the earlier row is itself due at a moment
+// still ahead, at that moment and once (wait.Until). A role topic with no live holder
 // refuses the publish (notify.ErrNoHolder): while the owning architect's claim can hold its role
 // again — relaunching, or a root the operator suspended and can resume — the row is held for it;
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
@@ -870,11 +872,56 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // finishes any other way leaves them claimed until its row's deletion releases them, for the
 // architect's next ready to name. However the row ends, a catch-up that told its decisions in any
 // run forgets them here rather than let its ending release what the architect has already heard.
+//
+// A row the wake pacing held to its turn (record.Notice.PacedAt) writes the line a wake writes,
+// once, on the attempt that publishes it (noticeAnswered's wakeRan, notice_exceptions.go):
+// running the row is the wake only if the architect is given the catch-up to read.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if err := r.deliverNotice(ctx, row, payload); err != nil {
 		return err
 	}
 	return r.settleTold(ctx, row, payload)
+}
+
+// wakeRan is the one line a wake the outbox runs writes, where it runs: the catch-up a start row
+// wrote in place of a launch, which the pacing held until the moment it reserved (workflow's
+// claimReady). It is the shape internal/supervise composes for every wake of the daemon,
+// prepended with the claim this one wakes (supervise.WakeRanMessage, WakeRanFields): the shape is
+// what matters to its reader, since one grep over the daemon's log finds every wake of a restart
+// or a plugin wave, whichever lane caused it, and counts the wakes of a minute against the rate
+// and burst each line names. The claim is the architect the catch-up goes to, the root architect
+// of the row's issue (QueueCatchUp writes the row for the root), spelled as a machine's own lines
+// spell a claim, since this logger is the runner's and carries no claim of its own — where a
+// machine's logger carries one already, which is why the field is this caller's to add.
+//
+// The line is written on the attempt that publishes, and so once for the row: a row that waits
+// behind an earlier notice of the same architect (errNoticeWaits, wait.Until), finds its role
+// topic unheld, or meets a transient publish failure runs again on its backoff, and a line per
+// attempt would count one wake many times in the minute it lands in (scripts/wake-windows.py
+// counts every paced line and builds a window for each).
+//
+// How long the wake waited is the row's own record, not a clock and not its next_at: the engine
+// carried both the moment it reserved and the moment it reserved from, so PacedAt less PacedFrom
+// is what the pacing held this wake for, whatever a retry since has written into next_at
+// (record.Notice.PacedAt, PacedFrom, the store's RetryOutbox). The pair is one clock's: the row's
+// created_at is the database's now() at the start of the fact's transaction, so a wake read
+// against it would be the engine's clock less the database's, and a row the burst let straight
+// out — the first wake of a wave, reserved for the instant it was composed — would report the
+// transaction's own duration as a wait. It waited nothing and says so, as supervise's line does;
+// reading the wait from the runner's clock instead would call every such row held, by however
+// long the lane took to pick it up.
+//
+// The pace the line names is the one the daemon holds its machines to (supervise.WakePace, set in
+// openSupervision): the rate and the burst alone, never its Reserve — the reservation that
+// decided when this row was due is the workflow engine's (workflow.Config.Reserve), taken from
+// the same limiter. A test that builds the runner by hand over a supervisor with no pace reads
+// the pacing off, which is that line's own reading of it.
+func (r *outbox) wakeRan(row record.OutboxRow, notice record.Notice) {
+	architect, _ := claim.NewToken(r.project, row.Issue, claim.RoleArchitect)
+	pace := r.supervisor.deps.WakePace
+	fields := append([]any{"claim", string(architect)},
+		supervise.WakeRanFields(supervise.WakeCatchUp, true, notice.PacedAt.Sub(notice.PacedFrom), pace.Rate, pace.Burst)...)
+	r.log.Info(supervise.WakeRanMessage, fields...)
 }
 
 // deliverNotice is the notice executor's own work: routing the notice, publishing it, and settling
@@ -938,7 +985,16 @@ func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payloa
 	} else if woken {
 		return fmt.Errorf("%w: %s's pod was released and is coming back for notice row %d", errNoticeWaits, architect, row.ID)
 	}
-	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
+	if earlier, due := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
+		// The row the fence holds this one behind is due at a known moment when the wake pacing
+		// holds it (record.Notice.PacedAt): this row runs once, then, rather than climbing its
+		// backoff to it — over a hold of tens of minutes that is a Warn every attempt from the
+		// seventh (settle), about one wake's worth of noise per architect in a wave. The hold
+		// itself is right: it keeps the architect to the one wake its catch-up is.
+		if now := r.now().UTC(); due.After(now) {
+			return wait.Until(due, fmt.Sprintf("%s's notice row %d waits behind its row %d, due at %s",
+				architect, row.ID, earlier, due.Format(time.RFC3339)))
+		}
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
@@ -1273,12 +1329,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// the decisions the task carries are settled first (settleKept) and the catch-up is
 		// composed without them; the settle after the row then finds nothing left to do. A retry of
 		// the row queues the task no second time and applies the fact once.
+		//
+		// That catch-up stands in place of a launch, so it is a wake of the architect and takes a
+		// turn in the daemon's pacing like the launch it replaces: the fact says so (Paced), the
+		// engine takes the turn inside the fact's transaction and writes the row due at it
+		// (workflow's claimReady), and this runner writes the line that wake writes when the row
+		// runs (wakeRan). A start that launches instead took its turn at the machine's gate above
+		// (supervise's reserveWake), so one start row is one wake either way.
 		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
 			if err := r.settleKept(ctx, row, payload, gave); err != nil {
 				return err
 			}
 			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
-				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation, Paced: true}, r.handlers...); err != nil {
 				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}

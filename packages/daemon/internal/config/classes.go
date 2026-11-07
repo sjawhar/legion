@@ -125,6 +125,7 @@ const (
 	whyIdleRel  = "the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it"
 	whyMemory   = "a tree's memory group is drawn once, as the tree is opened, under the mode admission and the API server were given at boot, and the instructions are read at boot into the launch specs: a change of either reaches the next boot and no tree already drawn"
 	whyPodSweep = "the pod-update sweep reads both limits off the configuration the daemon booted on, and nothing builds that reader again: a change of either reaches the next boot and no sweep before it"
+	whyWakePace = "the daemon builds its one wake limiter at boot and hands it to the workflow engine and to every machine it supervises, and it builds none of them again: a change of either reaches the next boot and no wake before it"
 )
 
 // Caller is which arm asked for a change through the settings route: what that caller may set.
@@ -248,6 +249,11 @@ var Classes = []Row{
 	// on (internal/daemon's supervision.cfg) rather than at each sweep.
 	{Field: "Config.PodUpdateMaxOpenRounds", Path: "pod_update_max_open_rounds", Class: ClassFixed, Why: whyPodSweep},
 	{Field: "Config.PodUpdateRoundsPerMinute", Path: "pod_update_rounds_per_minute", Class: ClassFixed, Why: whyPodSweep},
+	// The pace the daemon lets the wakes it causes out at, which it reads once, at boot, into
+	// the one limiter the engine and every machine reserve from (internal/daemon's run,
+	// reserveWake).
+	{Field: "Config.WorkerWakesPerMinute", Path: "worker_wakes_per_minute", Class: ClassFixed, Why: whyWakePace},
+	{Field: "Config.WorkerWakeBurst", Path: "worker_wake_burst", Class: ClassFixed, Why: whyWakePace},
 	{Field: "Config.ReviewRoundCap", Path: "review_round_cap", Class: ClassDecision},
 	{Field: "Config.MaxFixAttempts", Path: "max_fix_attempts", Class: ClassDecision},
 	// The capability report is built at every read of the state, from the settings holder

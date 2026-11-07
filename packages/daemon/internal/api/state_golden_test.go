@@ -64,6 +64,8 @@ controller_wake_interval_seconds: 1800
 launch_failure_limit: 4
 prompt_failure_limit: 5
 prompt_retire_limit: 3
+worker_wakes_per_minute: 12
+worker_wake_burst: 2
 operator_token_file: /var/run/legion/OPERATOR_TOKEN
 envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
 nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]
@@ -411,6 +413,22 @@ func populatedState(t *testing.T) State {
 		StrandedClaims: []StrandedClaim{
 			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
 			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
+		},
+		// A wave going out at the pace its operator set, with one wake of each lane still held:
+		// LEGION-207's implementer, working its production check in the pod the daemon keeps, waits
+		// for the update task its plugin round queues it; LEGION-208's architect, already running,
+		// waits for the catch-up a child's re-admission wrote it in place of a launch, which waits
+		// on its outbox row rather than in a machine; and LEGION-208's planner, whose pod answered
+		// its update round, waits for the launch that brings it up on the pod's replacement. The
+		// two machine wakes are over a process that still runs, which the queue holds like any
+		// other, and the three are one list in claim order whichever lane holds each.
+		WakesWaiting: []WakeWaiting{
+			{Claim: "legion-legion-legion-207-implementer", Issue: "LEGION-207", Role: claim.RoleImplementer,
+				Kind: "plugin-task", DueAt: time.Date(2026, 9, 22, 9, 17, 56, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-architect", Issue: "LEGION-208", Role: claim.RoleArchitect,
+				Kind: "catch-up", DueAt: time.Date(2026, 9, 22, 9, 18, 3, 0, time.UTC)},
+			{Claim: "legion-legion-legion-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner,
+				Kind: "launch", DueAt: time.Date(2026, 9, 22, 9, 18, 11, 0, time.UTC)},
 		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",

@@ -685,6 +685,8 @@ The table is the daemon's own (`Classes`, `packages/daemon/internal/config/class
 | `worker_rpc_timeout_seconds` | rebuild | `worker-stream` |
 | `worker_stop_timeout_seconds` | rebuild | `runtime` |
 | `worker_stream_port` | fixed | — |
+| `worker_wake_burst` | fixed | — |
+| `worker_wakes_per_minute` | fixed | — |
 
 ### Why a fixed key is refused
 
@@ -711,3 +713,5 @@ Each line below is the reason the route answers with, for the keys it names.
 - `runtime.kubernetes.idle_release`, `runtime.kubernetes.idle_release.idle_minutes`, `runtime.kubernetes.idle_release.backstop_minutes` — the idle release is settled at boot into the workflow's idle pass and the outbox's backstop, and the daemon builds neither again: a change of it reaches the next boot and nothing before it.
 
 - `pod_update_max_open_rounds`, `pod_update_rounds_per_minute` — the pod-update sweep reads both limits off the configuration the daemon booted on, and nothing builds that reader again: a change of either reaches the next boot and no sweep before it.
+
+- `worker_wakes_per_minute`, `worker_wake_burst` — the daemon builds its one wake limiter at boot and hands it to the workflow engine and to every machine it supervises, and it builds none of them again: a change of either reaches the next boot and no wake before it.

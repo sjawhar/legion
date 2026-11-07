@@ -214,7 +214,8 @@ func TestClassOfReadsTheTemplatedPaths(t *testing.T) {
 // project token, the runtime the daemon's processes run in), or a value boot settled into
 // something the daemon never builds again (the idle release, in the workflow's idle pass and the
 // outbox's backstop; a project's memory mode and instructions, in admission, the API server and
-// the launch specs). A new fixed path belongs in this list deliberately, with a reason an
+// the launch specs; the wake pacing, in the one limiter the engine and every machine reserve
+// from). A new fixed path belongs in this list deliberately, with a reason an
 // operator can act on: the alternative is a key the route answers `rebuilt` for and that reaches
 // nothing.
 func TestTheFixedPathsAreTheOnesBootSettled(t *testing.T) {
@@ -233,6 +234,7 @@ func TestTheFixedPathsAreTheOnesBootSettled(t *testing.T) {
 		"runtime.kubernetes.idle_release.backstop_minutes",
 		"runtime.kubernetes.idle_release.idle_minutes", "runtime.kubernetes.namespace",
 		"runtime.tmux", "runtime.tmux.take_over", "state_dir", "worker_stream_port",
+		"worker_wake_burst", "worker_wakes_per_minute",
 	}
 	if !slices.Equal(fixed, want) {
 		t.Errorf("the fixed paths are %q, want %q", fixed, want)

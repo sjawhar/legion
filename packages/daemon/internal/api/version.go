@@ -596,7 +596,33 @@ package api
 // says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
 // own number again at the next merge rather than from this line.)
 //
-// 53: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
+// 53: INFRA-976 -- the daemon spreads the wakes it causes at the pace its operator set
+// (`legion.yaml`'s `worker_wakes_per_minute`, default 8, and `worker_wake_burst`, default 1, which
+// the settings carry as the two numbers they are), and `api.State` gains `wakesWaiting`, the wakes
+// that pace is holding until their turn: an array, never null, of `{claim, issue, role, kind,
+// dueAt}`, beside `strandedClaims` and `heldOutboxRows`, one row per wake of the three lanes it
+// paces — `launch`, a role process it is about to start, `plugin-task`, the update task a
+// stale-plugin round queues to a session already running, both held in the claim's machine, and
+// `catch-up`, the notice a start writes to an architect already running, which waits on its own
+// outbox row — in claim order, and empty at every moment outside a restart, a re-admission wave or
+// a plugin wave. A strict reader before 53 refuses a state carrying the key, empty as surely as
+// naming a wake, so the bump is why the two never meet; for the one window the pairing leaves
+// open — a pod of the contract before this one still being replaced — the route serves a caller
+// whose pod records a contract below 53 a body with no `wakesWaiting` key at all (api's stateFor,
+// withoutWakesWaiting), as it serves the live trees only from 51 on and the memory group only
+// from 49 on. The key is left off that body rather than emptied, so it is left off the body a pod
+// whose claims cannot be read is served as well, which may be a pod at this contract: both are
+// why `packages/contracts/src/legion-api.ts` declares `wakesWaiting` optional, as it declares
+// `admission.trees`. A caller the daemon cannot place in a pod — the operator's `legion state` —
+// is served it. With `daemon.startedAt` and each claim's `updateRound` it is what says whether a
+// wave is still running. `legion state` prints a `wakes waiting:` line only when something waits.
+// This change adds no store migration. (This branch took 49, then 50, then 52, while main's
+// memory-group, admission-cap and issue-key-stamp changes were unmerged; main landed those as 49,
+// 51 and 52, so this branch takes the number above them all, as the collision notes above say.
+// main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
+// number again at the next merge rather than from this line.)
+//
+// 54: INFRA-1077 -- three fields of `GET /legion/v1/state`, each required by the reader this
 // commit ships (`packages/contracts/src/legion-api.ts` mirrors all three), so a plugin built
 // from here refuses a state an older daemon sends. The `daemon` block names the commit the
 // daemon was built from (`commit`, the release build's own revision, empty in a build that is
@@ -609,15 +635,16 @@ package api
 // ones `settings` withholds among them, so a rotated credential is visible without the
 // credential. `settings` itself is untouched, and stays the loose object it was. `GET
 // /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a contract
-// below 53 is served the state without all three (api's stateFor, withoutSettingSources), as a
-// caller below 51 is served it without the admission trees, one below 49 without the memory
-// group and one below 46 without the claim views' update rounds: every schema of
-// `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so such a plugin refuses a
-// whole state for one key it does not know. (This branch took 47 while main's idle release and
-// memory group were unmerged; main landed them as 48 and 49, so this branch took 50; main then
-// landed INFRA-980's admission cap at 51, without these shapes, so this branch took 52; main
-// then landed INFRA-1307's commit trailer at 52, again without these shapes, so this branch
-// takes the number above it, as the collision note says. main held 52 at the forward merge that
-// renumbered this entry, f51bf04f5661; read main's own number again at the next merge rather
-// than from this line.)
-const DaemonAPIVersion = 53
+// below 54 is served the state without all three (api's stateFor, withoutSettingSources), as a
+// caller below 53 is served it without the waiting wakes, one below 51 without the admission
+// trees, one below 49 without the memory group and one below 46 without the claim views' update
+// rounds: every schema of `packages/contracts/src/legion-api.ts` was strict until INFRA-1048, so
+// such a plugin refuses a whole state for one key it does not know. (This branch took 47 while
+// main's idle release and memory group were unmerged; main landed them as 48 and 49, so this
+// branch took 50; main then landed INFRA-980's admission cap at 51, without these shapes, so
+// this branch took 52; main then landed INFRA-1307's commit trailer at 52, again without these
+// shapes, so this branch took 53; main then landed INFRA-976's wake pacing at 53, again without
+// these shapes, so this branch takes the number above it, as the collision note says. main held
+// 53 at the forward merge that renumbered this entry, e9a6367b88ce; read main's own number again
+// at the next merge rather than from this line.)
+const DaemonAPIVersion = 54
