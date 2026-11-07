@@ -271,7 +271,7 @@ func pluginsLine(cfg config.Config) string {
 // boot logs it with
 // (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Then, under either runtime, the intake handler limit's line, but only when
-// worker_rpc_timeout_seconds derived a limit above intake.DefaultHandlerLimit
+// worker_rpc_timeout_seconds derived a limit above intake's ten-minute floor
 // (daemon.IntakeHandlerLimitLine): a check of a file that leaves the floor in place says nothing
 // an operator cannot read in the daemon's own default, while the boot log names the limit either
 // way.

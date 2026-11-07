@@ -57,9 +57,9 @@ func TestTheIntakeHandlerLimitCoversTheReadsItsWindowBounds(t *testing.T) {
 		limit   time.Duration
 		derived bool
 	}{
-		{"the daemon's default worker_rpc_timeout_seconds", 5 * time.Second, DefaultHandlerLimit, false},
-		{"the widest window any caller in this tree passes today", 30 * time.Second, DefaultHandlerLimit, false},
-		{"the last window the floor covers", 2*time.Minute + 30*time.Second, DefaultHandlerLimit, false},
+		{"the daemon's default worker_rpc_timeout_seconds", 5 * time.Second, defaultHandlerLimit, false},
+		{"the widest window any caller in this tree passes today", 30 * time.Second, defaultHandlerLimit, false},
+		{"the last window the floor covers", 2*time.Minute + 30*time.Second, defaultHandlerLimit, false},
 		{"the window of the issue, where a review's reads filled the old fixed limit", 200 * time.Second, 800 * time.Second, true},
 		{"a window of a quarter of an hour", 15 * time.Minute, 60 * time.Minute, true},
 		{"the largest window a legion.yaml may carry", maxTimerWindow, 4 * maxTimerWindow, true},
@@ -87,8 +87,8 @@ func TestTheIntakeHandlerLimitCoversTheReadsItsWindowBounds(t *testing.T) {
 			}
 			// No window makes the limit shorter than the ten minutes this daemon has always had,
 			// which is what leaves every deployment on a small window exactly where it was.
-			if limit < DefaultHandlerLimit {
-				t.Errorf("a window of %s derives a limit of %s, below the floor of %s", row.window, limit, DefaultHandlerLimit)
+			if limit < defaultHandlerLimit {
+				t.Errorf("a window of %s derives a limit of %s, below the floor of %s", row.window, limit, defaultHandlerLimit)
 			}
 		})
 	}
@@ -107,7 +107,7 @@ func TestTheIntakeHandlerLimitCoversTheReadsItsWindowBounds(t *testing.T) {
 		want time.Duration
 	}{
 		{"a window above the floor derives the limit the daemon runs under", withWindow(200*time.Second, 0), 800 * time.Second},
-		{"a window the floor covers leaves the floor in place", withWindow(5*time.Second, 0), DefaultHandlerLimit},
+		{"a window the floor covers leaves the floor in place", withWindow(5*time.Second, 0), defaultHandlerLimit},
 		// A rig that cuts a handler in well under a second is the reason a caller-set limit is
 		// kept rather than widened to the derivation: those rows would wait out the floor.
 		{"a caller that sets a limit keeps exactly what it set", withWindow(200*time.Second, 600*time.Millisecond), 600 * time.Millisecond},
@@ -303,7 +303,7 @@ func TestAReviewFactsBoundedReadsFitTheDerivedLimit(t *testing.T) {
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
 	// A window of ten minutes derives a limit of forty, well above the floor, so what the
-	// consumer runs under is the derivation and not DefaultHandlerLimit. HandlerLimit is left
+	// consumer runs under is the derivation and not defaultHandlerLimit. HandlerLimit is left
 	// unset for the same reason: the daemon sets none either.
 	spec.AckWait = 10 * time.Minute
 	limit, derived := HandlerLimitFor(spec.AckWait)

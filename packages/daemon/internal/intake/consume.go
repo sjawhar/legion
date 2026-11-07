@@ -23,12 +23,12 @@ const notificationStream = "ENVOY_NOTIFICATIONS"
 const (
 	defaultAckWait  = 30 * time.Second
 	defaultNakDelay = 30 * time.Second
-	// DefaultHandlerLimit is the floor the derived limit never goes below (HandlerLimitFor). The
+	// defaultHandlerLimit is the floor the derived limit never goes below (HandlerLimitFor). The
 	// derivation gives one window to each bounded read and one more to the rest, four in all, so
-	// every window at or below 2m30s yields these ten minutes. It is exported because it is read
-	// outside this file and outside the package: internal/daemon and the intake tests name it
-	// rather than restate the number.
-	DefaultHandlerLimit = 10 * time.Minute
+	// every window at or below 2m30s yields these ten minutes. No caller outside this package
+	// needs the number: HandlerLimitFor's second answer says whether the window lifted the limit
+	// above it.
+	defaultHandlerLimit = 10 * time.Minute
 )
 
 // boundedReadsPerFact is the most bounded reads one fact's handling makes, each of them bounded
@@ -46,7 +46,7 @@ const boundedReadsPerFact = 3
 const HandlerLimitCeiling = time.Hour
 
 // HandlerLimitFor is the limit a caller that sets no HandlerLimit gets for a given AckWait:
-// (boundedReadsPerFact + 1) * ackWait, floored at DefaultHandlerLimit — derived true only when
+// (boundedReadsPerFact + 1) * ackWait, floored at defaultHandlerLimit — derived true only when
 // the window lifted the limit above that floor. The first term, boundedReadsPerFact * ackWait, is
 // the bounded reads one fact may make, each of which handleMessage bounds at ackWait; the one
 // window more is for what nothing bounds, ApplyFact's wait on the one advisory lock plus the
@@ -61,16 +61,11 @@ const HandlerLimitCeiling = time.Hour
 //
 // The floor is there so that every window at or below 2m30s keeps the ten minutes this daemon has
 // always had, which leaves every existing caller and the default configuration unchanged. An
-// ackWait of zero or less, which normalizedSpec has defaulted away before it asks, yields the
-// floor too.
+// ackWait of zero or less, which normalizedSpec has defaulted away before it asks, derives a
+// bound at or below zero and so yields the floor too.
 func HandlerLimitFor(ackWait time.Duration) (limit time.Duration, derived bool) {
-	if ackWait <= 0 {
-		return DefaultHandlerLimit, false
-	}
-	if bound := (boundedReadsPerFact + 1) * ackWait; bound > DefaultHandlerLimit {
-		return bound, true
-	}
-	return DefaultHandlerLimit, false
+	bound := (boundedReadsPerFact + 1) * ackWait
+	return max(bound, defaultHandlerLimit), bound > defaultHandlerLimit
 }
 
 // ConsumerSpec is the caller-supplied durable-consumer configuration. The daemon owns its project
@@ -93,7 +88,7 @@ type ConsumerSpec struct {
 	// whether its pull request is recorded (recordedPullRequest), its truncated body
 	// (resolveReviewBody) and its author's permission (resolveReviewPermission), while every other
 	// fact makes one read or none — plus one window more for the part nothing bounds, ApplyFact's
-	// advisory-lock wait and its transaction, and never below DefaultHandlerLimit. Production sets
+	// advisory-lock wait and its transaction, and never below defaultHandlerLimit. Production sets
 	// none, so the daemon's worker_rpc_timeout_seconds, which it passes as AckWait, decides it;
 	// tests set a short one. There is no legion.yaml key for it. What the cut relies on is the
 	// handler honouring its context: consumeMessage cancels the handling's context and then waits

@@ -50,14 +50,12 @@ const (
 	ignoredSleep    = 5 * cutHandlerLimit
 )
 
-// cutHandlerLine is the warning consumeMessage writes for a handling its limit cut, and
-// retryableFailureLine is what nakResolve writes just before the nak that sends the cut fact back
-// to the stream. The row asks for both twice: that neither had been written while the step was
-// still running, and that both were once it returned.
-const (
-	cutHandlerLine       = "an intake handler outran its limit and was cut"
-	retryableFailureLine = "retryable intake processing failure"
-)
+// cutHandlerLine is the warning consumeMessage writes for a handling its limit cut. The nak that
+// sends the cut fact back to the stream is named by the package's own nakFailure
+// (ackprogress_test.go:460), the line nakResolve writes just before it. The row asks for both
+// twice: that neither had been written while the step was still running, and that both were once
+// it returned.
+const cutHandlerLine = "an intake handler outran its limit and was cut"
 
 // ignoredContextStep is this row's handler: a fact whose work is a sleep on the clock, the shape
 // slowFacts has (backlog_test.go:17-22), which never reads the context it is handed. It is this
@@ -187,7 +185,7 @@ func TestTheCutEndsAHandlerOnceItsStepHonoursTheCancelledContext(t *testing.T) {
 	if line := logLine(atReturn, cutHandlerLine); line != "" {
 		t.Errorf("the daemon said an intake handler outran its limit and was cut while that handler's step was still running, %s past its deadline: %s", late, line)
 	}
-	if line := logLine(atReturn, retryableFailureLine); line != "" {
+	if line := logLine(atReturn, nakFailure); line != "" {
 		t.Errorf("the daemon naked the message while its handler's step was still running, %s past its deadline: %s", late, line)
 	}
 	// Third, that both happened once the step returned, and that the message went back to the
@@ -202,7 +200,7 @@ func TestTheCutEndsAHandlerOnceItsStepHonoursTheCancelledContext(t *testing.T) {
 			t.Errorf("the cut handler's line carries no %s, which is what names the cut: %s", attribute, cut)
 		}
 	}
-	if naked := logLine(written, retryableFailureLine); naked == "" {
+	if naked := logLine(written, nakFailure); naked == "" {
 		t.Errorf("no line says the cut fact was naked, so nothing returned it to the stream, in:\n%s", written)
 	}
 	if again := step.deliveries()[1]; !again.After(returned) {
