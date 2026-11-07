@@ -1,0 +1,5 @@
+kind: Fixed
+body: The document service's cleanups hold their owner weakly, so a service that is dropped while rooms are still loaded is collected with those rooms' documents instead of being kept for the life of the process. A running Dispatch server keeps one service for its whole life and evicted rooms were already freed there, so its memory does not change; test binaries that build many services stop growing.
+time: 2026-11-05T00:24:46.834343438Z
+custom:
+    Issue: pr2783

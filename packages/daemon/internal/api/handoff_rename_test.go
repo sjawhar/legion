@@ -50,9 +50,12 @@ var transferStates = []struct {
 }
 
 // newTransferHandoffHarness is newHandoffHarness for a deployment that configures renames and
-// serves repositories: the two the server's serving rule reads (Options.ServedRepositories and
-// Options.RepositoryRenames), which the harnesses above leave empty. GitHub is read at api, and
-// the harness's Dispatch holds the handoff records a completion names (writeHandoff).
+// serves repositories: the serving rule the daemon hands the server (Options.Serving), built
+// here from what the daemon's own is built from — the repositories it serves and the configured
+// pairs, read one repository at a time (ghrepo.Serves, which is what internal/daemon's
+// repositories.serving reads) — where the harnesses above hand none and a recorded repository
+// is served under its own name. GitHub is read at api, and the harness's Dispatch holds the
+// handoff records a completion names (writeHandoff).
 func newTransferHandoffHarness(t *testing.T, api string, renames ghrepo.Renames, served []string) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
@@ -62,12 +65,16 @@ func newTransferHandoffHarness(t *testing.T, api string, renames ghrepo.Renames,
 	for _, repo := range served {
 		repositories = append(repositories, ghrepo.MustParse(repo))
 	}
+	serving := func(recorded ghrepo.Repository) ghrepo.Repository {
+		return renames.Serving(recorded, func(repo ghrepo.Repository) bool { return ghrepo.Serves(repositories, repo) })
+	}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: h.handoffs, PluginRelaunchable: true,
 		Tokens: handoffTokens{}, GitHubAPI: api,
-		ServedRepositories: func() []ghrepo.Repository { return repositories }, RepositoryRenames: renames,
+		GitHubRepositories: func() []ghrepo.Repository { return repositories }, RepositoryRenames: renames,
+		Serving:    serving,
 		MergeRules: func(string) config.MergeRules { return config.MergeRules{} },
 	}).Handler
 	return h, facts

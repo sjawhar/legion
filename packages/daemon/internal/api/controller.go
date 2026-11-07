@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -141,17 +140,27 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
-// controller capability buys the review App's fresh read-only tokens for every owner the project
-// serves a repository of (served, appauth.GitHubCredential), each rendered as the two
-// files `gh` reads. The capability compare runs under controllerMu, the same lock the mint and
-// the controller-session grant take, so a capability a concurrent mint just replaced is never
-// matched; the token mints run after the lock is released, since GitHub is the slow step and
-// holding the lock across it would block every other controller-record read or mint for as long
-// as GitHub takes to answer. A caller whose capability a later `legion controller start` has
-// since replaced is refused with a code the CLI can tell apart from a missing or malformed
-// secret, so its refresh loop stops rather than retrying forever; a daemon that launches its own
-// controller (`controller: daemon`) refuses every call, as controllerSecret does, since its
-// controller's tokens live in its pod's Secret and no `legion controller start` runs against it.
+// controller capability buys the review App's fresh read-only tokens for every owner of the
+// project, each narrowed to the repositories that owner serves
+// (appauth.ControllerCredential), each rendered as the two files `gh` reads. The capability
+// compare runs under controllerMu, the same lock the mint and the controller-session grant take,
+// so a capability a concurrent mint just replaced is never matched; the token mints run after the
+// lock is released, since GitHub is the slow step and holding the lock across it would block every
+// other controller-record read or mint for as long as GitHub takes to answer. A caller whose
+// capability a later `legion controller start` has since replaced is refused with a code the CLI
+// can tell apart from a missing or malformed secret, so its refresh loop stops rather than
+// retrying forever; a daemon that launches its own controller (`controller: daemon`) refuses every
+// call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
+// `legion controller start` runs against it.
+//
+// A default owner the App's installation no longer reaches — GitHub refusing a lease over every
+// repository that owner serves (appauth.ErrNarrowingRefused) — is DEFAULT_OWNER_UNREACHABLE,
+// naming the owner and the repositories the lease would have reached. The caller sees a refusal
+// rather than a 200 whose bundle names no App and no owner, which it could only read as gh files
+// it cannot write; its refresh loop keeps the files it has and tries again at its next tick,
+// since the owner is reached again the moment the account adds those repositories to the
+// installation. A caller that names no owner is answered from the owners the mint did reach, so
+// this is the recorded default's case alone.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
 	if s.controllerLaunched {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
@@ -186,15 +195,10 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return
 	}
-	// A GitHub App is installed on an owner and the bundle `gh` reads holds one directory per
-	// owner, so this caller holds owners and no repository: it asks with the zero repository and
-	// the owner it wants its default (runtime.GitHubCredential's contract), over the
-	// repositories the project serves (Options.ServedRepositories), from which the owners of its
-	// read-only directories follow. A rename resolves nothing here, since it is resolved per
-	// repository and this request names none. req.Default is an owner for the same reason — it
-	// names the directory `gh` defaults to — which is why this route's wire contract keeps
-	// asking for one.
-	bundle, err := appauth.GitHubCredential(s.tokens, s.served, s.renames)(r.Context(), claim.RoleController, ghrepo.Repository{}, req.Default)
+	// No left-out record (appauth.LeftOut): this bundle is built per request and reaches a
+	// `legion controller start` that rewrites its own gh directory every minute, so no pod's
+	// fixed projection is ever compared against it.
+	bundle, err := appauth.ControllerCredential(s.tokens, s.githubRepositories, s.renames, nil, s.log)(r.Context(), req.Default)
 	switch {
 	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
@@ -203,25 +207,29 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
 		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
 		return
+	case appauth.NarrowingRefused(err):
+		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_UNREACHABLE", "default", strings.ToLower(req.Default), "error", err)
+		writeFailure(w, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE", err.Error())
+		return
 	case err != nil:
 		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return
 	}
 	answer := ControllerCredentialResponse{
-		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Owners)),
+		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Dirs)),
 		Default: bundle.Default,
-		App:     bundle.Owners[bundle.Default].App,
+		App:     bundle.Dirs[bundle.Default].App,
 	}
 	var soonest time.Time
-	for owner, rendered := range bundle.Owners {
+	for owner, rendered := range bundle.Dirs {
 		answer.Owners[owner] = ControllerOwnerCredential{Hosts: rendered.Hosts, Config: rendered.Config}
 		if soonest.IsZero() || rendered.ExpiresAt.Before(soonest) {
 			soonest = rendered.ExpiresAt
 		}
 	}
 	answer.ExpiresAt = soonest.UTC().Format(timeFormat)
-	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.OwnerNames())
+	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.DirNames())
 	writeJSON(w, http.StatusOK, answer)
 }
 

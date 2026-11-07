@@ -129,7 +129,8 @@ func (o RequestObject) Service() string {
 
 // requestClaims is the JSON payload of a credential-request object (RFC 9101 §4 shape, RAR
 // authorization_details per RFC 9396 §2). lifetime_seconds is this broker's own claim: absent, the
-// broker gives the grant 12 hours, or until its session ends under default-grant=session. A broker from before it decodes the payload without
+// broker gives the grant 15 minutes when any name is human tier, else 12 hours, or until its
+// session ends under default-grant=session. A broker from before it decodes the payload without
 // refusing unknown claims, so it ignores the claim and grants for its own fixed lifetime; a client
 // that asked for one reads the lifetime the answer echoes to tell.
 type requestClaims struct {

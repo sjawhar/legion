@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -421,13 +422,16 @@ func launcherBackstop(boot, bound time.Duration) time.Duration {
 
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
-// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
-// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
-// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
-// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
-// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
-// timeout waits it alone.
+// launcher starts only once every init container of the pod has finished, however many the
+// deployment gives it, and the three steps whose duration follows the repository's size —
+// workspace-fetch's whole fetch with its retries, then workspace-init's shared clone of the feed
+// and the issue's own checkout of it — may take up to ProvisionBound from the fetch's own start,
+// a sum that counts no term for the commands which keep CommandTimeout, skills-fetch's one
+// shallow clone among them (ProvisionBound, manifest.go). So until the wait
+// first sees the pod provisioning (an init container running, provisioning) it gives the pod the
+// boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw the
+// pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
@@ -495,8 +499,11 @@ func (r *Runtime) stillFetching(pod *corev1.Pod) string {
 	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
-// provisioning is whether pod is running one of its init containers, workspace-fetch or
-// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+// provisioning is whether pod is running any of its init containers, whichever they are:
+// workspace-fetch, then skills-fetch where the deployment names a skills repository, then
+// workspace-init. It names none of them, reading each status for its own state, so a pod whose
+// init containers differ needs nothing here. It is the rule the liveness mapping reads such a pod
+// alive by (evaluate).
 func provisioning(pod *corev1.Pod) bool {
 	if phaseOf(pod) != corev1.PodPending {
 		return false
@@ -836,9 +843,14 @@ func (r *Runtime) waitedOut(ctx context.Context, s *sandbox) string {
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
 // launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
-// credential, its gh bundle (gitHubBundles): each owner's hosts.yml and config.yml (GitHubHostsKey,
-// GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container projects at
-// GHConfigDir.
+// credential, its gh bundle (gitHubBundles): each directory of that role's own bundle as its
+// hosts.yml and config.yml (GitHubHostsKey, GitHubConfigKey) and the default owner
+// (GitHubDefaultKey), which its container projects at GHConfigDir.
+//
+// The Secret holds the role's own directories, where the pod projects only the ones every role
+// holds (l.gitHubDirs, gitHubBundles): a key outside that projection is written and never read,
+// and the refresher keeps it current with the rest (refreshGitHubCredential), so the role's next
+// pod projects it the moment every role's bundle holds it.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launch) error {
 	bundles, err := r.gitHubBundles(ctx, l)
 	if err != nil {
@@ -851,9 +863,9 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 		}
 		bundle := bundles[role]
 		data := map[string][]byte{LauncherTokenFile: []byte(token), GitHubDefaultKey: []byte(bundle.Default)}
-		for _, owner := range l.gitHubOwners {
-			rendered := bundle.Owners[owner]
-			data[GitHubHostsKey(owner)], data[GitHubConfigKey(owner)] = []byte(rendered.Hosts), []byte(rendered.Config)
+		for _, dir := range bundle.DirNames() {
+			rendered := bundle.Dirs[dir]
+			data[GitHubHostsKey(dir)], data[GitHubConfigKey(dir)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
 		if err := r.upsertSecret(ctx, corev1.Secret{
 			ObjectMeta: r.secretMeta(s, *l, roleSecretName(s.Name, role)),
@@ -866,31 +878,54 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 			r.log.Info("sandbox runtime: no GitHub owner to act for; the role's gh acts as nobody", "sandbox", s.Name, "role", role)
 			continue
 		}
-		written := bundle.Owners[bundle.Default]
+		written := bundle.Dirs[bundle.Default]
 		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
+			"expiresAt", written.ExpiresAt, "dirs", l.gitHubDirs)
 	}
 	return nil
 }
 
-// gitHubBundles mints each launcher role's gh bundle for the issue's recorded repository
-// (Options.GitHubCredential, asked by the repository with no owner: the directory each role
-// writes through is named for the owner that record keeps, which no transfer moves, and the
-// token in it is minted for the owner whose installation holds that repository now) and records
-// the bundle's owners and default on l, which the pod's gh volumes and every agent's
-// GH_CONFIG_DIR are built from. Every role's bundle holds the same owners and default, and one
-// that does not fails the launch, as a mint that fails or a bundle Validate
-// refuses does, naming the role, since a pod whose gh holds no token would start every role unable
-// to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
-// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
-// nobody, as `legion controller start` does there, its bundle empty — no owner, no default — and
-// its gh directory an empty one (volumes).
+// gitHubBundles mints each launcher role's gh bundle for the issue's repository
+// (Options.GitHubCredential) and records on l the directories the pod projects and the bundles'
+// default, which the pod's gh volumes and every agent's GH_CONFIG_DIR are built from. A mint
+// that fails, a bundle Validate refuses, and a role whose bundle names another default fail the
+// launch, naming the role, since a pod whose gh holds no token would start every role unable to
+// reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
+// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting
+// as nobody, as `legion controller start` does there, its bundle empty — no directory, no
+// default — and its gh directory an empty one (volumes).
+//
+// The pod projects the directories every role's bundle holds, and no more (ghDirsShared): a
+// projection item naming a key the role's Secret lacks stops the pod from starting, and the six
+// roles of an issue pod run as two Apps whose installations answer for themselves, so one App's
+// installation not reaching `acme/x` leaves acme out of that App's bundles alone (appauth's
+// mintBundle). A role whose bundle holds a directory outside that set simply does not project
+// it; its Secret keeps the key, unused (writeLauncherSecrets), and the launch says once which
+// role lacked which directory. The launch fails where the set the roles share does not hold the
+// bundles' default, an empty set included — GH_CONFIG_DIR would then name a directory the pod
+// does not carry — and where a role's own default is not the pod's, which would leave that
+// role's Secret recording a directory its container never reads from (refreshGitHubCredential).
+// A refused write lease still fails its own bundle (appauth's mintBundle), so every role that
+// reaches here holds the directory it writes to.
+//
+// The controller's bundle is asked for by owner (Options.ControllerCredential), the one function
+// a controller's bundle is made from here, by this launch and by the refresh of the pod it makes
+// (refreshGitHubCredential). The launch asks for no owner, which takes the first owner the
+// project serves that the mint answered for, sorted, and records it as the pod's default; a
+// controller works no repository, so its every directory is read-only.
 func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
-	l.gitHubOwners, l.gitHubDefault = nil, ""
+	l.gitHubDirs, l.gitHubDefault = nil, ""
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
+	held := make(map[claim.Role][]string, len(l.roles))
 	for i, role := range l.roles {
 		minting, cancel := call(ctx)
-		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository, "")
+		var bundle ghconfig.Bundle
+		var err error
+		if role == claim.RoleController {
+			bundle, err = r.controllerCredential(minting, "")
+		} else {
+			bundle, err = r.gitHubCredential(minting, role, l.spec.Repository)
+		}
 		cancel()
 		switch {
 		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
@@ -901,16 +936,55 @@ func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]
 		if err != nil {
 			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
 		}
-		owners := bundle.OwnerNames()
 		if i == 0 {
-			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
-		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
-			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
-				role, owners, bundle.Default, l.gitHubOwners, l.gitHubDefault)
+			l.gitHubDefault = bundle.Default
 		}
-		bundles[role] = bundle
+		bundles[role], held[role] = bundle, bundle.DirNames()
 	}
+	shared, lacked := ghDirsShared(held)
+	if len(lacked) > 0 {
+		r.log.Warn("sandbox runtime: the roles' gh bundles hold different directories; the pod projects the ones they share",
+			"sandbox", l.name, "lacked", lacked, "projecting", shared)
+	}
+	if l.gitHubDefault != "" && !slices.Contains(shared, l.gitHubDefault) {
+		return nil, fmt.Errorf("write the github credential: the roles' gh bundles share the directories %v, which do not hold the pod's default owner %s",
+			shared, l.gitHubDefault)
+	}
+	for _, role := range l.roles {
+		if bundles[role].Default != l.gitHubDefault {
+			return nil, fmt.Errorf("write the github credential for %s: its default owner %s is not the pod's %s",
+				role, bundles[role].Default, l.gitHubDefault)
+		}
+	}
+	l.gitHubDirs = shared
 	return bundles, nil
+}
+
+// ghDirsShared is the directories every role's bundle holds, sorted — what a pod of those roles
+// may project (volumes) — and lacked, one phrase for each directory some role's bundle does not
+// hold, naming the directory and the roles that lack it, for the launch to say once.
+func ghDirsShared(held map[claim.Role][]string) (shared, lacked []string) {
+	holders := map[string]int{}
+	for _, dirs := range held {
+		for _, dir := range dirs {
+			holders[dir]++
+		}
+	}
+	roles := slices.Sorted(maps.Keys(held))
+	for _, dir := range slices.Sorted(maps.Keys(holders)) {
+		if holders[dir] == len(held) {
+			shared = append(shared, dir)
+			continue
+		}
+		without := make([]string, 0, len(roles))
+		for _, role := range roles {
+			if !slices.Contains(held[role], dir) {
+				without = append(without, string(role))
+			}
+		}
+		lacked = append(lacked, dir+" ("+strings.Join(without, ", ")+")")
+	}
+	return shared, lacked
 }
 
 // secretMeta is a pod's Secret's metadata: the pod's labels, the Sandbox as owner, and the

@@ -1,0 +1,5 @@
+kind: Added
+body: 'The Legion daemon state carries `wakesWaiting`, every wake its pacing holds until its turn: the claim, its issue and role, the kind of wake (`launch`, `plugin-task` or `catch-up`) and the moment it runs. The key is optional, because a daemon at this contract leaves it off the state it serves a caller whose pod is below 53 or whose claims it cannot read. Daemon API contract 53.'
+time: 2026-11-05T12:39:49.516338302Z
+custom:
+    Issue: pr2805

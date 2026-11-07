@@ -34,33 +34,30 @@ func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secret
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
 
 // GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
-// files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the
-// project — the role's App token in the directory named for the owner its record keeps and in
-// the directory of the owner that serves that record's repository, one token in both where a
-// rename makes them two directories, and a token of the same App narrowed to reading in every
-// other — with the request's own owner's directory the bundle's default, which GH_CONFIG_DIR
-// names. The runtime writes it under the agent's bundle root (LEGION_GH_OWNERS_DIR) and rewrites
-// it from the same function, asked the same way, as the leases near their expiry.
-//
-// repo and owner are one contract, not two ways of asking. A workflow role passes its issue's
-// recorded repository and an empty owner: its record names a repository, and the owner follows
-// from it. The project controller passes the zero repository and the owner it asks for, which may
-// be empty: it works no checkout, so an owner is all it holds, and it writes through no directory
-// at all. A workflow role whose claim names no repository passes the zero repository with its
-// owner, which is what that role has always passed and resolves nothing — a configured rename is
-// read against a repository, so a request that carries none is answered under the owner it was
-// asked with.
-//
-// The repository is what a rename is resolved from because a GitHub App is installed on an owner
-// while a transfer moves one repository at a time: the directory a role writes through is named
-// for the owner its record keeps, which a transfer never moves, and the token in that directory
-// is minted for the owner whose installation holds that repository now, as is that owner's own
-// directory's, since the role reaches the repository under either name. The directory's name
-// authorises nothing, the token in it does (appauth.GitHubCredential). The controller acts as the
-// review App (appauth.AppRoleFor) and writes to no owner: its bundle holds every owner read-only,
-// the owner it is asked for its default, or the first owner when it is asked for none. A project
-// with no GitHub owner at all to mint for is ErrNoGitHubOwner.
-type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error)
+// files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the project
+// — the role's App token for the one repository repo names, the one the agent writes to (its
+// issue's), in that repository's owner's directory, and a token of the same App narrowed to
+// reading for every other owner — with a directory of its own under the write owner for each
+// other repository that owner serves, holding a token narrowed to that repository alone. The
+// bundle's default, which GH_CONFIG_DIR names, is repo's own recorded owner's directory. The
+// runtime writes it under the agent's bundle root (LEGION_GH_OWNERS_DIR) and rewrites it from the
+// same function, asked for the same repository, as the leases near their expiry. A call that
+// names no repository writes to nothing: every directory is read-only and the first owner,
+// sorted, is the default, which is what a tmux tree pane whose claim the daemon records no
+// repository for gets. A controller's bundle is no call of this at all, at its launch as at its
+// refresh: it comes from ControllerCredential, which answers by owner. A project with no GitHub
+// owner at all to mint for is ErrNoGitHubOwner.
+type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error)
+
+// ControllerCredential is the daemon's one function a runtime calls for the project controller's
+// own gh bundle (appauth.ControllerCredential), which answers by default owner where
+// GitHubCredential answers by repository: a controller works no repository, so a bundle asked
+// for by one would take its default from the first owner the project serves, sorted, and a
+// project that gained an owner sorting before it would move a running controller's default away
+// from the directory its launch fixed as GH_CONFIG_DIR. A refresh asks it for the owner the
+// controller's launch recorded; a launch asks for none, taking the first owner, which is the
+// default it then records.
+type ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
 
 // ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
 // project whose repositories none of the Apps can act on, and a caller that names no owner. A
@@ -70,7 +67,7 @@ var ErrNoGitHubOwner = errors.New("no GitHub owner to mint an App lease for")
 // GHConfigDir is the tmux pane's bundle root (LEGION_GH_OWNERS_DIR): `<state_dir>/secrets/<claim>-gh`,
 // the directory holding the claim's gh bundle (ghconfig.WriteBundle), named for its claim token so
 // the daemon prunes it with the claim's other secret files. Its default owner's directory
-// (ghconfig.OwnerDir) is the pane's GH_CONFIG_DIR. A pod has no use for it: there the files are a
+// (ghconfig.Dir) is the pane's GH_CONFIG_DIR. A pod has no use for it: there the files are a
 // Secret volume the manifest mounts.
 func GHConfigDir(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-gh")
@@ -177,7 +174,8 @@ func validateClaimShape(spec SpawnSpec, refuse func(string, ...any) error) error
 // tree, no repository and no workspace — the controller works Dispatch, never a checkout — under
 // the project's controller token, which every runtime names its Secret and pod after. It is in no
 // memory group and is told no memory instructions either: a memory group is a tree's, and the
-// controller runs in none.
+// controller runs in none. It stamps no issue key into a commit either: it works no repository
+// and no issue.
 func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) error {
 	for _, field := range []struct{ name, value string }{{"project", spec.Project}, {"boot token", spec.BootToken}} {
 		if field.value == "" {
@@ -201,6 +199,9 @@ func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) 
 	}
 	if spec.Prompt.MemoryInstructionsPath != "" {
 		return refuse("the controller is told no memory instructions (got %s)", spec.Prompt.MemoryInstructionsPath)
+	}
+	if spec.IssueTrailer != "" {
+		return refuse("the controller works no repository and no issue, so it stamps nothing into a commit (got %s)", spec.IssueTrailer)
 	}
 	return nil
 }

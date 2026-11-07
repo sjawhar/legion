@@ -2388,7 +2388,8 @@ export interface Agent {
   readonly machine_id: string;
   /**
    * The session's real machine, as its own Envoy plugin reported it (envoy-client's
-   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * machineID(): `ENVOY_MACHINE_ID`, then an agent box's `AGENTBOX_HOST`, falling back to the
+   * kernel hostname). `machine_id` is
    * always the listener that registered the session and owns its delivery, which may be a
    * single shared listener for every machine; this is the one to show and filter on. The
    * listener falls back to `machine_id` itself for a session whose plugin predates this field,
@@ -2798,7 +2799,9 @@ export interface CheckResult {
 export type CheckWhen = "before_merge" | "after_merge" | "default_branch";
 
 /** One `check` block of a Verification document with every result recorded against it, newest
- *  first. */
+ *  first: `created_at` descending — the time the recording transaction began — with `id`
+ *  descending breaking a tie. Two results recorded in transactions that overlapped can come
+ *  back in either order. */
 export interface CheckBlock {
   readonly block_id: string;
   readonly ref: string;
@@ -2815,7 +2818,11 @@ export interface CheckBlock {
 }
 
 /** `GET /api/v1/issues/{key}/results`: the issue's Verification document and its checks in
- *  document order. An issue with no Verification document answers no checks. */
+ *  document order, each check's results newest first, by `created_at` descending — the time the
+ *  recording transaction began — with `id` descending breaking a tie; a client that reads one
+ *  result per check reads `results[0]`, which is what `dispatch results` prints. Two results
+ *  recorded in transactions that overlapped can come back in either order. An issue with no
+ *  Verification document answers no checks. */
 export interface IssueCheckResults {
   readonly issue: string;
   /** The issue's Verification document, `""` for an issue that has none. */
@@ -2832,7 +2839,9 @@ export interface CheckResultRecorded {
 }
 
 /** What `POST /api/v1/issues/{key}/results` takes. Absent counts are 0; a `pass` counting any of
- *  them is refused `400 RESULT_CONTRADICTS`. */
+ *  them is refused `400 RESULT_CONTRADICTS`. `commit` is 40 lowercase hex; one the repository of
+ *  the check's issue does not hold is refused `400 RESULT_COMMIT_UNKNOWN`, naming the commit and
+ *  that `owner/repo`, while a repository Dispatch cannot read stores the result as before. */
 export interface RecordCheckResultInput {
   readonly actor?: Actor;
   readonly check: string;
@@ -3015,8 +3024,8 @@ export type IssueReleasedEventPayload = IssueClaimEventPayload & {
  * shipped it (by intake or by the reconcile), with the system actor `delivery-timeline`, and
  * published on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`) as every
  * issue event is. `repo` and `number` name the pull request, `run_id` the production run, and
- * `completed_at` when that run's production job completed, in UTC. The Legion daemon wakes the
- * issue's production check on it. Strict: the Go writer
+ * `completed_at` when that run's production job completed, in UTC. The Legion daemon no longer
+ * reads it: nothing a deployment publishes wakes a production check. Strict: the Go writer
  * (`packages/envoy/internal/dispatch/delivery/deployed.go`) emits exactly these four fields.
  */
 export const IssueDeployedEventPayloadSchema = z.strictObject({
@@ -3075,8 +3084,8 @@ export type HandoffRecordedPayload = z.infer<typeof HandoffRecordedPayloadSchema
  * last process of the build before has gone, a restart on the announced build is not announced, and
  * a rollback to an earlier build is announced again. Its event id, source event id and dedupe key
  * are `dispatch-server-started-<commit>-<seq>`, `seq` being the announcement's own number. Mirrored
- * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`, and matched whole by the
- * Legion daemon's intake.
+ * by `startup.Subject` in `packages/envoy/internal/dispatch/startup`. The Legion daemon's intake
+ * matches no subject to it: an envelope on it is no fact.
  */
 export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
 
@@ -3084,9 +3093,9 @@ export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.st
  * The payload of a `server.started` envelope: the build commit every live Dispatch server process
  * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
  * the fleet was found serving it, by the database's clock, in UTC. The field is named `started_at`
- * because the Go writer and the Legion daemon carry that name. The Legion daemon compares the
- * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
- * two fields.
+ * because the Go writer carries that name. The Legion daemon reads none of
+ * it: nothing a Dispatch build announces wakes a production check. Strict: the Go writer emits
+ * exactly these two fields.
  */
 export const DispatchServerStartedPayloadSchema = z.strictObject({
   commit: z.string().min(1),

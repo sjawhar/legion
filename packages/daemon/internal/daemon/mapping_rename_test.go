@@ -277,14 +277,15 @@ type mintingTokens struct {
 	minted []string
 }
 
-func (t *mintingTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+func (t *mintingTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	owner := repo.Owner()
 	t.mu.Lock()
 	t.minted = append(t.minted, strings.ToLower(owner))
 	t.mu.Unlock()
 	if !slices.ContainsFunc(t.installed, func(held string) bool { return strings.EqualFold(held, owner) }) {
 		return appauth.Lease{}, fmt.Errorf("no installation of the %s App on %s covers the repository", role, owner)
 	}
-	return t.roleTokens.Token(ctx, role, owner)
+	return t.roleTokens.Token(ctx, role, repo)
 }
 
 // owners is every owner a token was minted for, lowercased, sorted and once each.

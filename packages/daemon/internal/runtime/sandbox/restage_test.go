@@ -351,7 +351,7 @@ func ghItemsFor(owners ...string) []corev1.KeyToPath {
 }
 
 // A project that gains a GitHub owner — a repository of a new owner in its mapping, which the
-// restarted daemon serves (appauth.GitHubOwners) and renders a directory for in every role's
+// restarted daemon serves (appauth.GitHubDirs) and renders a directory for in every role's
 // bundle — leaves every issue pod created before it projecting the owners of its own creation:
 // the refresher adds the new owner's two keys to the live role Secret, but a pod's projection
 // names the keys it was built with, so /var/run/legion/gh holds no directory of that owner and
@@ -366,8 +366,8 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	tester := workerSpec(t)
 	testerLoc := g.spawn(tester)
 	ghVolumeName := roleVolume(ghVolume, claim.RoleTester)
-	if held := ghItems(t, g.pod(testerLoc.Sandbox.Name), claim.RoleTester); !slices.Equal(held, ghItemsFor(staticOwners...)) {
-		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q and nothing else", held, staticOwners)
+	if held := ghItems(t, g.pod(testerLoc.Sandbox.Name), claim.RoleTester); !slices.Equal(held, ghItemsFor(staticDirs...)) {
+		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q and nothing else", held, staticDirs)
 	}
 
 	r2 := secondRuntime(t, g, servingAddedOwner)()
@@ -380,7 +380,7 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	if obs.Kind != runtime.Alive || obs.Locator != testerLoc {
 		t.Fatalf("%s at %+v, want the tester alive at its recorded locator until its round ends: %s", obs.Kind, obs.Locator, obs.Detail)
 	}
-	want := (movedAddress{ghVolumeName, ghOwnersName(staticOwners), ghOwnersName(servedOwners)}).String()
+	want := (movedAddress{ghVolumeName, ghDirsName(staticDirs), ghDirsName(servedDirs)}).String()
 	drifted := driftOf(t, g.ctx, r2, testerLoc)
 	if !slices.Contains(drifted, want) {
 		t.Errorf("PodDrift = %q, want %q among it", drifted, want)
@@ -417,8 +417,8 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
 	held := ghItems(t, pod, claim.RoleTester)
-	if !slices.Equal(held, ghItemsFor(servedOwners...)) {
-		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedOwners)
+	if !slices.Equal(held, ghItemsFor(servedDirs...)) {
+		t.Errorf("the replaced pod's gh volume projects %+v, want the two files of each of %q", held, servedDirs)
 	}
 	for _, want := range ghItemsFor(addedOwner) {
 		if !slices.Contains(held, want) {
@@ -437,7 +437,7 @@ func TestAddingAGitHubOwnerDriftsAnIssuePodWhoseGhVolumeLacksIt(t *testing.T) {
 // serving repos with pair configured: the owner of every repository served, and the owner the
 // pair moved a repository away from beside them whenever the project owned the pair's `to` owner
 // and owned nothing of its `from` owner. It is written here to be compared against
-// appauth.GitHubOwners, the rule that replaces it, since a pod created before this change
+// appauth.GitHubDirs, the rule that replaces it, since a pod created before this change
 // projects a directory for each owner this answered.
 func ownerRuleOwners(repos []ghrepo.Repository, pair ghrepo.Rename) []string {
 	owns := func(owner string) bool {
@@ -460,12 +460,12 @@ func ownerRuleOwners(repos []ghrepo.Repository, pair ghrepo.Rename) []string {
 // daemon served then, is unmoved against a daemon resolving the smoke repository's pair per
 // repository, in both owner-set states: state A, where the project serves no repository of the
 // recorded owner beyond what the pair gives it, and state B, where it serves one more
-// (otherOfRecordedOwner). That is what the owner set can do and no more: the predicate this
+// (otherOfRecordedOwner). That is what the directory set can do and no more: the predicate this
 // branch replaces added the pair's `from` owner whenever the project owned the pair's `to`
 // owner, while the rule now adds it only when the project serves the pair's `to` repository, so
 // the new set can lose a name and never gain one — and in state B, the one state where the two
 // differ, the `from` owner is in the set anyway, as the owner of a repository the project serves
-// under its own name (ownerRuleOwners above answers renamedOwners for both states). movedGhOwners
+// under its own name (ownerRuleOwners above answers renamedDirs for both states). movedGhDirs
 // compares one way, naming only what the daemon serves and the pod does not project, so a set
 // that cannot gain a name moves no pod: no update round is opened over a gh directory, no issue
 // pod is replaced, and the role's own addresses stay where they are.
@@ -479,11 +479,12 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 	stateA := []ghrepo.Repository{servingSmoke}
 	stateB := []ghrepo.Repository{servingSmoke, otherOfRecordedOwner}
 	for state, repos := range map[string][]ghrepo.Repository{"A": stateA, "B": stateB} {
-		serves := appauth.GitHubOwners(func() []ghrepo.Repository { return repos }, ghrepo.MustRenames(smokeRename))
+		serves := appauth.GitHubDirs(func() []ghrepo.Repository { return repos }, ghrepo.MustRenames(smokeRename),
+			nil, appauth.Roles, recordedSmoke)
 		owned := ownerRuleOwners(repos, smokeRename)
-		if !slices.Equal(serves, renamedOwners) || !slices.Equal(owned, renamedOwners) {
+		if !slices.Equal(serves, renamedDirs) || !slices.Equal(owned, renamedDirs) {
 			t.Fatalf("state %s serves %q by the repository rule and %q by the owner predicate it replaces, want %q from both: the new set gains no name, so a pod built under the old one lacks no directory",
-				state, serves, owned, renamedOwners)
+				state, serves, owned, renamedDirs)
 		}
 	}
 
@@ -492,8 +493,8 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 	loc := g.spawn(spec)
 	pod := g.pod(loc.Sandbox.Name)
 	ghVolumeName := roleVolume(ghVolume, claim.RoleTester)
-	if held := ghItems(t, pod, claim.RoleTester); !slices.Equal(held, ghItemsFor(renamedOwners...)) {
-		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q: the owners a daemon of either state serves, and the owner predicate's own answer", held, renamedOwners)
+	if held := ghItems(t, pod, claim.RoleTester); !slices.Equal(held, ghItemsFor(renamedDirs...)) {
+		t.Fatalf("the tester's gh volume projects %+v, want the two files of each of %q: the directories a daemon of either state serves, and the owner predicate's own answer", held, renamedDirs)
 	}
 	cache := CacheSandboxName(testProject, spec.Repository)
 	// reading is what k5 records of one owner-set state: whether the runtime reports the pod's gh
@@ -505,7 +506,7 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 	}
 	read := func(r *Runtime) reading {
 		t.Helper()
-		_, moved := r.movedGhOwners(g.pod(loc.Sandbox.Name).Spec, claim.RoleTester)
+		_, moved := r.movedGhDirs(g.pod(loc.Sandbox.Name), claim.RoleTester)
 		return reading{
 			moved:      moved,
 			configDir:  startEnv(lastStart(t, g, workerToken))["GH_CONFIG_DIR"],
@@ -515,7 +516,7 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 	}
 	want := reading{
 		moved:      false,
-		configDir:  ghconfig.OwnerDir(GHConfigDir, recordedSmoke.Owner()),
+		configDir:  ghconfig.Dir(GHConfigDir, recordedSmoke.Owner()),
 		cacheURL:   g.r.cacheURL(cache),
 		cacheToken: "ghs_provision_" + servingSmoke.Owner(),
 	}
@@ -560,7 +561,7 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 		t.Fatalf("state B holds %+v in the pod, which a pod created now is not handed", held)
 	}
 	later := launchOf(t, r2, childSpec(t))
-	if dir := ghconfig.OwnerDir(GHConfigDir, later.gitHubDefault); later.cacheURL != want.cacheURL || dir != want.configDir {
+	if dir := ghconfig.Dir(GHConfigDir, later.gitHubDefault); later.cacheURL != want.cacheURL || dir != want.configDir {
 		t.Errorf("a launch of another issue recorded on %s names the cache %q and GH_CONFIG_DIR %q, want %q and %q: a pod created in state B lands where this one stands",
 			recordedSmoke, later.cacheURL, dir, want.cacheURL, want.configDir)
 	}
@@ -573,8 +574,8 @@ func TestARenamedIssuesPodIsUnmovedInEitherOwnerSetState(t *testing.T) {
 	// head either, since the change moves neither value it reads: what the control changes is the
 	// owner set itself, which gains a name here and can only lose one across the states above.
 	r3 := secondRuntime(t, g, servingAddedOwner)()
-	control, ok := r3.movedGhOwners(pod.Spec, claim.RoleTester)
-	if want := (movedAddress{ghVolumeName, ghOwnersName(renamedOwners), ghOwnersName(servedOwners)}); !ok || control != want {
+	control, ok := r3.movedGhDirs(pod, claim.RoleTester)
+	if want := (movedAddress{ghVolumeName, ghDirsName(renamedDirs), ghDirsName(servedDirs)}); !ok || control != want {
 		t.Fatalf("the control reads %+v (moved %t), want %+v: a daemon serving an owner the pod projects no directory for moves it", control, ok, want)
 	}
 	launched := ghItems(t, &corev1.Pod{Spec: r3.podTemplate(launchOf(t, r3, spec)).Spec}, claim.RoleTester)

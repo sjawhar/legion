@@ -119,7 +119,7 @@ func TestTheRefresherRewritesOnlyTheOwnersWhoseGhFilesAreStale(t *testing.T) {
 	if len(refreshed) != 1 {
 		t.Fatalf("the runtime logged %d refreshed credentials %q, want the tester's alone", len(refreshed), refreshed)
 	}
-	for _, want := range []string{"sandbox=" + issue, "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "owners=[acme]"} {
+	for _, want := range []string{"sandbox=" + issue, "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "dirs=[acme]"} {
 		if !strings.Contains(refreshed[0], want) {
 			t.Errorf("the runtime logged %q, want %q in it", refreshed[0], want)
 		}
@@ -141,10 +141,8 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	logs := &lockedLog{}
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
-		o.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
-			if !repo.IsZero() {
-				owner = repo.Owner()
-			}
+		o.GitHubCredential = func(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+			owner := strings.ToLower(repo.Owner())
 			if refuse.Load() {
 				switch role {
 				case claim.RoleMerger:
@@ -157,10 +155,20 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 				owner = "sjawhar"
 			}
 			app := string(appauth.AppRoleFor(role))
-			return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{
+			return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{
 				"acme": ghconfig.Render("ghs_"+app+"_"+*lease.Load()+"_read", app, staticCredentialExpiry),
 				owner:  ghconfig.Render("ghs_"+app+"_"+*lease.Load(), app, staticCredentialExpiry),
 			}}, nil
+		}
+		// The controller's bundle comes from the one function that answers by owner, over the same
+		// lease: its launch asks for no owner and its refresh for the one its Secret records.
+		o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			bundle, err := o.GitHubCredential(ctx, claim.RoleController, ghrepo.Repository{})
+			if err != nil || defaultOwner == "" {
+				return bundle, err
+			}
+			bundle.Default = defaultOwner
+			return bundle, nil
 		}
 	}))
 	g.spawn(rootSpec(t))
@@ -209,6 +217,77 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	}
 	if !strings.Contains(logged, "default owner acme is not the Secret's sjawhar") {
 		t.Errorf("the runtime logged %q, want the planner's render refused for its default", logged)
+	}
+}
+
+// A controller's bundle is asked for by owner at its launch and at every refresh
+// (Options.ControllerCredential), so a project that gains an owner sorting before the one its
+// Secret records still refreshes it: the controller works no repository, and a bundle asked for
+// by repository takes its default from the first owner the project serves, which would be
+// another owner than the one the pod's GH_CONFIG_DIR was fixed at and so refused at every tick
+// until something replaced the pod, its tokens expiring within the hour.
+func TestAControllerIsRefreshedForTheOwnerItsSecretRecords(t *testing.T) {
+	var gained atomic.Bool
+	logs := &lockedLog{}
+	app := string(appauth.AppRoleFor(claim.RoleController))
+	// The project served sjawhar alone when the controller's pod was launched, and has since
+	// gained acme, which sorts before it.
+	bundle := func(dflt string) ghconfig.Bundle {
+		rendered := ghconfig.Bundle{Default: dflt, Dirs: map[string]ghconfig.Rendered{
+			"sjawhar": ghconfig.Render("ghs_review_read_sjawhar", app, staticCredentialExpiry),
+		}}
+		if gained.Load() {
+			rendered.Dirs["acme"] = ghconfig.Render("ghs_review_read_acme", app, staticCredentialExpiry)
+		}
+		return rendered
+	}
+	first := func() string {
+		if gained.Load() {
+			return "acme"
+		}
+		return "sjawhar"
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		o.GitHubCredential = func(_ context.Context, _ claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+			owner := strings.ToLower(repo.Owner())
+			if owner == "" {
+				owner = first()
+			}
+			return bundle(owner), nil
+		}
+		o.ControllerCredential = func(_ context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+			if defaultOwner == "" {
+				defaultOwner = first()
+			}
+			return bundle(defaultOwner), nil
+		}
+	}))
+	g.spawn(controllerSpec(t))
+	name := roleSecretName(SandboxName(controllerToken), claim.RoleController)
+	if recorded := string(g.secret(name).Data[GitHubDefaultKey]); recorded != "sjawhar" {
+		t.Fatalf("the controller's Secret records the default %q, want the one owner its launch served, sjawhar", recorded)
+	}
+	gained.Store(true)
+	if asked, _ := g.r.gitHubCredential(g.ctx, claim.RoleController, ghrepo.Repository{}); asked.Default != "acme" {
+		t.Fatalf("a bundle asked for by repository defaults to %q, want the project's new first owner acme, which the Secret does not record", asked.Default)
+	}
+	g.clearActions()
+
+	g.r.refreshGitHubCredentials(g.ctx)
+
+	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{name}) {
+		t.Fatalf("the refresher updated %v, want the controller's Secret %s", updated, name)
+	}
+	secret := g.secret(name)
+	if string(secret.Data[GitHubDefaultKey]) != "sjawhar" {
+		t.Errorf("the refresher wrote the default %q, want the recorded sjawhar untouched", secret.Data[GitHubDefaultKey])
+	}
+	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey("acme")]); err != nil || token != "ghs_review_read_acme" {
+		t.Errorf("the controller's acme hosts.yml holds %q (%v), want the new owner's read token", token, err)
+	}
+	if logged := logs.String(); strings.Contains(logged, "github credential refresh failed") {
+		t.Errorf("the runtime logged %q, want the controller refreshed rather than refused", logged)
 	}
 }
 
@@ -277,9 +356,9 @@ func TestTheRefresherLeavesAPodThatIsNotLiveAlone(t *testing.T) {
 }
 
 // leaseTokens is a provisioning token source whose lease the test re-mints: each token is the
-// lease's name and the repository's owner. Every mint is counted under the lower-cased
-// repository the walk's own memo keys by, so a test reads what a tick cost, and the repository
-// refuse names is refused, so a test reads what a tick does when GitHub mints nothing.
+// lease's name and the owner's. Every mint is counted under the lower-cased repository the
+// walk's own memo keys by, so a test reads what a tick cost, and the repository refuse names is
+// refused, so a test reads what a tick does when GitHub mints nothing.
 type leaseTokens struct {
 	lease  atomic.Pointer[string]
 	refuse atomic.Pointer[string]
@@ -295,7 +374,7 @@ func (l *leaseTokens) Token(_ context.Context, repo ghrepo.Repository) (string, 
 	l.mints[strings.ToLower(repo.String())]++
 	l.mu.Unlock()
 	if refused := l.refuse.Load(); refused != nil && strings.EqualFold(*refused, repo.String()) {
-		return "", errors.New("the implement App has no installation on " + repo.String())
+		return "", errors.New("the implement App's installation does not reach " + repo.String())
 	}
 	return "ghs_" + *l.lease.Load() + "_" + repo.Owner(), nil
 }
@@ -504,8 +583,8 @@ func TestTheRefresherKeepsEveryLivePodsProvisioningTokenFresh(t *testing.T) {
 		repo := rootSpec(t).Repository
 		owner, cache := repo.Owner(), CacheSandboxName(testProject, repo)
 		one, two := spawnIssue(t, g, "LEGION-311"), spawnIssue(t, g, "LEGION-312")
-		tokens.lease.Store(&second)
 		refused := repo.String()
+		tokens.lease.Store(&second)
 		tokens.refuse.Store(&refused)
 		g.clearActions()
 		minted := tokens.minted(repo)
@@ -653,12 +732,12 @@ func (l *namedLeases) lease(role appauth.AppRole, owner, kind string) (appauth.L
 	return appauth.Lease{Token: leaseNamed(role, owner, kind), ExpiresAt: staticCredentialExpiry}, nil
 }
 
-func (l *namedLeases) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return l.lease(role, owner, "write")
+func (l *namedLeases) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return l.lease(role, strings.ToLower(repo.Owner()), "write")
 }
 
-func (l *namedLeases) ReadToken(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return l.lease(role, owner, "read")
+func (l *namedLeases) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	return l.lease(role, strings.ToLower(owner), "read")
 }
 
 // asked is every lease GitHub was asked for, deduplicated and sorted.
@@ -685,9 +764,13 @@ func TestTheRefresherKeepsARenamedIssuesWriteLeaseInItsOwnDirectory(t *testing.T
 	leases := &namedLeases{}
 	served := func() []ghrepo.Repository { return []ghrepo.Repository{servingSmoke} }
 	renames := ghrepo.MustRenames(smokeRename)
+	left := appauth.NewLeftOut()
 	g := newRig(t, nil, withOptions(func(o *Options) {
-		o.GitHubCredential = appauth.GitHubCredential(leases, served, renames)
-		o.GitHubOwners = func() []string { return appauth.GitHubOwners(served, renames) }
+		o.GitHubCredential = appauth.GitHubCredential(leases, served, renames, left, nil)
+		o.ControllerCredential = appauth.ControllerCredential(leases, served, renames, left, nil)
+		o.GitHubDirs = func(repo ghrepo.Repository, roles []appauth.AppRole) []string {
+			return appauth.GitHubDirs(served, renames, left, roles, repo)
+		}
 	}))
 	g.spawn(rootSpec(t))
 	issue := SandboxName(rootToken)

@@ -990,17 +990,17 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (190m: the
-// wait for the repository cache, which covers the cache's own first clone, then one bound for the
-// cache's stream and its verification, then one of its own for the delta from GitHub) for
-// workspace-fetch and workspace.CloneTimeout (30m) for workspace-init's shared clone,
-// and nothing more: provisioning from the feed onto the pod's own disk waits on no other pod,
-// so no lock wait is added to it. Pinned to a literal, 220 minutes, since no test can wait the real
-// bound out.
-func TestProvisionBoundIsTheFetchsWholeBudgetAndTheClonesBound(t *testing.T) {
+// ProvisionBound is the three provisioning phases' bounds together, workspace.FetchBudget (190m:
+// the wait for the repository cache, which covers the cache's own first clone, then one bound for
+// the cache's stream and its verification, then one of its own for the delta from GitHub) for
+// workspace-fetch, workspace.CloneTimeout (30m) for workspace-init's shared clone, and
+// workspace.CheckoutTimeout (60m) for the issue's own checkout of that clone, and nothing more:
+// provisioning from the feed onto the pod's own disk waits on no other pod, so no lock wait is
+// added to it. Pinned to a literal, 280 minutes, since no test can wait the real bound out.
+func TestProvisionBoundIsTheFetchsWholeBudgetTheClonesBoundAndTheCheckouts(t *testing.T) {
 	g := newRig(t, nil)
-	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+2*workspace.FetchTimeout+workspace.CloneTimeout; got != 220*time.Minute || got != want {
-		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the stream's bound, the delta's own, and the shared clone's", got, want)
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+2*workspace.FetchTimeout+workspace.CloneTimeout+workspace.CheckoutTimeout; got != 280*time.Minute || got != want {
+		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the stream's bound, the delta's own, the shared clone's, and the checkout's", got, want)
 	}
 }
 
@@ -1200,7 +1200,7 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 				tokens := &outageTokens{failed: failed}
 				return withOptions(func(o *Options) { o.Tokens = tokens }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},
-			want: "mint the provisioning token for sjawhar/legion-smoke",
+			want: "mint the provisioning token for sjawhar",
 		},
 		"the provisioning Secret's write": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
@@ -1219,11 +1219,11 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		},
 		"a role's github credential mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository, owner string) (ghconfig.Bundle, error) {
+				credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 					if failed.CompareAndSwap(false, true) {
 						return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 					}
-					return staticCredential(ctx, role, repo, owner)
+					return staticCredential(ctx, role, repo)
 				}
 				return withOptions(func(o *Options) { o.GitHubCredential = credential }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},

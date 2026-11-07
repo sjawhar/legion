@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,10 @@ import (
 // alone. BROKER_SERVICES names two accounts for one service, so the broker boots serving the
 // secret that service owns instead of refusing its owner tag, which proves its policy loader was
 // given the service and not the accounts. The service logs in once with its own token, and its one
-// credential enrolls three pods, each proving with its projected token that it runs as its own
-// account. The pods running as either of the service's accounts are each granted its secret at
-// once, naming no approver, and read its value; the pod running as an account no entry names is
-// denied it at once, with no grant, no record and no approver to ask.
+// credential enrolls a pod as each of them. The pods running as either of the service's accounts
+// are each granted its secret at once, naming no approver, and read its value; a pod running as
+// an account no entry names is not the service's to enrol at all, and the broker refuses it
+// 403 POD_NOT_LAUNCHED before any secret is asked for.
 func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
@@ -64,12 +65,11 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 	t.Log("--- the service logs in once with its own token")
 	launcher := broker.LogIn(service, loginAccount)
 
-	t.Log("--- the one credential enrolls a pod as each of accounts A, B and C")
+	t.Log("--- the one credential enrolls a pod as each of accounts A and B")
 	granted := []struct {
 		name string
 		pod  brokertest.Pod
 	}{{"A", broker.Enroll(launcher, "pod-a", accountA)}, {"B", broker.Enroll(launcher, "pod-b", accountB)}}
-	podC := broker.Enroll(launcher, "pod-c", accountC)
 
 	for _, p := range granted {
 		t.Logf("--- pod %s, running as one of the service's accounts, is granted its secret at once", p.name)
@@ -82,9 +82,8 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 		}
 	}
 
-	t.Log("--- pod C, running as an account no entry names, is denied it at once with no one to ask")
-	reply := broker.Ask(podC, secretName)
-	if reply.State != "denied" || reply.GrantID != nil || reply.RecordID != nil || string(reply.Approver) != "null" {
-		t.Fatalf("pod C's request = %+v (approver %s), want denied with no grant, no record and approver null", reply, reply.Approver)
+	t.Log("--- pod C, running as an account no entry names, is no pod this login launches")
+	if status, code := broker.EnrollRefused(launcher, "pod-c", accountC); status != http.StatusForbidden || code != "POD_NOT_LAUNCHED" {
+		t.Fatalf("enroll pod C as %s = %d %s, want 403 POD_NOT_LAUNCHED", accountC, status, code)
 	}
 }

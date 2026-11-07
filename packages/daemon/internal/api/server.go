@@ -114,19 +114,21 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
-	// ServedRepositories are the repositories the project serves, as GitHub names them (the
-	// daemon's repositories.Accepted). It is the set the rename rule is read over, one
-	// repository at a time (ghrepo.Serves), and the set the controller's gh bundle is built
-	// from, a directory per owner of it (served, appauth.GitHubCredential). Nil is a server told
-	// of none — a test's, or a daemon with no GitHub Apps.
-	ServedRepositories func() []ghrepo.Repository
+	// GitHubRepositories are the project's repositories as the daemon serves them
+	// (daemon's repositories.Accepted): the controller's gh bundle holds a read-only token per
+	// owner of them, each narrowed to that owner's repositories (appauth.ControllerCredential).
+	GitHubRepositories func() []ghrepo.Repository
 	// RepositoryRenames is the deployment's repository equivalence
-	// (config.Config.RepositoryRenames), and two readers take it. Its principal reader is
-	// serving, this server's one rule for every GitHub call it makes: the owner a recorded
-	// repository's App token is minted for, and the repository a write addresses. The other is
-	// the controller's gh bundle, which holds one entry for a configured rename's two owners
-	// (appauth.GitHubCredential). The zero value configures none.
+	// (config.Config.RepositoryRenames): the controller's gh bundle holds one entry for a
+	// configured rename's two owners (appauth.ControllerCredential). The zero value configures none.
 	RepositoryRenames ghrepo.Renames
+	// Serving is the repository GitHub holds a recorded one under now, which every GitHub call
+	// this server makes is minted for and addressed to (serving): the daemon's one rule
+	// (daemon's repositories.serving, which the Sandbox runtime's own token source is handed
+	// too), so the mapping and the configured renames are read in one place and no caller here
+	// writes a second copy of it. Nil serves a recorded repository under its own name, which a
+	// test that configures no rename and a daemon with no GitHub Apps both want.
+	Serving func(recorded ghrepo.Repository) ghrepo.Repository
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -252,17 +254,18 @@ type server struct {
 	noPluginInstall    func(c supervise.Claim) bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu sync.Mutex
-	tokens       appauth.Tokens
-	// servedRepositories is Options.ServedRepositories: the repositories the project serves,
-	// which the rename rule reads (serving) and the controller's gh bundle is built from
-	// (served).
-	servedRepositories func() []ghrepo.Repository
+	controllerMu       sync.Mutex
+	tokens             appauth.Tokens
+	githubRepositories func() []ghrepo.Repository
 	// renames is the deployment's repository equivalence (Options.RepositoryRenames): the rule
 	// that says which owner's installation holds a repository recorded under the name a transfer
-	// moved it away from, which the controller's gh bundle reads (appauth.GitHubCredential) and
-	// serving reads for this server's own GitHub calls. The zero value configures none.
-	renames    ghrepo.Renames
+	// moved it away from, which the controller's gh bundle reads (appauth.ControllerCredential).
+	// The zero value configures none.
+	renames ghrepo.Renames
+	// serving is Options.Serving, the daemon's one rule for the repository GitHub holds a
+	// recorded one under now, never nil here: NewServer serves a recorded repository under its
+	// own name where the caller hands none.
+	serving    func(recorded ghrepo.Repository) ghrepo.Repository
 	githubAPI  string
 	mergeRules func(project string) config.MergeRules
 	grants     *credential.Grants
@@ -306,6 +309,10 @@ type server struct {
 // secret its registration was issued; and the operator's spawn surface, authenticated by the
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
+	serving := opts.Serving
+	if serving == nil {
+		serving = func(recorded ghrepo.Repository) ghrepo.Repository { return recorded }
+	}
 	s := &server{
 		state:              opts.State,
 		stateTransactions:  opts.StateTransactions,
@@ -322,8 +329,9 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
 		tokens:             opts.Tokens,
-		servedRepositories: opts.ServedRepositories,
+		githubRepositories: opts.GitHubRepositories,
 		renames:            opts.RepositoryRenames,
+		serving:            serving,
 		githubAPI:          opts.GitHubAPI,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
@@ -426,42 +434,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-}
-
-// serving is the repository GitHub holds a recorded one under now (ghrepo.Renames.Serving): the
-// other name of its configured pair exactly when the recorded name is that pair's from, the
-// project serves the pair's to, and the project does not serve the pair's from; every other
-// recorded name, the pair's to among them, is answered unchanged. It is the daemon's one rule,
-// read here over the repositories this server is told the project serves (ghrepo.Serves) rather
-// than written a second time, and ghrepo.Renames.Serving is where the rule says why it asks
-// that of one repository and never of an owner.
-//
-// The served repositories are read once, so the rule's two clauses — the project serving the
-// pair's to, and not serving the recorded name — are answered from one view of a mapping
-// another goroutine may be replacing, rather than two reads of it that each materialise and
-// sort the whole mapping. appauth.GitHubCredential reads its own set once for the same reason.
-//
-// A server built with no set — a test's, or a daemon with no GitHub Apps — serves no repository,
-// so no configured pair resolves and every recorded repository is addressed under the name it
-// was recorded with, exactly as a deployment that configures no rename addresses it.
-func (s *server) serving(recorded ghrepo.Repository) ghrepo.Repository {
-	repos := s.served()
-	return s.renames.Serving(recorded, func(repo ghrepo.Repository) bool { return ghrepo.Serves(repos, repo) })
-}
-
-// served is the repositories the project serves (Options.ServedRepositories), and none where
-// this server was told of no set — a test's, or a daemon with no GitHub Apps — so every caller
-// reads one answer and none repeats the nil check. A rename is resolved against these
-// repositories one at a time (ghrepo.Serves), and the controller's gh bundle is built over
-// the whole set: a GitHub App is installed on an owner, so appauth.GitHubCredential mints one
-// token per owner of them and renders the bundle one directory per owner, which is the shape
-// controllerGitHubCredential answers in, so a server with no set answers that route no owner
-// and it refuses with GITHUB_OWNER_UNCONFIGURED.
-func (s *server) served() []ghrepo.Repository {
-	if s.servedRepositories == nil {
-		return nil
-	}
-	return s.servedRepositories()
 }
 
 // decision is the context a route runs a decision of token's claim on. It outlives the request,
@@ -592,14 +564,19 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 // `updateRound` and `updateHead` to the claim views, is served the state without them
 // (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
-// three fields (withoutMemory); and a caller below treeContract, the contract that named the live
+// three fields (withoutMemory); a caller below treeContract, the contract that named the live
 // trees beside the issues holding a slot, is served it without `admission.trees` and without the
-// issues' `tree` (withoutTrees). The three compose: each is applied when the state carries
-// something of its own, so a caller below all of them — a pod below supervise.PodUpdateContract —
-// is served a body with none of the seven keys. Every later reader takes all seven as optional, so
-// the body this serves when the claims cannot be read is the one every reader from 45 on takes.
-// Any other caller — a pod at this contract, the operator's `legion state`, a tmux pane — is
-// served the state as this contract writes it.
+// issues' `tree` (withoutTrees); and a caller below wakesWaitingContract, the contract that added
+// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting). The four
+// compose: each is applied when the state carries something of its own, so a caller below all of
+// them — a pod below supervise.PodUpdateContract — is served a body carrying none of the eight
+// keys, each of them absent rather than empty, since a strict reader before the contract that
+// added a key refuses it whether or not it names anything. Every later reader takes all eight as
+// optional — `packages/contracts/src/legion-api.ts` marks `admission.trees` and `wakesWaiting`
+// optional for exactly these bodies — so the body this serves a pod whose claims cannot be read,
+// which may be a pod at this contract, is the one every reader from 45 on takes. Any other caller
+// — a pod at this contract whose claims were read, the operator's `legion state`, a tmux pane —
+// is served the state as this contract writes it.
 func (s *server) stateFor(r *http.Request, state State) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
@@ -624,9 +601,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	// before it is still being replaced — costs no scan of the issues.
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory and tree fields, which every plugin contract since 45 reads",
+		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory, tree and waiting-wake fields, which every plugin contract since 45 reads",
 			"pod", pod, "error", err)
-		return withoutTrees(withoutMemory(withoutUpdateRounds(state)))
+		return withoutWakesWaiting(withoutTrees(withoutMemory(withoutUpdateRounds(state))))
 	}
 	contract := podContract(claims, pod)
 	if contract == 0 {
@@ -641,6 +618,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	if contract < treeContract && carriesTrees(state) {
 		state = withoutTrees(state)
 	}
+	if contract < wakesWaitingContract && carriesWakesWaiting(state) {
+		state = withoutWakesWaiting(state)
+	}
 	return state
 }
 
@@ -654,6 +634,11 @@ const memoryContract = 49
 // and each issue's `tree`, its own tree's root: a plugin before it reads the state with a strict
 // schema that knows neither key and refuses the whole body for one of them.
 const treeContract = 51
+
+// wakesWaitingContract is the daemon contract that added `wakesWaiting` to the state (version.go's
+// 53): a plugin before it reads the state with a strict schema that knows no such key and refuses
+// the whole body for it.
+const wakesWaitingContract = 53
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -685,10 +670,19 @@ func carriesMemory(state State) bool {
 // issue's `tree`. It carries `admission.trees` whatever the daemon holds, since the admission
 // block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
 // strict reader before the contract refuses the empty key as surely as one naming a tree. So this
-// is true of every state the route writes; it is asked beside carriesUpdateRounds and
-// carriesMemory all the same, because stateFor puts the same question to the three and because a
-// later contract that stops writing `trees` on every body answers it here.
+// is true of every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory
+// and carriesWakesWaiting all the same, because stateFor puts the same question to the four and
+// because a later contract that stops writing `trees` on every body answers it here.
 func carriesTrees(State) bool { return true }
+
+// carriesWakesWaiting is whether state carries the key wakesWaitingContract added: `wakesWaiting`,
+// the wakes the pacing holds. It carries that key whatever the daemon holds, since the state
+// writes it on every body, empty rather than null (State.MarshalJSON), and the strict reader
+// before the contract refuses the empty key as surely as one naming a wake. So this is true of
+// every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory and
+// carriesTrees all the same, because stateFor puts the same question to the four and because a
+// later contract that stops writing `wakesWaiting` on every body answers it here.
+func carriesWakesWaiting(State) bool { return true }
 
 // podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
 // none records one: every role of a pod is served by the plugin that pod runs, and the body the
@@ -760,6 +754,18 @@ func withoutTrees(state State) State {
 		issues[key] = issue
 	}
 	state.Issues = issues
+	return state
+}
+
+// withoutWakesWaiting is state with no `wakesWaiting`, the top-level array wakesWaitingContract
+// added; nothing else of that contract is on the route but `settings` keys, which every plugin
+// reads loosely. The key is left off rather than emptied, because the strict reader before the
+// contract refuses it as surely when it is empty as when it names a wake, which is why
+// State.MarshalJSON writes the key on every body but this one (State.wakesWaitingHidden), as
+// Admission.MarshalJSON leaves off `trees` for withoutTrees. The flag is set on a value of the
+// state's own, so the state the source answered is left as it was.
+func withoutWakesWaiting(state State) State {
+	state.WakesWaiting, state.wakesWaitingHidden = nil, true
 	return state
 }
 

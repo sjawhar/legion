@@ -33,7 +33,7 @@ func TestTheOutboxTakesThePhaseEndedKindWith0066(t *testing.T) {
 	for _, kind := range []string{
 		"dispatch_status", "dispatch_message", "notice", "controller_notice", "supervise", "gate_seed",
 		"linger_close", "workspace_remove", "merge_queue_publish", "issue_branch", "issue_suspend",
-		"auto_merge_disable", "ready_merge", "check_compare", "check_look", "check_bound", "phase_ended",
+		"auto_merge_disable", "ready_merge", "check_wake", "check_look", "check_bound", "phase_ended",
 	} {
 		if err := queue(kind); err != nil {
 			t.Fatalf("queue a %s row after 0066: %v", kind, err)

@@ -20,6 +20,7 @@
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+//	agent-secrets enroll --pod --service <name> [--pod-token-file <file>] [--out <dir>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
@@ -50,17 +51,20 @@
 // broker that the broker's own answer carries as approve_url. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
 // session (buildChildEnv). A machine session enrolls automatically through the helper's own
-// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// enroll loop, and a Legion pod's enrollment is its daemon's job — this CLI has no direct
 // enrollment path for either; on a devbox only a session key a launcher holds (a box's) enrolls
 // through it, and only via --helper (the shared broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
-// the person's AWS sign-in against an AWS broker, or their Google sign-in (their Application
-// Default Credentials, or their gcloud login) against a GCP one, and need no session identity at
-// all. The machine and grant forms act under this machine's login: the helper signs each call
-// with its launcher credential (sign-launcher) for a process it can show is outside every
-// registered session's process tree, the operator's own shell, and only for the broker's four
-// operator routes.
+// that hold a launcher's proof-signing key). One runtime enrols itself: a Kubernetes pod an
+// operator launches by hand (`enroll --pod`, pod.go). It holds no credential a person installed;
+// the projected service-account token its own kubelet mounts is what the broker trusts instead,
+// so it needs no helper, no launcher and no approval. The secret forms
+// read AWS_PROFILE (or --profile) for the person's AWS sign-in against an AWS broker, or their
+// Google sign-in (their Application Default Credentials, or their gcloud login) against a GCP
+// one, and need no session identity at all. The machine and grant forms act under this machine's
+// login: the helper signs each call with its launcher credential (sign-launcher) for a process
+// it can show is outside every registered session's process tree, the operator's own shell, and
+// only for the broker's four operator routes.
 package main
 
 import (
@@ -115,8 +119,8 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
-		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper.\nIt writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>] | --pod --service <name> [--pod-token-file <file>] [--out <dir>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nor, with --pod, enroll this Kubernetes pod itself, for the broker-side service --service\nnames: a pod proves who it is with the projected service-account token its own kubelet\nmounts (--pod-token-file, default " + defaultPodTokenFile + ").\nEach writes the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment and prints it, alone, on\nstdout. --pod also writes key.pem there, reusing the one already in --out: a re-run keeps\nthat key's enrollment and renews its lease, and runs on one directory take turns. A pod keeps\nits own lease alive with the command --pod prints, which names the key directory because renew\nreads AGENT_SECRETS_KEY_DIR and never --out:\n`AGENT_SECRETS_KEY_DIR=<dir> agent-secrets renew --pod-token-file <file>`."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
@@ -142,9 +146,9 @@ var commands = []command{
 	{"renew", "agent-secrets renew [--pod-token-file FILE]",
 		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file, read again before each renewal, so each\nrenewal sends the token of that moment, which the broker checks names the pod the enrollment\nwas made for. POD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID\nsaying \"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
-		"Request secrets and print the request's id, state and source, and who approves it and\nwhere while it waits; exit 75 while it waits for approval and 77 when it is denied. The\ngrant lasts --ttl, or 12 hours (until this session ends when every secret is\ntagged default-grant=session)."},
+		"Request secrets and print the request's id, state and source, the broker's own detail when\nit denied them, and who approves it and where while it waits; exit 75 while it waits for\napproval and 77 when it is denied. The\ngrant lasts --ttl, or 15 minutes when any secret is human tier and 12 hours\notherwise (until this session ends when every secret is tagged\ndefault-grant=session)."},
 	{"status", "agent-secrets status <request_id> [--json]",
-		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, and who decided it."},
+		"Print a request's state, the broker and store it is at, who approves it and where while it\nwaits, its grant once granted, who decided it, and the broker's own detail when it was\ndenied."},
 	{"cancel", "agent-secrets cancel <request_id>",
 		"Cancel one of this session's pending requests."},
 	{"revoke", "agent-secrets revoke <grant_id>",
@@ -156,7 +160,7 @@ var commands = []command{
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
 	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or 12 hours (until this session ends when every secret is tagged default-grant=session). --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or 15 minutes when any secret is human tier and 12 hours otherwise (until this session ends when every secret is tagged default-grant=session). --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -525,8 +529,8 @@ func selectSigner(dir string) (string, Signer, error) {
 		}
 		id, idErr := readTrimmed(filepath.Join(dir, enrollmentFile))
 		if idErr != nil {
-			if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
-				return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
+			if reason, rerr := readTrimmed(filepath.Join(dir, enrollmentErrorFile)); rerr == nil {
+				return "", nil, fmt.Errorf("%w (%s: %s)", idErr, enrollmentErrorFile, reason)
 			}
 			return "", nil, idErr
 		}
@@ -549,15 +553,17 @@ func selectSigner(dir string) (string, Signer, error) {
 	} else if signer != nil {
 		return signer.enrollmentID, signer, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or a Legion pod is enrolled by its launcher, and a Kubernetes pod enrols itself with `agent-secrets enroll --pod`, which names this directory in the renewal command it prints), nobody has run `agent-secrets login` here, this machine proves no identity of its own (%s), and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, brokerclient.IdentityVar, sock)
 }
 
 // machineSigner is the signer of a machine that proves an identity of its own and holds no
-// launcher and no helper — a pod, which nobody enrols. It trades that identity for a launcher
-// credential, registers a key it makes here under it, and writes the key, the enrollment and
-// the marker that says whose session this is into the key dir, so the next call of this
-// machine's takes the file branch above and trades nothing. It answers nil where this machine
-// proves no identity, which is every deployment that has not turned the exchange on.
+// launcher and no helper — a pod no launcher enrols, and which has not enrolled itself with
+// `enroll --pod` either, since that writes the key the branch above would have taken. It trades
+// that identity for a launcher credential, registers a key it makes here under it, and writes
+// the key, the enrollment and the marker that says whose session this is into the key dir, so
+// the next call of this machine's takes the file branch above and trades nothing. It answers
+// nil where this machine proves no identity, which is every deployment that has not turned the
+// exchange on.
 func machineSigner(dir string) (*fileSigner, error) {
 	identity, err := brokerclient.MachineIdentity(os.Getenv)
 	if err != nil || identity == nil {
@@ -927,6 +933,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		writeVerbatim(stdout, raw)
 	} else {
 		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\nsource: %s\n", result.RequestID, result.State, c.source(ctx))
+		printDetail(stdout, result.Detail)
 		if result.State == "pending" {
 			fmt.Fprintln(stdout, waitingOn(result.Approver, result.ApproveURL))
 		}
@@ -982,6 +989,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	if result.Decision != nil {
 		fmt.Fprintf(stdout, "decided_by: %s\n", result.Decision.By)
 	}
+	printDetail(stdout, result.Detail)
 	return 0
 }
 
@@ -1168,7 +1176,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	state, grantID, requestID := result.State, result.GrantID, result.RequestID
+	state, grantID, requestID, detail := result.State, result.GrantID, result.RequestID, result.Detail
 	if state == "pending" {
 		reportPending(stderr, requestID, result.Approver, result.ApproveURL, *wait, src())
 		deadline := time.Now().Add(*wait)
@@ -1184,7 +1192,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				refuse(stderr, "agent-secrets", src(), err)
 				return 1
 			}
-			state, grantID = status.State, status.GrantID
+			state, grantID, detail = status.State, status.GrantID, status.Detail
 			backoff = nextBackoff(backoff)
 		}
 	}
@@ -1194,7 +1202,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: request %s to %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, src(), requestID)
 		return exitPending
 	case "denied":
-		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was denied\n", requestID, src())
+		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was denied%s\n", requestID, src(), deniedBecause(detail))
 		return exitDenied
 	case "cancelled", "expired":
 		fmt.Fprintf(stderr, "agent-secrets: request %s to %s was %s\n", requestID, src(), state)
@@ -1279,6 +1287,30 @@ func waitingOn(approver *string, brokerPage string) string {
 	default:
 		return "waiting for " + *approver + " to approve it on the secrets broker" + where
 	}
+}
+
+// deniedBecause is what the exec form's denied line adds to name why: ": " and the broker's own
+// sentence about the refusal (RequestResult.Detail), which names the secret that refused the
+// request and the rule that did, as ": GCLOUD_SAMI: requester-not-listed". An agent reading that
+// line on stderr then knows which secret it may not have and that asking again will not help,
+// rather than only that something was denied. A broker that recorded no detail, and one from
+// before the field, adds nothing, so such a denial reads exactly as it always has.
+func deniedBecause(detail *string) string {
+	if detail == nil {
+		return ""
+	}
+	return ": " + *detail
+}
+
+// printDetail writes the broker's own sentence about a request, the one the request row keeps as
+// its decision_detail, as the "detail: <text>" line the request and status forms both end with.
+// A broker that recorded none, and one from before the field, writes no line at all, so such an
+// answer reads exactly as it always has.
+func printDetail(stdout io.Writer, detail *string) {
+	if detail == nil {
+		return
+	}
+	fmt.Fprintf(stdout, "detail: %s\n", *detail)
 }
 
 // sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The Go tests run nats-server 2.15.1, the version the deployed hub runs, instead of 2.10.29: a raise of a live single-copy stream to three copies could lose every message on 2.10.29, whose scale-up let an empty new copy win the election (fixed upstream in nats-io/nats-server#8672). The NATS client the listener, Dispatch, the MCP server and natstail ship moves with it, from nats.go 1.50.0 to 1.53.1.'
+time: 2026-11-06T22:06:28.731608364Z
+custom:
+    Issue: pr2882

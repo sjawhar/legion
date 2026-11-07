@@ -5,7 +5,10 @@
 // latest Set, rereads it on a ticker, and merges a single name's reread into it (RefreshOne);
 // Set.Evaluate answers one requester's ask for one name.
 //
-// Who may ask follows from owner and tier alone:
+// Who may ask follows from owner and tier, except where a secret's requesters tag names the only
+// people and services that may ask for it at all (TagRequesters, checked before everything below,
+// and a session or pod it does not name is denied whatever the owner and tier would have given
+// it):
 //
 //   - a person's agent-tier secret goes to that person's sessions without asking, and any other
 //     session's or pod's request is an approval request to the person;
@@ -49,10 +52,15 @@ const (
 	KindGoogleLogin = "google-login"
 	// KindAzureLogin releases the broker's projected token with the stored Entra identity ids.
 	KindAzureLogin = "azure-login"
+	// KindGoogleServiceAccount mints a Google access token for the one service account its stored
+	// value names, {"service_account": "<id>@<project>.iam.gserviceaccount.com"}. The token acts
+	// as that account, which no person's sign-in bounds, so the kind is served only to the one
+	// person the secret's requesters tag names (RequesterRules).
+	KindGoogleServiceAccount = "google-service-account"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
 	// TagDefaultGrant, set to DefaultGrantSession, keeps a request that names no lifetime for this
-	// secret lasting until its session ends, rather than the broker's DefaultGrantLifetime.
+	// secret lasting until its session ends, rather than the broker's default grant lifetime.
 	TagDefaultGrant = "default-grant"
 	// DefaultGrantSession is the one value TagDefaultGrant takes.
 	DefaultGrantSession = "session"
@@ -60,13 +68,19 @@ const (
 	// (ParseGitHubOwners). A github-app secret without it is refused, since a public App can be
 	// installed by any account, and an installation on an account it does not list gets no token.
 	TagGitHubOwners = "github-owners"
+	// TagRequesters lists who may ask for the secret at all: people by lowercase email and
+	// registered services by name, separated by white space (ParseRequesters). A session or pod
+	// the list does not name is denied before owner and tier are read (ReasonRequesterNotListed),
+	// so the tag narrows who may ask and never widens it. A secret carrying it must bound its
+	// grants to an hour as well (RequesterRules).
+	TagRequesters = "requesters"
 	// kindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	kindSourcePrefix = "mint:"
-	// TagRemoved is the value of `agent-secrets secret retag --kind`, `--github-owners` and
-	// `--max-grant` that removes the tag. It is never a login a github-owners tag names: an entry
-	// that reads `none` in any case was written by hand, and is refused rather than read as an
-	// account (ParseGitHubOwners).
+	// TagRemoved is the value of `agent-secrets secret retag --kind`, `--github-owners`,
+	// `--requesters` and `--max-grant` that removes the tag. It is never a login a github-owners
+	// tag names: an entry that reads `none` in any case was written by hand, and is refused
+	// rather than read as an account (ParseGitHubOwners).
 	TagRemoved = "none"
 	// TagRollbackGuard and RollbackGuardValue are the tag `agent-secrets secret` writes beside every
 	// kind, and the value it writes. This broker never reads the tag. Brokers from
@@ -93,7 +107,7 @@ const (
 )
 
 // Kinds is every value a secret's kind tag may name. The broker holds a minter for each.
-var Kinds = []string{KindGitHubApp, KindGoogleLogin, KindAzureLogin}
+var Kinds = []string{KindGitHubApp, KindGoogleLogin, KindAzureLogin, KindGoogleServiceAccount}
 
 // ValidKind reports whether kind is one of Kinds.
 func ValidKind(kind string) bool {
@@ -176,6 +190,103 @@ func ParseGitHubOwners(raw string) (string, error) {
 	}
 	slices.Sort(owners)
 	return strings.Join(slices.Compact(owners), " "), nil
+}
+
+// ErrRequestersMissing is a requesters tag that names nobody: a tag that let no one ask would
+// serve the secret to no session at all, which is a mistake rather than a policy.
+var ErrRequestersMissing = errors.New("requesters names at least one person or service")
+
+// ErrRequestersComma is a requesters tag that holds a comma: its entries are separated by spaces,
+// as github-owners' and BROKER_SERVICES' are, since an AWS tag value takes a space and no comma.
+var ErrRequestersComma = errors.New(`requesters separates its entries with spaces, not commas ("<email> <service>")`)
+
+// ErrRequestersEntry is a requesters entry that names neither a person nor a service: one holding
+// an @ that is not a lowercase email of the form a person signs in under (an uppercase one is
+// refused rather than lowercased, since the tag is compared against the sign-in as it is written),
+// or one naming a service the deployment does not register.
+var ErrRequestersEntry = errors.New("requesters names people by their lowercase sign-in email and services by their registered name")
+
+// ParseRequesters reads a requesters tag for a caller that holds the deployment's registered
+// service list — the loader (Loader.Services), the one reader whose answer decides whether the
+// secret is served. People are named by lowercase email and services by name, separated by white
+// space. It refuses a comma anywhere (ErrRequestersComma), a list that names nobody
+// (ErrRequestersMissing), and an entry that is neither (ErrRequestersEntry). An entry holding an
+// @ is a person, and must be the lowercase email their sign-in names them by (emailPattern),
+// since Evaluate compares it against record.CanonicalLogin of the session's operator; any other
+// entry is a service, and must be one of services, ALWAYS, so a nil or empty list refuses every
+// service entry, exactly as the owner tag already refuses a name the deployment does not
+// register (Loader.secret). ParseRequesterShapes checks a service entry's shape alone, for the
+// one caller that holds no registered list. It answers the entries sorted, each
+// once and joined by single spaces, so a Secret holding them stays comparable, two spellings of
+// one list are one policy, and the value is one an AWS tag and a Secret Manager annotation both
+// hold.
+func ParseRequesters(raw string, services []string) (string, error) {
+	return parseRequesters(raw, services, true)
+}
+
+// ParseRequesterShapes reads a requesters tag for a caller that holds no registered service list:
+// `agent-secrets`, which never sees BROKER_SERVICES. It is ParseRequesters in every respect but
+// one — an entry naming a service is checked for a service name's shape alone
+// (record.ValidService) rather than against the registered list — so the CLI refuses a malformed
+// tag before it writes, and the broker's answer to the write's reread (ReasonRequestersMalformed)
+// is what catches a name no deployment registers. ParseRequesters exists for the loader, which
+// holds that list and must apply it.
+func ParseRequesterShapes(raw string) (string, error) {
+	return parseRequesters(raw, nil, false)
+}
+
+// parseRequesters is the one reading behind both exported functions. registered says which check
+// a service entry gets: membership of services, or a service name's shape alone.
+func parseRequesters(raw string, services []string, registered bool) (string, error) {
+	if strings.Contains(raw, ",") {
+		return "", ErrRequestersComma
+	}
+	var requesters []string
+	for _, entry := range strings.Fields(raw) {
+		switch {
+		case strings.Contains(entry, "@"):
+			if !emailPattern.MatchString(entry) {
+				return "", fmt.Errorf("%w, not %q", ErrRequestersEntry, entry)
+			}
+		case registered:
+			if !slices.Contains(services, entry) {
+				return "", fmt.Errorf("%w, not %q: no registered service has that name", ErrRequestersEntry, entry)
+			}
+		default:
+			if !record.ValidService(entry) {
+				return "", fmt.Errorf("%w, not %q", ErrRequestersEntry, entry)
+			}
+		}
+		requesters = append(requesters, entry)
+	}
+	if len(requesters) == 0 {
+		return "", ErrRequestersMissing
+	}
+	slices.Sort(requesters)
+	return strings.Join(slices.Compact(requesters), " "), nil
+}
+
+// RequesterRules is the one statement of what a requesters tag demands of the rest of a secret's
+// tags, which the loader applies to every secret it reads and `agent-secrets secret` create and
+// retag apply before they write (so it asks for no registered service list of its own). It
+// answers "" for a secret the rules allow, and otherwise the load reason that refuses it:
+//
+//   - ReasonRequestersMaxGrant: a secret whose requesters are listed sets no max-grant, or one
+//     longer than an hour. A list says who may ask for an admin or personal credential, and such
+//     a grant is reviewed while it is live, so it lasts an hour at most.
+//   - ReasonRequestersNotOwner: a google-service-account secret whose requesters are not exactly
+//     its own owner — no list, more than one entry, or one entry naming someone else. The token
+//     it mints acts as a service account, which the requirement gives to the one person who owns
+//     the secret, so a secret owned by shared or by a service can carry no such kind: neither is
+//     a person, and neither can be that one requester.
+func RequesterRules(kind, owner, requesters string, maxGrant time.Duration) string {
+	if requesters != "" && (maxGrant == 0 || maxGrant > time.Hour) {
+		return ReasonRequestersMaxGrant
+	}
+	if kind == KindGoogleServiceAccount && (!ValidPersonOwner(owner) || requesters != owner) {
+		return ReasonRequestersNotOwner
+	}
+	return ""
 }
 
 // gitHubRepositoryName is what a repository name GitHub creates can be: ASCII letters, digits,
@@ -304,6 +415,10 @@ type Secret struct {
 	// GitHubOwners is a github-app secret's github-owners tag as ParseGitHubOwners answers it, and
 	// "" for every other secret. A string, not a slice, for the same reason as MaxGrant.
 	GitHubOwners string
+	// Requesters is the secret's requesters tag as ParseRequesters answers it, and "" for a secret
+	// that carries none, which every session and pod may ask for. A string, not a slice, for the
+	// same reason as MaxGrant.
+	Requesters string
 	// SessionDefault is true when the secret's default-grant tag is "session": a request naming
 	// no lifetime gets a grant that lasts until its session ends instead of DefaultGrantLifetime.
 	SessionDefault bool
@@ -328,6 +443,38 @@ func (secret Secret) GitHubOwnerLogins() []string {
 	return strings.Fields(secret.GitHubOwners)
 }
 
+// requesterNames is Requesters as a list of the emails and service names it holds, nil when it
+// is "". It is unexported because lists, just below, is its one caller: nothing outside this
+// package reads a secret's requesters as a list.
+func (secret Secret) requesterNames() []string {
+	if secret.Requesters == "" {
+		return nil
+	}
+	return strings.Fields(secret.Requesters)
+}
+
+// lists reports whether secret's requesters name r: the person whose session it is, or the
+// service of the pod it is. Each sort is matched only by an entry of its own sort, which the @
+// tells apart (ParseRequesters makes every person entry hold one and every service entry hold
+// none): a login record.CanonicalLogin answers may be a GitHub login rather than an email, for
+// a record decided before people were named by email, and such a login has a service name's own
+// alphabet, so an operator named "legion-daemon" would otherwise be served every secret that
+// lists the legion-daemon service. An empty Operator (a pod has no person) and an empty Service
+// (a session has no service) match nothing, never an entry.
+func (secret Secret) lists(r Requester) bool {
+	operator := record.CanonicalLogin(r.Operator)
+	for _, entry := range secret.requesterNames() {
+		person := strings.Contains(entry, "@")
+		if person && operator != "" && entry == operator {
+			return true
+		}
+		if !person && r.Service != "" && entry == r.Service {
+			return true
+		}
+	}
+	return false
+}
+
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a
 // shared secret, its owner otherwise.
 func (secret Secret) approver() string {
@@ -339,21 +486,22 @@ func (secret Secret) approver() string {
 
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
-	// Version is the SHA-256 of every served secret's name, owner, tier, source, max-grant and
-	// github-owners: equal versions are equal policies. A request records the version it was decided
-	// under, so a live grant is re-evaluated only once the policy changed.
+	// Version is the SHA-256 of every served secret's name, owner, tier, source, max-grant,
+	// github-owners and requesters: equal versions are equal policies. A request records the
+	// version it was decided under, so a live grant is re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets. A secret with no max-grant and no github-owners writes the
-// pre-kind digest bytes, "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its
-// Source); one with either adds both, as a fifth field (time.Duration's form, 0s for none) and a
-// sixth (empty for none). Entries are ascending by the secret's name in the store (the slug) —
-// the exact order Load wrote before NewSet existed, so deployed plain-secret digests do not shift.
-// (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" <
-// "a0" as slugs but "A0" < "A_B" as Names.)
+// (keyed by Name) as its Secrets. A secret with no max-grant, no github-owners and no requesters
+// writes the pre-kind digest bytes, "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind
+// is in its Source); one with any of them adds the first two, as a fifth field (time.Duration's
+// form, 0s for none) and a sixth (empty for none), and a secret with requesters ends its line
+// with "\trequesters=<list>". Entries are ascending by the secret's name in the store (the slug)
+// — the exact order Load wrote before NewSet existed, so deployed plain-secret digests do not
+// shift. (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so
+// "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
 func NewSet(secrets map[string]Secret) *Set {
 	type bySlug struct {
 		slug   string
@@ -366,15 +514,19 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault {
+		requesters := ""
+		if s.secret.Requesters != "" {
+			requesters = "\trequesters=" + s.secret.Requesters
+		}
+		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" && !s.secret.SessionDefault && s.secret.Requesters == "" {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
 			continue
 		}
 		if s.secret.SessionDefault {
-			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\tdefault-grant=session%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters)
 			continue
 		}
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners, requesters)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
@@ -406,6 +558,9 @@ type Decision struct {
 	Approver string
 	// Source is what the secret's value is read by (Secret.Source).
 	Source string
+	// Reason names the rule behind a Deny the policy can name, and is empty for every other
+	// decision: a caller tells a session why it was refused without reading the policy itself.
+	Reason string
 }
 
 // ServiceOwned reports whether the set serves name as a registered service's secret. Who is a
@@ -415,14 +570,24 @@ func (s *Set) ServiceOwned(name string) bool {
 	return s.Secrets[name].ownership == ownerService
 }
 
-// Evaluate answers r's ask for name. A name the set does not serve is ErrUnknownSecret. A name
-// withheld from r (Requester.Withheld) is decided as a human-tier secret: what r would have got at
-// once is an approval request to the owner, or to anyone for a shared secret, and a service's own
-// secret, which no person approves, is denied.
+// ReasonRequesterNotListed is the Reason of a Deny the requesters tag decided: neither the
+// person the asking session is signed in as nor the service the asking pod proves is on the
+// secret's list, so it is refused whatever its owner and tier would have given them.
+const ReasonRequesterNotListed = "requester-not-listed"
+
+// Evaluate answers r's ask for name. A name the set does not serve is ErrUnknownSecret. A secret
+// whose requesters are listed (Secret.Requesters) is denied, ReasonRequesterNotListed, to every
+// requester the list does not name, before owner and tier are read at all. A name withheld from r
+// (Requester.Withheld) is decided as a human-tier secret: what r would have got at once is an
+// approval request to the owner, or to anyone for a shared secret, and a service's own secret,
+// which no person approves, is denied.
 func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 	secret, ok := s.Secrets[name]
 	if !ok {
 		return Decision{}, ErrUnknownSecret
+	}
+	if secret.Requesters != "" && !secret.lists(r) {
+		return Decision{Outcome: Deny, Reason: ReasonRequesterNotListed, Source: secret.Source}, nil
 	}
 	withheld := slices.Contains(r.Withheld, name)
 	d := Decision{Source: secret.Source}

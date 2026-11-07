@@ -1,6 +1,7 @@
 import { type LegionRole, zodSchemaApi } from "@legion/contracts";
 import {
   LEGION_PHASE_BACKWARD_TARGETS,
+  LegionInstant,
   type LegionIssue,
   type LegionPhase,
   type LegionState,
@@ -26,6 +27,14 @@ export interface ClaimCapability {
   readonly issue: string;
   readonly role: LegionRole;
   readonly secret: string;
+  /** The task agents the registration answered with (`LegionRegistration.promptAgents`), which
+   * the session's own capability measurements check its discovered agents against long after the
+   * boot returned. `bootLegionClaim` is this field's only producer, and every claim in production
+   * carries the list: `packages/claude-envoy/src/legion-claim.ts`, the other host that records a
+   * claim, records what that boot hands it. It is optional because a reader that finds no value
+   * has a defined answer — it measures against no prompt agents — so a claim built without it,
+   * which only a test does, is read rather than refused. */
+  readonly promptAgents?: readonly string[];
 }
 
 /**
@@ -52,13 +61,33 @@ const requiredString = (op: PhaseOp, field: string) => {
   return z.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
 };
 
-/** `read_release_records`' window: the instant it reads from, in the RFC 3339 form the route
- * takes (`LegionReleaseRecordsRequest`'s `since`). A value the route could not read is refused
- * here by the op's own name, rather than as the request schema's parse failure, and a blank one
- * is refused as missing alone. */
-const windowStart = requiredString("read_release_records", "since").refine(
-  (value) => value.trim() === "" || z.iso.datetime({ offset: true }).safeParse(value).success,
-  { error: "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is" }
+/** A string field `op` requires in the RFC 3339 form the route takes, refused here by the op's
+ * own name with message rather than as the request schema's parse failure; a blank one is
+ * refused as missing alone (requiredString). The form is the contract's `LegionInstant`, read
+ * here so that this tool refuses exactly the strings the daemon's decode refuses:
+ * `z.iso.datetime({ offset: true })` is not it, since it takes `2026-11-06T10:00Z`, which Go's
+ * `time.Time` refuses, and the agent would then get the daemon's generic invalid-body answer
+ * instead of the message below. */
+const rfc3339String = (op: PhaseOp, field: string, message: string) =>
+  requiredString(op, field).refine(
+    (value) => value.trim() === "" || LegionInstant.safeParse(value).success,
+    { error: message }
+  );
+
+/** `read_release_records`' window: the instant it reads from (`LegionReleaseRecordsRequest`'s
+ * `since`). */
+const windowStart = rfc3339String(
+  "read_release_records",
+  "since",
+  "read_release_records' since is an RFC 3339 time, as 2026-11-02T09:00:00Z is"
+);
+
+/** `handoff_complete`'s `wake_at`: when the checking agent asks to be woken for its next look
+ * (`LegionHandoffCompleteRequest`'s `wakeAt`, which is what goes on the wire). */
+const nextLook = rfc3339String(
+  "handoff_complete",
+  "wake_at",
+  "handoff_complete's wake_at is an RFC 3339 time, as 2026-11-02T09:00:00Z is"
 );
 
 /** One operation's arguments: `op` and `shape`, and nothing else. */
@@ -92,6 +121,7 @@ export const PhaseOpArguments = z.discriminatedUnion(
         })
         .optional(),
       ready: z.boolean({ error: "handoff_complete's ready is true or false" }).optional(),
+      wake_at: nextLook.optional(),
     }),
     operation("request_backward_move", {
       // The issue the move names: the tree architect's move names the issue it returns from
@@ -183,17 +213,21 @@ export function legionToolDescription(host: {
     "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
     (host.before ?? "") +
     "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
-    "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
-    "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
-    "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
+    "and the checking role's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for " +
+    "the architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict " +
+    "from any other role there) and pass|pending|fail on a production check report (pending: production does not carry the merge " +
     "yet), `ready: true` for the merger's READY. A planning, implementing, testing or reviewing phase ends with a handoff record on the " +
     "Dispatch issue: write it with `dispatch handoff-write --issue <issue> --phase <plan|implement|test|review> --body-file <file>` before " +
     "calling. This call reads the phase's newest record from Dispatch and reports it; the implementer's round also reports the commit " +
     "`legion/<issue>@origin` names, so push the branch first; retro and the merger's READY report the commit the workspace stands on. It " +
     "refuses, posting nothing, a phase with no record, a Dispatch that does not answer, or an implementer's `@-` not yet on " +
     "`legion/<issue>@origin`, each naming the remedy. A production check report " +
-    "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
-    "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
+    "(the task whose first line is `Production check of <KEY>`, handed once the merge closed the issue to the role the check records) needs no " +
+    "handoff and no commit: it carries its verdict and summary alone. A pending report also names `wake_at`, an RFC 3339 time: when you want the " +
+    "next look. A pass, a fail, and a pending on the check's last look end the check, so none of them carries `wake_at` " +
+    "(CHECK_WAKE_UNEXPECTED), and a pending on any other look is refused without one (CHECK_WAKE_REQUIRED). A report on an issue whose check is " +
+    "closed or never opened is refused (CHECK_NOT_OPEN), and so is one from a role the check does not record (CHECK_ROLE_MISMATCH). " +
+    "The daemon refuses " +
     "HANDOFF_SESSION_MISMATCH (another session wrote the record), HANDOFF_NOT_NEW (the record is the one you named for your previous phase: " +
     "write this phase's handoff), " +
     "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " +
@@ -264,16 +298,20 @@ const ROOT_COMPLETION_REFUSAL =
  * nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by `; `, a field
  * the operation does not take named first, then a root architect's completion,
  * then each problem with the operation's own fields in the order it takes them; then what the
- * record decides (a check report's verdict, `pending` on a phase completion, the issue a move
+ * record decides (a check report's verdict, its claim's role against the check's own, its
+ * `wake_at`, `pending` or `wake_at` on a phase completion, the issue a move
  * names), then a refused handoff report (`findHandoffReport`). A daemon refusal throws its code
  * and sentence.
  *
- * A completion is a phase's or the implementer's report on a look of its closed issue's
- * production check, told apart as the daemon tells them (`api.handoffComplete`): the
- * implementer's call on an issue no role works (`done`) whose `check` is open. A check report
- * names its verdict (`pass`, `pending` or `fail`) and nothing else: no handoff was written and
- * nothing pushed, so no record or commit is looked up and none is sent; `pending` is a check's
- * verdict alone, refused on a phase completion.
+ * A completion is a phase's or a look's report on the closed issue's production check. The daemon
+ * tells them apart by the caller's own live assignment (`api.handoffComplete`,
+ * `supervise.Claim.ServingCheck`), which this tool cannot read: it shapes the call by the issue's
+ * phase instead, a call on a `done` issue carrying what a check report carries and every other
+ * call what its phase's completion carries, and the daemon's answer decides. A check report names
+ * its verdict (`pass`, `pending` or `fail`), and a `pending` whose look is not the check's last
+ * the `wake_at` of its next look; no handoff was written and nothing pushed, so no record or commit
+ * is looked up and none is sent. `pending` is a check's verdict alone, refused on a phase
+ * completion, and so is `wake_at`.
  */
 export async function executePhaseOp(
   runtime: PhaseOpRuntime,
@@ -483,16 +521,24 @@ async function completeHandoff(
   args: Extract<z.infer<typeof PhaseOpArguments>, { op: "handoff_complete" }>
 ): Promise<Readonly<Record<string, unknown>>> {
   const { daemon, claim } = runtime;
-  // The record is read before anything is minted: it says whether this is a phase
-  // completion or a check report, by the daemon's own rule (`api/handoff.go`): the
-  // implementer's call on an issue no role works (`done`) is a check report, whether or not
-  // the record shows a check — a done issue whose check closed, or opened none, has no
-  // handoff for the implementer to write, so no record or commit is looked up, and the daemon
-  // answers the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply
-  // while the record shows the check it is of. A refusal here posts nothing and mints nothing.
+  // The record is read before anything is minted: it says what this call has to carry. An issue
+  // no role works (`done`) has no handoff for anyone to write, so no record or commit is looked
+  // up, and the call carries what a check report carries; it is posted all the same where the
+  // record shows no open check, for the daemon's own answer. Which of the two the call is, is the
+  // daemon's to say, and it says it from the caller's own live assignment (`api/handoff.go`,
+  // `supervise.Claim.ServingCheck`), which the record does not show: a session working a look of
+  // its issue's production check reports on that look, and every other session's completion is
+  // its phase's, which the daemon refuses on a `done` issue whatever it carries
+  // (`CHECK_LOOK_NOT_SERVED`). So the two can disagree: a look's report from an issue back in
+  // the workflow is refused here as a phase completion, and a phase's completion that outlived
+  // the close is posted here as a report and refused `CHECK_LOOK_NOT_SERVED`, before the phase
+  // path.
+  // The report's own refusals apply while the record shows the check it is of: the state carries
+  // that object only while the check is open. A refusal here posts nothing and mints nothing.
   const record = recordFrom(await daemon.state(), claim.issue);
-  if (claim.role === "implementer" && record.phase === "done") {
-    if (record.check !== undefined) {
+  if (record.phase === "done") {
+    const check = record.check;
+    if (check !== undefined) {
       if (args.verdict === undefined) {
         throw new Error(
           "handoff_complete on a production check names a verdict of pass, pending or fail"
@@ -501,17 +547,50 @@ async function completeHandoff(
       if (args.ready === true) {
         throw new Error("handoff_complete on a production check is no READY: leave ready out");
       }
+      // The check records the role that works it, and takes a report from that role alone, as
+      // the daemon does (CHECK_ROLE_MISMATCH).
+      if (claim.role !== check.role) {
+        throw new Error(
+          `${claim.issue}'s production check is the ${check.role}'s, and this session is the ${claim.role}'s: only the role the check records reports on it`
+        );
+      }
+      // The checking agent names its own next look, and nothing else starts one, so a pending
+      // carries a wake wherever a look follows it (CHECK_WAKE_REQUIRED). A pass and a fail close
+      // the check, and the last look's pending closes it as not run, so none of them carries one
+      // (CHECK_WAKE_UNEXPECTED).
+      if (args.verdict === "pending" && args.wake_at === undefined && !check.last) {
+        throw new Error(
+          `handoff_complete's pending report names wake_at, when the next look of ${claim.issue}'s production check is due`
+        );
+      }
+      if (args.wake_at !== undefined && (args.verdict !== "pending" || check.last)) {
+        const why =
+          args.verdict === "pending"
+            ? `look ${check.looks} is the check's last, after which the check closes as not run`
+            : `a ${args.verdict} report closes the check`;
+        throw new Error(
+          `handoff_complete names wake_at and no look follows it: ${why}; send it again without a time`
+        );
+      }
     }
     return daemon.handoffComplete({
       grantId: await mintClaimGrant(daemon, claim),
       summary: args.summary,
       verdict: args.verdict ?? "",
       ready: false,
+      ...(args.wake_at === undefined ? {} : { wakeAt: args.wake_at }),
     });
   }
   if (args.verdict === "pending") {
     throw new Error(
       "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
+    );
+  }
+  // The daemon refuses a phase completion that carries a wake (CHECK_WAKE_UNEXPECTED); this says
+  // so without the round trip.
+  if (args.wake_at !== undefined) {
+    throw new Error(
+      "handoff_complete's wake_at is a production check's pending report alone; a phase completion carries none"
     );
   }
   // The record and the commit are found before the grant is minted. The phase is the issue
