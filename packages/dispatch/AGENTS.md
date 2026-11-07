@@ -1492,11 +1492,17 @@ One shard leg by hand is that leg's own command without CI's blob reporter and i
 samplers, run from `packages/dispatch` with a Postgres provider the lanes above name:
 `DISPATCH_E2E_WORKERS=4 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone --shard=1/4`.
 The `full` lane's leg names all eight parallel projects in place of those two.
-A local run retries nothing and keeps the trace of every failed row, where CI retries a failed row
-once and keeps the trace of that retry alone (`retries: process.env.CI ? 1 : 0` and
-`trace: process.env.CI ? "on-first-retry" : "retain-on-failure"` in `e2e/playwright.config.ts`).
-That is what makes a flaky row reportable: a row that fails and passes on its retry is `flaky` in
-the merged report rather than failed, and the retry's trace says why.
+A local run retries nothing; CI retries a failed row once
+(`retries: process.env.CI ? 1 : 0` in `e2e/playwright.config.ts`), except in the three `-alone`
+projects, which set `retries: 0` of their own because a row whose claim is a wall-clock time has
+nothing to gain from a second attempt.
+That retry is what makes a flaky row reportable: a row that fails and then passes is `flaky` in
+the merged report rather than failed, and the rate the `merge` job publishes counts those rows.
+The trace is one value for both runs, `trace: "retain-on-first-failure"`, which records the first
+attempt and keeps it when that attempt failed, so a flaky row carries the trace of the attempt
+that failed, which is the one that explains it.
+`on-first-retry` would not: it records on the retry alone, and a row is flaky exactly when its
+retry passed, so it would keep a trace of a green run and leave the failure none.
 
 A row of this suite takes under two seconds, or says above its `test(` why it
 cannot. The reason goes in a `// SLOW(>=2s): <what it spends the time on>`
