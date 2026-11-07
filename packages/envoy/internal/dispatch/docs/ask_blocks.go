@@ -323,12 +323,15 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, err
 			}
 			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
-			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			// The question and the parts through one reader: the ask's parts hold its question,
+			// so the database answers once per kind for the write (refs.NewReader).
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, err := refs.ReplaceCounted(ctx, tx, reader, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			// The new ask's parts, beside its own references: both named by the ask.opened.
-			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, ask.CreatedAt, changes)
+			changes, err = refs.IndexAskPartsCounted(ctx, tx, reader, ask, ask.CreatedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of new ask block %s: %w", ask.ID, err)
 			}
@@ -356,7 +359,8 @@ func (s *Service) reconcileAskBlocks(
 			// The restoration writes state, answer and resolution back: the answer it brings
 			// back is a part again, and the event names what that moved.
 			restoredAt := refs.AskPartsAt(ask)
-			changes, err := refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
+			changes, err := refs.IndexAskPartsCounted(ctx, tx, refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL),
+				ask, restoredAt, model.ReferenceChanges{})
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)
 			}
@@ -404,13 +408,15 @@ func (s *Service) reconcileAskBlocks(
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			changes, err := refs.ReplaceCountedEdit(ctx, tx, "ask", ask.ID, previous.Question, ask.Question, s.serverURL)
+			reader := refs.NewReader(ctx, tx, "ask", ask.ID, s.serverURL)
+			changes, err := refs.ReplaceCountedEdit(ctx, tx, reader, previous.Question, ask.Question)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
-			// The block's wording is now the row's: its parts are that wording too, and the
-			// ask.edited names what they moved beside the ask's own references.
-			changes, err = refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, editedAt, changes)
+			// The block's wording is now the row's: its parts are that wording too, read through
+			// the one reader, and the ask.edited names what they moved beside the ask's own
+			// references.
+			changes, err = refs.IndexAskPartsCounted(ctx, tx, reader, ask, editedAt, changes)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of reconciled ask %s: %w", ask.ID, err)
 			}
@@ -698,9 +704,10 @@ func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) 
 // then the bound its question and options share (askWordingTooLong). It is the one reading of an
 // ask block, in one order: settlement calls it on each ask its collector
 // (collectAskBlocksForSettlement) reads, and every write of this package is held to it for each
-// ask the write wrote or changed (validateEditedAskBlocks, and the version path in mutation.go),
-// so a write is refused with the reason settlement would have flagged the block with, and a
-// document carries no ask settlement could not read.
+// ask the write wrote or changed (validateEditedAskBlocks; the version path in mutation.go holds
+// its asks to readWrittenAskBlockStrictly, the same reading with the content rule for markdown
+// written in whole), so a write is refused with the reason settlement would have flagged the
+// block with, and a document carries no ask settlement could not read.
 //
 // An ask breaking the rule - which concurrent edits can leave, and the browser keeps - is
 // unreadable even where the parse reads it: the browser's card takes its question from its first
@@ -721,6 +728,23 @@ func readAskBlockStrictly(node *pmdoc.Node) error {
 		return err
 	}
 	if err := pmdoc.AskContentError(node); err != nil {
+		return err
+	}
+	return askWordingTooLong(block)
+}
+
+// readWrittenAskBlockStrictly is readAskBlockStrictly for an ask that markdown written in whole
+// carries: the same parse and the same wording bound, with the content rule written markdown is
+// held to (pmdoc.AskWrittenContentError), so an ask written with its options and no question is
+// refused at that door as well, which the tree rule no longer catches once both parsers read the
+// empty paragraph the schema fills in ahead of the options. That rule is read first, since it
+// names what the author wrote wrongly, where the parse would name the empty question alone.
+func readWrittenAskBlockStrictly(node *pmdoc.Node) error {
+	if err := pmdoc.AskWrittenContentError(node); err != nil {
+		return err
+	}
+	block, err := parseAskBlock(node)
+	if err != nil {
 		return err
 	}
 	return askWordingTooLong(block)

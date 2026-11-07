@@ -28,7 +28,7 @@ type routeAnswer struct {
 // routeShape is what one row of the table takes and answers, in Go types an OpenAPI document is
 // reflected out of (INFRA-1406). It stands beside the table for the reason writeClasses and
 // routeScopes do: routeRow is a positional literal, Go leaves no field out of one, and a sixth
-// column would have to be written on all 178 rows. routes() stamps it onto the row.
+// column would have to be written on all 179 rows. routes() stamps it onto the row.
 type routeShape struct {
 	// Status is the status the route answers when it succeeds.
 	Status int
@@ -204,6 +204,17 @@ type referencesQuery struct {
 	Kind string `query:"kind"`
 	// Since reads the mentions above this events.id, up to the event log's safe horizon.
 	Since int64 `query:"since"`
+}
+
+// referenceQuestionsQuery is GET /api/v1/references/questions's query: the one source whose
+// document's question blocks are read.
+type referenceQuestionsQuery struct {
+	// Kind is the kind of the reference source, one of artifact, ask, comment or message;
+	// anything else is 400 INVALID_KIND.
+	Kind string `query:"kind" enum:"artifact,ask,comment,message"`
+	// ID is that source's whole uuid or a unique prefix of 8 characters or more; it is
+	// required, a prefix two sources carry is 409 ID_AMBIGUOUS.
+	ID string `query:"id"`
 }
 
 // blockLinksQuery is GET /api/v1/block-links's query: both documents are required.
@@ -480,6 +491,7 @@ var routeShapes = map[string]routeShape{
 		Also: []routeAnswer{{Status: http.StatusNotModified}},
 	},
 	"GET /api/v1/references":                               {Status: http.StatusOK, Response: model.GraphReferences{}, Params: referencesQuery{}},
+	"GET /api/v1/references/questions":                     {Status: http.StatusOK, Response: referenceQuestions{}, Params: referenceQuestionsQuery{}},
 	"GET /api/v1/block-links":                              {Status: http.StatusOK, Response: model.BlockLinks{}, Params: blockLinksQuery{}},
 	"GET /api/v1/issues/{key}/subscribers":                 {Status: http.StatusOK, Response: []subscriber{}},
 	"DELETE /api/v1/issues/{key}/subscribers/{session_id}": {Status: http.StatusNoContent},

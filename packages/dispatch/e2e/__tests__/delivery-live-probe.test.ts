@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Server, ServerWebSocket } from "bun";
+import {
+  type FakeDispatchServer,
+  startFakeDispatch,
+} from "@legion/envoy-client/test/fake-dispatch";
+import type { ServerWebSocket } from "bun";
 
 import after from "../../../contracts/fixtures/live/after.json";
 import delta from "../../../contracts/fixtures/live/delta.json";
@@ -42,25 +46,11 @@ const view: DeliveryLiveView = {
 /** Each test starts a Bun process and loads the probe's imports; the box these run on is shared. */
 const PROCESS_TEST_MS = 30_000;
 
-// The test preload (web/src/__tests__/setup.ts) puts happy-dom's Response on globalThis, which
-// Bun.serve does not take as an answer; Bun's own fetch still answers with Bun's.
-const NativeResponse = (await Bun.fetch("data:,")).constructor as typeof Response;
-
 interface Script {
   /** Answers the probe's `count`th subscribe (from 1) on `socket`, for its subscription `sub`. */
   readonly onSubscribe: (socket: ServerWebSocket<undefined>, sub: string, count: number) => void;
   /** Each GET route's body, by path. */
   readonly routes?: Readonly<Record<string, unknown>>;
-}
-
-interface FakeDispatch {
-  readonly url: string;
-  /** Every frame the probe sent, in order. */
-  readonly received: readonly LiveClientFrame[];
-  /** Every GET route the probe read. */
-  readonly reads: readonly URL[];
-  /** The Authorization header of every upgrade the probe asked for. */
-  readonly upgrades: readonly (string | null)[];
 }
 
 interface Run {
@@ -74,7 +64,7 @@ interface Run {
   exited(): Promise<number>;
 }
 
-const servers: Server<undefined>[] = [];
+const servers: FakeDispatchServer<LiveClientFrame>[] = [];
 const kills: (() => void)[] = [];
 const scratchDirs: string[] = [];
 /** Woken whenever something a test waits on happens: a line from the probe, a frame the probe
@@ -87,7 +77,7 @@ const wake = () => {
 afterEach(() => {
   waiters.clear();
   for (const kill of kills.splice(0)) kill();
-  for (const server of servers.splice(0)) server.stop(true);
+  for (const server of servers.splice(0)) server.stop();
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { force: true, recursive: true });
 });
 
@@ -100,50 +90,19 @@ function scratch(): string {
 /** `fixture` as Dispatch sends it to the subscription `sub`. */
 const forSub = (fixture: object, sub: string) => JSON.stringify({ ...fixture, sub });
 
-function fakeDispatch(script: Script): FakeDispatch {
-  const received: LiveClientFrame[] = [];
-  const reads: URL[] = [];
-  const upgrades: (string | null)[] = [];
-  let subscribes = 0;
-  const server = Bun.serve({
-    fetch(request, srv) {
-      const url = new URL(request.url);
-      if (url.pathname === "/ws/live") {
-        const authorization = request.headers.get("authorization");
-        upgrades.push(authorization);
-        if (authorization !== `Bearer ${TOKEN}`) {
-          return NativeResponse.json(
-            { code: "UNAUTHORIZED", error: "invalid bearer token" },
-            { status: 401 }
-          );
-        }
-        return srv.upgrade(request)
-          ? undefined
-          : new NativeResponse("upgrade failed", { status: 400 });
-      }
-      reads.push(url);
-      const body = script.routes?.[url.pathname];
-      return body === undefined
-        ? NativeResponse.json({ code: "NOT_FOUND", error: url.pathname }, { status: 404 })
-        : NativeResponse.json(body);
+/** A Dispatch the probe watches, on a loopback port of its own: the probe's bearer, the routes
+ *  `--compare` reads, and `onSubscribe` answering the `count`th subscribe (from 1). */
+function probeDispatch(script: Script): FakeDispatchServer<LiveClientFrame> {
+  const dispatch = startFakeDispatch<LiveClientFrame>({
+    live: (socket, frame, nth) => {
+      if (frame.type === "subscribe") script.onSubscribe(socket, frame.sub, nth);
     },
-    hostname: "127.0.0.1",
-    port: 0,
-    websocket: {
-      message(socket, data) {
-        // The probe's own frame, which the assertions below hold to the contract.
-        const frame = JSON.parse(String(data)) as LiveClientFrame;
-        received.push(frame);
-        if (frame.type === "subscribe") {
-          subscribes += 1;
-          script.onSubscribe(socket, frame.sub, subscribes);
-        }
-        wake();
-      },
-    },
+    onFrame: wake,
+    routes: script.routes,
+    token: TOKEN,
   });
-  servers.push(server);
-  return { reads, received, upgrades, url: `http://127.0.0.1:${server.port}` };
+  servers.push(dispatch);
+  return dispatch;
 }
 
 async function readLines(
@@ -210,7 +169,11 @@ function runProbe(args: readonly string[]): Run {
   };
 }
 
-function args(dispatch: FakeDispatch, token = TOKEN, minutes = "1"): string[] {
+function args(
+  dispatch: FakeDispatchServer<LiveClientFrame>,
+  token = TOKEN,
+  minutes = "1"
+): string[] {
   const tokenFile = join(scratch(), "token");
   writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
   return [
@@ -251,7 +214,7 @@ test(
   "the probe writes one line per frame and holds what the page would after them",
   async () => {
     const sent: string[] = [];
-    const dispatch = fakeDispatch({
+    const dispatch = probeDispatch({
       onSubscribe(socket, sub) {
         for (const text of [
           forSub(snapshot, sub),
@@ -395,7 +358,7 @@ test(
     if (firstPR === undefined || firstRun === undefined) {
       throw new Error("after.json holds a pull request and a run");
     }
-    const dispatch = fakeDispatch({
+    const dispatch = probeDispatch({
       onSubscribe(socket, sub) {
         socket.send(forSub(snapshot, sub));
         socket.send(forSub(delta, sub));
@@ -447,7 +410,7 @@ for (const [code, reason, what] of [[4001, "max age", "rotation"]] as const) {
     async () => {
       let closedAt = 0;
       let reopenedAt = 0;
-      const dispatch = fakeDispatch({
+      const dispatch = probeDispatch({
         onSubscribe(socket, sub, count) {
           if (count > 1) {
             reopenedAt = performance.now();
@@ -484,7 +447,7 @@ for (const [code, reason, what] of [[4001, "max age", "rotation"]] as const) {
 test(
   "after a restart close the probe reconnects within the spread and resumes with the change and revisions it holds",
   async () => {
-    const dispatch = fakeDispatch({
+    const dispatch = probeDispatch({
       onSubscribe(socket, sub, count) {
         if (count > 1) return;
         socket.send(forSub(snapshot, sub));
@@ -521,7 +484,7 @@ test(
 test(
   "a refused upgrade ends the probe with exit 1, naming the refusal",
   async () => {
-    const dispatch = fakeDispatch({ onSubscribe() {} });
+    const dispatch = probeDispatch({ onSubscribe() {} });
     const run = runProbe(args(dispatch, "not-the-token"));
     expect(await run.exited()).toBe(1);
     expect(dispatch.upgrades).toEqual(["Bearer not-the-token"]);
@@ -533,7 +496,7 @@ test(
 test(
   "a refused view ends the watch with exit 1, naming the code",
   async () => {
-    const dispatch = fakeDispatch({
+    const dispatch = probeDispatch({
       onSubscribe(socket, sub) {
         socket.send(
           JSON.stringify({
@@ -557,7 +520,7 @@ test(
 test(
   "the watch ends on its own after --minutes",
   async () => {
-    const dispatch = fakeDispatch({ onSubscribe() {} });
+    const dispatch = probeDispatch({ onSubscribe() {} });
     const started = Date.now();
     // 0.01 minutes is 600 ms of the probe's own clock, in another process, which no fake timer
     // here reaches: the test waits for that process to end and checks it ended no sooner.
@@ -572,7 +535,7 @@ test(
 test(
   "a missing flag is a usage error, exit 2",
   async () => {
-    const dispatch = fakeDispatch({ onSubscribe() {} });
+    const dispatch = probeDispatch({ onSubscribe() {} });
     const run = runProbe(args(dispatch).slice(0, 4));
     expect(await run.exited()).toBe(2);
     expect(run.stderr.join("\n")).toContain("--minutes is required");

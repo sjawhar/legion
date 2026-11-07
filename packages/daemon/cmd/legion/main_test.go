@@ -33,12 +33,20 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 	}
-	// The tests run real git and jj, in-process and as children (fixtureenv.Guard). LEGION_GH_PATH
-	// is kept: it names the real gh a capture test runs, a binary and no credential.
-	if err := fixtureenv.Guard("LEGION_GH_PATH"); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	// environment_test.go reads these variables again once every test before it has run, so the
+	// snapshot is taken here, ahead of MustGuard, the first thing that changes this binary's own
+	// environment.
+	snapshotStartupEnvironment()
+	// The tests run real git and jj, in-process and as children (fixtureenv.MustGuard).
+	// LEGION_GH_PATH is kept: it names the real gh a capture test runs, a binary and no credential.
+	fixtureenv.MustGuard("LEGION_GH_PATH")
+	os.Exit(runWithoutTheOperatorsJJConfig(m))
+}
+
+// runWithoutTheOperatorsJJConfig runs the package's tests with a jj configuration directory of
+// their own and removes it afterwards. The removal is deferred, so it also runs when the setup
+// below panics. A run killed by a signal still keeps the directory, which nothing here can help.
+func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
 	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
@@ -50,21 +58,14 @@ func TestMain(m *testing.M) {
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
+	defer os.RemoveAll(configDir)
 	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
-	code := m.Run()
-	os.RemoveAll(configDir)
-	os.Exit(code)
-}
-
-// TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
-// process that runs the tests.
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
+	return m.Run()
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or
@@ -455,7 +456,7 @@ func TestHelpListsEveryCommand(t *testing.T) {
 // LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
 // --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
-	unsetenv(t, "LEGION_GH_PATH")
+	fixtureenv.Unset(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -773,6 +774,11 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	for _, variant := range []struct{ extra, drop, says string }{
 		{extra: "worker_cap: 3\n", says: "worker_cap"},
 		{extra: "admission_cap: 0\n", says: "admission_cap"},
+		{extra: "worker_wakes_per_minute: -1\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wakes_per_minute: 2.5\n", says: "worker_wakes_per_minute"},
+		{extra: "worker_wake_burst: 0\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: -1\n", says: "worker_wake_burst"},
+		{extra: "worker_wake_burst: 2.5\n", says: "worker_wake_burst"},
 		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
@@ -846,7 +852,7 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			unsetenv(t, "LEGION_GH_PATH")
+			fixtureenv.Unset(t, "LEGION_GH_PATH")
 			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
 		},
 			func(dir string) string {
@@ -1723,6 +1729,53 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			var out, errb bytes.Buffer
 			if code := run(context.Background(), args, &out, &errb); code != 0 {
 				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told which wakes the daemon's pacing is holding,
+// each by claim with its kind and when it is due, on one line however many there are
+// (api.State.WakesWaiting). The line is there only while something waits: outside a restart or a
+// plugin wave the queue is empty, and a line saying so on every read would be noise.
+func TestPlainStateNamesTheWakesThePacingHolds(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, wakes, want string
+	}{
+		{
+			name: "a launch and an update task",
+			wakes: `[{"claim":"legion-legion-legion-208-implementer","issue":"LEGION-208","role":"implementer","kind":"launch","dueAt":"2026-09-23T00:00:08Z"},` +
+				`{"claim":"legion-legion-legion-210-reviewer","issue":"LEGION-210","role":"reviewer","kind":"plugin-task","dueAt":"2026-09-23T00:00:15Z"}]`,
+			want: "wakes waiting: 2 — legion-legion-legion-208-implementer launch due 2026-09-23T00:00:08Z; " +
+				"legion-legion-legion-210-reviewer plugin-task due 2026-09-23T00:00:15Z\n",
+		},
+		{name: "none", wakes: `[]`, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"wakesWaiting":` + tc.wakes + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if tc.want == "" {
+				if strings.Contains(out.String(), "wakes waiting") {
+					t.Fatalf("legion state printed %q, want no wakes-waiting line while nothing waits", out.String())
+				}
+				return
 			}
 			if !strings.Contains(out.String(), tc.want) {
 				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)

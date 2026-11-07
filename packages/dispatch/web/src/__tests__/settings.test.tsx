@@ -22,6 +22,8 @@ function mappingServer(initial: RepoProject[]) {
       created_by: { id: "alice", kind: "user" },
       default: input.default ?? (existing?.project === input.project ? existing.default : false),
       project: input.project,
+      // The write names no rename, as the page's never does, so the stored one stands.
+      renamed_to: existing?.renamed_to ?? null,
       repo,
     };
     rows = [
@@ -68,6 +70,7 @@ test("human users manage repository project mappings from the settings route", a
     created_by: { id: "alice", kind: "user" },
     default: false,
     project: "CORE",
+    renamed_to: null,
     repo: "owner/repo",
   };
   const other: RepoProject = { ...mapping, default: true, repo: "owner/other" };
@@ -193,6 +196,7 @@ test("a delayed mapping response does not undo a newer default the page has read
     created_by: { id: "alice", kind: "user" },
     default: isDefault,
     project: "CORE",
+    renamed_to: null,
     repo,
   });
   const server = mappingServer([row("owner/repo", false), row("owner/other", true)]);

@@ -52,6 +52,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { textSourceOf } from "../refs/text-references";
 import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
@@ -254,6 +255,9 @@ export function AskCard({
   // `document` is the Inbox row's: the ask read carries no owner, so the fresher `displayedAsk`
   // cannot name it and this card's own row is where it is read.
   const reference = itemRoute("ask", displayedAsk, ask.document ?? owner);
+  // Where a `#id` in the ask's own text resolves: the document the server scopes this ask to -
+  // the one its block is on, the one it is anchored to, else its issue's spec (`refs.ScopeOf`).
+  const source = textSourceOf("ask", displayedAsk.id);
   // Where a file pasted or dropped into the answer, or into a reply under the ask, goes: the
   // ask's issue, or the project of the document it was asked on.
   const documentProject = (ask.document ?? owner ?? displayedAsk.anchor_artifact)?.project;
@@ -577,7 +581,7 @@ export function AskCard({
         ) : null}
         {inBlock ? null : (
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-            <MarkdownBody markdown={displayedAsk.question} />
+            <MarkdownBody markdown={displayedAsk.question} source={source} />
           </div>
         )}
         {/* A request to approve again names the approval it follows, under the question (the

@@ -26,7 +26,7 @@ import (
 func parseAskID(r *http.Request) (string, error) {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		return "", errorf(http.StatusBadRequest, "ASK_ID_INPUT", "ask IDs are UUIDs; use the full ask ID")
+		return "", errorf(http.StatusBadRequest, "ASK_ID_INPUT", "%s", idPathProblem("ask"))
 	}
 	return id, nil
 }

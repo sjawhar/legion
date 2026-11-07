@@ -34,7 +34,10 @@ import type {
   CreateArtifactInput,
   DispatchEvent,
   DispatchUser,
+  DuplicateCandidate,
+  IDCandidate,
   IssueAskThreadRow,
+  TargetCandidate,
   UserIssueState,
 } from "./types";
 
@@ -67,16 +70,26 @@ export interface UploadProgress {
 const maxKeepaliveBodyBytes = 30 * 1024;
 const utf8 = new TextEncoder();
 
+/** One item a refusal lists for the caller to choose between: the items an ambiguous id prefix
+ *  names (`ID_AMBIGUOUS`), the issues a duplicate check found, or the positions an anchored
+ *  quote resolved at. Each refusal's own `code` says which of the three its list holds. */
+export type ErrorCandidate = IDCandidate | DuplicateCandidate | TargetCandidate;
+
 interface ErrorPayload {
   code?: string;
   error?: string;
   state?: UserIssueState;
+  candidates?: readonly ErrorCandidate[];
 }
 
 export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** What the refusal listed for the caller to choose between, read by the page that shows the
+   *  choice; the shape of each entry follows `code` (`ErrorCandidate`). Undefined for a refusal
+   *  that listed nothing, which is almost all of them. */
+  readonly candidates: readonly ErrorCandidate[] | undefined;
   /** How long the server asked the caller to wait before trying again (`Retry-After` in
    *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
    *  undefined when the response carried none. */
@@ -88,6 +101,7 @@ export class ApiError extends Error {
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.candidates = payload.candidates;
     this.retryAfterMs = retryAfterMs;
   }
 }
@@ -117,6 +131,12 @@ export class UnreadableAnswerError extends Error {
     this.status = status;
   }
 }
+
+/** The kinds `GET /api/v1/references/questions` reads a reference source as, from the route's
+ *  own query schema: a document version, an ask, a comment or an issue message. */
+export type ReferenceSourceKind = NonNullable<
+  QueryParams<Op<"/api/v1/references/questions", "get">>["kind"]
+>;
 
 /** How long the page lets Dispatch go silent on a request - no response headers yet, no piece of
  *  its body, and for an upload no piece of the request body sent either - before it gives the
@@ -1403,6 +1423,14 @@ export class DispatchApiClient {
    *  which a document's read otherwise leaves out. */
   getReferences(reference: string, options: { kind?: string } = {}) {
     return this.read("/api/v1/references", {}, { kind: options.kind, to: reference });
+  }
+
+  /** The question map of the document one reference source's text belongs to: every question
+   *  block that document's latest version declares, with the ask settled for it (for a copied
+   *  block, the ask it was copied from). `kind` is the source's own kind - artifact, ask,
+   *  comment or message - and `id` its id. A source whose text belongs to no document is 404. */
+  getReferenceQuestions(kind: ReferenceSourceKind, id: string) {
+    return this.read("/api/v1/references/questions", {}, { id, kind });
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */

@@ -245,32 +245,15 @@ async function searchHit(page: Page, query: string): Promise<Locator> {
   return hit;
 }
 
-async function expectSelectedMarginItem(
-  page: Page,
-  id: string,
-  isPhone: boolean,
-  isComment: boolean
-) {
-  const sheet = page.getByTestId("margin-sheet");
-  const item = sheet.locator(`[data-margin-item="${id}"]`);
+async function expectSelectedMarginItem(page: Page, id: string) {
+  const item = page.getByTestId("margin-sheet").locator(`[data-margin-item="${id}"]`);
   await expect(item).toHaveAttribute("aria-current", "true");
-  if (isPhone) {
-    if ((await sheet.getAttribute("data-expanded")) !== "true") {
-      await sheet.getByRole("button", { name: "Open review panel" }).click();
-    }
-    await expect(sheet).toHaveAttribute("data-expanded", "true");
-  }
   await expect(item).toBeInViewport();
-  if (isPhone && isComment) {
-    await expect(item).toHaveAttribute("aria-expanded", "false");
-  }
 }
 
 // SLOW(>=2s): four anchored writes, each seeded on its own transaction, and the four links the
 // row lands on in turn, in WebKit.
-test("emitted document item hrefs select and scroll their anchored thread @phone", async ({
-  browser,
-}, testInfo) => {
+test("emitted document item hrefs select and scroll their anchored thread", async ({ browser }) => {
   const { issue } = await seedIssue();
   // Anchored writes are seeded one at a time. Each holds its transaction across the document
   // work that stamps the mark, so concurrent ones queue on the server's connection pool
@@ -300,20 +283,14 @@ test("emitted document item hrefs select and scroll their anchored thread @phone
   try {
     const page = await context.newPage();
     const targets = [
-      {
-        id: comments[0].id,
-        isComment: true,
-        path: `/issues/${issue.key}/spec?comment=${comments[0].id}`,
-      },
+      { id: comments[0].id, path: `/issues/${issue.key}/spec?comment=${comments[0].id}` },
       {
         id: comments[1].id,
-        isComment: true,
         path: `/issues/${issue.key}/artifacts/${secondarySlug}?comment=${comments[1].id}`,
       },
-      { id: asks[0].id, isComment: false, path: `/issues/${issue.key}/spec?ask=${asks[0].id}` },
+      { id: asks[0].id, path: `/issues/${issue.key}/spec?ask=${asks[0].id}` },
       {
         id: asks[1].id,
-        isComment: false,
         path: `/issues/${issue.key}/artifacts/${secondarySlug}?ask=${asks[1].id}`,
       },
     ];
@@ -326,24 +303,18 @@ test("emitted document item hrefs select and scroll their anchored thread @phone
       } else {
         await navigateInApp(page, target.path);
       }
-      await expectSelectedMarginItem(
-        page,
-        target.id,
-        testInfo.project.name === "iphone",
-        target.isComment
-      );
-      if (testInfo.project.name === "iphone") {
-        await page.getByRole("button", { name: "Close review panel" }).click();
-      }
+      await expectSelectedMarginItem(page, target.id);
     }
   } finally {
     await context.close();
   }
 });
 
-test("a document link followed while the page before it is still downloading its document opens the link @phone", async ({
+// @webkit @firefox: the engine's cancellation of a chunk the navigation away from it left
+// downloading.
+test("a document link followed while the page before it is still downloading its document opens the link @webkit @firefox", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { issue } = await seedIssue();
   const comments = [
     await createComment(issue.key, {
@@ -369,7 +340,7 @@ test("a document link followed while the page before it is still downloading its
 
     const link = `/issues/${issue.key}/artifacts/${secondarySlug}?comment=${comments[1].id}`;
     await page.goto(link);
-    await expectSelectedMarginItem(page, comments[1].id, testInfo.project.name === "iphone", true);
+    await expectSelectedMarginItem(page, comments[1].id);
     const opened = new URL(page.url());
     expect(`${opened.pathname}${opened.search}`).toBe(link);
     await held.abort().catch(() => undefined);
@@ -378,9 +349,9 @@ test("a document link followed while the page before it is still downloading its
   }
 });
 
-test("a linked card the margin's later cards push down is scrolled back into view @phone", async ({
+test("a linked card the margin's later cards push down is scrolled back into view", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { issue } = await seedIssue();
   const comment = await createComment(issue.key, {
     anchor: { artifact: "spec", quote: "astrolabe" },
@@ -402,8 +373,7 @@ test("a linked card the margin's later cards push down is scrolled back into vie
       await route.continue();
     });
     await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
-    const isPhone = testInfo.project.name === "iphone";
-    await expectSelectedMarginItem(page, comment.id, isPhone, true);
+    await expectSelectedMarginItem(page, comment.id);
 
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
@@ -489,7 +459,9 @@ test("a composer opened from the document is in the margin's view after a commen
 // proves - the transport held so the editor reports no layout, the asks held so their group
 // relays the margin out after the press - and each half ends in a settle measured in the
 // engine's own still frames, not in wall-clock time.
-test("a press in the document while a comment link is still landing does not end the hold", async ({
+// @webkit @firefox: the margin hold's frame order, where the press races the landing's own
+// frames.
+test("a press in the document while a comment link is still landing does not end the hold @webkit @firefox", async ({
   browser,
 }) => {
   const { comment, issue, markId } = await seedLongDocument();
@@ -652,7 +624,8 @@ for (const journey of hiddenEditorJourneys) {
   // SLOW(>=2s): the journey is the property. A long document's landing, a tab switch or a
   // version switch that hides the editor, and the return are each a real editor mount and a real
   // smooth-scroll landing; there is no step here that is not the thing being proved.
-  test(journey.name, async ({ browser }) => {
+  // @webkit @firefox: the margin hold's frame order, read with the page's animation frames held.
+  test(`${journey.name} @webkit @firefox`, async ({ browser }) => {
     const { comment, issue, markId } = await seedLongDocument();
     if (journey.namedVersion) {
       await createNamedVersion(issue.primary_artifact_id, "Initial long document");
@@ -720,7 +693,8 @@ const MAX_SCROLL_FALL_PX = 64;
 // The past version's first landing with no diagram at all, so nothing runs it again: when every
 // render of the page rebuilt the version's editor, the last scroll could run before the last
 // editor had laid out and leave the reader at the top of the page.
-test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
+// @webkit @firefox: the margin hold's scroll order, read at every frame of the landing.
+test("a past version's comment link lands on its quote in a document with no diagram @webkit @firefox", async ({
   browser,
 }) => {
   const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
@@ -800,12 +774,20 @@ test("a resolving reference above a linked card does not end the hold", async ({
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
     await expect(card).toBeInViewport();
-    await expect(sheet.getByText(target.key, { exact: true }).first()).toBeVisible();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(0);
+    // Each ask above the card cites the target issue. INFRA-869's R4: "A `dispatch://`
+    // reference reads as its target's title wherever Dispatch shows text ... an issue as its
+    // key and title. A reference whose target is missing shows its address as written." The
+    // summary read is held, so until it lands the words the author wrote stand - the short form
+    // `CORE-2` this read before the issue - and once it lands the key and the long title do,
+    // which is the growth above the card this test is about.
+    const written = `dispatch://${target.key}`;
+    const resolved = `${target.key} ${target.title}`;
+    await expect(sheet.getByRole("link", { exact: true, name: written }).first()).toBeVisible();
+    await expect(sheet.getByRole("link", { exact: true, name: resolved })).toHaveCount(0);
     await landingSettled(sheet);
 
     referenceHeld.resolve();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(2);
+    await expect(sheet.getByRole("link", { exact: true, name: resolved })).toHaveCount(2);
     const before = "Paragraph 34: surrounding context for a long document.";
     const inserted = Array.from(
       { length: 30 },
@@ -904,7 +886,10 @@ async function placementAfterArrival(
 
 // SLOW(>=2s): two real anchored arrivals, each re-measuring the whole margin column, are the two
 // measurements the row compares; cutting one leaves nothing to compare.
-test("a linked card's placement ignores the margin's own scroll", async ({ browser }) => {
+// @webkit @firefox: the margin hold's scroll order, which the margin's own scroll must not move.
+test("a linked card's placement ignores the margin's own scroll @webkit @firefox", async ({
+  browser,
+}) => {
   // Only the desktop margin places cards by mark, so this row is not tagged `@phone`.
   // The compact sheet stacks its cards from the top of its column rather than tracking marks -
   // measured here, the linked card sits at 102 px and an arrival above it moves it to 204 px,
@@ -1026,9 +1011,9 @@ test("an iPhone secondary-document link scrolls its selected card after opening 
   }
 });
 
-test("an unanchored project-document comment is selected in its only discussion surface @phone", async ({
+test("an unanchored project-document comment is selected in its only discussion surface", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const document = await createProjectDocument("CORE", {
     content: "The astrolabe handbook is a project document.",
@@ -1045,7 +1030,7 @@ test("an unanchored project-document comment is selected in its only discussion 
     await expect(page).toHaveURL(
       `/projects/CORE/documents/${document.artifact.slug}?comment=${comment.id}`
     );
-    await expectSelectedMarginItem(page, comment.id, testInfo.project.name === "iphone", true);
+    await expectSelectedMarginItem(page, comment.id);
     await expect(
       page.getByTestId("margin-sheet").locator(`[data-margin-item="${comment.id}"]`)
     ).toContainText("Document-level note without a quote.");
@@ -1054,9 +1039,7 @@ test("an unanchored project-document comment is selected in its only discussion 
   }
 });
 
-test("an unanchored comment deep link still focuses its Conversation turn @phone", async ({
-  browser,
-}, testInfo) => {
+test("an unanchored comment deep link still focuses its Conversation turn", async ({ browser }) => {
   const { issue } = await seedIssue();
   const comment = await createComment(issue.key, { body: "No quote, just a note." });
   const context = await asUser(browser, "alice");
@@ -1065,14 +1048,6 @@ test("an unanchored comment deep link still focuses its Conversation turn @phone
     const page = await context.newPage();
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(page).toHaveURL(`/issues/${issue.key}/comments/${comment.id}`);
-    // On a phone the link opens the comment's thread full-screen over the Conversation; Back
-    // leaves it on the focused turn.
-    if (testInfo.project.name === "iphone") {
-      const thread = page.getByRole("dialog", { name: "Thread" });
-      await expect(thread.getByText("No quote, just a note.")).toBeVisible();
-      await thread.getByRole("button", { name: "Back" }).click();
-      await expect(thread).toHaveCount(0);
-    }
     const turn = page.locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`);
     await expect(turn).toContainText("No quote, just a note.");
     await expect(turn).toBeInViewport();
@@ -1103,9 +1078,9 @@ async function untilNotFound(page: Page, heading: string): Promise<void> {
     .toBe(true);
 }
 
-test("an item link the SPA cannot resolve names what is missing, inside the shell @phone", async ({
+test("an item link the SPA cannot resolve names what is missing, inside the shell", async ({
   browser,
-}, testInfo) => {
+}) => {
   const { issue } = await seedIssue();
   const context = await asUser(browser, "alice");
 
@@ -1135,9 +1110,7 @@ test("an item link the SPA cannot resolve names what is missing, inside the shel
         }
         await untilNotFound(page, heading);
         await expect(page.getByTestId("app-shell")).toBeVisible();
-        if (testInfo.project.name !== "iphone") {
-          await expect(page.getByRole("link", { exact: true, name: "Inbox" })).toBeVisible();
-        }
+        await expect(page.getByRole("link", { exact: true, name: "Inbox" })).toBeVisible();
       }
     }
   } finally {

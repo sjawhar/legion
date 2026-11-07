@@ -214,10 +214,14 @@ type uuidSpelling struct {
 }
 
 // uuidSpellings are the spellings of one uuid a path may carry, which this check and the
-// handler behind it must read the same way. Postgres's uuid parser takes a hyphen after any
-// group of four digits, so `a061-e3f2-…` is the same id as `a061e3f2-…` to every query a
-// handler makes, while Go's uuid.Parse refuses it: a check that read ids with the second
-// admitted a write to an object it had resolved to nothing (INFRA-264).
+// handler behind it must read the same way: both read the value the prefix layer resolved
+// (resolveIDPrefixes), which for a spelling that is no id written short - every spelling here -
+// is the path value as written. Postgres's uuid parser takes a hyphen after any group of four
+// digits, so `a061-e3f2-…` is the same id as `a061e3f2-…` to every query a handler makes, while
+// Go's uuid.Parse refuses it: a check that read ids with the second admitted a write to an
+// object it had resolved to nothing (INFRA-264). The prefix layer reads neither parser and
+// resolves nothing for such a spelling - no uuid starts with a hyphen after four digits - so it
+// leaves the two reading one value, exactly as they did.
 func uuidSpellings(write addressedWrite) []uuidSpelling {
 	canonical := uuidSpelling{name: "canonical", spell: func(id string) string { return id }, handlerAnswered: true}
 	if !write.uuidAddressed {

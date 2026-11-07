@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -351,5 +352,97 @@ func TestExternalIssueUsesPersistedRepoProject(t *testing.T) {
 	}](t, created)
 	if issue.Key != "CORE-2" || len(issue.Labels) != 0 {
 		t.Fatalf("persisted mapping external issue: got %#v", issue)
+	}
+}
+
+// renamedRepoProject reads the pair a mapping names beside its repository and project;
+// repoProjectResponse above leaves it out, so the comparisons there stay as they are.
+type renamedRepoProject struct {
+	Repo      string  `json:"repo"`
+	Project   string  `json:"project"`
+	RenamedTo *string `json:"renamed_to"`
+}
+
+// A repository renamed to another: the pair is written through the mapping route,
+// canonicalised as the route's own path is, answered by the listing, kept by a write that does
+// not name it — the page sends {project, default} and nothing else — and cleared by "". Every
+// pair that would put a canonical name two steps away, or point a repository at itself, is
+// refused, which is what lets refs.CanonicalRepo read one row and stop.
+func TestRepoProjectRenamedToIsSetKeptClearedAndHeldToOneStep(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	put := func(repo string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		return dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/"+repo, body, "alice")
+	}
+	renamedTo := func(repo string) *string {
+		t.Helper()
+		listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/repo-projects", nil, "alice")
+		if listed.Code != http.StatusOK {
+			t.Fatalf("list the mappings: status=%d body=%s", listed.Code, listed.Body.String())
+		}
+		for _, mapping := range decodeBody[[]renamedRepoProject](t, listed) {
+			if mapping.Repo == repo {
+				return mapping.RenamedTo
+			}
+		}
+		t.Fatalf("the listing holds no mapping of %s", repo)
+		return nil
+	}
+
+	if response := put("acme/gadgets", map[string]any{"project": "CORE", "default": true}); response.Code != http.StatusOK {
+		t.Fatalf("map acme/gadgets: status=%d body=%s", response.Code, response.Body.String())
+	}
+	// The pair is canonicalised the way this route canonicalises its own path.
+	response := put("oldco/gadgets", map[string]any{"project": "CORE", "renamed_to": " Acme/Gadgets.git "})
+	if response.Code != http.StatusOK {
+		t.Fatalf("rename oldco/gadgets: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := decodeBody[renamedRepoProject](t, response).RenamedTo; got == nil || *got != "acme/gadgets" {
+		t.Fatalf("the write answered renamed_to %v, want acme/gadgets", got)
+	}
+	if got := renamedTo("oldco/gadgets"); got == nil || *got != "acme/gadgets" {
+		t.Fatalf("the listing answers renamed_to %v for oldco/gadgets, want acme/gadgets", got)
+	}
+	if got := renamedTo("acme/gadgets"); got != nil {
+		t.Fatalf("the listing answers renamed_to %q for acme/gadgets, want null: it was never renamed", *got)
+	}
+
+	// A write that does not name the pair leaves it alone, as it leaves the default alone.
+	if response := put("oldco/gadgets", map[string]any{"project": "CORE"}); response.Code != http.StatusOK {
+		t.Fatalf("re-map oldco/gadgets: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := renamedTo("oldco/gadgets"); got == nil || *got != "acme/gadgets" {
+		t.Fatalf("renamed_to after a write that did not name it = %v, want acme/gadgets kept", got)
+	}
+
+	for _, refused := range []struct {
+		what string
+		repo string
+		body map[string]any
+	}{
+		{"a repository renamed to itself", "oldco/gadgets", map[string]any{"project": "CORE", "renamed_to": "oldco/gadgets"}},
+		{"a pair that is not owner/name", "oldco/gadgets", map[string]any{"project": "CORE", "renamed_to": "gadgets"}},
+		{"a target that is itself renamed", "ancient/gadgets", map[string]any{"project": "CORE", "renamed_to": "oldco/gadgets"}},
+		{"a rename of what another mapping points at", "acme/gadgets", map[string]any{"project": "CORE", "renamed_to": "newer/gadgets"}},
+	} {
+		if response := put(refused.repo, refused.body); response.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s, want 400", refused.what, response.Code, response.Body.String())
+		}
+	}
+	if got := renamedTo("oldco/gadgets"); got == nil || *got != "acme/gadgets" {
+		t.Fatalf("renamed_to after the refusals = %v, want acme/gadgets untouched", got)
+	}
+
+	// "" clears the pair, and the repository is its own canonical name again.
+	if response := put("oldco/gadgets", map[string]any{"project": "CORE", "renamed_to": ""}); response.Code != http.StatusOK {
+		t.Fatalf("clear the pair: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := renamedTo("oldco/gadgets"); got != nil {
+		t.Fatalf("renamed_to after clearing = %q, want null", *got)
 	}
 }

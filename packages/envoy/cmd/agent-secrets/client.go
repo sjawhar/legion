@@ -308,7 +308,11 @@ type SecretDecision struct {
 // broker gave the request's grant, nil for until its session ends; a broker from before
 // lifetime_seconds sends no such field, and it decodes as nil. ApproveURL is the record's page on
 // the broker, where its approver signs in and decides it, while the request is pending; empty
-// once it is not, and from a broker from before that page.
+// once it is not, and from a broker from before that page. Detail is the broker's one sentence
+// about why it denied the request — the secret that refused it and the rule that did, as
+// "GCLOUD_SAMI: requester-not-listed" — which every line this CLI prints about a refusal carries,
+// so a session reads that asking again will not help; nil when the broker recorded none, and from
+// a broker from before the field.
 type RequestResult struct {
 	RequestID       string           `json:"request_id"`
 	State           string           `json:"state"`
@@ -318,6 +322,7 @@ type RequestResult struct {
 	Approver        *string          `json:"approver"`
 	LifetimeSeconds *int             `json:"lifetime_seconds"`
 	Coalesced       bool             `json:"coalesced,omitempty"`
+	Detail          *string          `json:"detail"`
 	ApproveURL      string           `json:"approve_url"`
 }
 
@@ -364,7 +369,8 @@ type requestDecision struct {
 	At time.Time `json:"at"`
 }
 
-// RequestStatus is GET /v1/requests/{id}'s exact response shape. ApproveURL is as RequestResult's.
+// RequestStatus is GET /v1/requests/{id}'s exact response shape. ApproveURL is as RequestResult's,
+// and so is Detail: the broker's own sentence about the refusal, nil when it recorded none.
 type RequestStatus struct {
 	State      string           `json:"state"`
 	GrantID    *string          `json:"grant_id"`
@@ -372,6 +378,7 @@ type RequestStatus struct {
 	Approver   *string          `json:"approver"`
 	DecidedAt  *time.Time       `json:"decided_at"`
 	Decision   *requestDecision `json:"decision"`
+	Detail     *string          `json:"detail"`
 	ApproveURL string           `json:"approve_url"`
 }
 

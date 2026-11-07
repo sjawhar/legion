@@ -749,7 +749,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** @description A comment's current blocks in body order: {item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}, item the comment's graph node, revision its indexed revision, from and to UTF-16 code units into its stored body, changed_revision and changed_at the revision its block's text last changed in, embedding where meaning search stands on the block (embedded, pending, or none while no window covers it). While the comment is owed a block index, or was indexed from another body than it stores, indexed is false and blocks empty; the read writes nothing. A non-uuid id is 400 COMMENT_ID_INPUT. */
+    /** @description A comment's current blocks in body order: {item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at, embedding}]}, item the comment's graph node, revision its indexed revision, from and to UTF-16 code units into its stored body, changed_revision and changed_at the revision its block's text last changed in, embedding where meaning search stands on the block (embedded, pending, or none while no window covers it). While the comment is owed a block index, or was indexed from another body than it stores, indexed is false and blocks empty; the read writes nothing. An id written short - 8 characters or more of the hex digits and hyphens an id starts with - names the one comment that carries it, is 409 ID_AMBIGUOUS where two or more do, and is 404 NOT_FOUND where none does; any other non-uuid id is 400 COMMENT_ID_INPUT. */
     get: operations["getApiV1CommentsByIdBlocks"];
     put?: never;
     post?: never;
@@ -1573,10 +1573,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** @description The checks of the issue's Verification document in document order, each with its attributes (when, surface, run, negative_control), the version its words last changed in and their digest, and every result recorded against it from any issue, newest first: {issue, verification_artifact_id, checks}. Each result carries currency: current (its commit is the head of an open pull request attributed to the check's issue or the final head of a merged one, or, for an after_merge or default_branch check, a commit on the default branch of that issue's repository, and the check's words have not changed since), older, or unknown (the check's issue resolves to no repository, or Dispatch's GitHub App cannot read it). An issue with no Verification document answers no checks. */
+    /** @description The checks of the issue's Verification document in document order, each with its attributes (when, surface, run, negative_control), the version its words last changed in and their digest, and every result recorded against it from any issue, newest first: {issue, verification_artifact_id, checks}. A check's results come newest first by created_at, the time the recording transaction began, with id descending breaking a tie, and a client reading one result per check reads the first; two results recorded in transactions that overlapped can come back in either order. Each result carries currency: current (its commit is the head of an open pull request attributed to the check's issue or the final head of a merged one, or, for an after_merge or default_branch check, a commit on the default branch of that issue's repository, and the check's words have not changed since), older, or unknown (the check's issue resolves to no repository, or Dispatch's GitHub App cannot read it). An issue with no Verification document answers no checks. */
     get: operations["getApiV1IssuesByKeyResults"];
     put?: never;
-    /** @description Record one result of one check: {check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?}. {key} is the issue the result is recorded on; check names a check block of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical reference (409 CHECK_AMBIGUOUS); any other id is 400 UNKNOWN_CHECK. role is at most 32 characters of a-z and -, verdict is pass or fail, commit is 40 lowercase hex, and the counts default to 0; a pass counting any failed, skipped or excluded case is 400 RESULT_CONTRADICTS. A screenshot names an image document of the recording issue or of the check's issue. The result is appended as result.recorded on the check's issue. A closed issue, recording or the check's, takes a result only for a check whose when is after_merge or default_branch; every other result there is 409 ISSUE_CLOSED. The answer is {result, line}, line being the pull-request body line the result implies, which carries no link to Dispatch. */
+    /** @description Record one result of one check: {check, role, verdict, commit, surface?, run?, observed?, negative_control?, failed?, skipped?, excluded?, screenshots?}. {key} is the issue the result is recorded on; check names a check block of its Verification document or of one of its ancestors', by block id or, when a block id is not unique in that set, by its canonical reference (409 CHECK_AMBIGUOUS); any other id is 400 UNKNOWN_CHECK. role is at most 32 characters of a-z and -, verdict is pass or fail, commit is 40 lowercase hex, and the counts default to 0; a pass counting any failed, skipped or excluded case is 400 RESULT_CONTRADICTS. A commit the repository the check's issue resolves to does not hold is 400 RESULT_COMMIT_UNKNOWN, naming the commit and that owner/repo; a repository Dispatch cannot read, or none at all, stores the result as before. A screenshot names an image document of the recording issue or of the check's issue. The result is appended as result.recorded on the check's issue. A closed issue, recording or the check's, takes a result only for a check whose when is after_merge or default_branch; every other result there is 409 ISSUE_CLOSED. The answer is {result, line}, line being the pull-request body line the result implies, which carries no link to Dispatch. */
     post: operations["postApiV1IssuesByKeyResults"];
     delete?: never;
     options?: never;
@@ -2313,8 +2313,25 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** @description Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds. */
+    /** @description Edges of one node in the reference graph: ?to=<dispatch ref> backlinks or ?from= links; ?kind=, ?since=<events.id> (mentions only, read up to the event log's safe horizon: every mention committed before the read, unless an open transaction holds the horizon back past 1 s, when the read answers the mentions at or below it and a later read the rest). A caller with no cursor starts from since=0, which lists every mention committed before the read that carries a source_seq, and after that reads again from the highest source_seq an answer showed it. A mention written with no event (a rebuild, a backfill, an older build) carries no source_seq until a later write of its source stamps it with that write's event, and until then only a read without since lists it. A signed-in page may start from GET /auth/whoami's event_head instead, which takes a cookie or a trusted header and not a bearer, so a bearer caller starts from 0. Never take a since from max(events.id) read straight from the database: event ids are not commit order, and an id taken that way can stand above an edge that commits later. An empty answer is not proof that nothing is new, so the caller reads again with the id it holds. A ?to= reference whose item id or block id is written short (8 characters or more, never a whole uuid) names the one item of the owner the reference names that carries it: the issue of dispatch://<KEY>/ask/<prefix>, the document of a #b-<prefix>; the node answered carries the whole id, a prefix two of them carry is 409 ID_AMBIGUOUS listing both, and one nothing carries is the 404 the reference as written always gave. A whole id is read whatever owner the reference names, as it always was. */
     get: operations["getApiV1References"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/references/questions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description The question map of one reference source's document: ?kind= one of artifact, ask, comment or message and ?id= that source's whole uuid or a unique prefix of 8 characters or more. Answers {document, questions}: document the uuid of the document the source's text belongs to - its own for a document version, the document an ask or a comment is written on or anchored to, its issue's spec for an issue message - and questions each `:::ask{#id}` block that document's latest version declares, by block id, with the whole id of the ask settlement made for it and that ask's `dispatch://` address, which is what a `#id` in the source's text names and the address its edge is stored under (empty for an ask on an agent conversation's document, which no address names). A block no ask is settled for yet is absent, and a document declaring none answers []. A source whose text belongs to no document - a direct message, an id nothing holds - is 404 NOT_FOUND; a kind that is none of the four is 400 INVALID_KIND; a missing id is 400 INVALID_QUERY; an id prefix two sources carry is 409 ID_AMBIGUOUS. */
+    get: operations["getApiV1ReferencesQuestions"];
     put?: never;
     post?: never;
     delete?: never;
@@ -2450,7 +2467,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** @description List GitHub repository to project mappings, each marked whether it is its project's default. */
+    /** @description List GitHub repository to project mappings, each marked whether it is its project's default and what repository it was renamed to, null for one that was never renamed. */
     get: operations["getApiV1SettingsRepoProjects"];
     put?: never;
     post?: never;
@@ -2468,7 +2485,7 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
-    /** @description Map a GitHub repository to a project {project, default?}; default true makes it the project's one default. */
+    /** @description Map a GitHub repository to a project {project, default?, renamed_to?}; default true makes it the project's one default. renamed_to is the owner/name this repository is called today, which every comparison of a repository canonicalises through: absent or null leaves the stored one alone, "" clears it, and a pair naming this repository, one naming a repository that is itself renamed, or one on a repository another mapping is already renamed to is 400 INVALID_REPO_PROJECT. */
     put: operations["putApiV1SettingsRepoProjectsByOwnerByRepo"];
     post?: never;
     /** @description Remove a repository mapping no issue names as its repo. */
@@ -4593,6 +4610,7 @@ export interface components {
       actor?: components["schemas"]["Actor"] | null;
       default?: null | boolean;
       project: string;
+      renamed_to?: null | string;
     };
     RebuildArtifactInput: {
       markdown?: null | string;
@@ -4646,6 +4664,15 @@ export interface components {
       artifact: components["schemas"]["Artifact"];
       depth: number;
       via: components["schemas"]["ReferenceVia"];
+    };
+    ReferenceQuestion: {
+      ask: string;
+      block_id: string;
+      reference: string;
+    };
+    ReferenceQuestions: {
+      document: string;
+      questions: components["schemas"]["ReferenceQuestion"][] | null;
     };
     ReferenceVia: {
       id: string;
@@ -4710,6 +4737,7 @@ export interface components {
       created_by: components["schemas"]["Actor"];
       default: boolean;
       project: string;
+      renamed_to: null | string;
       repo: string;
     };
     RequirementCoverage: {
@@ -11003,6 +11031,40 @@ export interface operations {
       };
     };
   };
+  getApiV1ReferencesQuestions: {
+    parameters: {
+      query?: {
+        kind?: "artifact" | "ask" | "comment" | "message";
+        id?: string;
+        /** @description the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH) */
+        session?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReferenceQuestions"];
+        };
+      };
+      /** @description A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError). */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
   getApiV1RelatedChecks: {
     parameters: {
       query?: {
@@ -11795,6 +11857,8 @@ export type RecordDecisionResp = components["schemas"]["RecordDecisionResp"];
 export type RecordEnrollmentResp = components["schemas"]["RecordEnrollmentResp"];
 export type RecordResponse = components["schemas"]["RecordResponse"];
 export type ReferenceMember = components["schemas"]["ReferenceMember"];
+export type ReferenceQuestion = components["schemas"]["ReferenceQuestion"];
+export type ReferenceQuestions = components["schemas"]["ReferenceQuestions"];
 export type ReferenceVia = components["schemas"]["ReferenceVia"];
 export type ReferencedBy = components["schemas"]["ReferencedBy"];
 export type RelatedCheckInput = components["schemas"]["RelatedCheckInput"];

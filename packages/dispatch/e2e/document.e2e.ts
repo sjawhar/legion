@@ -22,22 +22,6 @@ import { navigateInApp } from "./sends";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
-async function setDocumentSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const thread = page.getByRole("dialog", { name: "Thread" });
-  if (!open && (await thread.count()) > 0) {
-    await thread.getByRole("button", { name: "Back" }).click();
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    await page
-      .getByRole("button", { name: open ? /Open review panel/ : /Close review panel/ })
-      .click();
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -136,7 +120,7 @@ test("picking a file on the Documents tab uploads it at once and lists it", asyn
 // SLOW(>=2s): two browser contexts, two mounted editors on one live document, a comment, a
 // suggestion accepted into a named version, an ask answered from bob's Inbox, and a full-page
 // screenshot.
-test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
+test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -170,7 +154,6 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await expect(
       documentEditor(bobPage).locator("span[data-proof][data-id]", { hasText: "Comment target" })
     ).toBeVisible();
-    await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Suggestion target");
     await barAction(alicePage, "Suggest");
     const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -194,7 +177,6 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       )
       .toBe(true);
 
-    await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Ask target");
     await barAction(alicePage, "Ask");
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
@@ -228,7 +210,6 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       });
     await expect(inboxDocumentRow).toHaveCount(0);
     await navigateInApp(bobPage, path);
-    await setDocumentSheet(bobPage, testInfo.project.name, true);
     await expect(bobPage.getByText("Yes, publish it.")).toBeVisible();
     await bobPage.screenshot({
       path: testInfo.outputPath("project-document-margin.png"),
@@ -261,9 +242,32 @@ async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
   expect(dotBox.x + dotBox.width).toBeLessThanOrEqual(card.x + card.width);
 }
 
-test("a document's connection dot stays on the line with its version actions @phone", async ({
+test("a document's connection dot stays on the line with its version actions", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Ask blocks design\n\nThe ask is a node.\n",
+    name: "ask-blocks-design.md",
+  });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/projects/CORE/documents/ask-blocks-design-md");
+    await expectDotBeside(page, "Name version");
+  } finally {
+    await context.close();
+  }
+});
+
+// The narrow-screen half of the row above, at the two widths the comment on `expectDotBeside`
+// names: the project's own, where at 390 px the picker, Name version and the dot are wider than
+// the header card, and 320 px, where a version view's two buttons and the dot are.
+test("a document's connection dot stays beside its version actions on a narrow screen @phone", async ({
   browser,
 }, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the row above makes the same check at 1280 px");
   await createProject({ key: "CORE", name: "Core" });
   await createProjectDocument("CORE", {
     content: "# Ask blocks design\n\nThe ask is a node.\n",
@@ -273,12 +277,6 @@ test("a document's connection dot stays on the line with its version actions @ph
   const page = await context.newPage();
   const path = "/projects/CORE/documents/ask-blocks-design-md";
   try {
-    if (testInfo.project.name === "chromium") {
-      await page.setViewportSize({ height: 900, width: 1280 });
-      await page.goto(path);
-      await expectDotBeside(page, "Name version");
-      return;
-    }
     await page.goto(path);
     await expectDotBeside(page, "Name version");
     await page.setViewportSize({ height: 800, width: 320 });

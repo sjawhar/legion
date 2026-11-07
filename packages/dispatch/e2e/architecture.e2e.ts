@@ -85,9 +85,9 @@ test.beforeEach(async () => {
 // SLOW(>=2s): one row for the whole Architecture page - the seeded model and its six issues, the
 // bars over them, a drill-down, a row's details, a status change that has to move a bar, and the
 // Unassigned picker. Each clause of the title is a press the row has to make.
-test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker @phone", async ({
+test("a project with a source opens on its Architecture: bars, drill-down, details, a bar that moves on a status change, and the Unassigned picker", async ({
   browser,
-}, testInfo) => {
+}) => {
   const issues = await seedArchitecture();
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -124,20 +124,6 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
     await expect(docs).toContainText("No tracked work");
     await expect(docs.locator('[data-tone="no-work"]')).toHaveClass(/border-dashed/);
     const chevron = page.getByRole("link", { name: "Open the components inside Platform" });
-    if (testInfo.project.name === "iphone") {
-      await expectTouchTarget(chevron);
-      // A long title truncates inside its row: neither the link nor the page scrolls sideways
-      // (phone styles.css makes every `a` inline-flex, which would shrink-wrap a `block` link).
-      const longLink = row(page, longTitle).getByRole("link", { exact: true, name: longTitle });
-      await expect
-        .poll(() => longLink.evaluate((node) => node.scrollWidth <= node.clientWidth))
-        .toBe(true);
-      expect(
-        await page.evaluate(
-          () => (document.scrollingElement?.scrollWidth ?? 0) === window.innerWidth
-        )
-      ).toBe(true);
-    }
 
     // Item 8: the chevron descends; the breadcrumb leads back.
     await chevron.click();
@@ -159,23 +145,6 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
     await expect(openWork.getByRole("listitem")).toHaveText([/Login child/, /Web login/]);
     await expect(page.getByTestId(`work-${issues.login.key}`)).toContainText("In progress");
     await expect(page.getByTestId(`work-${issues.child.key}`)).toContainText("inherited");
-    if (testInfo.project.name === "iphone") {
-      // A work row's title is readable on a phone: it takes its own line under the chevron,
-      // so the status pill and timestamp wrap beneath it instead of squeezing it to "CORE-1 · We".
-      const workLink = page
-        .getByTestId(`work-${issues.login.key}`)
-        .getByRole("link", { name: `${issues.login.key} · Web login` });
-      const [linkBox, rowBox] = await Promise.all([
-        workLink.boundingBox(),
-        page.getByTestId(`work-${issues.login.key}`).boundingBox(),
-      ]);
-      expect(linkBox).not.toBeNull();
-      expect(rowBox).not.toBeNull();
-      expect((linkBox?.width ?? 0) / (rowBox?.width ?? 1)).toBeGreaterThan(0.6);
-      await expect
-        .poll(() => workLink.evaluate((node) => node.scrollWidth <= node.clientWidth + 1))
-        .toBe(true);
-    }
     await expect(page.getByTestId(`work-${issues.shipped.key}`)).toHaveCount(0);
     await details.getByRole("button", { name: "Show 1 done" }).click();
     await expect(page.getByTestId(`work-${issues.shipped.key}`)).toContainText("Web shipped");
@@ -185,7 +154,7 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
       "href",
       "/projects/CORE/architecture?component=api"
     );
-    await screenshot(page, testInfo.project.name, "architecture-tree");
+    await screenshot(page, "chromium", "architecture-tree");
 
     // Item 9: a work row's chevron expands the issue's children in place.
     await page.getByRole("button", { name: `Expand children of ${issues.login.key}` }).click();
@@ -207,13 +176,6 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
       name: `${issues.loose.key} · Loose end: consolidate every remaining flag into the shared runtime configuration`,
     });
     await expect(looseLink).toBeVisible();
-    if (testInfo.project.name === "iphone") {
-      // The head takes its own line on a phone and the long title ellipsizes inside its link
-      // (the controls stack under it): the link itself never overflows.
-      await expect
-        .poll(() => looseLink.evaluate((node) => node.scrollWidth <= node.clientWidth))
-        .toBe(true);
-    }
     const attach = unassigned.getByRole("button", {
       name: `Attach ${issues.loose.key} to components`,
     });
@@ -222,11 +184,7 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
     await expect(page.getByRole("option", { name: "web · Web" })).toBeVisible();
     // External components are never offered: the server would refuse them.
     await expect(page.getByRole("option", { name: "github · GitHub" })).toHaveCount(0);
-    if (testInfo.project.name === "iphone") {
-      await expectTouchTarget(attach);
-      await expectTouchTarget(search);
-    }
-    await screenshot(page, testInfo.project.name, "architecture-unassigned-picker");
+    await screenshot(page, "chromium", "architecture-unassigned-picker");
     await page.getByRole("option", { name: "web · Web" }).click();
     await search.press("Escape");
     await expect
@@ -248,6 +206,75 @@ test("a project with a source opens on its Architecture: bars, drill-down, detai
       .toBe("inherit");
     await expect(scope).toContainText("1 unassigned");
     await expect(scope).toContainText("0 not architectural");
+  } finally {
+    await context.close();
+  }
+});
+
+// The narrow-screen half of the row above. The page's behaviour is the same in both projects;
+// what a 390 px screen decides is this: the component titles stay inside their links rather than
+// widening the page, a work row's title keeps its own line, and the Unassigned picker's controls
+// are touch-sized. Each claim is read where the page renders it, reached by its own URL. The
+// touch rule is the phone layout's alone (styles.css gives every control 44 px below 1280 px),
+// so the row runs on the phone and nowhere else.
+test("the Architecture page keeps its titles inside their links and its Unassigned controls touch-sized @phone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "these are the phone layout's own measurements");
+  const issues = await seedArchitecture();
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/projects/CORE/architecture");
+    const chevron = page.getByRole("link", { name: "Open the components inside Platform" });
+    await expectTouchTarget(chevron);
+    // A long title truncates inside its row: neither the link nor the page scrolls sideways
+    // (phone styles.css makes every `a` inline-flex, which would shrink-wrap a `block` link).
+    const longLink = row(page, longTitle).getByRole("link", { exact: true, name: longTitle });
+    await expect
+      .poll(() => longLink.evaluate((node) => node.scrollWidth <= node.clientWidth))
+      .toBe(true);
+    expect(
+      await page.evaluate(() => (document.scrollingElement?.scrollWidth ?? 0) === window.innerWidth)
+    ).toBe(true);
+
+    // A work row's title is readable on a phone: it takes its own line under the chevron, so the
+    // status pill and timestamp wrap beneath it instead of squeezing it to "CORE-1 · We".
+    await page.goto("/projects/CORE/architecture?component=web");
+    const workRow = page.getByTestId(`work-${issues.login.key}`);
+    const workLink = workRow.getByRole("link", { name: `${issues.login.key} · Web login` });
+    await expect(workLink).toBeVisible();
+    const [linkBox, rowBox] = await Promise.all([workLink.boundingBox(), workRow.boundingBox()]);
+    expect(linkBox).not.toBeNull();
+    expect(rowBox).not.toBeNull();
+    expect((linkBox?.width ?? 0) / (rowBox?.width ?? 1)).toBeGreaterThan(0.6);
+    await expect
+      .poll(() => workLink.evaluate((node) => node.scrollWidth <= node.clientWidth + 1))
+      .toBe(true);
+    await screenshot(page, testInfo.project.name, "architecture-tree");
+
+    // The Unassigned row's head takes its own line and the long title ellipsizes inside its link
+    // (the controls stack under it): the link itself never overflows, and the Attach button and
+    // the component search it opens are both touch-sized.
+    await page.goto("/projects/CORE/architecture?component=web&view=unassigned");
+    const unassigned = page.getByTestId("unassigned-list");
+    const looseLink = unassigned.getByRole("link", {
+      name: `${issues.loose.key} · Loose end: consolidate every remaining flag into the shared runtime configuration`,
+    });
+    await expect(looseLink).toBeVisible();
+    await expect
+      .poll(() => looseLink.evaluate((node) => node.scrollWidth <= node.clientWidth))
+      .toBe(true);
+    const attach = unassigned.getByRole("button", {
+      name: `Attach ${issues.loose.key} to components`,
+    });
+    await attach.click();
+    const search = page.getByRole("combobox", { name: "Search components" });
+    await expect(page.getByRole("option", { name: "web · Web" })).toBeVisible();
+    await expectTouchTarget(attach);
+    await expectTouchTarget(search);
+    await screenshot(page, testInfo.project.name, "architecture-unassigned-picker");
   } finally {
     await context.close();
   }

@@ -7,11 +7,11 @@ import (
 
 // The shape map is the table's sixth column: every mounted row has one, every entry names a row,
 // and the count only moves when a route is deliberately added or removed, as
-// TestRoutesTablePinsEveryRegisteredRoute pins the table itself.
+// testdata/routes.txt pins the table itself.
 func TestRouteShapesCoverEveryRouteTheTableMounts(t *testing.T) {
-	// 166 production rows plus the 12 rows Deps.TestHooksEnabled adds, the same two numbers
-	// registeredRoutes pins (routes_table_test.go).
-	const shapedRoutes = 178
+	// 167 production rows, the count testdata/routes.txt pins (routes_table_test.go), plus the
+	// 12 rows Deps.TestHooksEnabled adds.
+	const shapedRoutes = 179
 	if len(routeShapes) != shapedRoutes {
 		t.Fatalf("routeShapes has %d entries, want %d (update the pin when adding a route)", len(routeShapes), shapedRoutes)
 	}

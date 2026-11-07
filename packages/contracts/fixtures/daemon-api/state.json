@@ -15,6 +15,11 @@
     "waiting": [
       "LEGION-211"
     ],
+    "trees": [
+      "LEGION-208",
+      "LEGION-210",
+      "LEGION-212"
+    ],
     "blocked": [
       {
         "issue": "LEGION-209",
@@ -37,6 +42,7 @@
       "generation": 2,
       "phase": "done",
       "status": "done",
+      "tree": "LEGION-207",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {
@@ -79,6 +85,7 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "tree": "LEGION-208",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "architect": {
@@ -197,6 +204,7 @@
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "tree": "LEGION-210",
       "repo": "zeta/tools",
       "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
@@ -216,6 +224,7 @@
       "generation": 1,
       "phase": "awaiting_person",
       "status": "in_progress",
+      "tree": "LEGION-212",
       "repo": "acme/widgets",
       "defaultBranch": "main",
       "workers": {},
@@ -248,6 +257,29 @@
       "issue": "LEGION-211",
       "role": "implementer",
       "state": "suspended"
+    }
+  ],
+  "wakesWaiting": [
+    {
+      "claim": "legion-legion-legion-207-implementer",
+      "issue": "LEGION-207",
+      "role": "implementer",
+      "kind": "plugin-task",
+      "dueAt": "2026-09-22T09:17:56Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-architect",
+      "issue": "LEGION-208",
+      "role": "architect",
+      "kind": "catch-up",
+      "dueAt": "2026-09-22T09:18:03Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-planner",
+      "issue": "LEGION-208",
+      "role": "planner",
+      "kind": "launch",
+      "dueAt": "2026-09-22T09:18:11Z"
     }
   ],
   "controllerLocator": {
@@ -533,6 +565,8 @@
     "launch_failure_limit": 4,
     "prompt_failure_limit": 5,
     "prompt_retire_limit": 3,
+    "worker_wakes_per_minute": 12,
+    "worker_wake_burst": 2,
     "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
     "nats_urls": [
       "nats://xxxxx@nats.internal.example:4222",

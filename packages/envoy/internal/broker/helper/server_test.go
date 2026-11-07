@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/testtmp"
 )
 
 type rig struct {
@@ -33,16 +34,14 @@ type rig struct {
 	parentOf atomic.Pointer[func(int) (int, error)]
 }
 
-// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
-// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+// shortTempDir is a directory of the test's own, removed when the test ends, with room under it
+// for the longest path these tests put there: the helper.sock their rigs bind (newLoggedRig,
+// contract_test.go). TMPDIR places it, and the helper falls back to /tmp for that length alone,
+// where t.TempDir()'s path carries the whole of the test's name and passes the 107 bytes a unix
+// socket path holds (docs/testing.md).
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "hlp")
-	if err != nil {
-		t.Fatalf("make a temporary directory: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	return testtmp.Dir(t, "helper.sock")
 }
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
