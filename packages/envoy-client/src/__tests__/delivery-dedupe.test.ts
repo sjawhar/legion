@@ -59,6 +59,11 @@ test("a key that names its event is remembered for the duplicate window and not 
 // The whole production notification stream stored 100,028 messages in one 72-hour window
 // (2026-09-30), and a host is handed no more keys than the stream carries on the topics it
 // follows. A host that follows all of them still recognises a Retry made at the end of the window.
+//
+// The 30 s limit is a hang guard, not a budget: the 100,029 claims are pure CPU work, and bun's
+// unwritten 5,000 ms per-test default is a limit on that work rather than on a hang. Measured in a
+// 2-CPU pod: 0.33 s idle, 2.53 s at most under 16 busy loops (8 x nproc). It fires only if a claim
+// stops returning.
 test("a repeat is still recognised after as many other keys as the whole stream stored in one window", () => {
   const dedupe = createDeliveryDedupe(() => 0);
   const frame = (n: number) => ({
@@ -70,11 +75,16 @@ test("a repeat is still recognised after as many other keys as the whole stream 
   for (let n = 1; n <= 100_028; n++) dedupe.claim(frame(n));
 
   expect(dedupe.claim({ ...frame(0), event_id: "evt-0-retry" })).toBeUndefined();
-});
+}, 30_000);
 
 // A flood of fresh keys inside the window cannot grow the record past its limit: the oldest key
 // goes first, and every later one is still recognised. Each frame carries an event id as well, and
 // those are held apart, so they do not spend the key limit.
+//
+// Measured in a 2-CPU pod: 0.95 s idle, 8.46 s at most under 16 busy loops (8 x nproc), so bun's
+// unwritten 5,000 ms per-test default timed this row out on a busy machine, 16 runs of 20. The
+// count is DELIVERY_DEDUPE_KEY_LIMIT itself, the boundary the row exists to prove, so it stays and
+// the limit becomes an explicit 60 s hang guard: it fires only if a claim stops returning.
 test("past the key limit the oldest key is forgotten first, and only it", () => {
   const dedupe = createDeliveryDedupe(() => 0);
   let sends = 0;
@@ -90,7 +100,7 @@ test("past the key limit the oldest key is forgotten first, and only it", () => 
   expect(dedupe.claim(send(1))).toBeUndefined();
   expect(dedupe.claim(send(DELIVERY_DEDUPE_KEY_LIMIT))).toBeUndefined();
   expect(dedupe.claim(send(0))).toBeDefined();
-});
+}, 60_000);
 
 // The MCP bridge keys a notification by a hash of its URI and summary, and every textless
 // notification on one URI shares it; the Go daemon's outbox row ids start over in a new store.
