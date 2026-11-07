@@ -236,14 +236,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if log == nil {
 		log = slog.Default()
 	}
-	// The loader's warnings, before anything else this boot says: a key the file still sets that
-	// this daemon reads nothing from, with the refusal it would have carried and what to change
-	// (config.Config.Warnings, config.KeyWarning). The boot goes on: such a key is ignored, never
-	// refused
-	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
-	for _, warning := range cfg.Warnings {
-		log.Warn(warning)
-	}
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err

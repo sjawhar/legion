@@ -383,8 +383,17 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	// The loader's warnings are logged by the boot itself, before any other work it does with
-	// the configuration (daemon.Run).
+	// Each warning the loader has (config.Config.Warnings) is logged once, here and nowhere
+	// further down: daemon.Run logs none of them, so a boot that goes on to serve writes each
+	// line once and not twice. They come before any other work this boot does with the
+	// configuration — before the team is claimed, which another legion's entry refuses — so a
+	// start that never reaches a boot has logged them too, and the lines are the first a reader of
+	// the log meets
+	// (docs/solutions/envoy/a-setting-another-repositorys-deployment-sets-is-removed-in-two-releases-pr2674.md).
+	// The boot goes on: a key another deployment still sets is ignored, never refused.
+	for _, warning := range cfg.Warnings {
+		log.Warn(warning)
+	}
 	// legion.yaml always resolves both bind and port, and both must name the inherited socket: the
 	// registry entry, the default daemon_url and `legion state --port` all dial them.
 	if inherited != nil {
