@@ -606,6 +606,7 @@ function CommentTurn({
   expanded,
   forceExpanded = false,
   hideReplyComposer = false,
+  hideUnreadMark = false,
   isClosed,
   isPhone = false,
   issueKey,
@@ -637,6 +638,13 @@ function CommentTurn({
   expanded: boolean;
   forceExpanded?: boolean;
   hideReplyComposer?: boolean;
+  /** Drops the card's `New` mark. The phone thread dialog sets it: the reader has the
+   *  conversation open and is reading it, so the badge says nothing above the card they are in,
+   *  and a card that never draws one cannot move the thread's rows when it goes. The mark is
+   *  written from that same card a second after it is on screen, and the `lastReadSeq` it moves
+   *  is in the `unreadBoundary` read's key, so the read re-enters `isPending`, `unreadFrom` goes
+   *  undefined and every `New` unmounts - under whatever the reader is pressing in the thread. */
+  hideUnreadMark?: boolean;
   isClosed: boolean;
   isPhone?: boolean;
   issueKey: string;
@@ -730,7 +738,7 @@ function CommentTurn({
       data-turn={item.id}
       ref={register}
     >
-      {item.unread ? (
+      {item.unread && !hideUnreadMark ? (
         <div className="mb-1 flex justify-end">
           <UnreadMark />
         </div>
@@ -1140,8 +1148,8 @@ export function ConversationTab({
   // A thread over any older conversation holds the mark until its own Back gives the list back:
   // the newest conversation is behind the thread, unread, and marking the issue read would also
   // move `lastReadSeq` under the reader - that value is in the `unreadBoundary` key above, so
-  // the read re-entering `isPending` unmounts every card's `New` and reflows the list by a row,
-  // under whatever tap the reader is making in the thread. The exits that write no mark for
+  // the read re-entering `isPending` unmounts every `New` the list still draws and reflows it by
+  // a row, under the list the reader is given back. The exits that write no mark for
   // such a thread are the ones that never give the list back: the browser's back and the
   // drawer. A dwell already counting when an older thread opens is cancelled rather than
   // completed, since `useDwell` drops its timers as `enabled` goes false.
@@ -1441,6 +1449,7 @@ export function ConversationTab({
                 expanded={openThreads.has(phoneThread.root.id)}
                 forceExpanded
                 hideReplyComposer={phoneReplyTargetsThread}
+                hideUnreadMark
                 isClosed={isClosed}
                 issueKey={issueKey}
                 item={phoneThread}
