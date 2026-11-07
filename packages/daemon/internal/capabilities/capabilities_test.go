@@ -303,20 +303,42 @@ func TestRedactCredentialsReachesAFixedPointWithinItsBound(t *testing.T) {
 	}
 }
 
+// cutBoundaryPads are the lengths of the run of letters a case whose cleaned text is `cleaned`
+// bytes long is pushed by, so that the MaxReportDetail cut lands at each boundary of that text in
+// turn. A sweep of every length between them cleans each case ten thousand times over and reads
+// nothing these eight do not. In order, each is: no letters at all, the case cleaned on its own;
+// the start of the window a sweep covers, sixteen bytes short of the first cut; the longest pad
+// that still leaves the case whole; the shortest pad whose cut takes the case's last byte, and one
+// past it; the pad whose cut lands in the middle of the case, where a label can be parted from its
+// value; the pad whose cut lands on the case's first byte, so all of its own text goes; and the end
+// of that window, where the cut lands inside the letters themselves. Each is clamped into the
+// window and the list de-duplicated, so a case as long as the cut answers fewer than eight.
+func cutBoundaryPads(cleaned int) []int {
+	first := MaxReportDetail - cleaned
+	pads := []int{0, first - 16, first - 1, first, first + 1, MaxReportDetail - cleaned/2, MaxReportDetail - 1, MaxReportDetail + 8}
+	for i, pad := range pads {
+		pads[i] = min(max(pad, 0), MaxReportDetail+8)
+	}
+	slices.Sort(pads)
+	return slices.Compact(pads)
+}
+
 // At the cut, cleaning keeps what came before it and is idempotent: every case of the shared
-// fixture, pushed by a run of letters so that each byte of its cleaned text in turn straddles
-// MaxReportDetail, still starts with those letters (as many as fit), is — for a case with no pad of
-// its own — a prefix of the letters and the case cleaned whole, and comes back from a second
-// cleaning as the first left it. A label the cut parts from its value is dropped, not redacted only
-// by the daemon's pass, and nothing before it goes with it.
+// fixture, pushed by a run of letters so that the cut at MaxReportDetail lands at each boundary of
+// its cleaned text (cutBoundaryPads), still starts with those letters (as many as fit), is — for a
+// case with no pad of its own — a prefix of the letters and the case cleaned whole, and comes back
+// from a second cleaning as the first left it. A label the cut parts from its value is dropped,
+// not redacted only by the daemon's pass, and nothing before it goes with it.
 func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 	var fixture struct {
 		Patterns []redactionCase `json:"patterns"`
 	}
 	readFixture(t, "capability-redaction.json", &fixture)
+	pushes := 0
 	for _, testCase := range fixture.Patterns {
 		whole := cleanDetail(testCase.Detail)
-		for letters := max(0, MaxReportDetail-len(testCase.Detail)-16); letters <= MaxReportDetail+8; letters++ {
+		for _, letters := range cutBoundaryPads(len(whole)) {
+			pushes++
 			padding := strings.Repeat("a", letters)
 			once := cleanDetail(padding + " " + testCase.Detail)
 			label := fmt.Sprintf("%s: %s, pushed by %d letters", testCase.Pattern, testCase.Name, letters)
@@ -326,11 +348,15 @@ func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 			if !strings.HasPrefix(once, padding[:min(letters, MaxReportDetail)]) {
 				t.Errorf("%s: lost its padding: %q", label, once)
 			}
-			if testCase.Pad == 0 && !strings.HasPrefix(padding+" "+whole, once) {
+			// With no letters there is no space before the case either: cleaning drops that one
+			// separator, so what the push cleans to is the case cleaned whole.
+			pushed := strings.TrimPrefix(padding+" "+whole, " ")
+			if testCase.Pad == 0 && !strings.HasPrefix(pushed, once) {
 				t.Errorf("%s: %q is not a prefix of the case cleaned whole, %q", label, once, whole)
 			}
 		}
 	}
+	t.Logf("%d cases, %d pushed cases in all", len(fixture.Patterns), pushes)
 }
 
 // What the session's plugin sends for the shared fixture's branches —

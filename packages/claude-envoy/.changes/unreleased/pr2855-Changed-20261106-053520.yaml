@@ -1,0 +1,5 @@
+kind: Changed
+body: The plugin's manifest names daemon API contract 54, so a Claude Code worker loads beside a daemon of this release.
+time: 2026-11-06T05:35:20.690542845Z
+custom:
+    Issue: pr2855
