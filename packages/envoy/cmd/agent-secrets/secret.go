@@ -49,7 +49,7 @@ func init() {
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
 			"List every agent secret under your own cloud sign-in: its owner, tier, kind, max grant,\nwhether it has a value, and deletion details. Name the store the rows are in."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
-			"Print an agent secret's store, owner, tier, kind, max grant, dates and versions. Never\nprint its value."}, cmdSecretShow},
+			"Print an agent secret's name, store, secret name, owner, tier, kind, github-owners,\nrequesters, scopes, admin mark, max grant, default grant, its created and last-changed\ntimes, its deletion and earliest purge once it is deleted, and its versions. Never print\nits value."}, cmdSecretShow},
 		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind " + strings.Join(policy.Kinds, "|") + "|none] [--github-owners LOGINS] [--requesters LIST] [--scopes LIST] [--admin true] [--max-grant DURATION] [--default-grant session] [--profile P]",
 			"Create an agent secret under your own cloud sign-in. Then ask the broker to serve it. Read\nits value from standard input, or type it at a prompt with echo off."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
