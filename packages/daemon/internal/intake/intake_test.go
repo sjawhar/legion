@@ -3,13 +3,10 @@ package intake
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,8 +27,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
@@ -1617,60 +1614,11 @@ func writeHandlers(t *testing.T, pool *pgxpool.Pool) []string {
 	return handlers
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test intake transactions")
-	}
-	base, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("connect admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	name := "legion_intake_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(context.Background(), "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := legionstore.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(b[:])
+	return testpg.ClonePool(t, "legion_intake_test")
 }
 
 type lockedBuffer struct {
