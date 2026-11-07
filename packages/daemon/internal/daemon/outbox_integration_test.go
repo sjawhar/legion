@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -205,24 +206,21 @@ func outboxRows(t *testing.T, pool *pgxpool.Pool) int {
 	return rows
 }
 
+// isolatedOutboxPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool). The rigs' own stores share the server's database instead
+// (testDSN): only the tests that need rows of their own come here.
 func isolatedOutboxPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := testpg.Database(t, "legion_outbox_test")
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open isolated store: %v", err)
+	return testpg.ClonePool(t, "legion_outbox_test")
+}
+
+func outboxSuffix(t *testing.T) string {
+	t.Helper()
+	var bytes [8]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		t.Fatalf("random database suffix: %v", err)
 	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate isolated store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open isolated pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return hex.EncodeToString(bytes[:])
 }
 
 type blockingDispatch struct {

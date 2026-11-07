@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/testbuild"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
@@ -305,8 +306,10 @@ func startScratchDispatchWithNATS(t *testing.T, natsURL string) (string, string)
 type scratchDispatchOptions struct {
 	// natsURL is the NATS server the server publishes its events on; empty runs it with NATS off.
 	natsURL string
-	// root is the checkout whose packages/envoy the server is built from; empty is this one, four
-	// directories above the package's.
+	// root is the checkout whose packages/envoy the server runs in and whose
+	// packages/dispatch/web/dist it serves; empty is this one, four directories above the
+	// package's. The binary is not built from it: testbuild.EnvoyBinary builds the checkout
+	// testbuild.RootEnv names, else the one holding the working directory.
 	root string
 	// log, when set, receives the server's output as well.
 	log io.Writer
@@ -333,8 +336,8 @@ type scratchDispatch struct {
 	output   *syncBuffer
 }
 
-// startScratchDispatchOn creates the server's scratch database on the test DSN's Postgres, builds
-// cmd/dispatch, and starts it.
+// startScratchDispatchOn gives the server a scratch database of its own on the test DSN's
+// Postgres (testpg.Database) and starts the cmd/dispatch this process built.
 func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scratchDispatch {
 	t.Helper()
 	database := testpg.Database(t, "dispatch_scratch_test")
@@ -347,15 +350,10 @@ func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scrat
 		t.Fatalf("resolve repository root: %v", err)
 	}
 	d := &scratchDispatch{
-		t: t, binary: filepath.Join(t.TempDir(), "dispatch"), dir: filepath.Join(root, "packages", "envoy"),
+		t: t, binary: testbuild.EnvoyBinary(t, "./cmd/dispatch"), dir: filepath.Join(root, "packages", "envoy"),
 		webDist: filepath.Join(root, "packages", "dispatch", "web", "dist"), database: database,
 		natsURL: options.natsURL, token: scratchAgentToken, home: filepath.Join(t.TempDir(), "home"),
 		log: options.log,
-	}
-	build := exec.Command("go", "build", "-o", d.binary, "./cmd/dispatch")
-	build.Dir = d.dir
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build scratch Dispatch: %v\n%s", err, output)
 	}
 	if err := os.MkdirAll(d.home, 0o700); err != nil {
 		t.Fatalf("create scratch Dispatch home: %v", err)

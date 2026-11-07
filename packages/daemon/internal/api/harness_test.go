@@ -43,20 +43,12 @@ const (
 // dispatch (Options.PromptAgents).
 var testPromptAgents = []string{"deep-worker", "oracle", "plan-gap-analyst"}
 
-// testStore is a migrated database of the test's own on the devbox or CI Postgres: the routes
-// are held to what a real store records, and tests never see each other's rows.
+// testStore is a migrated database of the test's own on the devbox or CI Postgres, cloned from
+// the package's template: the routes are held to what a real store records, and tests never see
+// each other's rows.
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_api_test"))
-	if err != nil {
-		t.Fatalf("open the test database: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if _, err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate the test database: %v", err)
-	}
-	return st
+	return testpg.CloneStore(t, "legion_api_test")
 }
 
 // stillClock is time that never moves: a machine's timers are armed and never fire, so a route

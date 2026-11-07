@@ -27,7 +27,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -1615,24 +1614,11 @@ func writeHandlers(t *testing.T, pool *pgxpool.Pool) []string {
 	return handlers
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := testpg.Database(t, "legion_intake_test")
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_intake_test")
 }
 
 type lockedBuffer struct {

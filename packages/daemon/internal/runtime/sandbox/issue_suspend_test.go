@@ -21,20 +21,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
-// migratedStore is a migrated store on a database of its own: the daemon's authorization of an
-// issue's close, which SuspendIssue runs under its pod's launch turn.
+// migratedStore is a migrated store on a database of its own, cloned from the package's template:
+// the daemon's authorization of an issue's close, which SuspendIssue runs under its pod's launch
+// turn.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_sandbox_test"))
-	if err != nil {
-		t.Fatalf("open the test database: %v", err)
-	}
-	t.Cleanup(st.Close)
-	if _, err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return st
+	return testpg.CloneStore(t, "legion_sandbox_test")
 }
 
 // authorizeClose is the daemon's authorization of close, the store's check (store.IssueSuspension).

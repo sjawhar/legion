@@ -24,7 +24,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -1084,24 +1083,11 @@ func sameStrings(got, want []string) bool {
 	return true
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool).
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := testpg.Database(t, "legion_workflow_test")
-	st, err := legionstore.Open(t.Context(), dsn)
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	if _, err := st.Migrate(t.Context()); err != nil {
-		st.Close()
-		t.Fatalf("migrate test store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(t.Context(), dsn)
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_workflow_test")
 }
 
 func randomSuffix(t *testing.T) string {

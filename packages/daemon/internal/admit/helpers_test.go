@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -324,29 +323,15 @@ func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
 	}
 }
 
+// migratedPool is a pool on a database carrying every migration, cloned from the package's
+// template (testpg.ClonePool). The DSN is required rather than skipped: these tests are the real
+// Postgres admission tests, and a run that quietly skipped them would prove nothing.
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	// A refusal, not the skip the shared fixture would make: these tests are the admission's
-	// own, and a run that never reached Postgres proves nothing about it.
 	if os.Getenv("LEGION_TEST_PG_DSN") == "" {
 		t.Fatal("LEGION_TEST_PG_DSN is required for real Postgres admission tests")
 	}
-	dsn := testpg.Database(t, "legion_admit_test")
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open test pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_admit_test")
 }
 
 func testJetStream(t *testing.T) jetstream.JetStream {

@@ -47,10 +47,7 @@ func TestMain(m *testing.M) {
 			os.Exit(m.Run())
 		}
 	}
-	if err := fixtureenv.Guard(); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	fixtureenv.MustGuard()
 	for _, name := range []string{ompsessions.DSNFileVariable, ompsessions.StorageVariable} {
 		if err := os.Unsetenv(name); err != nil {
 			fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -60,12 +57,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
-}
-
-// No test of this package can reach the workspace of the pod it runs in. The guard's own control
-// is TestTheTestProcessIsGuarded; this adds what that does not say. The first two cases fail
+// No test of this package can reach the workspace of the pod it runs in. The first two cases fail
 // without a Guard in a Legion issue pod, where LEGION_WORKSPACE names the pod's live workspace,
 // and name the workspace a restore of this package's tests would have worked. The third holds
 // whether or not a Guard ran: it checks only that fixtureenv.Isolated, which the bundle fixture

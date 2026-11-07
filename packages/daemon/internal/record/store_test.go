@@ -22,10 +22,14 @@ import (
 
 var _ Store = NewStore()
 
+// emptyStore is a store on an empty, unmigrated database of its own, dropped when the test ends.
+// The tests that apply part of the migration set by hand and count what Migrate then applies
+// need one. The record has no in-memory implementation — its transaction and locking semantics
+// are PostgreSQL's — so without LEGION_TEST_PG_DSN there is nothing to run against and the test
+// is skipped (testpg.Database).
 func emptyStore(t *testing.T) *store.Store {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, testpg.Database(t, "legion_record_test"))
+	st, err := store.Open(context.Background(), testpg.Database(t, "legion_record_test"))
 	if err != nil {
 		t.Fatalf("open the test database: %v", err)
 	}
@@ -33,13 +37,12 @@ func emptyStore(t *testing.T) *store.Store {
 	return st
 }
 
+// migratedStore is a store on a database carrying every migration, cloned from the package's
+// template rather than migrated here. emptyStore stays an empty, unmigrated database: the tests
+// that apply part of the migration set by hand and count what Migrate then applies need one.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	st := emptyStore(t)
-	if _, err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return st
+	return testpg.CloneStore(t, "legion_record_test")
 }
 
 func inTx(t *testing.T, st *store.Store, fn func(pgx.Tx)) {
