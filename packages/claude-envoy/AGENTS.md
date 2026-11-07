@@ -306,8 +306,11 @@ above says how to run it).
   which every heartbeat presses again until the claim is granted, since one claim at boot and no
   more would cost a `--resume` or a channel-server restart inside the live window its role for
   the life of the process. The Legion pane's claim waits the same refusal out rather than
-  stopping the pane, for the live window plus one heartbeat, and throws only on a refusal naming
-  a different session. The lookup's rule and the record's are the client contract's own,
+  stopping the pane, asking every `ROLE_CLAIM_RETRY_MS` (10 s) for the live window and one
+  attempt more, so the grant lands inside the daemon's registration deadline for the pane's
+  `claims/ready` — `worker_boot_timeout_seconds` × `worker_boot_registration_deadline_intervals`
+  from the registration — and it throws only on a refusal naming a different session. The
+  lookup's rule and the record's are the client contract's own,
   `roleHeldBy` and `mayActOnRoleRecord` in `@legion/envoy-client/transport`, which
   `packages/pi-envoy` calls too and which read an empty instance id as none, the lookup leaving
   `client_instance_id` out where the claim names no process. Every claim and every topic

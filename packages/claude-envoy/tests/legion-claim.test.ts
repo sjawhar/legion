@@ -2,12 +2,15 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS } from "@legion/contracts"
 import type { SetRoleInput, SetRoleResult } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { legion } from "../package.json" with { type: "json" }
 import type { RoleRegainHook } from "../src/envoy-channel-server"
 import {
   legionPane,
+  ROLE_CLAIM_RETRY_MS,
+  ROLE_CLAIM_WAIT_MS,
   SAVED_MARKER_SUFFIX,
   startLegionClaim,
   waitForTranscript,
@@ -16,6 +19,11 @@ import {
 const SESSION = "0b9c2f4e-2d3a-4c55-9a1e-6f7d8e9a0b1c"
 /** The channel server's client instance, which the pane's claim names as its process. */
 const INSTANCE = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+/** The daemon's deadline for a registered pane's `claims/ready`: `worker_boot_timeout_seconds`
+ *  × `worker_boot_registration_deadline_intervals`, 120 s × 3 with the shipped defaults
+ *  (`packages/daemon/internal/config/config.go`), armed when the pane registers
+ *  (`armRegistration`, `packages/daemon/internal/supervise`). */
+const REGISTRATION_DEADLINE_MS = 120_000 * 3
 const scratch: string[] = []
 afterEach(async () => {
   for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true })
@@ -340,6 +348,80 @@ test("a claim refused by a standing claim under this session's own id is asked a
   expect(lines).toEqual([
     `Envoy role ${token} is claimed under this session by the process this pane replaced; asking again every 5 ms for up to 5000 ms, until nobody has answered for that claim inside the listener's live window`,
   ])
+})
+
+test("the wait lands the grant inside the daemon's registration deadline for `claims/ready`", async () => {
+  // The worst relaunch: the process this pane replaced renewed its claim at the moment this pane
+  // registered, so the listener holds the claim for a whole live window and the pane's
+  // `claims/ready` is what the daemon's registration deadline is counting down to.
+  //
+  // The attempts run here 5 ms apart so the test is instant; each is answered as the listener
+  // would answer the attempt at that point of the shipped schedule — `ROLE_CLAIM_RETRY_MS`
+  // apart, the first at the registration — and the times asserted below are that schedule's.
+  const configDir = await tempDir()
+  await mkdir(join(configDir, "projects", "p"), { recursive: true })
+  await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
+  const registered = await daemonFixture("register.json")
+  const { posted, fetch } = daemonAnswering((path) =>
+    path.endsWith("/claims/register")
+      ? Response.json(registered)
+      : new Response(null, { status: 204 }),
+  )
+  const setRoles: SetRoleInput[] = []
+  let grantedAt: number | undefined
+  let stops = 0
+  const claim = startLegionClaim({
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir, launcherSaves: false },
+    sessionID: SESSION,
+    daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    clientInstanceID: INSTANCE,
+    client: {
+      setRole: async (input): Promise<SetRoleResult> => {
+        setRoles.push(input)
+        const at = (setRoles.length - 1) * ROLE_CLAIM_RETRY_MS
+        // The listener refuses while the claim stands, naming this very session — the id the
+        // predecessor holds it under — and grants it to the first attempt that falls after the
+        // live window its last renewal bought it.
+        if (at < SESSION_LIVE_WINDOW_MS) return { claimed: false, holder: SESSION }
+        grantedAt ??= at
+        return {
+          claimed: true,
+          interest: { session_id: SESSION, machine_id: "m", dir: "/w", topics: [] },
+        }
+      },
+    },
+    session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
+    signal: new AbortController().signal,
+    log: () => undefined,
+    stop: () => {
+      stops += 1
+    },
+    pollMs: 5,
+    roleRetryMs: 5,
+  })
+  await claim.booted
+
+  // Ready was sent, and the schedule says when: the first attempt past the live window, 31
+  // attempts in, 300,000 ms after the registration armed the deadline.
+  expect(posted.map(({ path }) => path)).toEqual([
+    "/legion/v1/claims/register",
+    "/legion/v1/claims/ready",
+  ])
+  expect(stops).toBe(0)
+  expect(setRoles).toHaveLength(SESSION_LIVE_WINDOW_MS / ROLE_CLAIM_RETRY_MS + 1)
+  expect(grantedAt).toBe(SESSION_LIVE_WINDOW_MS)
+  // Inside the wait, so the pane never gives up on a claim that is about to be granted.
+  expect(grantedAt).toBeLessThan(ROLE_CLAIM_WAIT_MS)
+  // And inside the daemon's deadline — 120 s × 3 from the registration — with a minute to spare
+  // for `claims/ready` itself. The cadence this wait ran at before, one attempt per session
+  // heartbeat, put its first attempt past the live window at the deadline exactly.
+  expect(REGISTRATION_DEADLINE_MS - (grantedAt ?? Number.NaN)).toBe(60_000)
+  expect(Math.ceil(SESSION_LIVE_WINDOW_MS / SESSION_HEARTBEAT_MS) * SESSION_HEARTBEAT_MS).toBe(
+    REGISTRATION_DEADLINE_MS,
+  )
+  // The give-up falls inside the deadline too: a pane that cannot have its role says so in its
+  // own log instead of being retired silently.
+  expect(ROLE_CLAIM_WAIT_MS).toBeLessThan(REGISTRATION_DEADLINE_MS)
 })
 
 test("a claim under this session's own id that is never granted stops the pane once the wait is out", async () => {

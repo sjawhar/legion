@@ -1,7 +1,7 @@
 import { readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import { SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS } from "@legion/contracts"
+import { SESSION_LIVE_WINDOW_MS } from "@legion/contracts"
 import { messageFor } from "@legion/envoy-client/errors"
 import { readSecretFile } from "@legion/envoy-client/secret-file"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
@@ -133,6 +133,42 @@ function isFile(file: string): Promise<boolean> {
   )
 }
 
+/**
+ * How long apart the attempts of {@link startLegionClaim}'s wait on a claim the listener refused
+ * naming this very session are.
+ *
+ * The wait runs between `claims/register` and `claims/ready`, and the daemon retires a pane that
+ * has not said it is ready `worker_boot_timeout_seconds` ×
+ * `worker_boot_registration_deadline_intervals` after its registration armed that deadline — 120
+ * s × 3 = 360 s with the shipped defaults (`packages/daemon/internal/config/config.go`, armed by
+ * `register` through `armRegistration` in `packages/daemon/internal/supervise`). So the interval
+ * is what stands between the grant and that deadline: the listener grants the standing claim on
+ * the first attempt that falls after the live window its last renewal bought it, which is at
+ * most `SESSION_LIVE_WINDOW_MS` after this pane registered, and every part of an interval past
+ * that point is dead waiting. At a heartbeat's cadence the attempt at 270 s is still refused
+ * whenever that renewal fell inside the 30 s before the registration, and the next one is at 360
+ * s — the deadline itself. At 10 s the grant lands inside 310 s of the registration, 50 s of
+ * room for `claims/ready` and its own retries.
+ *
+ * What the shorter interval costs: one `POST /v1/roles/set` per interval, a conditional write the
+ * listener refuses without touching the claim, at most about 30 of them, and only in a pane the
+ * daemon relaunched into its predecessor's standing claim — once per such relaunch, for at most
+ * one live window.
+ */
+export const ROLE_CLAIM_RETRY_MS = 10_000
+
+/**
+ * How long that same wait keeps asking before it gives up and the pane is stopped: the live
+ * window and one attempt more, so the last attempt falls after the window the process this pane
+ * replaced could still have been answering for its claim in, even when it answered for it at the
+ * very moment this pane registered.
+ *
+ * Inside the daemon's registration deadline on purpose: a pane that cannot have its role writes
+ * why to its log and is launched again, rather than being retired by a deadline that would
+ * otherwise fire first and say nothing.
+ */
+export const ROLE_CLAIM_WAIT_MS = SESSION_LIVE_WINDOW_MS + ROLE_CLAIM_RETRY_MS
+
 export interface LegionClaim {
   /** The registered claim, or undefined until `claims/register` has answered. */
   readonly capability: () => ClaimCapability | undefined
@@ -155,6 +191,10 @@ export interface LegionClaim {
  * replaced, and that claim is granted the moment nobody has answered for it inside the
  * listener's live window (`roleWaitMs`). Stopping instead would hand the daemon a relaunch that
  * meets the same claim, for a whole window of relaunches.
+ *
+ * The claim is asked again every {@link ROLE_CLAIM_RETRY_MS} for up to
+ * {@link ROLE_CLAIM_WAIT_MS}, both sized so the grant, and the give-up behind it, fall inside the
+ * daemon's registration deadline for this pane's `claims/ready`.
  */
 export function startLegionClaim(deps: {
   readonly pane: LegionPane
@@ -172,21 +212,17 @@ export function startLegionClaim(deps: {
   readonly stop: () => void
   /**
    * How long a claim refused by a standing claim under this very session id keeps asking before
-   * it gives up and the pane is stopped: the listener's live window plus one heartbeat, so the
-   * last attempt falls after the window the process this pane replaced could still have been
-   * answering for its claim in.
+   * it gives up and the pane is stopped: {@link ROLE_CLAIM_WAIT_MS}.
    */
   readonly roleWaitMs?: number
-  /** How long between those attempts: `SESSION_HEARTBEAT_MS`, the cadence a session's
-   *  registration — the one thing that answers for a claim — is refreshed at, so the claim is
-   *  pressed once per chance the standing claim had to be renewed. */
+  /** How long between those attempts: {@link ROLE_CLAIM_RETRY_MS}. */
   readonly roleRetryMs?: number
   readonly pollMs?: number
 }): LegionClaim {
   let capability: ClaimCapability | undefined
   const { sessionID } = deps
-  const roleWaitMs = deps.roleWaitMs ?? SESSION_LIVE_WINDOW_MS + SESSION_HEARTBEAT_MS
-  const roleRetryMs = deps.roleRetryMs ?? SESSION_HEARTBEAT_MS
+  const roleWaitMs = deps.roleWaitMs ?? ROLE_CLAIM_WAIT_MS
+  const roleRetryMs = deps.roleRetryMs ?? ROLE_CLAIM_RETRY_MS
 
   const boot = async (): Promise<void> => {
     const transcript = await waitForTranscript(

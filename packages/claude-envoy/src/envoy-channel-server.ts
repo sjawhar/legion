@@ -1133,8 +1133,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   /**
    * The id whose role record is still to be taken back, read by `transferRole` on every
    * heartbeat: a handoff has moved away from it, a restore of it failed, or a restore of it was
-   * refused by a standing claim under this session's own id. Cleared by the restore that
-   * resolves without queueing itself again.
+   * refused by a standing claim under this session's own id. Written by each caller of
+   * `restoreRole` from what that call answered, and by `adoptHandoff` for the id it left.
    */
   let roleTransferFrom: string | undefined
 
@@ -1144,6 +1144,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * grants such a claim only when that predecessor has no live registry entry, when its entry
    * carries this process's own client instance id, or when either side carries none; a
    * predecessor still live under another client instance keeps the role.
+   *
+   * Answers `"pending"` when the role is still to be taken back from that id and only time
+   * decides it, `"settled"` when nothing more is to be asked of that record. The caller keeps
+   * the retry: a restore writes none of its own.
    *
    * A record another process wrote is pressed only while this process holds no role
    * (`mayActOnRoleRecord`, the one rule both clients read). One state directory is read by two
@@ -1158,9 +1162,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * replaced — the `claude` that `--resume` continues, or the channel server this one restarted
    * — which renewed that claim at its last heartbeat and so still stands inside the listener's
    * live window. The listener grants it the moment nobody has answered for it inside that
-   * window, so the restore is queued on `roleTransferFrom` and every heartbeat asks again until
-   * it is granted: one claim at boot and no more would cost this process its role for the life
-   * of the process, on every `--resume` and every restart inside the window. The record stays
+   * window, so that refusal is the `"pending"` answer and every heartbeat asks again until it
+   * is granted: one claim at boot and no more would cost this process its role for the life of
+   * the process, on every `--resume` and every restart inside the window. The record stays
    * where it is, because the pending claim is read back out of it.
    *
    * Which is why a refusal naming the predecessor itself keeps the record too: it belongs to
@@ -1169,10 +1173,10 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * predecessor demonstrably no longer holds it, so its record goes — the one path that removes
    * a role record by hand.
    */
-  const restoreRole = async (previousSessionID = identity.id): Promise<void> => {
+  const restoreRole = async (previousSessionID: string): Promise<"settled" | "pending"> => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
     const persisted = await readPersistedRole(previousFile)
-    if (persisted === undefined) return
+    if (persisted === undefined) return "settled"
     if (
       !mayActOnRoleRecord(
         persisted.client_instance_id,
@@ -1180,7 +1184,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         heldRole !== undefined,
       )
     ) {
-      return
+      return "settled"
     }
     const claim = await options.client.setRole({
       sessionID: identity.id,
@@ -1190,17 +1194,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       clientInstanceID: options.clientInstanceID,
     })
     if (!claim.claimed) {
-      if (claim.holder === identity.id) {
-        roleTransferFrom = previousSessionID
-        return
-      }
+      if (claim.holder === identity.id) return "pending"
       if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
-      return
+      return "settled"
     }
     heldRole = persisted.role
     const currentFile = roleStateFile(options.stateDirectory, identity.id)
     if (previousFile !== currentFile) await rm(previousFile, { force: true })
     await writeRoleRecord(currentFile, persisted.role)
+    return "settled"
   }
 
   let regained: RoleRegainHook | undefined
@@ -1296,8 +1298,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   let roleTransferFailureReported = false
   /**
    * Best-effort, unlike `syncRegisteredInterests` behind it on the heartbeat. A failed transfer
-   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves
-   * without queueing itself again; a throw would add nothing to that and would end the tick
+   * keeps its own retry, `roleTransferFrom`, which this clears only once `restoreRole` answers
+   * that the record is settled; a throw would add nothing to that and would end the tick
    * before the interests reconciliation, on every tick for as long as the failure lasts — a
    * resumed session would never adopt its subscriptions and a registry-side unsubscribe that
    * failed would never be cleared. The session works without its role meanwhile; it does not
@@ -1307,16 +1309,12 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   const transferRole = async (): Promise<void> => {
     const from = roleTransferFrom
     if (from === undefined) return
-    // Cleared before the attempt, not after it: a claim the listener refuses naming this
-    // session queues the next attempt from inside `restoreRole`, and clearing afterwards would
-    // drop the very retry that refusal asked for.
-    roleTransferFrom = undefined
     try {
-      await restoreRole(from)
+      roleTransferFrom = (await restoreRole(from)) === "pending" ? from : undefined
       roleTransferFailureReported = false
     } catch (error) {
-      roleTransferFrom = from
-      // Said once per failure run: every heartbeat retries it.
+      // `roleTransferFrom` is untouched, so the next heartbeat asks again.
+      // Said once per failure run.
       if (!roleTransferFailureReported) {
         roleTransferFailureReported = true
         process.stderr.write(
@@ -1609,24 +1607,26 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // role file, any transient error. The one is a role file whose bytes cannot be parsed, which
     // only `readPersistedRole` can tell apart: no later read of the same bytes succeeds, so it is
     // not queued, and it costs this session its role and nothing more. A claim the listener
-    // refused naming this very session queues itself the same way, from inside `restoreRole`:
-    // the process this one resumed renewed that claim at its last heartbeat, and the role comes
-    // back one live window later to a process that keeps asking.
-    await restoreRole().catch((error: unknown) => {
+    // refused naming this very session is queued the same way, on the `"pending"` the restore
+    // answers: the process this one resumed renewed that claim at its last heartbeat, and the
+    // role comes back one live window later to a process that keeps asking.
+    try {
+      roleTransferFrom = (await restoreRole(identity.id)) === "pending" ? identity.id : undefined
+    } catch (error) {
       if (error instanceof UnparseableRoleRecordError) {
         process.stderr.write(
           `envoy-channel: ${messageFor(error)}; the session starts without a role\n`,
         )
-        return
+      } else {
+        roleTransferFrom = identity.id
+        // This is the first failure of the run `transferRole` reports, so it says nothing more
+        // until the retry has succeeded once.
+        roleTransferFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
+        )
       }
-      roleTransferFrom = identity.id
-      // This is the first failure of the run `transferRole` reports, so it says nothing more
-      // until the retry has succeeded once.
-      roleTransferFailureReported = true
-      process.stderr.write(
-        `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
-      )
-    })
+    }
   })
   // The first sweep, once the listener knows what the session follows: what was stored while it
   // was away (a resume included), or, for a new session, its cursors' start at the stream's end.
