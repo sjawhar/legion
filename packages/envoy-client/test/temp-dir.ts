@@ -91,7 +91,8 @@ function removeTree(directory: string): void {
   rmSync(directory, { recursive: true, force: true });
 }
 
-/** `chmod -R u+rwX` on a tree, following no symlink. A path already gone is nothing to do. */
+/** `chmod -R u+rwx` on a tree's DIRECTORIES, following no symlink. A path already gone is
+ * nothing to do. */
 function makeWritable(path: string): void {
   const entry = makeSelfWritable(path);
   if (entry === undefined || !entry.isDirectory()) {
@@ -109,8 +110,13 @@ function makeWritable(path: string): void {
 }
 
 /**
- * `chmod u+rwX` on one path, following no symlink: read and write always, execute (search) on a
- * directory only. Returns what it found there, or nothing for a path that is gone or a symlink.
+ * `chmod u+rwx` on one path when it is a directory, following no symlink. Returns what it found
+ * there, or nothing for a path that is gone or a symlink.
+ *
+ * A file's own mode is left alone: unlinking a file needs write permission on the directory
+ * holding it, never on the file, and a file in a temporary tree can be a hard link to one
+ * outside it, whose mode is the same inode's (an external 0444 fixture came back 0644 while this
+ * function wrote `u+rw` on files too).
  */
 function makeSelfWritable(path: string): Stats | undefined {
   let entry: Stats;
@@ -122,8 +128,11 @@ function makeSelfWritable(path: string): Stats | undefined {
   if (entry.isSymbolicLink()) {
     return undefined;
   }
+  if (!entry.isDirectory()) {
+    return entry;
+  }
   const mode = entry.mode & 0o7777;
-  const wanted = entry.isDirectory() ? mode | 0o700 : mode | 0o600;
+  const wanted = mode | 0o700;
   if (wanted !== mode) {
     try {
       chmodSync(path, wanted);

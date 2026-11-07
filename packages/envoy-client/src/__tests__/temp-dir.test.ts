@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -56,6 +55,38 @@ describe("temporaryDirectory", () => {
     removeTemporaryDirectories();
 
     expect(existsSync(directory)).toBe(false);
+  });
+
+  test("leaves the mode of a file hard-linked from outside the tree alone", async () => {
+    // A file's mode is a property of its inode, which a hard link shares: a `chmod` on the copy
+    // inside the tree is a chmod on the one outside it. The outside file is made with `mkdtemp`
+    // in the child, so the helper is never told to remove it.
+    const { code, stdout } = await inItsOwnProcess(
+      `import { chmodSync, linkSync, mkdtempSync, writeFileSync } from "node:fs";
+       import { tmpdir } from "node:os";
+       import { join } from "node:path";
+       const outside = mkdtempSync(join(tmpdir(), "temp-dir-fixture-"));
+       const fixture = join(outside, "fixture");
+       writeFileSync(fixture, "x");
+       chmodSync(fixture, 0o444);
+       const directory = temporaryDirectory("temp-dir-linking-hard-");
+       linkSync(fixture, join(directory, "link"));
+       console.log(JSON.stringify({ directory, outside, fixture }));`
+    );
+    expect(code).toBe(0);
+    const { directory, outside, fixture } = JSON.parse(stdout) as {
+      directory: string;
+      outside: string;
+      fixture: string;
+    };
+
+    try {
+      expect(existsSync(directory)).toBe(false);
+      expect(existsSync(fixture)).toBe(true);
+      expect(statSync(fixture).mode & 0o777).toBe(0o444);
+    } finally {
+      rmSync(outside, { force: true, recursive: true });
+    }
   });
 
   test("never reaches through a symlink to a tree it did not make", async () => {
@@ -159,53 +190,62 @@ describe("temporaryDirectory", () => {
 /**
  * Bun's test runner emits no `exit`, so a test file that makes a temporary directory and does not
  * register the removal itself leaves it behind — which is how 709 `dispatch-cli-*` and 680
- * `dispatch-config-*` directories gathered in one machine's temporary directory. This is
- * the check that a new one does not start it again.
+ * `dispatch-config-*` directories gathered in one machine's temporary directory.
+ *
+ * What a test file left behind is a fact about a finished run, not about its source, so this runs
+ * `bun test` over a fixture file of each kind and reads the temporary directory it ran with. The
+ * same reading over this package's whole suite is a step of its own in CI, beside the step that
+ * runs it ("Test Envoy client" in `.github/workflows/ci.yaml`).
  */
-describe("this package's test files", () => {
-  /** Every `.ts` file under `src/__tests__/` and `test/`, the helper itself left out. */
-  function files(): { readonly path: string; readonly source: string }[] {
+describe("a test file's run", () => {
+  /**
+   * Runs `bun test` over one fixture file whose body is `body`, with a temporary directory of its
+   * own, and returns that directory's entries with the run's exit code. The fixture imports the
+   * helper by its path, as a file outside the package would not resolve the package's exports.
+   */
+  async function leftBehind(
+    body: string
+  ): Promise<{ readonly code: number; readonly entries: string[] }> {
+    const fixtures = temporaryDirectory("temp-dir-fixtures-");
+    const runTmp = temporaryDirectory("temp-dir-fixture-tmp-");
     const helper = join(import.meta.dir, "..", "..", "test", "temp-dir.ts");
-    const found: { path: string; source: string }[] = [];
-    const walk = (directory: string): void => {
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        const path = join(directory, entry.name);
-        if (entry.isDirectory()) {
-          walk(path);
-        } else if (entry.name.endsWith(".ts") && path !== helper) {
-          found.push({ path, source: readFileSync(path, "utf8") });
-        }
-      }
-    };
-    walk(import.meta.dir);
-    walk(join(import.meta.dir, "..", "..", "test"));
-    return found;
+    const fixture = join(fixtures, "fixture.test.ts");
+    writeFileSync(
+      fixture,
+      `import { expect, afterAll, test } from "bun:test";\n` +
+        `import { removeTemporaryDirectories, temporaryDirectory } from ${JSON.stringify(helper)};\n` +
+        `${body}\n`
+    );
+    const run = Bun.spawn([process.execPath, "test", fixture], {
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env, TMPDIR: runTmp },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await new Response(run.stdout).text();
+    await new Response(run.stderr).text();
+    return { code: await run.exited, entries: readdirSync(runTmp) };
   }
 
-  test("make their temporary directories through the helper", () => {
-    // The name at all, not the call: an import that renames it is the same leak. This file is the
-    // exception: its child process makes one with `mkdtemp` on purpose, to show that the removal
-    // does not follow a symlink into a tree the helper was not given.
-    const direct = files()
-      .filter(
-        ({ path, source }) => !path.endsWith("temp-dir.test.ts") && /\bmkdtempSync\b/.test(source)
-      )
-      .map(({ path }) => path);
-    expect(direct).toEqual([]);
+  test("leaves nothing when it registers the removal", async () => {
+    const { code, entries } = await leftBehind(
+      `afterAll(removeTemporaryDirectories);
+       test("makes one", () => {
+         expect(temporaryDirectory("fixture-registered-")).toBeTruthy();
+       });`
+    );
+    expect(code).toBe(0);
+    expect(entries).toEqual([]);
   });
 
-  // A module that is not a test file (`nats-server.ts`, `test/envoy-stack.ts`) has no hook of its
-  // own to register: it removes its directory where it stops the thing that used it, and the
-  // helper's own process-exit removal is what covers a process that never reaches that.
-  test("register the removal, which the test runner's own exit does not", () => {
-    const unregistered = files()
-      .filter(
-        ({ path, source }) =>
-          path.endsWith(".test.ts") &&
-          /\btemporaryDirectory\(/.test(source) &&
-          !/\bafterAll\([^)]*\bremoveTemporaryDirectories\b/.test(source)
-      )
-      .map(({ path }) => path);
-    expect(unregistered).toEqual([]);
+  // The negative control: without this, a check that reads an empty directory proves nothing.
+  test("leaves its directory behind when it does not, which this check sees", async () => {
+    const { code, entries } = await leftBehind(
+      `test("makes one", () => {
+         expect(temporaryDirectory("fixture-unregistered-")).toBeTruthy();
+       });`
+    );
+    expect(code).toBe(0);
+    expect(entries).toEqual([expect.stringMatching(/^fixture-unregistered-/)]);
   });
 });
