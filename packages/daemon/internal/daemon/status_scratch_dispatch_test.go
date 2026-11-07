@@ -9,10 +9,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -149,16 +151,27 @@ func TestABootStatusWriteDoesNotLandOverAPersonsMoveWithinTheWorkflow(t *testing
 }
 
 // seedPlanningRoot records key as a tree of its own that the older daemon left planning while
-// Dispatch still shows it todo: the state the boot corrects. The root holds the admission slot
-// its planning says it has, because the boot corrects an issue only while its tree runs: a root
-// in a phase with no slot is a root waiting for one, carrying the phase a hand-over left it, and
-// the correction leaves it alone so that `todo` keeps it in the waiting line (correctStatuses).
+// Dispatch still shows it todo: the state the boot corrects. The tree's lifecycle stands open
+// under the workflow, because the boot corrects an issue only while its tree runs, and what says
+// a tree runs is that lifecycle rather than a slot (record.TreeRuns): a slot counts one issue at
+// work now, and a running tree holds none of its own while its issues wait in the line. A root in
+// a phase whose tree never opened is a root waiting for its promotion, carrying the phase a
+// hand-over left it, and the correction leaves it alone so that `todo` keeps it in the waiting
+// line (correctStatuses). The slot is kept beside the lifecycle: this root is at work, so it
+// holds one.
 func seedPlanningRoot(t *testing.T, pool *pgxpool.Pool, records record.Store, key string) {
 	t.Helper()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main",
 			GitHubRepo: "acme/widgets", Tree: key, Project: "LEGION", Title: key, Phase: phase.Planning, Generation: 1,
 			Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "U"}); err != nil {
+			return err
+		}
+		project, err := claim.ProjectToken("LEGION")
+		if err != nil {
+			return err
+		}
+		if _, err := records.OpenTreeLifecycle(context.Background(), tx, project, key, treelifecycle.AuthorityWorkflow); err != nil {
 			return err
 		}
 		return records.PutSlot(context.Background(), tx, record.Slot{Issue: key, Index: 0, AdmittedAt: time.Now()})
