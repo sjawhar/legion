@@ -250,6 +250,9 @@ func TestArtifactGrantsRefuseAReferenceThatCannotBeCovered(t *testing.T) {
 		{"a document", "dispatch://" + fixture.issue + "/artifact/notes-md", http.StatusBadRequest, "DATA_FILE_IS_A_DOCUMENT"},
 		{"an agent conversation's file", "dispatch://agent/" + session + "/artifact/session-html", http.StatusBadRequest, "AGENT_CONVERSATION_FILE"},
 		{"a version the file does not have", fixture.dataRef + "@v2", http.StatusBadRequest, "VERSION_NOT_FOUND"},
+		// Past what an `integer` column holds: a version no file could ever have, refused as
+		// the version this one does not have is, rather than sent to Postgres to fail on.
+		{"a version past what a version number can be", fixture.dataRef + "@v3000000000", http.StatusBadRequest, "VERSION_NOT_FOUND"},
 	} {
 		t.Run(refusal.what, func(t *testing.T) {
 			response := dispatchRequest(t, handler, http.MethodPost, grantsRoute(fixture.page.Artifact.ID),

@@ -1,11 +1,11 @@
 package api
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 
@@ -94,6 +94,50 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 	s.serveVersionBytes(w, r, artifactID, number, content, sha, size, downloadHeaders(w, contentType, sha))
 }
 
+// downloadContentSecurityPolicy is the policy every file version's download carries, the GET's
+// answer and the HEAD's alike. `sandbox` with no token gives a document drawn from these bytes
+// an opaque origin, so it is same-origin with nothing and holds no cookie and no storage of
+// Dispatch's, and `default-src 'none'` leaves it no source for anything at all; the two
+// together are what a raw host sends (GitHub's does). It is the second half of the rule below,
+// and the half that holds when the first is wrong: a type this route refuses to send is a type
+// no engine draws, and a type it does send that an engine draws anyway is drawn with no origin
+// of Dispatch's and no way out of the frame. A policy on a subresource is ignored by the engine
+// that fetched it, so an `<img src>` of these bytes, a `fetch` of them and a reader's own
+// download are answered exactly as before.
+const downloadContentSecurityPolicy = "sandbox; default-src 'none'"
+
+// typesAnEngineDrawsAsADocument are the stored types a browser draws as a document rather than
+// saving: a page's own type, the two XML dialects an engine renders, and SVG, whose script runs
+// in the document it is drawn as. A version stored under one of them is downloaded as
+// `application/octet-stream` (downloadContentType), because `Content-Disposition: attachment`
+// is advice an engine may decline - WebKit draws an attachment it believes it can render, which
+// the page route met (A4, dispatch://INFRA-682) - and a document this route drew would run on
+// Dispatch's own origin, holding the reader's cookie: it could then grant its own page any data
+// file it liked, which R9 gives to no one but the person at their browser.
+//
+// No picture is one of them. An image is made from sniffed PNG, JPEG, GIF or WebP alone and is
+// stored under the type its bytes are (artifactKind), so the `<img src>` the web app draws a
+// conversation's pictures with asks for a type this map does not hold and is answered it.
+var typesAnEngineDrawsAsADocument = map[string]bool{
+	"text/html":             true,
+	"application/xhtml+xml": true,
+	"image/svg+xml":         true,
+	"text/xml":              true,
+	"application/xml":       true,
+}
+
+// downloadContentType is the type a file version is downloaded under: the type it is stored
+// under, and `application/octet-stream` for a type an engine draws as a document, for a version
+// that records no type, and for a type that does not parse - one an engine may still read a
+// drawable type out of, which is reason enough not to repeat it back.
+func downloadContentType(storedType string) string {
+	mediaType, _, err := mime.ParseMediaType(storedType)
+	if err != nil || typesAnEngineDrawsAsADocument[mediaType] {
+		return "application/octet-stream"
+	}
+	return storedType
+}
+
 // downloadHeaders is the download answer's headers, written once with the body's length:
 // serveFileVersion hands it to serveVersionBytes, which calls it after the last refusal and
 // before the first byte, and a HEAD calls it itself on the length of the version's bytes, having
@@ -101,13 +145,14 @@ func (s *server) serveFileVersion(w http.ResponseWriter, r *http.Request, artifa
 // included.
 func downloadHeaders(w http.ResponseWriter, contentType, sha *string) func(length int64) {
 	return func(length int64) {
-		w.Header().Set("Content-Type", cmp.Or(deref(contentType), "application/octet-stream"))
+		w.Header().Set("Content-Type", downloadContentType(deref(contentType)))
 		if sha != nil {
 			w.Header().Set("ETag", *sha)
 		}
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 		w.Header().Set("Content-Disposition", "attachment")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", downloadContentSecurityPolicy)
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusOK)
 	}
@@ -160,26 +205,97 @@ func (s *server) serveFilePage(w http.ResponseWriter, r *http.Request, artifactI
 // dispatch://INFRA-682). A type no browser renders leaves no engine that choice, and `nosniff`
 // stops one guessing `text/html` back from the bytes. `Vary` names the header so no cache gives
 // one of those answers to the other request. `no-cache` makes the browser ask again on each
-// load, under the version's ETag, so a later change to these headers reaches every page.
+// load, under the version's ETag, so a later change to these headers reaches every page, and
+// an ask that brings the tag back is answered 304 from the row (pageNotModified).
 func pageHeaders(w http.ResponseWriter, r *http.Request, sha *string) func(length int64) {
-	disposition, contentType := "attachment", "application/octet-stream"
-	if r.Header.Get("Sec-Fetch-Dest") == "iframe" {
-		disposition, contentType = "inline", "text/html; charset=utf-8"
-	}
 	return func(length int64) {
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Disposition", disposition)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Cache-Control", "private, no-cache")
-		if sha != nil {
-			w.Header().Set("ETag", *sha)
-		}
-		w.Header().Set("Vary", "Sec-Fetch-Dest")
-		w.Header().Set("Content-Security-Policy", pageContentSecurityPolicy)
+		writePageHeaders(w, r, sha)
 		w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// framePageRequest is the one test of "this is the frame a view block inserted": the request
+// whose Sec-Fetch-Dest is `iframe`. It decides the two headers that differ between the page's
+// two answers and whether a revalidation may be answered 304, so the inline answer and the
+// answer a cache may reuse are the same request shape by construction.
+func framePageRequest(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Dest") == "iframe"
+}
+
+// writePageHeaders writes every page header but Content-Length, which the 200 sets from the
+// body it is about to write and the 304 has none of.
+func writePageHeaders(w http.ResponseWriter, r *http.Request, sha *string) {
+	disposition, contentType := "attachment", "application/octet-stream"
+	if framePageRequest(r) {
+		disposition, contentType = "inline", "text/html; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", disposition)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if tag := entityTag(sha); tag != "" {
+		w.Header().Set("ETag", tag)
+	}
+	w.Header().Set("Vary", "Sec-Fetch-Dest")
+	w.Header().Set("Content-Security-Policy", pageContentSecurityPolicy)
+}
+
+// entityTag is a version's entity tag: the hash of its bytes, quoted as RFC 9110 8.8.3 spells
+// an entity tag, which is what a browser sends back in If-None-Match. A version that records no
+// hash has none, and is answered without the header. It is strong, as the hash of the bytes a
+// version will always have is.
+func entityTag(sha *string) string {
+	if sha == nil {
+		return ""
+	}
+	return `"` + *sha + `"`
+}
+
+// pageNotModified answers a page request whose If-None-Match holds the version's entity tag,
+// and reports whether it did. The page route is `no-cache`, so a browser revalidates every
+// frame it starts; without this each revalidation downloaded the whole page again, up to 5 MiB
+// of it.
+//
+// Only the frame's own answer is ever revalidated. A browser that had fetched the page into a
+// frame was observed reusing that stored answer for a later navigation to the same address in a
+// tab - `Vary: Sec-Fetch-Dest` did not keep the two apart - so a 304 to a tab handed it the
+// frame's `text/html` and `inline` and drew the page on Dispatch's own address, which is the one
+// thing A4 forbids (dispatch://INFRA-682). The attachment answer is a download and revalidating
+// it saves a reader nothing, so this refuses every request but the frame's and the guarantee
+// stops depending on a browser honouring `Vary`.
+//
+// The 304 carries every header the 200 would carry but Content-Length, and no body: a cache
+// replaces the headers it stored with the ones a 304 brings (RFC 9111 4.3.4) and keeps the
+// rest, so a 304 that left out the policy or the disposition would leave the frame running
+// under the ones stored when the page was first fetched - which is the thing `no-cache` is here
+// to prevent.
+func pageNotModified(w http.ResponseWriter, r *http.Request, sha *string) bool {
+	tag := entityTag(sha)
+	if tag == "" || !framePageRequest(r) || r.Header.Get("If-None-Match") != tag {
+		return false
+	}
+	writePageHeaders(w, r, sha)
+	w.WriteHeader(http.StatusNotModified)
+	return true
+}
+
+// answerHead answers a HEAD from the version's row alone, under the headers of its route, and
+// reports whether it did. A version the row holds the bytes of has its length in stored, read
+// by octet_length from the stored value's header; a version a file store holds has it in
+// recorded, the size the row keeps. A row with neither is answered false, and its route falls
+// through to the read of the bytes, which keeps the file store's own refusals.
+func answerHead(stored, recorded *int64, headers func(length int64)) bool {
+	length := stored
+	if length == nil {
+		length = recorded
+	}
+	if length == nil {
+		return false
+	}
+	headers(*length)
+	return true
 }
 
 // serveVersionBytes writes a version's bytes under the headers its route sets: a row holding

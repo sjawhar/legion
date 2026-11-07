@@ -243,9 +243,13 @@ func pngBytes(body string) []byte {
 
 // An upload's kind is read from its bytes, never from the type its client declares, which any
 // client sets at will. It is an image only when its bytes are one of the pictures a model is
-// shown (PNG, JPEG, GIF, WebP), stored, kept in the file store and served under the type its
-// bytes are; anything else, an SVG for one, is a file under the type its client declared. The
-// rule is the same on an issue and in an agent's conversation.
+// shown (PNG, JPEG, GIF, WebP), stored and kept in the file store under the type its bytes
+// are; anything else, an SVG for one, is a file under the type its client declared. The rule is
+// the same on an issue and in an agent's conversation.
+//
+// download is the type that file is downloaded under, which is the stored type for every
+// picture and application/octet-stream for the SVG: a browser draws an SVG as a document and
+// runs the script in it, and this route sends no document (downloadContentType).
 func TestAnUploadIsAPictureOnlyWhenItsBytesAreOne(t *testing.T) {
 	memory := filestest.NewMemory()
 	handler, _, _ := newTestServer(t, testServerOptions{files: memory})
@@ -255,13 +259,14 @@ func TestAnUploadIsAPictureOnlyWhenItsBytesAreOne(t *testing.T) {
 			name, declared string
 			content        []byte
 			kind, mime     string
+			download       string
 		}{
-			{"not-a-picture.png", "image/png", []byte("these bytes are text, whatever the type says"), "file", "image/png"},
-			{"undeclared.png", "application/octet-stream", pngBytes("pixels"), "image", "image/png"},
-			{"jpeg-declared-png.png", "image/png", []byte("\xff\xd8\xff\xe0\x00\x10JFIF"), "image", "image/jpeg"},
-			{"animation.gif", "image/gif", []byte("GIF89a\x01\x00\x01\x00"), "image", "image/gif"},
-			{"photo.webp", "application/octet-stream", []byte("RIFF\x24\x00\x00\x00WEBPVP8 frame"), "image", "image/webp"},
-			{"drawing.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), "file", "image/svg+xml"},
+			{"not-a-picture.png", "image/png", []byte("these bytes are text, whatever the type says"), "file", "image/png", "image/png"},
+			{"undeclared.png", "application/octet-stream", pngBytes("pixels"), "image", "image/png", "image/png"},
+			{"jpeg-declared-png.png", "image/png", []byte("\xff\xd8\xff\xe0\x00\x10JFIF"), "image", "image/jpeg", "image/jpeg"},
+			{"animation.gif", "image/gif", []byte("GIF89a\x01\x00\x01\x00"), "image", "image/gif", "image/gif"},
+			{"photo.webp", "application/octet-stream", []byte("RIFF\x24\x00\x00\x00WEBPVP8 frame"), "image", "image/webp", "image/webp"},
+			{"drawing.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), "file", "image/svg+xml", "application/octet-stream"},
 		} {
 			t.Run(owner+"/"+test.name, func(t *testing.T) {
 				response := multipartRequest(t, handler, owner+"/artifacts", map[string]string{"name": test.name}, test.name, test.declared, test.content, "alice")
@@ -279,8 +284,8 @@ func TestAnUploadIsAPictureOnlyWhenItsBytesAreOne(t *testing.T) {
 					t.Errorf("the file store holds it as %q, want %s", stored, test.mime)
 				}
 				served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+created.Artifact.ID+"/versions/1", nil, "alice")
-				if served.Code != http.StatusOK || served.Header().Get("Content-Type") != test.mime || !bytes.Equal(served.Body.Bytes(), test.content) {
-					t.Fatalf("download: status=%d Content-Type %q, want 200 %s with the bytes", served.Code, served.Header().Get("Content-Type"), test.mime)
+				if served.Code != http.StatusOK || served.Header().Get("Content-Type") != test.download || !bytes.Equal(served.Body.Bytes(), test.content) {
+					t.Fatalf("download: status=%d Content-Type %q, want 200 %s with the bytes", served.Code, served.Header().Get("Content-Type"), test.download)
 				}
 			})
 		}

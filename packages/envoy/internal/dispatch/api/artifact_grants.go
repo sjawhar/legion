@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -37,30 +36,32 @@ import (
 const codeHumanOnly = "HUMAN_ONLY"
 
 // grantingPerson is the person at their own browser, the one caller that may write a grant
-// (dispatch://INFRA-682, R9). Their cookie resolves to the credential that holds the `person`
-// scope and names no agent at all (optionalActor's personCredential); every token that gets
-// this far names one — a personal token its id and name, a broker-issued token the session it
-// proved (model.Credential) — and is refused 403 HUMAN_ONLY, whatever scopes it holds. The two
-// credentials that name no agent and hold no scope either, the deployment's shared token and a
-// pod's service-account token, are refused by the scope test here.
+// (dispatch://INFRA-682, R9). The test is identity and not a property: personCredential is the
+// one credential optionalActor's cookie branch returns, the same value for every such request
+// (server.go), so a caller carrying it came through that branch and no other. Every other
+// branch builds a credential of its own — a personal token's names its id, a broker-issued
+// token's the session it proved, the deployment's shared token and a pod's service-account
+// token each hold a scopeless one — and none of them is this value, so each is refused 403
+// HUMAN_ONLY whatever scopes it holds. A caller with no credential at all is refused with
+// them, since nil is not this value either.
 //
-// Past Holds the credential is not nil, which is what makes the two names below safe to read.
+// What the gate is not: it reads no scope and no empty field. A credential a later release
+// gives `person` to, or one that happens to name no token and no session, is still not the
+// value the cookie branch returns, so widening the gate takes a second value named here.
 //
-// optionalActor's second answer, the `human` one this discards, is the same verdict today: it is
-// true on the cookie branch and on no other. The test below is written against the credential's
-// own fields all the same, and deliberately. What "human" means is being loosened as this
-// release migrates to OAuth scopes, and a gate that read it would widen with it, silently, the
-// day something else is allowed to call itself human; a gate that reads `person` with no token
-// id and no session can be widened only by someone editing this line. The `_` is the discard
-// that says so, not an answer nobody had.
+// optionalActor's second answer, the `human` one this discards, is the same verdict today: it
+// is true on the cookie branch and on no other. The test is written against the credential all
+// the same, and deliberately: what "human" means is being loosened as this release migrates to
+// OAuth scopes, and a gate that read it would widen with it, silently, the day something else
+// is allowed to call itself human. The `_` is the discard that says so, not an answer nobody
+// had.
 func (s *server) grantingPerson(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, _, err := s.optionalActor(r)
 	if err != nil {
 		s.writeAuthenticationError(w, err)
 		return model.Actor{}, false
 	}
-	if !actor.Credential.Holds(model.ScopePerson) ||
-		actor.Credential.TokenID != "" || actor.Credential.Session != "" {
+	if actor.Credential != personCredential {
 		writeError(w, codeHumanOnly, http.StatusForbidden,
 			"only a person at their own browser may change a page file's data grants; no token may, whatever scopes it holds")
 		return model.Actor{}, false
@@ -95,102 +96,37 @@ type artifactGrantsChangedPayload struct {
 	ArtifactID string `json:"artifact_id"`
 }
 
-// grantArtifact is an artifact as the grants routes read it: enough to decide whether it is a
-// page file, to own the event, and to write its address. MIME is the stored type of its latest
-// version, which the page test reads with the name (isPageFile): it is "" for an artifact with
-// no version, and for a read that does not select it, which is every read but the page file's
-// own (grantPageColumns).
-type grantArtifact struct {
-	ID        string
-	IssueKey  *string
-	Project   string
-	SessionID *string
-	Slug      string
-	Name      string
-	Kind      string
-	Primary   bool
-	MIME      string
-}
-
-// owner is the collaboration owner the page file's event hangs from: its issue for an issue page
-// file, so the change shows on that issue's log, and the file itself for a project page file,
-// whose event carries the project with no issue key.
-func (a grantArtifact) owner() owner {
-	if a.IssueKey != nil {
-		return issueOwner(*a.IssueKey)
-	}
-	return documentOwner(a.ID)
-}
-
-// ref is the address a reference to this artifact writes.
-func (a grantArtifact) ref() string {
-	return refs.ArtifactRef(a.IssueKey, a.Project, a.SessionID, a.Slug, a.Kind, a.Primary)
-}
-
-// ownedByAnAgentConversation reports whether the artifact belongs to an agent's conversation
-// rather than to an issue or a project: it carries a session and neither key, which is the third
-// arm of artifacts_one_owner (0071_agent_artifacts.up.sql). Such a file's uploads write no event,
-// so nothing could redraw it, and it is neither a page a view block shows nor data it is given.
-func (a grantArtifact) ownedByAnAgentConversation() bool {
-	return a.SessionID != nil && a.IssueKey == nil && a.Project == ""
-}
-
-// isPage reports whether the artifact is a page file a view block can show: an issue's or a
-// project's file whose stored type is text/html or whose name ends .html or .htm. A document is
-// never one — its text is markdown Dispatch rewrites, not the bytes an author sent — and nor is
-// an agent conversation's file.
-func (a grantArtifact) isPage() bool {
-	if a.Kind == "doc" || a.ownedByAnAgentConversation() {
-		return false
-	}
-	return isPageFile(a.Name, a.MIME)
-}
-
-// grantArtifactColumns reads an artifact for these routes, over artifacts aliased a, in the
-// order grantArtifact.scanTargets scans it.
-const grantArtifactColumns = `a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id,
-	a.slug, a.name, a.kind, a.is_primary`
-
-// grantPageColumns adds the latest version's stored type, from one backwards probe of
-// artifact_versions' (artifact_id, number) key, as the summary reads its size. The page test is
-// the only reader of it (grantArtifact.isPage), so only the read that makes that test selects
-// it: the grant list and the granted file's lookup pay no probe for a column they never read.
-const grantPageColumns = grantArtifactColumns + `,
-	coalesce((select v.mime from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1), '')`
-
-// scanTargets is where each column of grantArtifactColumns is scanned, in the constant's order.
-// Every read of those columns scans through it, so the order is written once and a column added
-// to the constant is added here, for all three routes at once, rather than in each read.
-func (a *grantArtifact) scanTargets() []any {
-	return []any{&a.ID, &a.IssueKey, &a.Project, &a.SessionID, &a.Slug, &a.Name, &a.Kind, &a.Primary}
-}
-
-// scanGrantArtifact reads one row of grantArtifactColumns into artifact, and of whatever columns
-// the caller selected past them into past: grantPageColumns' stored type, and nothing else.
-func scanGrantArtifact(row pgx.Row, artifact *grantArtifact, past ...any) error {
-	err := row.Scan(append(artifact.scanTargets(), past...)...)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
-	}
-	return err
-}
+// grantedFileColumns reads a data file in the grant list's join, over artifacts aliased a.
+// It is artifactColumns, in artifactColumns' order, each column named over the alias, because
+// the join's other table carries columns of these names too. The reads that join nothing read
+// artifactColumns itself.
+const grantedFileColumns = `a.id::text, a.issue_key, a.project_key, a.session_id, a.ref_key,
+	a.slug, a.name, a.kind, a.is_primary, coalesce(a.role, ''), a.created_by, a.created_at`
 
 // pageFileOfRequest is the page file {id} names, for all three routes: a grant list belongs to a
 // page file and to nothing else, so an artifact that is not one is refused here rather than
 // answered an empty list it could never fill.
-func (s *server) pageFileOfRequest(ctx context.Context, q queryer, r *http.Request) (grantArtifact, error) {
+//
+// The read selects the latest version's stored type beside the artifact, since that with the
+// name is the page test (isPageFile), and it is the only read of these routes that pays for
+// that probe: a data file need not be a page, and the list's rows are not asked.
+func (s *server) pageFileOfRequest(ctx context.Context, q queryer, r *http.Request) (model.Artifact, error) {
 	id, err := parseArtifactID(r.PathValue("id"))
 	if err != nil {
-		return grantArtifact{}, err
+		return model.Artifact{}, err
 	}
-	var artifact grantArtifact
-	if err := scanGrantArtifact(q.QueryRow(ctx, `
-		select `+grantPageColumns+` from artifacts a where a.id = $1
-	`, id), &artifact, &artifact.MIME); err != nil {
-		return grantArtifact{}, err
+	var storedType string
+	artifact, err := scanArtifact(q.QueryRow(ctx, `
+		select `+artifactColumns+`, `+latestStoredTypeColumn+` from artifacts where id = $1
+	`, id), &storedType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Artifact{}, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
 	}
-	if !artifact.isPage() {
-		return grantArtifact{}, errorf(http.StatusUnsupportedMediaType, "NOT_A_PAGE", "this artifact is not a page file")
+	if err != nil {
+		return model.Artifact{}, err
+	}
+	if !isPageFile(artifact, storedType) {
+		return model.Artifact{}, errorf(http.StatusUnsupportedMediaType, "NOT_A_PAGE", "this artifact is not a page file")
 	}
 	return artifact, nil
 }
@@ -199,7 +135,7 @@ func (s *server) pageFileOfRequest(ctx context.Context, q queryer, r *http.Reque
 // them.
 func (s *server) readArtifactGrants(ctx context.Context, q queryer, pageID string) ([]artifactGrant, error) {
 	rows, err := q.Query(ctx, `
-		select g.id::text, `+grantArtifactColumns+`, g.version, g.granted_by, g.created_at
+		select `+grantedFileColumns+`, g.id::text, g.version, g.granted_by, g.created_at
 		from artifact_grants g join artifacts a on a.id = g.data_artifact_id
 		where g.page_artifact_id = $1
 		order by g.created_at, g.id
@@ -211,13 +147,11 @@ func (s *server) readArtifactGrants(ctx context.Context, q queryer, pageID strin
 	grants := []artifactGrant{}
 	for rows.Next() {
 		var grant artifactGrant
-		var data grantArtifact
-		targets := append([]any{&grant.ID}, data.scanTargets()...)
-		targets = append(targets, &grant.Version, &grant.GrantedBy, &grant.CreatedAt)
-		if err := rows.Scan(targets...); err != nil {
+		data, err := scanArtifact(rows, &grant.ID, &grant.Version, &grant.GrantedBy, &grant.CreatedAt)
+		if err != nil {
 			return nil, err
 		}
-		grant.ArtifactID, grant.Ref, grant.Name = data.ID, data.ref(), data.Name
+		grant.ArtifactID, grant.Ref, grant.Name = data.ID, artifactReference(data), data.Name
 		grants = append(grants, grant)
 	}
 	if err := rows.Err(); err != nil {
@@ -259,44 +193,49 @@ func (s *server) listArtifactGrants(w http.ResponseWriter, r *http.Request) {
 //     settle rather than the bytes an agent sent, so it is no data file.
 //   - AGENT_CONVERSATION_FILE: a file an agent's conversation owns, whose uploads write no
 //     event, so nothing could ever redraw the page from it.
-//   - VERSION_NOT_FOUND: a @vN the file does not have, since such a grant could cover nothing.
+//   - VERSION_NOT_FOUND: a @vN the file does not have, since such a grant could cover nothing,
+//     and a @vN past what a version number can be, which no file could ever have.
 //
 // The file is resolved to its id and the id is what the grant stores, so a later file taking the
 // same name is not covered by it.
-func (s *server) resolveGrantedFile(ctx context.Context, q queryer, reference string) (grantArtifact, *int, error) {
+func (s *server) resolveGrantedFile(ctx context.Context, q queryer, reference string) (model.Artifact, *int, error) {
 	reference = strings.TrimSpace(reference)
 	var version *int
 	if pinned := grantReferencePin.FindStringSubmatch(reference); pinned != nil {
-		number, err := strconv.Atoi(pinned[1])
+		// A version number is an `integer` column, so a pin past that range is a version no
+		// file can have. It is refused here, as a version the file does not have is: sent on,
+		// it would reach Postgres as a number the column cannot hold, and the request a person
+		// can correct would be answered 500.
+		number, err := strconv.ParseInt(pinned[1], 10, 32)
 		if err != nil {
-			return grantArtifact{}, nil, errorf(http.StatusBadRequest, "NOT_A_FILE_REFERENCE",
-				"%q names no version this file could have", reference)
+			return model.Artifact{}, nil, errorf(http.StatusBadRequest, "VERSION_NOT_FOUND",
+				"no file has a version %s, so a grant of it could cover nothing", pinned[1])
 		}
-		version = &number
+		pin := int(number)
+		version = &pin
 		reference = strings.TrimSuffix(reference, pinned[0])
 	}
 	ref, ok := text.ParseRef(reference, s.deps.ServerURL)
 	if !ok || ref.Kind != "artifact" {
-		return grantArtifact{}, nil, errorf(http.StatusBadRequest, "NOT_A_FILE_REFERENCE",
+		return model.Artifact{}, nil, errorf(http.StatusBadRequest, "NOT_A_FILE_REFERENCE",
 			"a grant names one file, as dispatch://<issue or project>/artifact/<slug>[@v<N>]; %q names none", reference)
 	}
-	var data grantArtifact
-	if err := scanGrantArtifact(q.QueryRow(ctx, `
-		select `+grantArtifactColumns+` from artifacts a where a.ref_key = $1
-	`, text.TargetID(ref)), &data); err != nil {
-		var refusal *apiError
-		if errors.As(err, &refusal) && refusal.code == "ARTIFACT_NOT_FOUND" {
-			return grantArtifact{}, nil, errorf(http.StatusBadRequest, "DATA_FILE_NOT_FOUND",
-				"%s is no file of this workspace", reference)
-		}
-		return grantArtifact{}, nil, err
+	data, err := scanArtifact(q.QueryRow(ctx, `
+		select `+artifactColumns+` from artifacts where ref_key = $1
+	`, text.TargetID(ref)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.Artifact{}, nil, errorf(http.StatusBadRequest, "DATA_FILE_NOT_FOUND",
+			"%s is no file of this workspace", reference)
+	}
+	if err != nil {
+		return model.Artifact{}, nil, err
 	}
 	switch {
 	case data.Kind == "doc":
-		return grantArtifact{}, nil, errorf(http.StatusBadRequest, "DATA_FILE_IS_A_DOCUMENT",
+		return model.Artifact{}, nil, errorf(http.StatusBadRequest, "DATA_FILE_IS_A_DOCUMENT",
 			"%s is a document: its text is markdown Dispatch rewrites, not the bytes an upload sent", reference)
-	case data.ownedByAnAgentConversation():
-		return grantArtifact{}, nil, errorf(http.StatusBadRequest, "AGENT_CONVERSATION_FILE",
+	case ownedByAnAgentConversation(data):
+		return model.Artifact{}, nil, errorf(http.StatusBadRequest, "AGENT_CONVERSATION_FILE",
 			"%s belongs to an agent's conversation, whose uploads announce nothing a page could redraw from", reference)
 	}
 	if version != nil {
@@ -305,10 +244,10 @@ func (s *server) resolveGrantedFile(ctx context.Context, q queryer, reference st
 			select true from artifact_versions where artifact_id = $1 and number = $2
 		`, data.ID, *version).Scan(&exists); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return grantArtifact{}, nil, errorf(http.StatusBadRequest, "VERSION_NOT_FOUND",
-					"%s has no version %d, so a grant of it could cover nothing", data.ref(), *version)
+				return model.Artifact{}, nil, errorf(http.StatusBadRequest, "VERSION_NOT_FOUND",
+					"%s has no version %d, so a grant of it could cover nothing", artifactReference(data), *version)
 			}
-			return grantArtifact{}, nil, err
+			return model.Artifact{}, nil, err
 		}
 	}
 	return data, version, nil
@@ -352,7 +291,7 @@ func (s *server) createArtifactGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	grant := artifactGrant{
-		ArtifactID: data.ID, Ref: data.ref(), Name: data.Name, Version: version, GrantedBy: actor.ID,
+		ArtifactID: data.ID, Ref: artifactReference(data), Name: data.Name, Version: version, GrantedBy: actor.ID,
 	}
 	err = tx.QueryRow(r.Context(), `
 		insert into artifact_grants (page_artifact_id, data_artifact_id, version, granted_by)
@@ -368,7 +307,7 @@ func (s *server) createArtifactGrant(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		existing.ArtifactID, existing.Ref, existing.Name = data.ID, data.ref(), data.Name
+		existing.ArtifactID, existing.Ref, existing.Name = data.ID, artifactReference(data), data.Name
 		WriteJSON(w, http.StatusOK, existing)
 		return
 	}
@@ -376,7 +315,7 @@ func (s *server) createArtifactGrant(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, page.owner().event(
+	event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(page).event(
 		"artifact.grants_changed", actor, artifactGrantsChangedPayload{ArtifactID: page.ID},
 	))
 	if err != nil {
@@ -439,7 +378,7 @@ func (s *server) deleteArtifactGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "GRANT_NOT_FOUND", http.StatusNotFound, "grant not found")
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, page.owner().event(
+	event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(page).event(
 		"artifact.grants_changed", actor, artifactGrantsChangedPayload{ArtifactID: page.ID},
 	))
 	if err != nil {

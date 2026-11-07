@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -105,7 +106,9 @@ func TestArtifactPageHeadersForAFrameAndForEveryOtherRequest(t *testing.T) {
 	page := []byte("<!doctype html><title>Chart</title><script>parent.postMessage({type:'dispatch-view:ready'},'*')</script>")
 	file := uploadPageTestFile(t, handler, issue, "chart.html", "text/html", page)
 	digest := sha256.Sum256(page)
-	etag := hex.EncodeToString(digest[:])
+	// The quoted entity tag of RFC 9110 8.8.3, which is what the browser sends back in
+	// If-None-Match; the bare hash it was would match nothing a browser asked with.
+	etag := `"` + hex.EncodeToString(digest[:]) + `"`
 
 	target := "/api/v1/artifacts/" + file.Artifact.ID + "/versions/1/page"
 	answers := map[string]*httptest.ResponseRecorder{
@@ -206,19 +209,49 @@ func TestArtifactPageRefusesAnArtifactOrAVersionThatIsNotThere(t *testing.T) {
 		"/api/v1/artifacts/00000000-0000-0000-0000-000000000000/versions/1/page", http.StatusNotFound, "ARTIFACT_NOT_FOUND")
 }
 
-// TestArtifactPageRefusesAFileThatIsNotAPageAndADocument: 415 NOT_A_PAGE for both. A document is
-// refused though its markdown would render: its text is what Dispatch rewrites as edits settle,
-// not the bytes an author sent.
-func TestArtifactPageRefusesAFileThatIsNotAPageAndADocument(t *testing.T) {
+// TestArtifactPageRefusesEveryFileThatIsNotAPageFile: 415 NOT_A_PAGE for each, to GET and to
+// HEAD. They are the four arms of the page test (isPageFile), which the grants routes make too,
+// so each file refused here is one whose grants those routes refuse to list:
+//
+//   - a file that is HTML by neither name nor stored type;
+//   - a document, though its markdown would render: its text is what Dispatch rewrites as edits
+//     settle, not the bytes an author sent;
+//   - an agent conversation's file, whose uploads write no event, so nothing could redraw a page
+//     from it;
+//   - a version of a file whose latest version is no longer HTML, since the test reads the
+//     latest version's stored type and the file is a page file or is not, at every version of it.
+func TestArtifactPageRefusesEveryFileThatIsNotAPageFile(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := pageTestIssue(t, handler)
 	notes := uploadPageTestFile(t, handler, issue, "notes.txt", "text/plain", []byte("plain notes\n"))
 	document := uploadPageTestFile(t, handler, issue, "notes.md", "text/markdown", []byte("# Notes\n\nA paragraph.\n"))
+	const session = "01a1058e-f14f-7684-87eb-3dc885955553"
+	conversation := uploadTestFile(t, handler, "/api/v1/agents/"+session+"/artifacts",
+		"session.html", "text/html", []byte("<!doctype html><title>Session</title>"))
 
 	requirePageRefusal(t, handler, "a file that is not a page",
 		"/api/v1/artifacts/"+notes.Artifact.ID+"/versions/1/page", http.StatusUnsupportedMediaType, "NOT_A_PAGE")
 	requirePageRefusal(t, handler, "a document",
 		"/api/v1/artifacts/"+document.Artifact.ID+"/versions/1/page", http.StatusUnsupportedMediaType, "NOT_A_PAGE")
+	requirePageRefusal(t, handler, "an agent conversation's HTML file",
+		"/api/v1/artifacts/"+conversation.Artifact.ID+"/versions/1/page", http.StatusUnsupportedMediaType, "NOT_A_PAGE")
+
+	// A file stored as HTML at v1 and as something else at v2, under a name that is no page's:
+	// the page test reads the latest version's type, so neither version is served and the
+	// grants routes refuse the same file, which is the agreement the one predicate is for.
+	stopped := uploadPageTestFile(t, handler, issue, "report", "text/html", []byte("<!doctype html><title>v1</title>"))
+	if second := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts",
+		map[string]string{"name": "report"}, "report", "application/json", []byte(`{"at":"v2"}`), "alice"); second.Code != http.StatusCreated {
+		t.Fatalf("second version of report: status=%d body=%s", second.Code, second.Body.String())
+	}
+	for _, number := range []string{"1", "2"} {
+		requirePageRefusal(t, handler, "version "+number+" of a file whose latest version is not HTML",
+			"/api/v1/artifacts/"+stopped.Artifact.ID+"/versions/"+number+"/page", http.StatusUnsupportedMediaType, "NOT_A_PAGE")
+	}
+	grants := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+stopped.Artifact.ID+"/grants", nil, "alice")
+	if grants.Code != http.StatusUnsupportedMediaType || decodeBody[pageRefusal](t, grants).Code != "NOT_A_PAGE" {
+		t.Errorf("the grants of that file = %d %s, want the 415 NOT_A_PAGE the page route makes", grants.Code, grants.Body.String())
+	}
 }
 
 // TestArtifactPageRefusesAPageOverTheLimit: a version past 5 MiB is 413 PAGE_TOO_LARGE, to GET
@@ -281,5 +314,145 @@ func TestAHeadOfAStoreBackedPageAnswersItsLengthWithoutReadingTheObject(t *testi
 	served := pageRequest(t, handler, http.MethodGet, target, "iframe")
 	if served.Code != http.StatusOK || served.Body.Len() != len(body) {
 		t.Fatalf("GET after the HEAD: status=%d, %d body bytes, want 200 with %d", served.Code, served.Body.Len(), len(body))
+	}
+}
+
+// TestArtifactPageAnswersNotModifiedToTheEntityTagItSent: the page route is `no-cache`, so a
+// browser revalidates every time a frame starts; the second ask carries the tag the first
+// answer sent and is answered 304 with no body, so a reader who scrolls back to a view block
+// downloads the page once. The 304 carries the headers the 200 carried, because a cache
+// replaces what it stored with what a 304 brings: one that left them out would keep the frame
+// running under the policy stored the first time.
+func TestArtifactPageAnswersNotModifiedToTheEntityTagItSent(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := pageTestIssue(t, handler)
+	body := []byte("<!doctype html><title>Chart</title><p>drawn once")
+	file := uploadPageTestFile(t, handler, issue, "chart.html", "text/html", body)
+	target := "/api/v1/artifacts/" + file.Artifact.ID + "/versions/1/page"
+
+	first := pageRequest(t, handler, http.MethodGet, target, "iframe")
+	if first.Code != http.StatusOK || first.Body.String() != string(body) {
+		t.Fatalf("the first GET: status=%d body=%s, want 200 with the page", first.Code, first.Body.String())
+	}
+	etag := first.Header().Get("ETag")
+	digest := sha256.Sum256(body)
+	if etag != `"`+hex.EncodeToString(digest[:])+`"` {
+		t.Fatalf("the ETag = %q, want the quoted hash of the page's bytes", etag)
+	}
+
+	again := httptest.NewRequest(http.MethodGet, target, nil)
+	again.Header.Set("X-Dispatch-User", "alice")
+	again.Header.Set("Sec-Fetch-Dest", "iframe")
+	again.Header.Set("If-None-Match", etag)
+	revalidated := httptest.NewRecorder()
+	handler.ServeHTTP(revalidated, again)
+	if revalidated.Code != http.StatusNotModified {
+		t.Fatalf("the revalidation: status=%d body=%s, want 304", revalidated.Code, revalidated.Body.String())
+	}
+	if revalidated.Body.Len() != 0 {
+		t.Errorf("the 304 carries %d body bytes, want none", revalidated.Body.Len())
+	}
+	if got := revalidated.Header().Get("Content-Length"); got != "" {
+		t.Errorf("the 304's Content-Length = %q, want none", got)
+	}
+	for header, want := range map[string]string{
+		"ETag":                    etag,
+		"Cache-Control":           "private, no-cache",
+		"Vary":                    "Sec-Fetch-Dest",
+		"Content-Security-Policy": wantPagePolicy,
+		"Content-Type":            "text/html; charset=utf-8",
+		"Content-Disposition":     "inline",
+	} {
+		if got := revalidated.Header().Get(header); got != want {
+			t.Errorf("the 304's %s = %q, want %q", header, got, want)
+		}
+	}
+
+	// Only the frame's answer is revalidated. A browser that had fetched the page into a frame
+	// was observed reusing that stored answer for a later navigation to the same address in a
+	// tab, `Vary: Sec-Fetch-Dest` notwithstanding, so a 304 to a tab would hand it the frame's
+	// `text/html` and `inline` and draw the page on Dispatch's own address - the one thing A4
+	// forbids. Every request but the frame's gets the attachment in full, whatever tag it sends.
+	for _, dest := range []string{"document", "empty", "script", ""} {
+		tab := httptest.NewRequest(http.MethodGet, target, nil)
+		tab.Header.Set("X-Dispatch-User", "alice")
+		if dest != "" {
+			tab.Header.Set("Sec-Fetch-Dest", dest)
+		}
+		tab.Header.Set("If-None-Match", etag)
+		answered := httptest.NewRecorder()
+		handler.ServeHTTP(answered, tab)
+		if answered.Code != http.StatusOK || answered.Body.String() != string(body) {
+			t.Errorf("Sec-Fetch-Dest %q revalidating: status=%d %d body bytes, want 200 with the page",
+				dest, answered.Code, answered.Body.Len())
+		}
+		if got := answered.Header().Get("Content-Type"); got != "application/octet-stream" {
+			t.Errorf("Sec-Fetch-Dest %q revalidating: Content-Type = %q, want application/octet-stream", dest, got)
+		}
+	}
+
+	// A tag of another version is no match, and that ask is answered the page in full.
+	stale := httptest.NewRequest(http.MethodGet, target, nil)
+	stale.Header.Set("X-Dispatch-User", "alice")
+	stale.Header.Set("Sec-Fetch-Dest", "iframe")
+	stale.Header.Set("If-None-Match", `"0000000000000000000000000000000000000000000000000000000000000000"`)
+	served := httptest.NewRecorder()
+	handler.ServeHTTP(served, stale)
+	if served.Code != http.StatusOK || served.Body.String() != string(body) {
+		t.Fatalf("a request under another tag: status=%d body=%s, want 200 with the page", served.Code, served.Body.String())
+	}
+}
+
+// TestAFileVersionDownloadDrawsNoDocumentOnDispatchsOwnOrigin: the plain download route, the
+// one that serves any file version's bytes. An uploaded .html is answered
+// application/octet-stream, so no engine draws it; every answer of the route carries the
+// sandbox policy, so an engine that drew one anyway would draw it with an opaque origin,
+// holding no cookie of Dispatch's and reaching nothing - and so could not POST a data grant as
+// the reader (R9, dispatch://INFRA-682).
+//
+// The control that matters as much: a PNG is still answered image/png, so the pictures the web
+// app draws with <img src> are untouched. A policy on a subresource is ignored by the engine
+// that fetched it, so the header costs that path nothing.
+func TestAFileVersionDownloadDrawsNoDocumentOnDispatchsOwnOrigin(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := pageTestIssue(t, handler)
+	for _, file := range []struct {
+		what     string
+		name     string
+		declared string
+		content  []byte
+		download string
+	}{
+		{"an uploaded page", "chart.html", "text/html", []byte("<!doctype html><title>Chart</title><script>fetch('/api/v1/me')</script>"), "application/octet-stream"},
+		{"an XHTML file", "page.xhtml", "application/xhtml+xml", []byte(`<html xmlns="http://www.w3.org/1999/xhtml"/>`), "application/octet-stream"},
+		{"a drawing", "drawing.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>`), "application/octet-stream"},
+		{"an XML document", "feed.xml", "text/xml", []byte(`<?xml version="1.0"?><feed/>`), "application/octet-stream"},
+		{"an XML file of the other type", "data.xml", "application/xml", []byte(`<?xml version="1.0"?><data/>`), "application/octet-stream"},
+		{"a picture", "shot.png", "image/png", pngBytes("pixels"), "image/png"},
+		{"a file of no type a browser draws", "attempts.json", "application/json", []byte(`{"attempts":3}`), "application/json"},
+	} {
+		t.Run(file.what, func(t *testing.T) {
+			uploaded := uploadPageTestFile(t, handler, issue, file.name, file.declared, file.content)
+			target := "/api/v1/artifacts/" + uploaded.Artifact.ID + "/versions/1"
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				response := dispatchRequest(t, handler, method, target, nil, "alice")
+				if response.Code != http.StatusOK {
+					t.Fatalf("%s %s: status=%d body=%s, want 200", method, file.name, response.Code, response.Body.String())
+				}
+				for header, want := range map[string]string{
+					"Content-Type":            file.download,
+					"Content-Disposition":     "attachment",
+					"X-Content-Type-Options":  "nosniff",
+					"Content-Security-Policy": "sandbox; default-src 'none'",
+				} {
+					if got := response.Header().Get(header); got != want {
+						t.Errorf("%s %s: %s = %q, want %q", method, file.name, header, got, want)
+					}
+				}
+			}
+			if served := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice"); !bytes.Equal(served.Body.Bytes(), file.content) {
+				t.Errorf("%s's bytes = %q, want what was uploaded", file.name, served.Body.String())
+			}
+		})
 	}
 }
