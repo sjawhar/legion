@@ -724,8 +724,8 @@ func matchOpChar(l *lexer, i int) int {
 // That is what keeps this reading's cost the text's length rather than its square. Flex asks
 // {operator} and {xcstart} about every byte of such a run while their actions take one or two
 // bytes of it at a time (yyless(nchars), yyless(2)), so measuring the run on every byte measures
-// it once per byte of itself, and 64 KiB of +- read thousands of times its own length that way
-// against the 10.00 times it reads this way (TestOperatorRunLexingIsLinear). This reader is
+// it once per byte of itself, and 64 KiB of +- read between 524,294 and 655,366 times its own
+// length that way against the 10.00 times it reads this way (TestOperatorRunLexingIsLinear). This reader is
 // handed what pg_stat_activity holds, which track_activity_query_size bounds at 1 MB.
 type opRun struct {
 	from, to int // the run itself, [from, to)
@@ -772,7 +772,7 @@ var opRunScanned func(run opRun, slash, dash int)
 // bytes of the whole run. That reuse is the branch a text of comments inside one operator run
 // takes, and the case of TestOperatorRunLexingIsLinear that exercises it is "+/**/": with the
 // branch taken out, every other test of this package stays green while 64 KiB of that text reads
-// 13,110.4 times its own length, which that case is what measures.
+// 13,110.4 times its own length, which is what that case measures.
 func (l *lexer) measureOpRun(i int) opRun {
 	run := opRun{from: i, to: i, qualify: -1}
 	if i >= l.op.from && i < l.op.to {

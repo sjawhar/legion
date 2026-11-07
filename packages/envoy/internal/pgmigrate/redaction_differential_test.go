@@ -773,27 +773,43 @@ func TestRedactionAgainstServerOutcomes(t *testing.T) {
 	// over a sample it had compared no success in: this is the check that would have said so on
 	// the day it landed.
 	//
-	// One check, on the different statements rather than on the pairs: ranTexts is filled where
-	// ran is counted, so the pairs can never be the smaller of the two and a floor on them could
-	// never fail by itself. What the pairs are good for is a figure beside this one, reported and
-	// not bounded - measured on 2026-11-07, 6,264 pairs over 3,431 statements, a ratio of 1.83,
-	// under two because a statement such as select U&'zqz' runs under standard_conforming_strings
-	// on and is refused under off. A sweep that lost a setting RAISES that ratio to 2.00 rather
-	// than lowering it, since this leg asks every text once per entry of settings and a lost
-	// setting means asking the same one twice; so no bound on it would catch that, and what does
-	// catch it is already here three times over - the fixed-text assertion, since U&'zqz' stops
-	// raising its class; the per-class tally, since that class's generated count falls to 0; and
-	// the per-connection check of standard_conforming_strings at the top of this leg.
+	// A floor on the pairs could never fail by itself, since ranTexts is filled where ran is
+	// counted and the pairs are never the smaller number, so the floor below is on the different
+	// statements. The pairs are bounded from ABOVE instead, which is a question of their own: this
+	// leg asks every text once per entry of settings, so a sweep that lost a setting asks the
+	// same one twice and every statement the server runs it runs under both asks, making the
+	// pairs exactly twice the statements. A correct sweep cannot reach that, because the corpus
+	// itself builds texts the two settings answer differently - a statement
+	// standard_conforming_strings makes the server run under one and refuse under the other.
+	// Measured on 2026-11-07: 6,264 pairs over 3,431 statements, which is 2,833 statements run
+	// under both settings and 598 run under exactly one, so the bound's margin is 598 pairs,
+	// 8.7 per cent below where it fires.
 	//
-	// So this floor is on the corpus's own reach. Measured on 2026-11-07: 3,431 of them
-	// behind those pairs, close to the twice a two-setting sample implies, so nearly every text
-	// the server ran it ran under both settings. Four of the sample's own statements are ones the
-	// server runs rather than texts the corpus built: the three seeded for that purpose, and one
-	// of scanlErrors' nineteen fixed statements, select U&'zqz', which raises its class under
-	// standard_conforming_strings off and runs under on. The other eighteen are refusals under
-	// both settings by construction, which is what they are for. So this floor stands on the
-	// corpus's own reach but for those four, and a collapsed corpus leaves four statements rather
-	// than one, which is what makes the number the sample's own rather than the class table's.
+	// That premise lives in the corpus's own reach, not in the fixed set: 597 of those 598 are
+	// texts the corpus built, so the bound keeps its reason with any fixed statement removed.
+	// What would move it is an alphabet or depth change that stops the two settings disagreeing,
+	// which the per-class tally below would show as well.
+	//
+	// What else catches a lost setting, forced both ways rather than argued: losing off (6,796
+	// pairs over 3,398) fails the fixed-text assertion and the per-class tally, since U&'zqz'
+	// stops raising its class and that class's generated count falls to 0, and the lost-marker
+	// and refusal checks below with them; losing on (5,732 over 2,866) fails those two checks
+	// ALONE, since U&'zqz' still raises its class under off. The per-connection check of
+	// standard_conforming_strings fires on neither, comparing as it does against the same
+	// settings array: what it catches is a connection that did not take the option it was asked
+	// for. So a lost on is caught by two checks rather than four, which is why this bound is
+	// worth its line. Those readings were taken before the bound existed; with it here the bound's
+	// own Fatalf stops the run first, so a reader driving either sweep sees this line and not
+	// them - which is worth knowing, since a red attributed to the wrong assertion is how a claim
+	// about these guards went wrong once already.
+	if ran >= 2*len(ranTexts) {
+		t.Fatalf("the server ran %d (text, setting) pairs over %d different statements, exactly twice or more: every statement it ran it ran under both asks, which two different settings cannot do while the corpus builds texts they answer differently - 598 of them at the head this was measured at", ran, len(ranTexts))
+	}
+	// And the floor itself, on the corpus's own reach, measured in the same run as the counts
+	// above. Four of the sample's own statements are ones the server runs rather than texts the
+	// corpus built: the three seeded for that purpose, and U&'zqz'. The other eighteen fixed
+	// statements are refusals under both settings by construction, which is what they are for, so
+	// this floor stands on the corpus's own reach but for those four.
 	//
 	// Which question each number answers, since none of the three is a measure of quality: this
 	// one is diversity of texts and the one above is collapse, while shape is the per-class tally
@@ -918,10 +934,10 @@ func serverSample() []sampleText {
 	// Three statements the server runs, which make the count of compared successes the sample's
 	// own rather than the class table's: a marker inside a literal, one as a column alias, and
 	// one in a comment, each of which PostgreSQL answers a row to under either setting. Without
-	// them a collapsed corpus would still leave that count at 1, since select U&'zqz' runs under
-	// standard_conforming_strings on, so the checks above would be reading a number the class
-	// table happens to produce. They are 6 of the 6,264 pairs and 3 of the 3,431 statements
-	// those checks stand on, so what they fix is where the number comes from, not its size.
+	// them that count would be whatever the class table happens to produce - one statement, since
+	// select U&'zqz' runs under standard_conforming_strings on. They are a handful of the pairs
+	// and statements the checks above stand on, so what they fix is where the number comes from
+	// rather than its size.
 	for _, ran := range []string{
 		"select '" + marker + "'",
 		"select 1 as " + marker,
