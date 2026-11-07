@@ -352,8 +352,21 @@ answers `503` with `Retry-After: 1` and claims nothing until the view answers ag
 than hand a live holder's role away because its renewal aged with nothing able to move it. A
 claim from the process the standing claim already names is granted through that refill, since
 it takes the role from nobody. `GET /v1/roles/<role>` answers the holding process's
-`client_instance_id` beside the holder's session id, which is how a refused claimant tells its
-own session id held by another process from a different session.
+`client_instance_id` beside the holder's session id where the claim names a process, and leaves
+the field out where it names none, which is how a refused claimant tells its own session id
+held by another process from a different session.
+
+A registration renews a claim only while the interest record it leaves still names that role's
+lane topic. The claim writes that topic onto the record and a hand-back removes it, so a client
+that gives a role up stops renewing it even where the release freed no claim, and the reaper
+frees the role one live window later; a registration that carries no topic list at all says
+nothing about the lanes its session follows and renews every claim its process holds. A release
+that loses its conditional delete to a record written since is not reported as a release: the
+claim is read again, a record still naming that same session and that same process is its own
+holder's renewal, and the delete goes out again at the revision that renewal left, three
+deletes in all. A claim renewed under every one of them is left standing and fails the request
+naming the role, so a client that is handing a role back sends the hand-back again rather than
+leaving the role held while its own registrations renew the claim.
 
 Dispatch judges a role route's holder by the same two windows, and both processes carry the same
 values: give every listener of a deployment and Dispatch's server the same
