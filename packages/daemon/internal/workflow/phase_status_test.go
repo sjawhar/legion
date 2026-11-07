@@ -55,28 +55,38 @@ func TestEveryPhaseHasAStatusEntry(t *testing.T) {
 	}
 }
 
-// A child's own first phase writes its status: the move into planning queues the in_progress that
-// tells the person reading Dispatch that Legion works the child, in the transaction that records
-// the phase. No status repair runs here — the write comes from the transition itself. The move on
-// into implementing writes nothing more, because in_progress is the status the issue already
-// shows, and it keeps it.
+// A transition writes the status of the phase it enters, in the transaction that records the
+// phase: the move into implementing queues nothing more, because in_progress is the status the
+// issue already shows and it keeps it, and the move on into testing queues that phase's own.
+// No status repair runs here — each write comes from the transition itself.
+//
+// Recording a child under a tree whose gate is open is no longer one of those transitions. The
+// cap counts the issues at work, so the child's first phase takes a slot of its own: the fact
+// records the child at admitted, in the waiting line, and admission's promotion is what moves it
+// into planning and writes its in_progress (dispatch://INFRA-980, acceptance A3 and A4). Before
+// this release the one fact did both, which is what this test asserted when main wrote it.
 func TestATransitionWritesTheStatusOfThePhaseItEnters(t *testing.T) {
 	pool := migratedPool(t)
+	parent := "LEGION-208"
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208",
 		Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
-	// The tree's gate is open, so recording the child moves it from admitted into planning in the
-	// one fact.
+	// The child is recorded where the line finds it, and nothing of its own status is written
+	// until the slot comes.
 	applyRefusingNothing(t, pool, engine, intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 1, Type: "issue.updated",
 		Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V"})
-	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
-		t.Fatalf("the child = %s once the gate's tree recorded it, want planning", got)
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s once the gate's tree recorded it, want admitted: its first phase waits for a slot of its own", got)
 	}
-	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-209", "in_progress", "todo"})
+	assertQueuedStatusWrites(t, pool)
 
+	// The promotion the slot brings, as admission makes it: the child stands in planning with
+	// in_progress written. From here the transitions are the workflow's own again.
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208",
+		Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "V"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "planner-claim"})
 	applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "planner-claim",
 		Summary: "the plan", HandoffRecord: "plan", HandoffVersion: 1})
@@ -86,5 +96,5 @@ func TestATransitionWritesTheStatusOfThePhaseItEnters(t *testing.T) {
 	if got := issueRecord(t, pool, "LEGION-209"); got.Status != "in_progress" {
 		t.Fatalf("the child in implementing carries status %q, want in_progress", got.Status)
 	}
-	assertQueuedStatusWrites(t, pool, statusRow{"LEGION-209", "in_progress", "todo"})
+	assertQueuedStatusWrites(t, pool)
 }

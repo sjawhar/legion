@@ -2,6 +2,7 @@ import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
+import { AGENT_LIST_REFILLING } from "../../api/client";
 import { projectIssuesQuery } from "../../api/queries";
 import { Chip } from "../../components/Chip";
 import { MultiSelect } from "../../components/MultiSelect";
@@ -100,6 +101,18 @@ export function IssueFilters({
             {label}
           </Chip>
         ))}
+        {filters.unclaimedUnchecked === undefined ? null : (
+          <p
+            className={`text-sm ${textSecondaryOnCanvas}`}
+            data-testid="unclaimed-unchecked"
+            role="status"
+          >
+            Couldn't check which claims have lapsed, so every claim counts as held:{" "}
+            {filters.unclaimedUnchecked === "refilling"
+              ? AGENT_LIST_REFILLING
+              : "Envoy listener unreachable."}
+          </p>
+        )}
       </div>
       {filtersExpanded ? (
         <div className="mb-4 flex flex-wrap items-end gap-3" id="project-issue-filters">

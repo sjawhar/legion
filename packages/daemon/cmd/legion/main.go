@@ -91,10 +91,10 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
-	"handoffs":       {runHandoffs, "copy each in-flight branch's committed .legion/ handoff files onto its Dispatch issue, then remove .legion/ from the branch"},
 	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
-	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, provision the issue's workspace; and a repository cache pod's process"},
+	"workspace-init": {runWorkspaceInit, "an issue pod's init containers: fetch the repository, clone the skills marketplace, provision the issue's workspace; and a repository cache pod's process"},
+	"skills-check":   {runSkillsCheck, "compare the skills a role installed with the commit its pod's init container recorded (a role's start wrapper runs it, never a person)"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
 	"git-credential": {runGitCredential, "git's credential helper in every shared clone: answers git with the token of the owner the repository's path names (git runs it, never a person)"},
 	"gh":             {runGh, "the gh first on a pane's or pod's PATH: runs the real gh with the gh directory of the owner the command names (a pane runs it, never a person)"},
@@ -545,8 +545,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "legion %s on %s — schema %d, boot %d started %s (first boot %s)\n",
 		state.Daemon.Project, address, state.Daemon.SchemaVersion, state.Daemon.Boots,
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
-	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
-		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintf(stdout, "admission: %d issues hold a slot, cap %d, %d waiting; %d live trees; %d issues\n",
+		len(state.Admission.Active), state.Admission.Cap, len(state.Admission.Waiting),
+		len(state.Admission.Trees), len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
 	fmt.Fprintln(stdout, memorySummary(state.Issues))
 	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
@@ -555,6 +556,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims, strandedSuspenders(ctx, op, state.StrandedClaims)))
+	if wakes := wakesWaitingSummary(state.WakesWaiting); wakes != "" {
+		fmt.Fprintln(stdout, wakes)
+	}
 	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
 		fmt.Fprintln(stdout, line)
 	}
@@ -632,10 +636,11 @@ func memorySummary(issues map[string]api.Issue) string {
 }
 
 // awaitingSummary is the one line an operator reads for the roots that gave their admission slot
-// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
-// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
-// a person answered (each at the front of the waiting line for the next free slot), and each by
-// key with what it waits on and whether, when and by what act it was answered.
+// up to wait on a person (api.WaitingOnView): an unanswered one holds no slot and is in neither
+// `active` nor `waiting`, only among the live trees, so without this line the capacity it freed
+// looks idle. It says how many, how many a person answered (each at the front of the waiting line
+// for the next free slot), and each by key with what it waits on and whether, when and by what act
+// it was answered.
 func awaitingSummary(issues map[string]api.Issue) string {
 	var keys []string
 	answered := 0
@@ -834,6 +839,23 @@ func strandedSummary(stranded []api.StrandedClaim, suspended api.Suspenders) str
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// wakesWaitingSummary is the line an operator reads for the wakes the daemon's pacing is holding
+// until their turn (api.State.WakesWaiting): how many, and each by claim with what kind of wake it
+// is and when it is due, in the state's own claim order. It is empty when nothing waits, and the
+// caller then prints nothing: every other line here says "none" because what it counts is always
+// worth a glance, while a wake queue is empty at every moment outside a restart or a plugin wave,
+// and a line saying so on every read would be noise in the one place an operator reads most.
+func wakesWaitingSummary(wakes []api.WakeWaiting) string {
+	if len(wakes) == 0 {
+		return ""
+	}
+	held := make([]string, len(wakes))
+	for i, wake := range wakes {
+		held[i] = fmt.Sprintf("%s %s due %s", wake.Claim, wake.Kind, wake.DueAt.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("wakes waiting: %d — %s", len(wakes), strings.Join(held, "; "))
 }
 
 // strandedSuspenders is who suspended each stranded claim, which the state body does not carry:

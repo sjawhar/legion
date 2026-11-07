@@ -124,6 +124,16 @@ type Config struct {
 	PromptFailureLimit int
 	PromptRetireLimit  int
 
+	// WorkerWakesPerMinute and WorkerWakeBurst are the pace of the wakes the daemon causes — the
+	// role processes it launches, and the tasks and notices it queues to wake a live session in
+	// place of a launch — so that a restart or a wave of plugin deliveries does not push an
+	// Anthropic organization over its per-minute uncached-input cap (internal/wakepace).
+	// `worker_wakes_per_minute` is 8 by default and `worker_wake_burst` 1, which hold a minute to
+	// 9 paced wakes. A rate of 0 turns the pacing off: nothing is paced then, and no bound of this
+	// kind holds.
+	WorkerWakesPerMinute int
+	WorkerWakeBurst      int
+
 	// OperatorTokenFile is the bearer the operator routes compare against, as a path; "" when
 	// the file sets none.
 	OperatorTokenFile string
@@ -161,8 +171,15 @@ type Config struct {
 	// inside one run rather than wait out a day of real time.
 	PodUpdateRetask time.Duration
 	PodUpdateNotice time.Duration
-	ReviewRoundCap  int
-	MaxFixAttempts  int
+	// PodUpdateMaxOpenRounds is how many issues may hold an open pod-update round at once
+	// (`pod_update_max_open_rounds`), and PodUpdateRoundsPerMinute how many rounds one sweep may
+	// open in a minute (`pod_update_rounds_per_minute`). Both are pointers because a file that
+	// leaves the key out asks for no limit at all, which no number says: there is no default to
+	// fall back on, and nil is how a sweep reads "open as many as the fleet needs".
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           int
+	MaxFixAttempts           int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers). The same tick runs the
@@ -194,8 +211,12 @@ const (
 	defaultPort         = 13370
 	defaultBind         = "127.0.0.1"
 	defaultAdmissionCap = 4
-	defaultRuntimeName  = "tmux"
-	defaultEnvoyURL     = "http://127.0.0.1:9020"
+	// defaultWorkerWakesPerMinute is `worker_wakes_per_minute`'s default. The burst's default is a
+	// countKeys row, because that reader is the one that refuses a burst below 1; the rate is read
+	// on its own, since 0 is how an operator turns the pacing off.
+	defaultWorkerWakesPerMinute = 8
+	defaultRuntimeName          = "tmux"
+	defaultEnvoyURL             = "http://127.0.0.1:9020"
 
 	// maxTimerSeconds is the shipped bound on every duration key (config.ts MAX_TIMER_SECONDS):
 	// the largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's
@@ -221,8 +242,8 @@ var durationKeys = []struct {
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
-// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS) and the
-// supervision budgets.
+// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS), the
+// supervision budgets, and the wake pacing's burst.
 var countKeys = []struct {
 	key          string
 	defaultValue int
@@ -232,6 +253,7 @@ var countKeys = []struct {
 	{"launch_failure_limit", 3, func(c *Config) *int { return &c.LaunchFailureLimit }},
 	{"prompt_failure_limit", 3, func(c *Config) *int { return &c.PromptFailureLimit }},
 	{"prompt_retire_limit", 2, func(c *Config) *int { return &c.PromptRetireLimit }},
+	{"worker_wake_burst", 1, func(c *Config) *int { return &c.WorkerWakeBurst }},
 }
 
 // tossedKeys are the settings that no longer exist, mapped to why. A file carrying one is refused
@@ -263,26 +285,29 @@ const gatesMergeMessage = "gates.merge is not a Legion setting: human approval o
 // fileConfig holds the modelled keys as they were read: a pointer per key, so a key the file
 // leaves out is distinguishable from one it sets to a zero value.
 type fileConfig struct {
-	Project           *string
-	Port              *int
-	Bind              *string
-	AdvertiseHost     *string
-	PostgresDSN       *string
-	StateDir          *string
-	AdmissionCap      *int
-	Kubernetes        *Kubernetes
-	Tmux              *Tmux
-	DaemonURL         *string
-	OmpInvocation     *string
-	OmpLaunchPrefix   []string
-	ProviderKeys      []ProviderKey
-	Instructions      *string
-	WorkerStreamPort  *int
-	OperatorTokenFile *string
-	EnvoyURL          *string
-	NatsURLs          []string
-	EnvoyTokenFile    *string
-	NatsNkeySeedFile  *string
+	Project          *string
+	Port             *int
+	Bind             *string
+	AdvertiseHost    *string
+	PostgresDSN      *string
+	StateDir         *string
+	AdmissionCap     *int
+	Kubernetes       *Kubernetes
+	Tmux             *Tmux
+	DaemonURL        *string
+	OmpInvocation    *string
+	OmpLaunchPrefix  []string
+	ProviderKeys     []ProviderKey
+	Instructions     *string
+	WorkerStreamPort *int
+	// WorkerWakesPerMinute is `worker_wakes_per_minute`, read on its own rather than as a count
+	// key: 0 is a value an operator may set, and the count reader refuses it.
+	WorkerWakesPerMinute *int
+	OperatorTokenFile    *string
+	EnvoyURL             *string
+	NatsURLs             []string
+	EnvoyTokenFile       *string
+	NatsNkeySeedFile     *string
 	// NatsDaemonNkeySeedFile is `nats_daemon_nkey_seed_file`.
 	NatsDaemonNkeySeedFile *string
 	DispatchURL            *string
@@ -294,15 +319,20 @@ type fileConfig struct {
 	ProductionCheckBound   *time.Duration
 	PodUpdateRetask        *time.Duration
 	PodUpdateNotice        *time.Duration
-	ReviewRoundCap         *int
-	MaxFixAttempts         *int
-	Controller             *string
-	Capabilities           *Capabilities
-	Durations              map[string]int
-	Counts                 map[string]int
-	WorkerBackends         map[claim.Role]runtime.Backend
-	RoleConfigFiles        map[claim.Role][]string
-	RepositoryRenames      []ghrepo.Rename
+	// PodUpdateMaxOpenRounds is `pod_update_max_open_rounds` and PodUpdateRoundsPerMinute
+	// `pod_update_rounds_per_minute`; each stays nil when the file leaves its key out, which is
+	// how resolve tells an absent key from a number and leaves Config's own pointer nil.
+	PodUpdateMaxOpenRounds   *int
+	PodUpdateRoundsPerMinute *int
+	ReviewRoundCap           *int
+	MaxFixAttempts           *int
+	Controller               *string
+	Capabilities             *Capabilities
+	Durations                map[string]int
+	Counts                   map[string]int
+	WorkerBackends           map[claim.Role]runtime.Backend
+	RoleConfigFiles          map[claim.Role][]string
+	RepositoryRenames        []ghrepo.Rename
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -402,6 +432,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Instructions, err = readNonEmptyString(value, key)
 		case "worker_stream_port":
 			file.WorkerStreamPort, err = readInt(value, key)
+		case "worker_wakes_per_minute":
+			file.WorkerWakesPerMinute, err = readInt(value, key)
 		case "operator_token_file":
 			file.OperatorTokenFile, err = readNonEmptyString(value, key)
 		case "envoy_url":
@@ -432,6 +464,12 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.PodUpdateRetask, err = readHours(value, key)
 		case "pod_update_notice_hours":
 			file.PodUpdateNotice, err = readHours(value, key)
+		// Both round caps are read here rather than through countKeys, which carries a default
+		// for every key it holds and so could never report that the operator named neither.
+		case "pod_update_max_open_rounds":
+			file.PodUpdateMaxOpenRounds, err = readPositiveInteger(value, key, 0)
+		case "pod_update_rounds_per_minute":
+			file.PodUpdateRoundsPerMinute, err = readPositiveInteger(value, key, 0)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -893,6 +931,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Bind:                 defaultBind,
 		Runtime:              Runtime{Name: defaultRuntimeName},
 		AdmissionCap:         defaultAdmissionCap,
+		WorkerWakesPerMinute: defaultWorkerWakesPerMinute,
 		EnvoyURL:             defaultEnvoyURL,
 		Gates:                Gates{Design: DesignGateRootIssues},
 		Linger:               72 * time.Hour,
@@ -964,6 +1003,14 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, errors.New("admission_cap must be a positive integer")
 	}
 
+	if file.WorkerWakesPerMinute != nil {
+		cfg.WorkerWakesPerMinute = *file.WorkerWakesPerMinute
+	}
+	// 0 is the pacing off, which is why the rate is no countKeys row: that reader refuses it.
+	if cfg.WorkerWakesPerMinute < 0 {
+		return Config{}, errors.New("worker_wakes_per_minute must be 0 (the pacing off) or a positive integer")
+	}
+
 	if err := resolveStage2(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -991,6 +1038,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, err
 	}
 	if err := checkDeployRenames(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := checkCommitIssueTrailerRenames(&cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

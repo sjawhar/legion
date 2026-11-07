@@ -64,11 +64,13 @@ import type {
   DispatchUser,
   DocumentRead,
   DocumentReferenceSummary,
+  DuplicateCandidate,
   EditCommentInput,
   Event,
   GraphReferences,
   Handoff,
   HandoffSummary,
+  IDCandidate,
   InboxRow,
   Issue,
   IssueAskRow,
@@ -91,11 +93,13 @@ import type {
   Project,
   ProjectDefaultAssignee,
   ProjectDefaultAssigneeInput,
+  ReferenceQuestions,
   RepoProject,
   SearchResponse,
   SignInsResponse,
   Subscriber,
   Suggestions,
+  TargetCandidate,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
@@ -135,16 +139,26 @@ export interface UploadProgress {
 const maxKeepaliveBodyBytes = 30 * 1024;
 const utf8 = new TextEncoder();
 
+/** One item a refusal lists for the caller to choose between: the items an ambiguous id prefix
+ *  names (`ID_AMBIGUOUS`), the issues a duplicate check found, or the positions an anchored
+ *  quote resolved at. Each refusal's own `code` says which of the three its list holds. */
+export type ErrorCandidate = IDCandidate | DuplicateCandidate | TargetCandidate;
+
 interface ErrorPayload {
   code?: string;
   error?: string;
   state?: UserIssueState;
+  candidates?: readonly ErrorCandidate[];
 }
 
 export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
   readonly state: UserIssueState | undefined;
+  /** What the refusal listed for the caller to choose between, read by the page that shows the
+   *  choice; the shape of each entry follows `code` (`ErrorCandidate`). Undefined for a refusal
+   *  that listed nothing, which is almost all of them. */
+  readonly candidates: readonly ErrorCandidate[] | undefined;
   /** How long the server asked the caller to wait before trying again (`Retry-After` in
    *  delta-seconds, as Dispatch sends with a 503 refusing excess load), in milliseconds;
    *  undefined when the response carried none. */
@@ -156,6 +170,7 @@ export class ApiError extends Error {
     this.code = payload.code;
     this.status = status;
     this.state = payload.state;
+    this.candidates = payload.candidates;
     this.retryAfterMs = retryAfterMs;
   }
 }
@@ -353,10 +368,28 @@ export function isAnchorMissing(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
 }
 
+// The server refusing a write because its text passes a bound Dispatch holds it to: one block
+// too long, too many blocks, or an ask's question and options too long together. The refusal
+// names what passed which bound, so a page shows those words rather than wording of its own.
+export function isCapExceeded(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === "CAP_EXCEEDED";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
+/** What every view says while Envoy's agent list refills: the server's own `ENVOY_REFILLING`
+ *  message, shown wherever a view would otherwise say an agent is absent. */
+export const AGENT_LIST_REFILLING = "The agent list is refilling. Try again in a moment.";
+
+// The agents list and the subscriber reads answer this 503 while the Envoy listener refills its
+// copy of the session registry: the list is not known yet, so nothing on it may be read as gone.
+// It is transient, so the shared retry policy keeps retrying it like any other 5xx.
+export function isAgentListRefilling(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.code === "ENVOY_REFILLING";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
@@ -1431,6 +1464,16 @@ export class DispatchApiClient {
   getReferences(reference: string, options: { kind?: string } = {}): Promise<GraphReferences> {
     return this.json<GraphReferences>(
       pathWithQuery("/api/v1/references", { kind: options.kind, to: reference })
+    );
+  }
+
+  /** The question map of the document one reference source's text belongs to: every question
+   *  block that document's latest version declares, with the ask settled for it (for a copied
+   *  block, the ask it was copied from). `kind` is the source's own kind - artifact, ask,
+   *  comment or message - and `id` its id. A source whose text belongs to no document is 404. */
+  getReferenceQuestions(kind: string, id: string): Promise<ReferenceQuestions> {
+    return this.json<ReferenceQuestions>(
+      pathWithQuery("/api/v1/references/questions", { id, kind })
     );
   }
 

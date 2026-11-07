@@ -31,13 +31,16 @@ func azureEmbedEnvironment(overrides map[string]string) map[string]string {
 	return signInEnvironment(values)
 }
 
-// azureKeyless is the keyless form of Azure credential, in place of azureEmbedEnvironment's key.
-var azureKeyless = map[string]string{
-	"DISPATCH_AZURE_EMBED_KEY":            "",
+// azureFederated is the Azure sign-in the embedder and the answerer share, which whichever of
+// them is azure reads.
+var azureFederated = map[string]string{
 	"DISPATCH_AZURE_TENANT_ID":            "tenant-id",
 	"DISPATCH_AZURE_CLIENT_ID":            "client-id",
 	"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": "/var/run/secrets/azure-federation/token",
 }
+
+// azureKeyless is the keyless form of Azure credential, in place of azureEmbedEnvironment's key.
+var azureKeyless = withOverrides(azureFederated, map[string]string{"DISPATCH_AZURE_EMBED_KEY": ""})
 
 // withOverrides is base with overrides applied over it, base itself unchanged.
 func withOverrides(base, overrides map[string]string) map[string]string {
@@ -127,18 +130,29 @@ func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
 		{"a blank key file beside a bare key", azureEmbedEnvironment(map[string]string{"DISPATCH_AZURE_EMBED_KEY_FILE": blank}),
 			[]string{"DISPATCH_AZURE_EMBED_KEY_FILE names " + blank + ", which is empty, and DISPATCH_AZURE_EMBED_KEY is not read in its place"}},
 	}
-	// Every DISPATCH_AZURE_* variable, a _FILE form included, is refused under Bedrock, whether
-	// DISPATCH_EMBEDDER says so or is unset.
+	// Every DISPATCH_AZURE_EMBED_ variable, a _FILE form included, is refused under Bedrock,
+	// whether DISPATCH_EMBEDDER says so or is unset.
 	for _, variable := range []string{
 		"DISPATCH_AZURE_EMBED_ENDPOINT", "DISPATCH_AZURE_EMBED_DEPLOYMENT", "DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE",
-		"DISPATCH_AZURE_EMBED_KEY", "DISPATCH_AZURE_EMBED_KEY_FILE", "DISPATCH_AZURE_TENANT_ID", "DISPATCH_AZURE_CLIENT_ID",
-		"DISPATCH_AZURE_FEDERATED_TOKEN_FILE",
+		"DISPATCH_AZURE_EMBED_KEY", "DISPATCH_AZURE_EMBED_KEY_FILE",
 	} {
 		cases = append(cases,
 			refusal{variable + " under the default", signInEnvironment(map[string]string{variable: "x"}),
-				[]string{variable + " set, but DISPATCH_EMBEDDER is unset, which is bedrock: the DISPATCH_AZURE_* settings are read only with DISPATCH_EMBEDDER=azure"}},
+				[]string{variable + " set, but DISPATCH_EMBEDDER is unset, which is bedrock: the DISPATCH_AZURE_EMBED_* settings are read only with DISPATCH_EMBEDDER=azure"}},
 			refusal{variable + " under bedrock", signInEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock", variable: "x"}),
 				[]string{variable + " set, but DISPATCH_EMBEDDER is bedrock"}},
+		)
+	}
+	// The shared sign-in is refused only where neither model service is on Azure: a Bedrock
+	// embedder beside an Azure answerer reads all three. The three are the reader's own rows,
+	// in table order, which an empty environment leaves wholly missing, so no list here can
+	// drift from the one the resolvers walk.
+	for _, variable := range readAzureSignIn(envGetter(nil)).missing {
+		cases = append(cases,
+			refusal{variable + " with neither place azure", signInEnvironment(map[string]string{variable: "x"}),
+				[]string{variable + " set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure: the shared Azure sign-in is read by whichever of them is azure"}},
+			refusal{variable + " under bedrock", signInEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock", variable: "x"}),
+				[]string{variable + " set, but neither DISPATCH_EMBEDDER nor DISPATCH_ANSWERER is azure"}},
 		)
 	}
 	cases = append(cases, refusal{"the whole Azure configuration under bedrock", azureEmbedEnvironment(map[string]string{"DISPATCH_EMBEDDER": "bedrock"}),
@@ -227,5 +241,45 @@ func TestNewEmbedderBuildsAzureFromEitherCredential(t *testing.T) {
 				t.Errorf("logged %q, want the one line %q", line, want)
 			}
 		})
+	}
+}
+
+// The dev embedder embeds by hashing words, so a deployment that set it would answer meaning
+// search with vectors that mean nothing and never know: it is read only by a local harness,
+// which is what DISPATCH_DEV_SIGNIN=1 marks, and it reads no setting of a model service.
+func TestTheDevEmbedderNeedsDevSignIn(t *testing.T) {
+	refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"},
+		"DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1")
+	refusedWith(t, map[string]string{"DISPATCH_DEV_EMBEDDER": "yes"},
+		`DISPATCH_DEV_EMBEDDER="yes" (expected 1 or unset)`)
+	for _, beside := range []map[string]string{
+		{"DISPATCH_EMBEDDER": "azure", "DISPATCH_AZURE_EMBED_ENDPOINT": "https://embed.example/models"},
+		{"DISPATCH_EMBEDDER": "bedrock"},
+		{"DISPATCH_AZURE_EMBED_KEY": testAzureKey},
+	} {
+		overrides := withOverrides(beside, map[string]string{"DISPATCH_DEV_EMBEDDER": "1"})
+		if _, err := resolveBootConfig(devSignInEnvironment(overrides)); err == nil ||
+			!strings.Contains(err.Error(), "set, but DISPATCH_DEV_EMBEDDER=1: the dev embedder calls no model service and reads no setting of one") {
+			t.Errorf("resolveBootConfig(%v) = %v, want a refusal naming the settings beside it", overrides, err)
+		}
+	}
+
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_EMBEDDER": "1"}))
+	if err != nil || boot.Embedder != (embedderConfig{Place: embed.PlaceDev}) {
+		t.Fatalf("under dev sign-in: Embedder = %+v, %v; want the dev place and nothing else", boot.Embedder, err)
+	}
+	logged := capturedLog(t)
+	embedder, err := newEmbedder(context.Background(), boot.Embedder)
+	if err != nil {
+		t.Fatalf("newEmbedder: %v", err)
+	}
+	if _, ok := embedder.(*embed.DevClient); !ok {
+		t.Fatalf("newEmbedder built %T, want *embed.DevClient", embedder)
+	}
+	if place, _ := embed.IdentityPlace(embedder.Identity()); place != embed.PlaceDev {
+		t.Errorf("Identity() = %q, which names the place %q, not %q", embedder.Identity(), place, embed.PlaceDev)
+	}
+	if line := logged.String(); !strings.Contains(line, "place=dev identity="+embedder.Identity()) || !strings.Contains(line, "level=WARN") {
+		t.Errorf("logged %q, want one warning naming the place and the identity", line)
 	}
 }

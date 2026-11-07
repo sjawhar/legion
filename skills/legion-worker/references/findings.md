@@ -72,16 +72,22 @@ sent to the controller.
 
 ### When no controller takes it
 
-`envoy_publish`'s own answer tells you whether a controller took the finding: a publish to a role
-answers with its live `holder`. With no live controller, or with one whose claim has lapsed, the
-answer says Envoy kept the message instead (`packages/envoy/cmd/listener`, the test "unheld role
-is kept and answered 202 without publishing on the role topic"). The next session that claims
-`legion-<project>-controller` is handed each kept message once, within one hour of the keep. A
-keep is not a delivery: a controller can stay away for the whole hour, and a message kept longer
-than an hour is dropped unread, so a kept finding can reach nobody. Treat a kept answer as a
-controller not taking it, and make the finding an ask as well, as [What the ask
-says](#what-the-ask-says) spells it, on the first of these that holds, so a person sees it and
-the controller finds it when it returns:
+The controller topic is a live wake: a message published while no controller runs reaches nobody
+at the time. `envoy_publish`'s own answer tells you whether one took it. A publish to a role
+answers with its live `holder`. With no claim on `legion-<project>-controller` at all, the answer
+says Envoy kept the message instead (`packages/envoy/cmd/listener`, the test "unheld role is kept
+and answered 202 without publishing on the role topic"): the next session that claims the role is
+handed each kept message once, within one hour of the keep. A keep is not a delivery: a
+controller can stay away for the whole hour, and a message kept longer than an hour is dropped
+unread, so a kept finding can reach nobody. It fails with `role legion-<project>-controller
+holder <session> lapsed; claim retained`, naming the holder, its `holder_state` and its
+`last_seen`, when a controller holds the role and its session has not registered within the live
+window: an `unresponsive` controller is not a stopped one, so release nothing, take nothing from
+it, and publish no second copy.
+Treat a kept answer as a controller not taking it. Either way the finding has not been taken yet,
+so make it an ask, as
+[What the ask says](#what-the-ask-says) spells it, on the first
+of these that holds, so a person sees it and the controller finds it when it returns:
 
 1. **The report issue is open:** ask there, the question opening `Clear defect from <your role
    token>` and `--ref` naming your evidence comment. Then reply `Asked dispatch://<REPORT

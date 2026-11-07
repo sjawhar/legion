@@ -340,12 +340,12 @@ func TestAzureEmbedTruncatesAnOverlongTextByRunes(t *testing.T) {
 		_, _ = w.Write(azureAnswer(0))
 	}))
 	defer server.Close()
-	overlong := strings.Repeat("é", maxInputChars+100)
+	overlong := strings.Repeat("é", MaxInputRunes+100)
 	if _, err := testAzureClient(t, server, AzureConfig{}).Embed(context.Background(), []string{overlong}, InputDocument); err != nil {
 		t.Fatalf("Embed: %v", err)
 	}
-	if n := utf8.RuneCountInString(got); n != maxInputChars || !utf8.ValidString(got) {
-		t.Errorf("server received %d runes (valid UTF-8: %v), want %d", n, utf8.ValidString(got), maxInputChars)
+	if n := utf8.RuneCountInString(got); n != MaxInputRunes || !utf8.ValidString(got) {
+		t.Errorf("server received %d runes (valid UTF-8: %v), want %d", n, utf8.ValidString(got), MaxInputRunes)
 	}
 }
 
@@ -401,5 +401,65 @@ func TestNewAzureRefusesAMisshapenConfig(t *testing.T) {
 				t.Errorf("NewAzure(%s): want an error, got nil", tc.name)
 			}
 		})
+	}
+}
+
+// TestAzureEmbedNeverFollowsARedirectWithTheCredential: a service that answers 3xx - or anyone
+// able to answer for it - must not have this process present the deployment's credential to a
+// host it was never configured with. net/http strips Authorization across domains but strips
+// api-key from nothing, so the client refuses the redirect instead: the second host is never
+// called, and the call fails on the 302 as it fails on any other non-2xx. Both forms of
+// credential are tried, because each is sent in a header of its own.
+func TestAzureEmbedNeverFollowsARedirectWithTheCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  AzureConfig
+	}{
+		{"the key form", AzureConfig{APIKey: testAzureKey}},
+		{"the keyless form", AzureConfig{Tokens: staticTokens{token: "entra-access-token"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			var gotKey, gotAuthorization string
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				gotKey, gotAuthorization = r.Header.Get("api-key"), r.Header.Get("Authorization")
+				_, _ = w.Write(azureAnswer(0))
+			}))
+			defer other.Close()
+			redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, other.URL+"/models/embeddings", http.StatusFound)
+			}))
+			defer redirecting.Close()
+
+			client := testAzureClient(t, redirecting, tc.cfg)
+			_, err := client.Embed(context.Background(), []string{"x"}, InputQuery)
+			if calls != 0 {
+				t.Fatalf("the other host served %d calls (api-key %q, Authorization %q), want none: no redirect is followed",
+					calls, gotKey, gotAuthorization)
+			}
+			if err == nil {
+				t.Fatal("Embed followed the redirect and answered no error, want the 302 refused")
+			}
+		})
+	}
+}
+
+// TestNewAzureLeavesTheCallersClientAlone: the client a caller passes is the caller's, so
+// refusing redirects is set on a copy of it. A test's own httptest client would otherwise stop
+// following redirects for everything else that test does with it.
+func TestNewAzureLeavesTheCallersClientAlone(t *testing.T) {
+	caller := &http.Client{}
+	if _, err := NewAzure(AzureConfig{
+		Endpoint:        "https://resource.services.ai.azure.com/models",
+		Deployment:      "embed-v-4-0",
+		TokensPerMinute: 300_000,
+		APIKey:          testAzureKey,
+		HTTPClient:      caller,
+	}); err != nil {
+		t.Fatalf("NewAzure: %v", err)
+	}
+	if caller.CheckRedirect != nil {
+		t.Error("NewAzure wrote CheckRedirect onto the caller's own client, want it set on a copy")
 	}
 }

@@ -33,20 +33,24 @@ type relayRig struct {
 
 func newRelayRig(t *testing.T) *relayRig {
 	t.Helper()
-	return newRelayRigPausing(t, relayPauseFirst, relayPauseMax)
+	return newRelayRigReceipt(t, relayPauseFirst, relayPauseMax, relayReceiptWait)
 }
 
-// newRelayRigPausing is newRelayRig with the backoff a paused relay waits before it sends the
-// session's unanswered messages again bounded by first and max, so a test need not wait the
-// production bounds out.
-func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
+// newRelayRigReceipt is newRelayRig with the backoff a paused relay waits before it sends the
+// session's unanswered messages again bounded by first and max, and the receipt wait shortened too:
+// how long the oldest frame a session has not answered may wait before the relay pauses. A row
+// about what an unreachable session leaves behind spends that wait twice over in fixed sleeps, and
+// production's three seconds buy it nothing, so such a row names a short one of its own and scales
+// its sleeps and its silent windows to it.
+func newRelayRigReceipt(t *testing.T, first, max, receipt time.Duration) *relayRig {
 	t.Helper()
 	rig := newRelayRigUnowned(t, first, max)
+	rig.relays.receiptWait = receipt
 	rig.relays.setOwned(true)
 	return rig
 }
 
-// newRelayRigUnowned is newRelayRigPausing for a task that does not hold its machine's durable
+// newRelayRigUnowned bounds the same backoff, for a task that does not hold its machine's durable
 // binding yet: it relays nothing, and no relay starts, until the test calls
 // rig.relays.setOwned(true). A test that must run the durable path before any relay orders them
 // this way rather than by timing.
@@ -493,11 +497,13 @@ func TestRelayRunRetryWaitEndsOnAWake(t *testing.T) {
 // unanswered frame and the one stored during the pause, in stream order, which a session that is
 // answering again takes once.
 func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *testing.T) {
-	// Shorter than the production bounds, long enough that the silent window below ends before the
-	// first probe: the relay sends again relayReceiptWait + pauseFirst after the frame it got no
-	// answer for.
+	// Shorter than the production bounds, long enough that the silent window below ends before
+	// the first probe: the relay sends again receipt + pauseFirst after the frame it got no
+	// answer for. The receipt wait is this row's own rather than production's three seconds,
+	// which it would otherwise spend twice over in fixed sleeps (INFRA-985).
+	const receipt = 500 * time.Millisecond
 	const pauseFirst, pauseMax = 2 * time.Second, 4 * time.Second
-	rig := newRelayRigPausing(t, pauseFirst, pauseMax)
+	rig := newRelayRigReceipt(t, pauseFirst, pauseMax, receipt)
 	const sessionID = "ses_unreachable"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
@@ -509,14 +515,14 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 	e1, _ := rig.storeEvent(t, agent)
 	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
 	requireFrames(t, []relayedFrame{unanswered}, e1)
-	// The relay stops relayReceiptWait after that frame: a message stored once it has reaches the
-	// session only when the relay sends again, which is pauseFirst later.
-	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 300*time.Millisecond)))
+	// The relay stops receipt after that frame: a message stored once it has reaches the session
+	// only when the relay sends again, which is pauseFirst later.
+	time.Sleep(time.Until(unanswered.arrived.Add(receipt + 300*time.Millisecond)))
 	e2, _ := rig.storeEvent(t, agent)
 	standIn.none(t, 900*time.Millisecond)
 
 	standIn.silent.Store(false)
-	requireFrames(t, standIn.collect(t, 2, relayReceiptWait+2*pauseFirst+2*time.Second), e1, e2)
+	requireFrames(t, standIn.collect(t, 2, receipt+2*pauseFirst+2*time.Second), e1, e2)
 	standIn.none(t, time.Second)
 	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
 		t.Fatalf("the pause was logged %d times, want once for the episode:\n%s", lines, rig.harness.logs.String())
@@ -526,7 +532,9 @@ func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *
 // A registration resumes a paused relay at once, long before its backoff would send again.
 func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testing.T) {
 	// A backoff no test waits out: only the registration can make the relay send again here.
-	rig := newRelayRigPausing(t, time.Minute, time.Minute)
+	// The receipt wait is this row's own, as in the row above.
+	const receipt = 500 * time.Millisecond
+	rig := newRelayRigReceipt(t, time.Minute, time.Minute, receipt)
 	const sessionID = "ses_unreachable_registers"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
@@ -538,7 +546,7 @@ func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testin
 	e1, _ := rig.storeEvent(t, agent)
 	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
 	requireFrames(t, []relayedFrame{unanswered}, e1)
-	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 500*time.Millisecond)))
+	time.Sleep(time.Until(unanswered.arrived.Add(receipt + 500*time.Millisecond)))
 	e2, _ := rig.storeEvent(t, agent)
 	standIn.none(t, 1500*time.Millisecond)
 	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {

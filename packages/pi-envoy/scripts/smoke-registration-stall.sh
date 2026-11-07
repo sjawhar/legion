@@ -6,16 +6,15 @@
 # registry. Two arms, each with a negative control that must fail the way the bug failed:
 #
 #   --arm stall    a pane whose registration post is wedged forever is detected, bounded, keeps
-#                  refreshing past one record lifetime, and says so exactly once.
+#                  refreshing past one live window, and says so exactly once.
 #   --arm recover  a pane unregistered while its process runs re-registers itself, with no human
 #                  and no write from this script beyond the one delete.
 #
 # The two numbers every budget below is measured in — the pane's refresh interval and the
-# listener's record lifetime — are read at run time out of the files that define them
-# (packages/envoy-client/src/envoy-settings.ts and packages/envoy/internal/session/registry.go,
-# the same two .github/scripts/check-heartbeat-margin.sh parses), never copied here: a copy would
-# go stale the moment either moves and this smoke would measure against a budget the tree no
-# longer has.
+# listener's live window — are read at run time from `@legion/contracts`
+# (`SESSION_HEARTBEAT_MS` and `SESSION_LIVE_WINDOW_MS`, declared once each in
+# packages/contracts/src/envoy-session.ts), never copied here: a copy would go stale the moment
+# either moves and this smoke would measure against a budget the tree no longer has.
 #
 # The listener is the operator's (ENVOY_URL and ENVOY_TOKEN_FILE), or `--local-stack` builds
 # natsd and the listener from this checkout with `go build` and runs both on loopback ports of
@@ -32,6 +31,9 @@ readonly poll_s=15
 readonly fast_poll_s=5
 readonly curl_connect_timeout=5
 readonly curl_max_time=20
+# How long a single check keeps retrying a list read that failed (the listener's refilling 503
+# asks for a retry after 5 s) before it fails for want of a list.
+readonly list_read_budget_s=60
 
 refuse() {
   printf 'smoke-registration-stall: %s\n' "$1" >&2
@@ -54,29 +56,23 @@ local_stack_fail=refuse
 # shellcheck source=packages/pi-envoy/scripts/local-stack.sh
 source "${script_dir}/local-stack.sh"
 
-# The refresh interval and the record lifetime, out of the tree rather than out of this file.
-settings_file="${repo_root}/packages/envoy-client/src/envoy-settings.ts"
-registry_file="${repo_root}/packages/envoy/internal/session/registry.go"
-readonly settings_file registry_file
-[[ -r "$settings_file" ]] ||
-  refuse "${settings_file} is not readable: this smoke reads DEFAULT_HEARTBEAT_MS from it"
-[[ -r "$registry_file" ]] ||
-  refuse "${registry_file} is not readable: this smoke reads OpenSessionRegistry's default ttl from it"
-default_heartbeat_ms="$(sed -nE 's/^export const DEFAULT_HEARTBEAT_MS = ([0-9_]+);.*$/\1/p' \
-  "$settings_file" | tr -d _)"
-[[ "$default_heartbeat_ms" =~ ^[0-9]+$ ]] ||
-  refuse "${settings_file} declares no single plain-decimal DEFAULT_HEARTBEAT_MS this smoke can read"
-readonly default_heartbeat_ms
-record_ttl="$(sed -nE 's/^[[:space:]]*opts := sessionRegistryOpts\{.*ttl: ([0-9_]+) \* time\.(Second|Minute).*$/\1 \2/p' \
-  "$registry_file" | tr -d _)"
-[[ "$record_ttl" =~ ^[0-9]+\ (Second|Minute)$ ]] ||
-  refuse "${registry_file} declares no single OpenSessionRegistry default ttl in <n> * time.Second|Minute form this smoke can read"
-if [[ "$record_ttl" == *Minute ]]; then
-  record_lifetime_s=$((${record_ttl% *} * 60))
-else
-  record_lifetime_s="${record_ttl% *}"
-fi
-readonly record_ttl record_lifetime_s
+# The refresh interval and the live window, read from @legion/contracts — the one declaration
+# of each, which both languages are generated from — rather than scraped out of a source file,
+# since no pattern over program text can tell a live declaration from one inside a comment. bun
+# runs in this package's directory, where its own @legion/contracts dependency resolves from.
+command -v bun >/dev/null 2>&1 || refuse "bun is required"
+contracts_timing="$(cd -- "${repo_root}/packages/pi-envoy" &&
+  bun -e 'import { SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS } from "@legion/contracts";
+console.log(SESSION_HEARTBEAT_MS, SESSION_LIVE_WINDOW_MS);')" ||
+  refuse "reading SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS from @legion/contracts failed (the reason is above)"
+[[ "$contracts_timing" =~ ^[0-9]+[[:space:]][0-9]+$ ]] ||
+  refuse "@legion/contracts answered \"${contracts_timing}\" for SESSION_HEARTBEAT_MS and SESSION_LIVE_WINDOW_MS, which is not two whole numbers"
+read -r default_heartbeat_ms live_window_ms <<<"$contracts_timing"
+# Rounded up, as the refresh interval below is: live_window_s is a budget the session must
+# outlive, so a window with a sub-second remainder must not be waited out short.
+live_window_s=$(((live_window_ms + 999) / 1000))
+readonly contracts_timing default_heartbeat_ms live_window_ms live_window_s
+note "read from @legion/contracts: refresh interval ${default_heartbeat_ms} ms (SESSION_HEARTBEAT_MS), live window ${live_window_s}s (SESSION_LIVE_WINDOW_MS)"
 
 arm=""
 control=0
@@ -164,13 +160,13 @@ for tool in "${required[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || refuse "${tool} is required"
 done
 
-# What the pane's refresh interval will be: DEFAULT_HEARTBEAT_MS as the tree declares it, unless
-# the operator shortened it, which is what every "one refresh interval" budget below is measured
-# in.
+# What the pane's refresh interval will be: SESSION_HEARTBEAT_MS as @legion/contracts declares
+# it, unless the operator shortened it, which is what every "one refresh interval" budget below
+# is measured in.
 refresh_ms="${heartbeat_ms:-$default_heartbeat_ms}"
 readonly refresh_ms
 readonly refresh_s=$(((refresh_ms + 999) / 1000))
-note "read from the tree: refresh interval ${default_heartbeat_ms} ms (DEFAULT_HEARTBEAT_MS, ${settings_file}), record lifetime ${record_lifetime_s}s (${record_ttl}, OpenSessionRegistry's default ttl, ${registry_file}); this run refreshes every ${refresh_s}s"
+note "this run refreshes every ${refresh_s}s"
 
 arm_label="$arm"
 ((control == 0)) || arm_label="${arm}, control"
@@ -304,18 +300,41 @@ delete_session() {
     "${auth_header[@]}" "${envoy_url}/v1/sessions/$1" 2>/dev/null)" || http_code="000"
 }
 
-# This run's own row among the listener's hundreds of live ones, left in `row_json` (empty when it
-# is not listed): `dir` is the scratch directory the pane was launched with, which no other
-# session can be running in.
+# This run's own row among the listener's hundreds of live ones: `dir` is the scratch directory
+# the pane was launched with, which no other session can be running in. own_row returns 0 when it
+# read the list, leaving the row in `row_json` (empty when it is not listed), and 1 when it could
+# not: no answer, a non-200 such as the listener's refilling 503, or a body that is not a list. A
+# failed read says nothing about the row, so no caller may take it for absence; `list_read_error`
+# keeps the last such failure for the message.
 row_json=""
+list_read_error=""
 own_row() {
   row_json=""
   list_sessions
-  if [[ "$http_code" != "200" ]]; then
-    note "GET /v1/sessions returned ${http_code}"
+  if [[ "$http_code" == "000" ]]; then
+    list_read_error="GET /v1/sessions got no answer from ${envoy_url}"
+  elif [[ "$http_code" != "200" ]]; then
+    list_read_error="GET /v1/sessions returned ${http_code}: $(head -c 200 "$sessions_json" 2>/dev/null | tr '\n' ' ' || true)"
+  elif ! row_json="$(jq -c --arg dir "$scratch" \
+    'if type == "array" then map(select(.dir == $dir)) | first // empty else error("not a list") end' \
+    "$sessions_json" 2>/dev/null)"; then
+    row_json=""
+    list_read_error="GET /v1/sessions answered a body that is not a session list: $(head -c 200 "$sessions_json" | tr '\n' ' ' || true)"
+  else
     return 0
   fi
-  row_json="$(jq -c --arg dir "$scratch" 'map(select(.dir == $dir)) | first // empty' "$sessions_json")"
+  note "$list_read_error"
+  return 1
+}
+
+# read_own_row retries own_row until a read of the list lands, for at most $1 seconds: 0 with the
+# row in `row_json` once one does, 1 with `list_read_error` naming the last failure when none did.
+read_own_row() {
+  local deadline=$((SECONDS + $1))
+  until own_row; do
+    ((SECONDS + fast_poll_s < deadline)) || return 1
+    sleep "$fast_poll_s"
+  done
 }
 
 last_registration() {
@@ -368,19 +387,21 @@ start_pane() {
   note "pane started (pid ${pane_pid}, wedge ${wedge}, refresh ${refresh_s}s) in ${scratch}"
 }
 
-# Bounded wait for this run's row to appear in `row_json`.
+# Bounded wait for this run's row to appear in `row_json`; any other outcome fails the run, and a
+# window in which no read of the list landed fails as unknown, never as an unregistered pane.
 wait_for_row() {
-  local deadline=$((SECONDS + $1))
+  local deadline=$((SECONDS + $1)) read_any=0
   while ((SECONDS < deadline)); do
-    own_row
-    [[ -z "$row_json" ]] || return 0
-    pane_alive || {
-      note "pane exited early: $(pane_tail)"
-      return 1
-    }
+    if own_row; then
+      read_any=1
+      [[ -z "$row_json" ]] || return 0
+    fi
+    pane_alive || verdict_fail "the pane exited before it registered under ${scratch}: $(pane_tail)"
     sleep "$fast_poll_s"
   done
-  return 1
+  ((read_any == 1)) ||
+    verdict_fail "could not read the listener's session list within $1s, so whether the pane registered under ${scratch} is unknown: ${list_read_error:-no read finished}"
+  verdict_fail "the pane never registered under ${scratch} within $1s: $(pane_tail)"
 }
 
 row_field() {
@@ -393,8 +414,7 @@ age_s() {
 
 run_stall() {
   start_pane "$wedge_at"
-  wait_for_row 120 ||
-    verdict_fail "the pane never registered under ${scratch} within 120s: $(pane_tail)"
+  wait_for_row 120
   local row="$row_json"
   local session_id
   session_id="$(row_field "$row" session_id)"
@@ -410,23 +430,25 @@ run_stall() {
   done
   local wedged_at
   wedged_at="$(date +%s)"
-  own_row
+  read_own_row "$list_read_budget_s" ||
+    verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of registration ${wedge_at} wedging, so the session's row at the wedge is unknown: ${list_read_error}"
   row="$row_json"
   [[ -n "$row" ]] || verdict_fail "the session was already unlisted when registration ${wedge_at} wedged"
   local wedged_last_seen
   wedged_last_seen="$(row_field "$row" last_seen)"
   note "registration ${wedge_at} is wedged; last_seen at the wedge is ${wedged_last_seen}"
 
-  # One record lifetime past the wedged post plus a margin: before that, a listener record that is
-  # merely not yet expired proves nothing either way.
+  # One live window past the wedged post plus a margin: before that, a listener record that is
+  # merely still inside the window proves nothing either way.
   local margin=60
   ((control == 0)) || margin=90
-  local target=$((wedged_at + record_lifetime_s + margin))
+  local target=$((wedged_at + live_window_s + margin))
   local gone_at=0
-  note "watching until $(date -u -d "@${target}" +%H:%M:%SZ) (${record_lifetime_s}s record lifetime + ${margin}s)"
+  note "watching until $(date -u -d "@${target}" +%H:%M:%SZ) (${live_window_s}s live window + ${margin}s)"
   while (($(date +%s) < target)); do
     sleep "$poll_s"
-    own_row
+    # A list this poll could not read says nothing either way; own_row has noted why.
+    own_row || continue
     row="$row_json"
     local regs stalls
     regs="$(last_registration)"
@@ -446,7 +468,8 @@ run_stall() {
     pane_alive || verdict_fail "the pane exited during the watch: $(pane_tail)"
   done
 
-  own_row
+  read_own_row "$list_read_budget_s" ||
+    verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of the watch ending, so whether the session outlived the ${live_window_s}s live window is unproven: ${list_read_error}"
   row="$row_json"
   local regs stalls last_seen
   regs="$(last_registration)"
@@ -454,13 +477,14 @@ run_stall() {
   if ((control == 1)); then
     [[ -z "$row" ]] ||
       verdict_fail "the base-rev session is still listed $(($(date +%s) - wedged_at))s after the wedged post (last_seen $(row_field "$row" last_seen)); the control must lapse"
+    ((gone_at != 0)) || gone_at="$(date +%s)"
     ((regs <= wedge_at - 1)) ||
       verdict_fail "the base-rev pane posted registration ${regs} after the wedged ${wedge_at}; its wedge did not hold"
     verdict_pass "the plugin at ${base_rev} left ${session_id} wedged at registration ${wedge_at}, posted nothing after it (last accepted ${regs}), and the record was gone $((gone_at - wedged_at))s after the wedged post and never returned (watched to $(($(date +%s) - wedged_at))s)"
   fi
 
   [[ -n "$row" ]] ||
-    verdict_fail "the session is not listed $(($(date +%s) - wedged_at))s after the wedged post; expected it to outlive the ${record_lifetime_s}s record lifetime"
+    verdict_fail "the session is not listed $(($(date +%s) - wedged_at))s after the wedged post; expected it to outlive the ${live_window_s}s live window"
   last_seen="$(row_field "$row" last_seen)"
   ((last_seen > wedged_last_seen)) ||
     verdict_fail "last_seen did not advance past the wedged post: ${wedged_last_seen} at the wedge, ${last_seen} now"
@@ -468,13 +492,12 @@ run_stall() {
     verdict_fail "no registration past the wedged ${wedge_at} was posted (last accepted ${regs}); the refresh did not resume"
   ((stalls == 1)) ||
     verdict_fail "expected exactly one stall line in the pane's log, saw ${stalls}"
-  verdict_pass "${session_id} stayed listed $(($(date +%s) - wedged_at))s after registration ${wedge_at} wedged — past the ${record_lifetime_s}s record lifetime — last_seen advanced ${wedged_last_seen} → ${last_seen}, the fixture logged ${regs} accepted registrations (past the wedged ${wedge_at}, so the refresh kept going), and the pane said the stall exactly once"
+  verdict_pass "${session_id} stayed listed $(($(date +%s) - wedged_at))s after registration ${wedge_at} wedged — past the ${live_window_s}s live window — last_seen advanced ${wedged_last_seen} → ${last_seen}, the fixture logged ${regs} accepted registrations (past the wedged ${wedge_at}, so the refresh kept going), and the pane said the stall exactly once"
 }
 
 run_recover() {
   start_pane 0
-  wait_for_row 120 ||
-    verdict_fail "the pane never registered under ${scratch} within 120s: $(pane_tail)"
+  wait_for_row 120
   local row="$row_json"
   local session_id before_seen regs_before
   session_id="$(row_field "$row" session_id)"
@@ -490,7 +513,8 @@ run_recover() {
     wait "$pane_pid" 2>/dev/null || true
     if pane_alive; then verdict_fail "the pane is still running after SIGKILL"; fi
     pane_pid=""
-    own_row
+    read_own_row "$list_read_budget_s" ||
+      verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of the SIGKILL, so whether the killed pane's record outlived it is unknown: ${list_read_error}"
     row="$row_json"
     [[ -n "$row" ]] ||
       verdict_fail "the killed pane's record was already gone before the delete; nothing to control"
@@ -503,18 +527,22 @@ run_recover() {
   local deleted_at
   deleted_at="$(date +%s)"
   note "deleted ${session_id}; confirming it is unlisted"
-  local gone=0 confirm_deadline=$((SECONDS + 30))
+  local gone=0 read_any=0 confirm_deadline=$((SECONDS + 30))
   while ((SECONDS < confirm_deadline)); do
-    own_row
-    row="$row_json"
-    if [[ -z "$row" ]]; then
-      gone=1
-      break
+    if own_row; then
+      read_any=1
+      if [[ -z "$row_json" ]]; then
+        gone=1
+        break
+      fi
     fi
     sleep 2
   done
-  ((gone == 1)) ||
+  if ((gone == 0)); then
+    ((read_any == 1)) ||
+      verdict_fail "could not read the listener's session list in the 30s after the delete, so whether it took is unknown: ${list_read_error:-no read finished}"
     verdict_fail "${session_id} was still listed 30s after the delete; the delete did not take"
+  fi
   note "unlisted $(($(date +%s) - deleted_at))s after the delete"
 
   # One refresh interval is what the pane's own heartbeat needs; the margin covers the round trip.
@@ -524,38 +552,48 @@ run_recover() {
     note "watching ${budget}s: a record with no process behind it must stay gone"
     while ((SECONDS < deadline)); do
       sleep "$fast_poll_s"
-      own_row
-      row="$row_json"
-      [[ -z "$row" ]] ||
+      # A list this poll could not read says nothing either way; own_row has noted why.
+      own_row || continue
+      [[ -z "$row_json" ]] ||
         verdict_fail "${session_id} came back $(($(date +%s) - deleted_at))s after the delete although its process was already dead; the return in the main arm would not be the pane's own refresh"
       note "still gone ($(($(date +%s) - deleted_at))s)"
     done
+    # The verdict rests on a list read at the end of the window, never on polls that all failed.
+    read_own_row "$list_read_budget_s" ||
+      verdict_fail "could not read the listener's session list within ${list_read_budget_s}s of the ${budget}s watch ending, so that ${session_id} stayed gone is unproven: ${list_read_error}"
+    [[ -z "$row_json" ]] ||
+      verdict_fail "${session_id} came back $(($(date +%s) - deleted_at))s after the delete although its process was already dead; the return in the main arm would not be the pane's own refresh"
     verdict_pass "${session_id}'s process was SIGKILLed, its record deleted, and it stayed gone for ${budget}s (one ${refresh_s}s refresh interval and a margin) — so a return in the main arm is the live pane's own refresh, not the listener restoring anything; this run made ${listener_gets} list polls and ${listener_deletes} delete, and no other request"
   fi
 
   note "watching up to ${budget}s for the live pane to re-register itself"
+  local read_after_delete=0
   while ((SECONDS < deadline)); do
     sleep "$fast_poll_s"
-    own_row
-    row="$row_json"
-    if [[ -n "$row" ]]; then
-      local back_id back_seen
-      back_id="$(row_field "$row" session_id)"
-      back_seen="$(row_field "$row" last_seen)"
-      [[ "$back_id" == "$session_id" ]] ||
-        verdict_fail "a different session (${back_id}) now holds ${scratch}, not ${session_id}"
-      ((back_seen > before_seen)) ||
-        verdict_fail "the returned row's last_seen ${back_seen} did not advance past ${before_seen}"
-      local regs_after
-      regs_after="$(last_registration)"
-      ((regs_after > regs_before)) ||
-        verdict_fail "the fixture logged no registration after the delete (${regs_before} before, ${regs_after} after); the row did not come back from the pane's own post"
-      note "back after $(($(date +%s) - deleted_at))s with last_seen=${back_seen}"
-      verdict_pass "${session_id} was deleted from the registry while its process ran and re-registered itself $(($(date +%s) - deleted_at))s later (budget ${budget}s: one ${refresh_s}s refresh interval and a margin), last_seen ${before_seen} → ${back_seen} and the pane's own registration count ${regs_before} → ${regs_after}, with no human and no envoy_subscribe: the only requests this run made to the listener are ${listener_gets} GET /v1/sessions polls and the single DELETE /v1/sessions/${session_id}"
+    if own_row; then
+      read_after_delete=1
+      row="$row_json"
+      if [[ -n "$row" ]]; then
+        local back_id back_seen
+        back_id="$(row_field "$row" session_id)"
+        back_seen="$(row_field "$row" last_seen)"
+        [[ "$back_id" == "$session_id" ]] ||
+          verdict_fail "a different session (${back_id}) now holds ${scratch}, not ${session_id}"
+        ((back_seen > before_seen)) ||
+          verdict_fail "the returned row's last_seen ${back_seen} did not advance past ${before_seen}"
+        local regs_after
+        regs_after="$(last_registration)"
+        ((regs_after > regs_before)) ||
+          verdict_fail "the fixture logged no registration after the delete (${regs_before} before, ${regs_after} after); the row did not come back from the pane's own post"
+        note "back after $(($(date +%s) - deleted_at))s with last_seen=${back_seen}"
+        verdict_pass "${session_id} was deleted from the registry while its process ran and re-registered itself $(($(date +%s) - deleted_at))s later (budget ${budget}s: one ${refresh_s}s refresh interval and a margin), last_seen ${before_seen} → ${back_seen} and the pane's own registration count ${regs_before} → ${regs_after}, with no human and no envoy_subscribe: the only requests this run made to the listener are ${listener_gets} GET /v1/sessions polls and the single DELETE /v1/sessions/${session_id}"
+      fi
+      note "not back yet ($(($(date +%s) - deleted_at))s)"
     fi
     pane_alive || verdict_fail "the pane exited before re-registering: $(pane_tail)"
-    note "not back yet ($(($(date +%s) - deleted_at))s)"
   done
+  ((read_after_delete == 1)) ||
+    verdict_fail "could not read the listener's session list in the ${budget}s after the delete, so whether ${session_id} re-registered is unknown: ${list_read_error:-no read finished}"
   verdict_fail "${session_id} did not re-register within ${budget}s of the delete (one ${refresh_s}s refresh interval and a margin); the pane is still running: $(pane_tail)"
 }
 

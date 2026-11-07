@@ -1,5 +1,65 @@
 # Changelog
 
+This file is history: every entry after the last section below stays as a fragment file under
+`.changes/unreleased/`, since this package has no release of its own to carry it.
+
+## [main@0abb1e50da7d] - 2026-11-06
+
+### Added
+
+- `src/envoy-session.ts` declares the six timings of Envoy session registration once:
+  `SESSION_HEARTBEAT_MS` (90000), how often a pane refreshes its listener registration,
+  `SESSION_LIVE_WINDOW_MS` (300000), how long a session's last registration keeps it live to the
+  listener, `SESSION_CLAIM_STALE_MS` (300000), how long a role claim may go unrefreshed before a
+  reader treats its holder as gone, and `LISTENER_CALL_TIMEOUT_MS` (5000),
+  `LISTENER_CALL_RETRY_DELAY_MS` (250) and `LISTENER_CALL_ATTEMPTS` (2), what one whole listener
+  call costs. `scripts/gen-go.ts` emits each as `contracts.SessionHeartbeat`,
+  `contracts.SessionLiveWindow`, `contracts.SessionClaimStale`,
+  `contracts.ListenerCallTimeout`, `contracts.ListenerCallRetryDelay` and
+  `contracts.ListenerCallAttempts`, which the Envoy listener reads and the Legion daemon reads
+  through `github.com/sjawhar/envoy/sessiontiming`. No value changed.
+
+## [main@c5c94dbd542d] - 2026-11-05
+
+### Added
+
+- `ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS` is how long a holder that has stopped answering keeps its
+  issue claim, generated into Go beside its TypeScript declaration so the two languages cannot
+  disagree about when a claim becomes takeable. `IssueClaimHolderState` (`live`, `unresponsive`,
+  `gone`, `unknown`) and `IssueClaimLiveness` (`holder_state`, `last_seen`, `takeable_at`) carry
+  a claim holder's state on an issue read, beside the claim rather than inside it.
+  `ISSUE_ROUTE_STATUSES` gains `holder_unresponsive`, and `IssueRouteReach` gains
+  `route_status_reason` (`refilling` or `unreachable`), which says why a route reads `unknown`:
+  a listener whose agent list is refilling did answer and will judge the route in a moment,
+  where one that is unreachable did not answer at all.
+
+## [main@87fb43e754ba] - 2026-11-05
+
+### Changed
+
+- No Dispatch tool carries a length of its own. `DISPATCH_BODY_MAX` and `ASK_QUESTION_MAX` are
+  gone, and the server's own bounds take their place: `DISPATCH_BLOCK_UNITS` (32000), one block
+  of a body, `DISPATCH_ITEM_BLOCKS` (32768), how many blocks a body may hold, and
+  `DISPATCH_EVENT_BODY_MAX` (32000), how much of a body one event carries whole and the bound an
+  ask's question and its options share. Each is generated into Go for the server, which refuses
+  a longer write and names what passed the bound, and the Legion daemon reads the two block
+  bounds through the server's own splitter (`github.com/sjawhar/envoy/dispatchbody`), so it
+  refuses a close reason or a READY packet the server would refuse at the call that carries it
+  rather than losing the post. The new `dispatch_limits` spec reads them from the server
+  (`GET /api/v1/limits`, `DispatchLimits`).
+  Every ask instruction gives one rule and states no character count: an ask is short and asks
+  one thing, and its reasoning goes in the document. An event whose body is longer than it
+  carries says `body_truncated`; a search hit carries `block_id`, the block of it a meaning
+  match named; and a document, comment or message block carries `embedding`, where meaning
+  search stands on it.
+
+## [main@c82087d74996] - 2026-11-05
+
+### Added
+
+- LegionOperatorClaimsResponse carries pod_update_rounds: what the daemon's last pod-update sweep decided under the two new legion.yaml limits on opening pod-update rounds — each limit or null for no limit, the issues holding an open round, and the issues each limit held back.
+- Review and approval contracts expose approved content hashes and their provenance; runtime review-event validation preserves both fields. Document-version reads can report the SHA-256 of their stored UTF-8 bytes.
+
 ## [main@f06073fb9ef4] - 2026-11-05
 
 ### Added

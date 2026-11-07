@@ -96,10 +96,10 @@ type Runtime interface {
 	ProvisionsWorkspaces() bool
 	// ProvisionBound is how much longer a launch may run before its agent's own process has even
 	// started: zero for a runtime whose process starts the agent at once (tmux), and the Sandbox
-	// runtime's own init-container budget (its two clones' bounds together) for a launch whose pod runs
-	// provisioning first, which that runtime's wait for the pod's launcher allows past its boot
-	// timeout. The supervisor also adds it to the registration deadline's base
-	// Boot×RegistrationIntervals bound while a claim is still StateLaunching.
+	// runtime's own init-container budget (its two clones' and the issue's checkout's bounds
+	// together) for a launch whose pod runs provisioning first, which that runtime's wait for the
+	// pod's launcher allows past its boot timeout. The supervisor also adds it to the registration
+	// deadline's base Boot×RegistrationIntervals bound while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
 	// LaunchBound is the longest one launch try — one Spawn or Resume call — may run on the
 	// runtime's own account before the runtime ends it with an error, so a try that never answers
@@ -309,7 +309,12 @@ func (k Known) Validate() error {
 // the project's memory group (record.Issue.MemoryGroup on the tree's root, which internal/daemon's
 // specs reads): such a launch names the project's memory overlays last in PI_CONFIG_FILES and ends
 // its system prompt with the memory instructions; false for every no-memory tree and for the
-// controller, which runs in no tree. Backend is the harness the process runs (`worker_backends`,
+// controller, which runs in no tree. IssueTrailer is the issue key this pane stamps into its
+// commits, as the `Dispatch: <KEY>` trailer the agent's jj overlay writes (LEGION_ISSUE_TRAILER,
+// which each runtime sets itself): the claim's own issue when the project names its repository in
+// `commit_issue_trailer_repos` (which internal/daemon's specs reads); "" for a repository the
+// project does not name, for a launch with no repository, and for the controller, which works
+// neither. Backend is the harness the process runs (`worker_backends`,
 // Backends); "" is Oh My Pi (Of).
 type SpawnSpec struct {
 	Claim             claim.Token
@@ -327,6 +332,7 @@ type SpawnSpec struct {
 	ResumeSessionFile string
 	Plugins           *PluginInstall
 	Memory            bool
+	IssueTrailer      string
 	Backend           Backend
 }
 

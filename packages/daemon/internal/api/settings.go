@@ -53,12 +53,16 @@ type Settings struct {
 	ProbeIntervalSeconds          int `json:"probe_interval_seconds"`
 	ControllerWakeIntervalSeconds int `json:"controller_wake_interval_seconds"`
 	// The counts.
-	WorkerBootRegistrationDeadlineIntervals int      `json:"worker_boot_registration_deadline_intervals"`
-	LaunchFailureLimit                      int      `json:"launch_failure_limit"`
-	PromptFailureLimit                      int      `json:"prompt_failure_limit"`
-	PromptRetireLimit                       int      `json:"prompt_retire_limit"`
-	EnvoyURL                                string   `json:"envoy_url"`
-	NatsURLs                                []string `json:"nats_urls"`
+	WorkerBootRegistrationDeadlineIntervals int `json:"worker_boot_registration_deadline_intervals"`
+	LaunchFailureLimit                      int `json:"launch_failure_limit"`
+	PromptFailureLimit                      int `json:"prompt_failure_limit"`
+	PromptRetireLimit                       int `json:"prompt_retire_limit"`
+	// The wake pacing: at most WorkerWakesPerMinute wakes a minute in bursts of WorkerWakeBurst,
+	// a rate of 0 being the pacing off.
+	WorkerWakesPerMinute int      `json:"worker_wakes_per_minute"`
+	WorkerWakeBurst      int      `json:"worker_wake_burst"`
+	EnvoyURL             string   `json:"envoy_url"`
+	NatsURLs             []string `json:"nats_urls"`
 	// DispatchURL is absent while the file sets none.
 	DispatchURL string `json:"dispatch_url,omitempty"`
 	// Projects is `{}` while the file declares none.
@@ -75,12 +79,19 @@ type Settings struct {
 	// update round waits before it asks a worker again, and how long after the round opened the
 	// controller is told it is stalled. They are decimals so a live proof and the production
 	// check can drive each bound inside one run.
-	PodUpdateRetaskHours float64                 `json:"pod_update_retask_hours"`
-	PodUpdateNoticeHours float64                 `json:"pod_update_notice_hours"`
-	ReviewRoundCap       int                     `json:"review_round_cap"`
-	MaxFixAttempts       int                     `json:"max_fix_attempts"`
-	Controller           config.ControllerLaunch `json:"controller"`
-	Capabilities         CapabilitiesSettings    `json:"capabilities"`
+	PodUpdateRetaskHours float64 `json:"pod_update_retask_hours"`
+	PodUpdateNoticeHours float64 `json:"pod_update_notice_hours"`
+	// PodUpdateMaxOpenRounds and PodUpdateRoundsPerMinute are `pod_update_max_open_rounds` and
+	// `pod_update_rounds_per_minute`: how many issues may hold an open update round at once, and
+	// how many rounds one sweep may open in a minute. Each is null, and neither is omitted, when
+	// the file names no limit, so a reader of the settings sees the key and reads from it that
+	// the deployment caps nothing.
+	PodUpdateMaxOpenRounds   *int                    `json:"pod_update_max_open_rounds"`
+	PodUpdateRoundsPerMinute *int                    `json:"pod_update_rounds_per_minute"`
+	ReviewRoundCap           int                     `json:"review_round_cap"`
+	MaxFixAttempts           int                     `json:"max_fix_attempts"`
+	Controller               config.ControllerLaunch `json:"controller"`
+	Capabilities             CapabilitiesSettings    `json:"capabilities"`
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
@@ -131,6 +142,11 @@ type KubernetesSettings struct {
 	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
 	Setup []string `json:"setup"`
+	// SkillsRepository is the skills marketplace every issue pod's roles install from
+	// (`runtime.kubernetes.skills_repository`), as `<owner>/<name>`; empty while the file names
+	// none. It is a public repository name, not a credential, and every pod's init container
+	// carries it on its command line already.
+	SkillsRepository string `json:"skills_repository"`
 	// TestPostgres is whether every issue pod serves its own PostgreSQL for tests, which every
 	// role of such a pod is told as LEGION_TEST_PG_DSN, so every pod may read it.
 	TestPostgres    bool                    `json:"test_postgres"`
@@ -306,6 +322,8 @@ func SettingsOf(cfg config.Config) Settings {
 		LaunchFailureLimit:                      cfg.LaunchFailureLimit,
 		PromptFailureLimit:                      cfg.PromptFailureLimit,
 		PromptRetireLimit:                       cfg.PromptRetireLimit,
+		WorkerWakesPerMinute:                    cfg.WorkerWakesPerMinute,
+		WorkerWakeBurst:                         cfg.WorkerWakeBurst,
 		EnvoyURL:                                endpointOf(cfg.EnvoyURL),
 		NatsURLs:                                make([]string, len(cfg.NatsURLs)),
 		DispatchURL:                             endpointOf(cfg.DispatchURL),
@@ -315,6 +333,8 @@ func SettingsOf(cfg config.Config) Settings {
 		ProductionCheckHours:                    cfg.ProductionCheckBound.Hours(),
 		PodUpdateRetaskHours:                    cfg.PodUpdateRetask.Hours(),
 		PodUpdateNoticeHours:                    cfg.PodUpdateNotice.Hours(),
+		PodUpdateMaxOpenRounds:                  cfg.PodUpdateMaxOpenRounds,
+		PodUpdateRoundsPerMinute:                cfg.PodUpdateRoundsPerMinute,
 		ReviewRoundCap:                          cfg.ReviewRoundCap,
 		MaxFixAttempts:                          cfg.MaxFixAttempts,
 		Controller:                              cfg.ControllerLaunch,
@@ -403,9 +423,10 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Issue:      reservationSettingsOf(block.Resources.Issue),
 			Controller: reservationSettingsOf(block.Resources.Controller),
 		},
-		SessionStore: string(block.SessionStore.Kind),
-		Setup:        stringsOf(block.Setup),
-		TestPostgres: block.TestPostgres,
+		SessionStore:     string(block.SessionStore.Kind),
+		Setup:            stringsOf(block.Setup),
+		SkillsRepository: skillsRepositorySetting(block.SkillsRepository),
+		TestPostgres:     block.TestPostgres,
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
@@ -454,6 +475,16 @@ func seconds(d time.Duration) int {
 // stringsOf is a copy of values that is `[]` on the wire when values is nil.
 func stringsOf(values []string) []string {
 	return append([]string{}, values...)
+}
+
+// skillsRepositorySetting is repository as `<owner>/<name>`, and "" for the zero repository, which
+// is what a file naming no skills marketplace leaves: ghrepo's own String() of the zero value is
+// not the empty string.
+func skillsRepositorySetting(repository ghrepo.Repository) string {
+	if repository.IsZero() {
+		return ""
+	}
+	return repository.String()
 }
 
 // endpointOf is one address key's value as the state shows it: the scheme, the host and the path,

@@ -202,6 +202,10 @@ type harness struct {
 	// context was the agent's request's or one that outlives its connection.
 	reported           *[]capabilities.Report
 	reportedContextErr *[]error
+	// podUpdateRounds is what Options.PodUpdateRounds answers, which a test writes before it lists
+	// the claims: the sweep that fills it in production is the daemon's, which this package has
+	// none of.
+	podUpdateRounds *PodUpdateRounds
 	// handoffs is the Dispatch a completion route's harness reads handoff records from
 	// (newHandoffHarness), which writeHandoff fills; nil for a harness serving no completion.
 	handoffs *statusRecorder
@@ -261,11 +265,13 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	}
 	readied := &[]supervise.Claim{}
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
+	rounds := &PodUpdateRounds{}
 	h := &harness{
 		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup,
 		readied:            readied,
 		reported:           reported,
 		reportedContextErr: reportedContextErr,
+		podUpdateRounds:    rounds,
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
@@ -273,6 +279,7 @@ func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 		PluginRelaunchable: relaunchable,
 		ClaimReady:         func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents:       testPromptAgents,
+		PodUpdateRounds:    func() PodUpdateRounds { return *rounds },
 		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {
 			*reported = append(*reported, report)
 			*reportedContextErr = append(*reportedContextErr, ctx.Err())
@@ -330,14 +337,17 @@ func (h *harness) launch(issue string, role claim.Role) (claim.Token, string) {
 }
 
 // launchIn is launch for an issue of tree: a sub-architect or a worker on a child. The tree's
-// lifecycle is opened first, as the operator's root spawn or the workflow's admission opens it.
+// lifecycle is opened first under the workflow's own authority, as admission's promotion of the
+// root opens it: that row is what says the tree runs (record.TreeLive), so a fixture whose tree
+// must be live opens it the way the daemon does. A test about a tree the operator holds opens
+// its own row under that authority instead.
 func (h *harness) launchIn(tree, issue string, role claim.Role) (claim.Token, string) {
 	h.t.Helper()
 	token, err := claim.NewToken(testProject, issue, role)
 	if err != nil {
 		h.t.Fatalf("token: %v", err)
 	}
-	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, tree, treelifecycle.AuthorityOperator); err != nil {
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, tree, treelifecycle.AuthorityWorkflow); err != nil {
 		h.t.Fatalf("open the lifecycle of %s: %v", tree, err)
 	}
 	m, _, err := h.supervisor.Create(h.ctx, supervise.Claim{
@@ -521,4 +531,22 @@ func sortedTokens(claims []OperatorClaim) []string {
 	}
 	sort.Strings(tokens)
 	return tokens
+}
+
+// openTree opens tree's lifecycle under the workflow's authority, as admission's promotion of a
+// root does. That row, and not a slot, is what says a tree runs (record.TreeLive) now that a
+// slot counts one issue at work, so every fixture that seeds a running tree opens it. project is
+// the Dispatch project key the tree's issues are recorded under.
+func (h *harness) openTree(t *testing.T, project, tree string) {
+	t.Helper()
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		t.Fatalf("project token of %s: %v", project, err)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		_, err := record.NewStore().OpenTreeLifecycle(context.Background(), tx, token, tree, treelifecycle.AuthorityWorkflow)
+		return err
+	}); err != nil {
+		t.Fatalf("open the tree lifecycle of %s: %v", tree, err)
+	}
 }

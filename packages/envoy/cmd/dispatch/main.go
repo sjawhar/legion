@@ -31,10 +31,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/cireconcile"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -45,6 +47,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/envconf"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -77,6 +80,10 @@ type bootConfig struct {
 	DefaultProject string
 	EnvoyURL       string
 	GitHubAPIBase  string
+	// ReviewerAppID is DISPATCH_REVIEWER_APP_ID, the id of the App whose `tester` and `architect`
+	// check runs are Legion's verdicts, as the text of the number GitHub's own objects carry it
+	// as. Empty means the CI reconcile pass records no verdict check at all.
+	ReviewerAppID  string
 	IdentityHeader string
 	// SignInIssuer, SignInClientID and SignInClientSecret, with exactly one of SignInGroup and
 	// SignInDomain, configure Google sign-in (DISPATCH_SIGNIN_*): through a Cognito sign-in pool
@@ -116,6 +123,22 @@ type bootConfig struct {
 	// before its edit notice goes, zero for the document service's own 30 s; only
 	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
 	EditNoticeQuiet time.Duration
+	// CIReconcileInterval is how often the CI reconcile pass runs, zero for cireconcile.Interval's
+	// five minutes; only DISPATCH_TEST_CI_RECONCILE_INTERVAL, under the test hooks, sets it, since
+	// no process-level test can wait five minutes for a pass.
+	CIReconcileInterval time.Duration
+	// MaintenanceSweepInterval is how often the maintenance sweep runs - the Idempotency-Keys and
+	// spent DPoP proofs past their windows, and the deliveries a process that died left owed -
+	// zero for api.MaintenanceSweepInterval's minute; only
+	// DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL, under the test hooks, sets it, since no
+	// process-level test can wait a minute for a pass.
+	MaintenanceSweepInterval time.Duration
+	// ProcessHeartbeat is how often this process stamps its row in the registry of live server
+	// processes, zero for processes.HeartbeatInterval's five seconds; only
+	// DISPATCH_TEST_PROCESS_HEARTBEAT, under the test hooks, sets it, and processes.LiveWindow
+	// keeps its ratio of three beats to it, since no process-level test can wait a live window
+	// and a heartbeat for a refusal to stand.
+	ProcessHeartbeat time.Duration
 	// ListenerRosterUncached makes every read of the listener's session list ask the listener
 	// rather than share the process's five-second copy; only DISPATCH_TEST_ROSTER_UNCACHED=1, under
 	// the test hooks, sets it.
@@ -170,9 +193,17 @@ type bootConfig struct {
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
 	EnvoyToken string
+	// RoleHolderWindows are the session windows a role route's holder is judged by
+	// (ENVOY_SESSION_LIVE_WINDOW and ENVOY_SESSION_GONE_HORIZON, roleHolderWindows): what the
+	// outbox's reader of the role and session buckets carries (roles.NewBuckets).
+	RoleHolderWindows roles.Windows
 	// Embedder is where meaning search embeds text (DISPATCH_EMBEDDER and DISPATCH_AZURE_*),
 	// checked whole; newEmbedder builds its client.
 	Embedder embedderConfig
+	// Answerer is where the server generates text (DISPATCH_ANSWERER, and the DISPATCH_AZURE_CHAT_*
+	// or DISPATCH_CHAT_* settings of the place it names), checked whole; an empty Place is no
+	// model configured, which the server says at boot rather than refusing to start.
+	Answerer answererConfig
 }
 
 func main() {
@@ -185,6 +216,14 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
 		os.Exit(1)
+	}
+	// The registry's pace, before anything registers or reads what is live. The live window stays
+	// three beats, as processes.LiveWindow is of processes.HeartbeatInterval, so a run cannot give
+	// itself a window shorter than its own heartbeat, and the wait a refused process makes
+	// (Register: one live window and one heartbeat) shortens with it.
+	if boot.ProcessHeartbeat > 0 {
+		processes.HeartbeatInterval = boot.ProcessHeartbeat
+		processes.LiveWindow = 3 * boot.ProcessHeartbeat
 	}
 
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
@@ -379,6 +418,7 @@ func main() {
 		MarkWait:          boot.MarkWait,
 		UnrecordedMarkTTL: boot.UnrecordedMarkTTL,
 		EditNoticeQuiet:   boot.EditNoticeQuiet,
+		TestHooks:         boot.TestHooksEnabled,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
@@ -386,6 +426,7 @@ func main() {
 	// restoreDecidedWordings, which takes the copy lock (see below).
 	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
 	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
+	fillReviewContentHashes(ctx, database.Pool, reviewContentHashFillTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -416,6 +457,15 @@ func main() {
 		embedder = client
 	}
 
+	// answerer is nil where the deployment configured no model, which newAnswerer logs: the
+	// server boots and says it cannot answer. A shape it could not build from is a refusal to
+	// boot, as the embedder's is, since the deployment asked for a model and got none.
+	answerer, err := newAnswerer(boot.Answerer)
+	if err != nil {
+		slog.Error("dispatch: build the answerer", "error", err)
+		os.Exit(1)
+	}
+
 	built := routes.AppContextOptions{
 		SigningKey:     signingKey,
 		WebDistDir:     webDistDir,
@@ -439,6 +489,11 @@ func main() {
 	// configured verifier, and every JWT-shaped bearer would be sent to it.
 	if serviceTokens != nil {
 		built.OIDC = serviceTokens
+	}
+	// Set only when configured, for the reason above: a nil *going.Answerer in the interface
+	// field would read as a model configured, and the capability route would say so.
+	if answerer != nil {
+		built.Answerer = answerer
 	}
 	brokerTokens, err := brokerTokenVerifier(boot, database, serverURL)
 	if err != nil {
@@ -502,11 +557,12 @@ func main() {
 	//     above; each tick sends its statements whether or not anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
-	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
-	// (a channel added later would never be LISTENed on), and no loop waits for it: each runs its
-	// boot pass whether or not the hub has connected. Postgres does not replay a notification sent
-	// while nothing listened, so the hub signals every wake after each successful LISTEN, and a
-	// change made while it was redialing (backing off up to 30 s) is caught up then.
+	// listener pool, carrying every woken loop's channel and the document rooms' room-sync
+	// channels alike. Every wake and handler is registered before it runs (a channel added later
+	// would never be LISTENed on), and no loop waits for it: each runs its boot pass whether or
+	// not the hub has connected. Postgres does not replay a notification sent while nothing
+	// listened, so the hub signals every wake after each successful LISTEN, and a change made
+	// while it was redialing (backing off up to 30 s) is caught up then.
 	//
 	// The events outbox publishes under a hold of its own rather than such a lease
 	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
@@ -519,16 +575,15 @@ func main() {
 	//     reconciliation (`for no key update ... skip locked`) and the delivery intakes (NATS's
 	//     push-durable exclusivity, which delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
-	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
-	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
-	//     shared wake listener (each process's loops wait on their own), the delivery live hub
-	//     and its listener (migration 0107_events_notify.up.sql states that purpose), the event
-	//     stream relay, the document rooms' timers, the document compaction queue (docs.New starts
-	//     it; it compacts the documents this process's own appends and loads noted, and the hourly
-	//     compaction sweep below is the leased pass over the documents doc_compaction_owed names,
-	//     those with rows to fold), and the stale-room evictor (it closes the rooms resident in
-	//     this process that the other process's writes left behind the durable head, so it has to
-	//     run wherever a room is resident).
+	//     the delivery live hub and its listener (migration 0107_events_notify.up.sql states that
+	//     purpose), the event stream relay, the document rooms' timers, the document compaction
+	//     queue (docs.New starts it; it compacts the documents this process's own appends and
+	//     loads noted, and the hourly compaction sweep below is the leased pass over the
+	//     documents doc_compaction_owed names, those with rows to fold), the process's shared
+	//     listener hub (its connection is this process's membership and every loop above waits on
+	//     a wake of this process's own, so it has to run in every process) and the room sync
+	//     registered on it (it serves the rooms resident in this process: it catches them up with
+	//     the other processes' writes and answers their room queries).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above, and the embedding coverage pass (two processes' passes at once leave what one
@@ -551,7 +606,14 @@ func main() {
 	met := metrics.New()
 	outboxPublishFailures := met.NewCounter(
 		"envoy_dispatch_outbox_publish_failures_total",
-		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), holder (a role forward its holder's resolution held pending, with nothing sent), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder whose entry records a port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+		"Destinations of an outbox publish attempt that were not reached, by reason: denied (the server refused the send under the connection's own publish permissions), refused (NATS refuses it however often it is retried), unanswered (NATS took the forward and the answer never came: the role holder's receipt, or, for a holder whose entry an earlier listener stored with a port, the stream's acknowledgement of the stored copy) or failed (every other failure)",
+	)
+	// The holds beside the failures: a role-routed event whose holder is not answering is waiting
+	// for that session, with nothing sent and nothing failed, so it is counted here rather than
+	// under the publish failures an operator alerts on (outbox.Deps.RoleForwardsHeld).
+	outboxRoleForwardsHeld := met.NewCounter(
+		"envoy_dispatch_outbox_role_forwards_held_total",
+		"Role forwards an event's holder resolution held pending with nothing sent, by the holder's state: unresponsive (the holder is past the live window), undated (nothing dates the holder) or unresolved (the role claim or the holder's session could not be read)",
 	)
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -560,17 +622,19 @@ func main() {
 			os.Exit(1)
 		}
 		// One reader of the role and session buckets serves both: a role route's holder is read
-		// straight from the buckets on the bus client's connection, with no watcher.
-		holders := roles.NewBuckets(natsClient)
+		// straight from the buckets on the bus client's connection, with no watcher, and judged
+		// by the windows this deployment gave its listeners (roleHolderWindows).
+		holders := roles.NewBuckets(natsClient, boot.RoleHolderWindows)
 		outboxPublisher = outbox.New(outbox.Deps{
-			Store:           &store.Store{Pool: outboxPool},
-			Publisher:       natsClient,
-			Broker:          broker,
-			Listen:          database.Pool.Listener,
-			RoleClaims:      holders,
-			Sessions:        holders,
-			KeptLanes:       natsClient,
-			PublishFailures: outboxPublishFailures,
+			Store:            &store.Store{Pool: outboxPool},
+			Publisher:        natsClient,
+			Broker:           broker,
+			Listen:           database.Pool.Listener,
+			RoleClaims:       holders,
+			Sessions:         holders,
+			KeptLanes:        natsClient,
+			PublishFailures:  outboxPublishFailures,
+			RoleForwardsHeld: outboxRoleForwardsHeld,
 		})
 		outboxStopped = make(chan struct{})
 		go func() {
@@ -594,30 +658,46 @@ func main() {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
 	}
 
-	// The shared listener (see the loop comment above). A wake is registered only for a loop that
-	// will read it: with no embedder embedqueue.Run returns at once, and without NATS or the
-	// GitHub App no intake starts to route by the settings, so neither channel is LISTENed on.
-	wakes := &pglisten.Hub{Owner: "dispatch background wakes", Dial: database.Pool.Listener}
+	// This process's one shared LISTEN connection. Its name is what makes this process a member:
+	// the other envoy-dispatch processes read it in pg_stat_activity (docs/room_sync.go), and only
+	// one connection per process can answer for that, so the woken loops' wakes and the document
+	// rooms' room sync are registered on the one hub. The delivery hub and the event stream relay
+	// still hold listener connections of their own (store.Pool.Listener).
+	//
+	// A wake is registered only for a loop that will read it: with no embedder embedqueue.Run
+	// returns at once, and without NATS or the GitHub App no intake starts to route by the
+	// settings, so neither channel is LISTENed on.
+	listenerHub := &pglisten.Hub{
+		Owner: "dispatch",
+		Dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return database.Pool.Dedicated(ctx, docs.ListenerApplicationPrefix+documentService.ProcessID())
+		},
+	}
 	var embeddingsWake, settingsWake <-chan struct{}
 	if backgroundEmbedder != nil {
-		embeddingsWake = wakes.Wake(embedqueue.WakeChannel)
+		embeddingsWake = listenerHub.Wake(embedqueue.WakeChannel)
 	}
-	excerptsWake := wakes.Wake(docs.ExcerptsOwedChannel)
-	editNoticesWake := wakes.Wake(docs.EditNoticesChannel)
-	eventsWake := wakes.Wake(api.EventsChannel)
+	excerptsWake := listenerHub.Wake(docs.ExcerptsOwedChannel)
+	editNoticesWake := listenerHub.Wake(docs.EditNoticesChannel)
+	eventsWake := listenerHub.Wake(api.EventsChannel)
 	if natsClient != nil && appCtx.GitHub() != nil {
-		settingsWake = wakes.Wake(delivery.SettingsChannel)
+		settingsWake = listenerHub.Wake(delivery.SettingsChannel)
 	}
-	go wakes.Run(ctx)
 
 	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder, Wake: embeddingsWake})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
-	// anyone opening its document.
-	go documentService.RunSettlementResumption(ctx)
-	// INFRA-66: a document written by the other envoy-dispatch process is announced over
-	// Postgres, and the room this process holds for it closes within that round trip, so its
-	// browsers reconnect and re-sync instead of reading text the store no longer holds.
-	go documentService.RunStaleRoomEviction(ctx)
+	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
+	go documentService.RunSettlementResumption(ctx, leases)
+	// The document rooms' room sync, registered on the hub above and run beside it: a document
+	// written by another process is announced over Postgres, and the room this process holds for
+	// it catches up from the stored updates within that round trip, so its browsers see the write
+	// without a reconnect. The hub takes no registration once it runs, so every wake above and
+	// every room-sync handler is registered before the line that starts it. Both stop with ctx,
+	// like the loops beside them; the service's NOTIFY sender stays open until
+	// documentService.Shutdown has drained the rooms.
+	runRoomSync := documentService.RegisterRoomSync(listenerHub)
+	go runRoomSync(ctx)
+	go listenerHub.Run(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
 	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
@@ -660,6 +740,33 @@ func main() {
 		go sweeper.Run(ctx, redeliver.Interval, leases)
 	} else {
 		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
+	}
+
+	// INFRA-1211: a webhook that never arrived leaves a head short of a check, and a head short
+	// of a check never settles, so every interval one process reads each open pull request's head
+	// from GitHub and records the completed checks Envoy's record of that head lacks. It is a
+	// timer that stays, as the webhook redelivery sweep and the delivery reconcile beside it are:
+	// GitHub has no feed of the webhook it never delivered, so there is nothing to wake on.
+	reconciler, err := ciReconciler(natsClient, database, appCfg, boot.GitHubAPIBase, boot.ReviewerAppID)
+	if err != nil {
+		slog.Error("dispatch: open the CI reconcile pass", "error", err)
+		os.Exit(1)
+	}
+	if reconciler != nil {
+		interval := cireconcile.Interval
+		if boot.CIReconcileInterval > 0 {
+			interval = boot.CIReconcileInterval
+		}
+		slog.Info("dispatch: reconciling the CI records GitHub's webhook never delivered", "client_id", appCfg.ClientID, "interval", interval)
+		if boot.ReviewerAppID == "" {
+			slog.Info("dispatch: the CI reconcile pass records no tester or architect check run: DISPATCH_REVIEWER_APP_ID is unset, so no App's verdict checks are trusted")
+		}
+		// The period argument is what makes one process serve each period (duty_passes): the
+		// lease alone only keeps two passes from overlapping, and the App's budget pays for every
+		// pass that runs.
+		go duty.RunLeased(ctx, leases, cireconcile.Lease, interval, duty.TickAfterInterval, reconciler.Pass)
+	} else {
+		slog.Info("dispatch: CI reconcile off: it needs NATS and the GitHub App private key")
 	}
 
 	go architecture.Run(ctx, appCtx.Architecture(), leases)
@@ -723,7 +830,11 @@ func main() {
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because
 	// it resumes those deliveries through the API server built just above.
-	go api.RunMaintenanceSweep(ctx, database.Pool, api.MaintenanceSweepInterval, leases, background.ResumeDeliveries)
+	maintenanceInterval := api.MaintenanceSweepInterval
+	if boot.MaintenanceSweepInterval > 0 {
+		maintenanceInterval = boot.MaintenanceSweepInterval
+	}
+	go api.RunMaintenanceSweep(ctx, database.Pool, maintenanceInterval, leases, background.ResumeDeliveries)
 	handler := dispatchHandler(routesHandler, met, database, natsClient, outboxPublisher, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := newHTTPServer(handler, time.Now)
 	// The server serves on the socket it inherited (DISPATCH_LISTEN_FD) or binds its address, and
@@ -943,6 +1054,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
+	if boot.RoleHolderWindows, err = roleHolderWindows(env); err != nil {
+		return bootConfig{}, err
+	}
 	for _, setting := range []struct {
 		name   string
 		target *time.Duration
@@ -953,10 +1067,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
 		{"DISPATCH_TEST_LISTENER_TAKEOVER_WINDOW", &boot.ListenerTakeoverWindow},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
+		{"DISPATCH_TEST_CI_RECONCILE_INTERVAL", &boot.CIReconcileInterval},
+		{"DISPATCH_TEST_MAINTENANCE_SWEEP_INTERVAL", &boot.MaintenanceSweepInterval},
+		{"DISPATCH_TEST_PROCESS_HEARTBEAT", &boot.ProcessHeartbeat},
 	} {
 		if err := testHookDuration(env, setting.name, boot.TestHooksEnabled, setting.target); err != nil {
 			return bootConfig{}, err
 		}
+	}
+	if boot.ReviewerAppID, err = reviewerAppID(env); err != nil {
+		return bootConfig{}, err
 	}
 	for _, setting := range []struct {
 		name   string
@@ -1039,6 +1159,15 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	boot.Embedder, err = resolveEmbedder(env)
 	if err != nil {
 		return bootConfig{}, err
+	}
+	boot.Answerer, err = resolveAnswerer(env, boot.Embedder.Place)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	// The dev embedder's vectors mean nothing beyond the words a text and a query share, so a
+	// deployment that set it would answer meaning search with them and never know.
+	if !devSignIn && boot.Embedder.Place == embed.PlaceDev {
+		return bootConfig{}, errors.New("DISPATCH_DEV_EMBEDDER is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_EMBEDDER to embed a deployment's text at a model service")
 	}
 
 	if devSignIn {
@@ -1281,6 +1410,17 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 				return nil, err
 			}
 			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+const reviewContentHashFillTimeout = 30 * time.Second
+
+// fillReviewContentHashes pins reviews from before the hash columns were added.
+func fillReviewContentHashes(ctx context.Context, pool *store.Pool, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: fill reviews' content hashes", "dispatch: filled reviews' content hashes",
+		func(ctx context.Context) ([]any, error) {
+			result, err := docs.FillReviewContentHashes(ctx, pool)
+			return []any{"filled", result.Filled, "unhashable", result.Unhashable}, err
 		})
 }
 
@@ -1637,6 +1777,26 @@ func testHookBool(env settingValues, name string, testHooksEnabled bool, target 
 	}
 	*target = raw == "1"
 	return nil
+}
+
+// roleHolderWindows are the session windows Dispatch judges a role route's holder by, read
+// through the helper the listener reads its own with (envconf.SessionWindows): the listener's
+// two settings, their compiled defaults, a warning and the default for a value no duration can
+// be read from, and a refusal to start for one that is not positive. It hands the helper the
+// settings table's own lookup, so Dispatch still reads its environment in one place
+// (settings.go, TestNoReaderBypassesTheSettingsTable).
+//
+// Both processes judge the same holder, so both carry the same values. Dispatch left to the
+// compiled windows calls a holder gone whose horizon the deployment raised, counts its role
+// route reached and marks the event published with nothing sent (forwardOf), while the
+// listener, carrying the raise, still calls that holder unresponsive and keeps its claim: the
+// event reaches it never (dispatch://INFRA-392).
+func roleHolderWindows(env settingValues) (roles.Windows, error) {
+	live, horizon, err := envconf.SessionWindows(slog.Default(), env.lookup)
+	if err != nil {
+		return roles.Windows{}, err
+	}
+	return roles.Windows{Live: live, Horizon: horizon}, nil
 }
 
 // resolveListen says where the server serves. With DISPATCH_LISTEN_FD it is the inherited socket

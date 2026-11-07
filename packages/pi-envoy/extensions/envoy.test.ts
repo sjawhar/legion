@@ -502,6 +502,12 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
 /** Every callback the default `sessionContext()` timer ran, awaited after each test. */
 const contextTimers: Promise<void>[] = [];
 
+/** A managed timer scheduled further out than this is left pending by the fake below, as the
+ *  host's own clock leaves it in a test that lasts milliseconds: the heartbeat's extra call
+ *  after a failed registration is 20–40 s out, and a test that wants it supplies a `setTimeout`
+ *  of its own and runs the callback itself. */
+const TIMER_HORIZON_MS = 1_000;
+
 // The session-manager surface `isSubagentSession` reads. No transcript path reads as a
 // top-level session, so every fixture here registers unless a test supplies a transcript that
 // sits inside a parent's directory.
@@ -517,7 +523,8 @@ function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
     hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
-    setTimeout: (callback) => {
+    setTimeout: (callback, delayMs) => {
+      if (delayMs > TIMER_HORIZON_MS) return;
       contextTimers.push(Promise.resolve().then(callback));
     },
     ui: {
@@ -949,8 +956,13 @@ async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
   }
 }
 
+/** A server's answer, typed as Dispatch and the listener type theirs: a client reads a body as
+ *  JSON only where the answer says it is JSON (`DispatchClient`'s `#response`). */
 function response(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200 });
+  return new Response(JSON.stringify(body), {
+    headers: { "Content-Type": "application/json" },
+    status: 200,
+  });
 }
 
 /** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
@@ -1171,7 +1183,8 @@ async function bootAskNudge(
       getBranch: () => branch,
     },
     setInterval: (callback) => intervals.push(callback),
-    setTimeout: (callback) => {
+    setTimeout: (callback, delayMs) => {
+      if (delayMs > TIMER_HORIZON_MS) return;
       if (options.holdTimers === true) held.push(callback);
       else timers.push(Promise.resolve().then(callback));
     },
@@ -2945,12 +2958,14 @@ describe("envoy OMP extension", () => {
         expires_at: 1_788_956_000_000,
         idempotency_key: "0f6c1e3a-7d2b-4c8e-9a51-3b7e2d4f6a80",
       });
+    // The listener named no recipient_state, which reads as live.
     expect(sent?.content[0]?.text).toBe(
-      "sent evt_1 to ses_target (recipient unconfirmed by listener)"
+      "sent evt_1 to ses_target (live) (recipient unconfirmed by listener)"
     );
     expect(sent?.details).toMatchObject({
       event_id: "evt_1",
       recipient: "ses_target",
+      recipient_state: "live",
       confirmed: false,
     });
     await fixture.tools
@@ -3040,8 +3055,7 @@ describe("envoy OMP extension", () => {
           payload_summary: "broadcast",
           trace_id: "trace_kept",
           kept: true,
-          kept_reason: "holder_lapsed",
-          holder: "ses_lapsed",
+          kept_reason: "unclaimed",
         }),
         { status: 202 }
       );
@@ -3057,13 +3071,13 @@ describe("envoy OMP extension", () => {
 
     expect(kept?.isError).toBeFalsy();
     expect(kept?.content[0]?.text).toBe(
-      "published evt_kept; kept for the role: no session holds it yet, and the message waits for the session that claims it next"
+      "published evt_kept. Envoy kept it for the role: no session holds it yet, and the message waits for the session that claims it next."
     );
     expect(kept?.details).toMatchObject({
       event_id: "evt_kept",
       topic: "notifications.role.legion-architect",
       kept: true,
-      kept_reason: "holder_lapsed",
+      kept_reason: "unclaimed",
     });
   });
 
@@ -10647,21 +10661,28 @@ console.log(JSON.stringify(args));
     // nor errors used to hold every later pass behind it for the life of the process: the pane's
     // registry record then lapsed while it ran on, and every other agent was told there was no
     // live session for it. The refresh has to keep going, tick after tick, not recover once.
-    // The ticks are hand-driven, but the age the refresh is decided on is read from the real
-    // clock (`Date.now() - registeredAt`), so the waits between them are real waits.
+    // The ticks are hand-driven, and the age the refresh is decided on is read from the real
+    // clock (`Date.now() - registeredAt`), so a tick inside that interval posts nothing: the row
+    // waits on the registration reaching the listener, and ticks again until it does, rather than
+    // reading the count after a sleep a loaded machine outruns.
     await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 5000 }, async () => {
       let wedgePass = false;
+      const wedged = Promise.withResolvers<void>();
       const answered = Promise.withResolvers<void>();
       let registrations = 0;
+      /** Told of the next registration the listener accepts, while `refreshed` waits for one. */
+      let accepted: (() => void) | undefined;
       globalThis.fetch = async (input, init) => {
         if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
           // The call the pass awaits, as a socket that is accepted and never answered leaves it:
           // nothing resolves it, and the request's abort signal goes unread.
           if (wedgePass) {
             wedgePass = false;
+            wedged.resolve();
             await answered.promise;
           } else {
             registrations += 1;
+            accepted?.();
           }
         }
         return responseWithRegistration(input, init, {});
@@ -10673,31 +10694,50 @@ console.log(JSON.stringify(args));
         ...sessionContext("ses_wedged_pass"),
         setInterval: (callback) => intervals.push(callback),
       };
+      /**
+       * Ticks until the listener has accepted one more registration, and answers with the count it
+       * reached. A tick that lands inside the refresh interval posts nothing, so the row ticks
+       * again after a grace instead of deciding on one tick, and a refresh is awaited where it
+       * shows — at the listener. The deadline only a stopped refresh reaches leaves the count as
+       * it was, so the caller's own assertion says what was missing.
+       */
+      const refreshed = async (): Promise<number> => {
+        const seen = registrations;
+        const until = Date.now() + 5_000;
+        while (registrations === seen && Date.now() < until) {
+          const waiting = Promise.withResolvers<void>();
+          accepted = () => waiting.resolve();
+          const grace = setTimeout(() => waiting.resolve(), 250);
+          intervals[0]?.();
+          await waiting.promise;
+          clearTimeout(grace);
+          accepted = undefined;
+        }
+        return registrations;
+      };
       envoyExtension(fixture.pi);
       await fixture.handlers.get("session_start")?.({}, context);
       expect(registrations).toBe(1);
 
       wedgePass = true;
       intervals[0]?.();
-      // The pass is still inside that call, so its own registration never reached the listener.
-      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The pass is inside that call, so its own registration never reached the listener.
+      await wedged.promise;
       expect(registrations).toBe(1);
 
-      // Two refresh intervals with nothing accepted: the tick posts the registration itself.
-      intervals[0]?.();
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(registrations).toBe(2);
+      // A refresh interval with nothing accepted: the tick posts the registration itself.
+      const second = await refreshed();
+      expect(second).toBeGreaterThan(1);
 
-      // And the tick after it does too: the refresh resumes, it does not recover once.
-      intervals[0]?.();
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(registrations).toBe(3);
+      // And the ticks after it do too: the refresh resumes, it does not recover once.
+      expect(await refreshed()).toBeGreaterThan(second);
 
       // Answer at last, so the pass settles and leaves no deadline timer behind.
       answered.resolve();
       for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
     });
-  });
+    // The row's own bound is a hang guard, the file's convention: its work is a handful of ticks.
+  }, 30_000);
 
   test("a role move that never settles still lets the next tick refresh the registration", async () => {
     // What a wedged envoy_role_set or a wedged Legion claim leaves behind: the role-move queue is
@@ -16181,8 +16221,9 @@ console.log(JSON.stringify(args));
     const notifications: string[] = [];
     const warned = Promise.withResolvers<void>();
     const context: SessionContext = {
-      cwd: "/tmp/envoy-omp-test",
-      sessionManager: { ...topLevelSession, getSessionId: () => "ses_heartbeat" },
+      // The host always carries a managed one-shot timer, and the heartbeat's extra call after a
+      // failed registration is scheduled on it; the default fake leaves that one pending.
+      ...sessionContext("ses_heartbeat"),
       setInterval: (callback) => intervals.push(callback),
       ui: {
         ...sessionContext().ui,
@@ -16215,6 +16256,99 @@ console.log(JSON.stringify(args));
       message.includes("registry heartbeat failed")
     );
     expect(warnings).toHaveLength(1);
+  });
+
+  test("a registration that times out is retried once inside forty seconds, and a success returns the cadence to the heartbeat", async () => {
+    let registryDown = false;
+    let registrations = 0;
+    let attempted = 0;
+    // A listener call this client gives up on has been attempted twice (`DEFAULT_TIMEOUT_MS`,
+    // two attempts), so a pass is over once its last attempt has been answered and the
+    // microtasks behind it have drained. Waiting on the attempts rather than on a duration is
+    // what keeps this test off the clock.
+    let reached = { at: 0, ...Promise.withResolvers<void>() };
+    const afterAttempts = async (at: number): Promise<void> => {
+      reached = { at, ...Promise.withResolvers<void>() };
+      if (attempted >= at) reached.resolve();
+      await reached.promise;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    globalThis.fetch = async (input) => {
+      const registering = new URL(input.toString()).pathname === "/v1/interests/subscribe";
+      if (registering) {
+        attempted += 1;
+        if (attempted >= reached.at) reached.resolve();
+      }
+      // The symptom from production: the registration call itself times out under listener load.
+      if (registryDown) throw new Error("The operation timed out.");
+      if (registering) registrations += 1;
+      return response({ session_id: "ses_retry", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-retry");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    // The host's managed timer, read rather than run: the delay is the assertion, and the call
+    // itself is fired here, so the retry costs the test none of the seconds it waits in a pane.
+    const scheduled: { readonly delayMs: number; readonly run: () => void | Promise<void> }[] = [];
+    const notifications: string[] = [];
+    let warned = Promise.withResolvers<void>();
+    const context: SessionContext = {
+      ...sessionContext("ses_retry"),
+      setInterval: (callback) => intervals.push(callback),
+      setTimeout: (callback, delayMs) => {
+        scheduled.push({ delayMs, run: callback });
+      },
+      ui: {
+        ...sessionContext().ui,
+        notify: (message) => {
+          notifications.push(message);
+          if (message.includes("registry heartbeat failed")) warned.resolve();
+        },
+      },
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+    expect(registrations).toBe(1);
+
+    // A tick whose registration times out buys one extra call, far enough out that a listener
+    // under load is not hit again at once and far short of the next 90 s tick.
+    registryDown = true;
+    intervals[0]?.();
+    await warned.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduled).toHaveLength(1);
+    const delayMs = scheduled[0]?.delayMs ?? 0;
+    expect(delayMs).toBeGreaterThanOrEqual(20_000);
+    expect(delayMs).toBeLessThanOrEqual(40_000);
+    expect(notifications).toEqual([
+      expect.stringContaining(`retrying once in ${Math.round(delayMs / 1000)} s`),
+    ]);
+
+    // That one call also fails: the session goes back to the plain interval rather than asking
+    // the listener again, so a session that keeps failing costs it one extra call per interval.
+    const beforeRetry = attempted;
+    await scheduled[0]?.run();
+    await afterAttempts(beforeRetry + 2);
+    expect(scheduled).toHaveLength(1);
+    expect(registrations).toBe(1);
+
+    // The next tick lands: the registration is accepted and the cadence is the interval's again.
+    registryDown = false;
+    warned = Promise.withResolvers<void>();
+    const beforeHealthy = attempted;
+    intervals[0]?.();
+    await afterAttempts(beforeHealthy + 1);
+    expect(registrations).toBe(2);
+    expect(scheduled).toHaveLength(1);
+
+    // And the success restored the budget: the failure after it buys an extra call of its own.
+    registryDown = true;
+    intervals[0]?.();
+    await warned.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled[1]?.delayMs).toBeGreaterThanOrEqual(20_000);
+    expect(scheduled[1]?.delayMs).toBeLessThanOrEqual(40_000);
   });
 
   test("a rebind during a network outage notifies instead of failing the handler", async () => {
@@ -16323,6 +16457,181 @@ console.log(JSON.stringify(args));
 
     deletion.reject(new Error("listener cleanup failed"));
     await shutdown;
+  });
+
+  // A registration still on the wire when the session ends lands after the DELETE and writes the
+  // record back: the session is registered again with nobody heartbeating it, and peers read it
+  // as live for the live window and as unresponsive for an hour after (dispatch://INFRA-392).
+  test("session_shutdown holds the deregistration until a registration in flight settles", async () => {
+    const requests: string[] = [];
+    const registration = Promise.withResolvers<Response>();
+    let registrationPending = false;
+    let registrationPendingAtDelete: boolean | undefined;
+    let registrations = 0;
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/replay") return emptyReplay(init);
+      if (path === "/v1/sessions/ses_shutdown") {
+        registrationPendingAtDelete = registrationPending;
+        return response({});
+      }
+      if (path === "/v1/interests/subscribe") {
+        registrations += 1;
+        // The session's own start registers as usual; the one the tool below sends hangs.
+        if (registrations === 1) return responseWithRegistration(input, init, []);
+        registrationPending = true;
+        const answer = await registration.promise;
+        registrationPending = false;
+        return answer;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-settles-registration");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const subscribing = fixture.tools
+      .find((tool) => tool.name === "envoy_subscribe")
+      ?.execute("", { topics: ["notifications.github.sjawhar.legion.pr.1.>"] });
+    // Real time, briefly: the registration has to reach the wire, and the shutdown has to be
+    // given the chance to send the DELETE early, which is the failure this test is here for.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    if (shutdown === undefined) throw new Error("session_shutdown handler was not registered");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The negative case: the DELETE must not be on the wire while the registration is.
+    expect(requests).not.toContain("DELETE /v1/sessions/ses_shutdown");
+
+    registration.resolve(
+      response({
+        session_id: "ses_shutdown",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_shutdown"],
+      })
+    );
+    await shutdown;
+    await subscribing;
+
+    expect(requests).toContain("DELETE /v1/sessions/ses_shutdown");
+    expect(registrationPendingAtDelete).toBe(false);
+  });
+
+  // The wait above is bounded on the shutdown path, because Oh My Pi abandons a shutdown handler
+  // after 2 s: a registration slower than the wait must not cost the DELETE. One never sent
+  // leaves the record behind for the whole gone horizon, where one that overtakes a registration
+  // only may (dispatch://INFRA-392).
+  test("session_shutdown sends the DELETE when the registration in flight never settles", async () => {
+    const requests: string[] = [];
+    const registration = Promise.withResolvers<Response>();
+    let registrations = 0;
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      requests.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/replay") return emptyReplay(init);
+      if (path === "/v1/sessions/ses_shutdown") return response({});
+      if (path === "/v1/interests/subscribe") {
+        registrations += 1;
+        // The session's own start registers as usual; the one the tool below sends never answers.
+        if (registrations === 1) return responseWithRegistration(input, init, []);
+        return registration.promise;
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?shutdown-bounds-settle");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_shutdown"));
+    const subscribing = fixture.tools
+      .find((tool) => tool.name === "envoy_subscribe")
+      ?.execute("", { topics: ["notifications.github.sjawhar.legion.pr.1.>"] });
+    // Real time: the registration has to be on the wire before the shutdown starts waiting it out.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const startedAt = Date.now();
+    await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_shutdown"));
+    const elapsed = Date.now() - startedAt;
+
+    // The DELETE is on the wire at all, which the five-second settle inside a one-second deadline
+    // never managed, and the handler is still done inside the 2 s OMP gives it.
+    expect(requests).toContain("DELETE /v1/sessions/ses_shutdown");
+    expect(elapsed).toBeLessThan(1_900);
+
+    registration.resolve(
+      response({
+        session_id: "ses_shutdown",
+        machine_id: "test",
+        dir: "/tmp",
+        topics: ["notifications.agent.ses_shutdown"],
+      })
+    );
+    await subscribing;
+  });
+
+  // A `/new`, a fork or a branch mints a new id, and nothing heartbeats the old one from then on:
+  // left registered it reads as live, and then as unresponsive, for an hour of peers' sends.
+  test("a session id switch deregisters the id this process left", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(input.toString()).pathname}`);
+      return responseWithRegistration(input, init, []);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?switch-deregisters-old-id");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_before"));
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, sessionContext("ses_after"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(requests).toContain("DELETE /v1/sessions/ses_before");
+    expect(requests).not.toContain("DELETE /v1/sessions/ses_after");
+  });
+
+  // The list is what an agent reads before it decides a peer is dead: a stalled session must be
+  // asked for, and must arrive with the state and the heartbeat that say it is only stalled.
+  test("envoy_sessions asks for the unresponsive sessions and renders each one's state and last_seen", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      urls.push(`${url.pathname}${url.search}`);
+      if (url.pathname !== "/v1/sessions") return responseWithRegistration(input, init, []);
+      return response([
+        {
+          session_id: "ses_stalled",
+          machine_id: "test",
+          dir: "/tmp",
+          port: 0,
+          title: "Reviewer",
+          topics: [],
+          self_subscribed: true,
+          last_seen: 1_700_000_000_000,
+          state: "unresponsive",
+        },
+      ]);
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?sessions-render-state");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_lister"));
+    const listed = await fixture.tools
+      .find((tool) => tool.name === "envoy_sessions")
+      ?.execute("", {});
+
+    expect(urls).toContain("/v1/sessions?include=unresponsive");
+    const rows = JSON.parse(listed?.content[0]?.text ?? "[]") as readonly Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({
+      session_id: "ses_stalled",
+      state: "unresponsive",
+      last_seen: 1_700_000_000_000,
+    });
+    expect(listed?.details).toMatchObject({ count: 1, unresponsive: 1 });
   });
 
   test("/whoami reads the live session ID when the session was created after session_start", async () => {
@@ -19452,3 +19761,174 @@ for (const listenerGrant of ["current", "before-session-consumers"] as const) {
     }
   );
 }
+
+// A comment, message or broadcast body is bounded block by block, so one event carries its
+// first part alone and says so with `body_truncated`; an event the bus refused whole reaches
+// the session as a stand-in with no body at all (`payload_omitted`). A host that prompted its
+// agent with either would hand it less than the comment says, so the session reads the whole
+// body through its own Dispatch before it prompts; with no Dispatch, or a read that fails, it
+// keeps what the event carried and the note that says so.
+describe("a body an event carried only in part", () => {
+  const CUT_COMMENT = "44444444-4444-4444-8444-444444444444";
+  const CARRIED = "The first paragraph.";
+  const WHOLE = `${CARRIED}\n\nThe second paragraph, past where the event stopped.`;
+
+  /** The payload the event carries: the comment row with its body cut (`body_truncated`), or,
+   *  for `omitted`, the stand-in a bus refusal leaves behind - the row's short top-level fields
+   *  and `payload_omitted`, with no body at all. */
+  function commentPayload(omitted: boolean): Record<string, unknown> {
+    const named = {
+      id: CUT_COMMENT,
+      issue_key: "INFRA-370",
+      author: { kind: "user", id: "alice" },
+      created_at: "2026-11-02T00:00:00Z",
+    };
+    return omitted
+      ? { ...named, payload_omitted: true }
+      : {
+          ...named,
+          artifact_id: null,
+          body: CARRIED,
+          body_truncated: true,
+          anchor: null,
+          reply_to: null,
+          ask_id: null,
+          turn: null,
+          resolved: false,
+          resolved_by: null,
+          resolved_at: null,
+          edited_at: null,
+          suggestion: null,
+          mentions: [],
+          deliveries: [],
+          artifact_name: "",
+        };
+  }
+
+  function cutCommentEnvelope(topic: string, omitted: boolean): string {
+    return JSON.stringify({
+      event_id: "dispatch-cut-1",
+      source: "dispatch",
+      source_event_id: "1",
+      topic,
+      dedupe_key: "dispatch-cut-1",
+      issued_at: 1,
+      payload_summary: "INFRA-370 comment created",
+      payload: JSON.stringify({
+        id: 1,
+        seq: 1,
+        issue_key: "INFRA-370",
+        type: "comment.created",
+        actor: { kind: "user", id: "alice" },
+        notify: true,
+        quiet: false,
+        created_at: "2026-11-02T00:00:00Z",
+        payload: commentPayload(omitted),
+      }),
+      trace_id: "dispatch-cut-1",
+    });
+  }
+
+  /** Boots a session subscribed to INFRA-370's topic, pushes the comment event - cut, or the
+   *  stand-in when `omitted` - and answers the comment read with `read`. Returns the card its
+   *  agent was prompted with. */
+  async function cardForCutComment(
+    name: string,
+    read: (path: string) => Response | undefined,
+    omitted = false
+  ): Promise<string> {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    globalThis.fetch = async (input, init) => {
+      const answer = read(new URL(input.toString()).pathname);
+      return answer ?? responseWithRegistration(input, init, []);
+    };
+    const { default: envoyExtension } = await import(`./envoy.ts?${name}`);
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext(`ses_${name}`));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const topic = dispatchIssueSubject("INFRA-370", ">");
+    await subscribeTool.execute("", { topics: [topic] });
+    const control = natsState.controls.get(topic);
+    if (control === undefined) throw new Error("the issue topic was not subscribed");
+
+    control.push(cutCommentEnvelope(topic, omitted));
+    const deadline = Date.now() + 5_000;
+    while (fixture.deliveries.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const card = fixture.deliveries[0]?.content;
+    if (card === undefined) throw new Error("no card was delivered for the cut comment");
+    return card;
+  }
+
+  test("is prompted with the body the comment route answers", async () => {
+    const reads: string[] = [];
+    const card = await cardForCutComment("cut-comment-read", (path) => {
+      if (path !== `/api/v1/comments/${CUT_COMMENT}`) return undefined;
+      reads.push(path);
+      return response({
+        comment: { id: CUT_COMMENT, issue_key: "INFRA-370", body: WHOLE },
+        replies: [],
+      });
+    });
+
+    expect(reads).toEqual([`/api/v1/comments/${CUT_COMMENT}`]);
+    // Byte for byte: the body the route answered, written as the card writes a text holding
+    // blank lines (one quoted scalar), and no note, because nothing is missing.
+    expect(card).toContain(`body: ${JSON.stringify(WHOLE)}`);
+    expect(card).not.toContain("first part only");
+  });
+
+  test("keeps the part it carried, and the note, when that read fails", async () => {
+    const card = await cardForCutComment("cut-comment-read-fails", (path) =>
+      path === `/api/v1/comments/${CUT_COMMENT}`
+        ? new Response(JSON.stringify({ code: "INTERNAL", error: "down" }), { status: 500 })
+        : undefined
+    );
+
+    expect(card).toContain(CARRIED);
+    expect(card).not.toContain("The second paragraph");
+    expect(card).toContain(
+      `the body is its first part only; read it whole with GET /api/v1/comments/${CUT_COMMENT}`
+    );
+  });
+
+  test("is prompted with that body for a stand-in the bus left with no body at all", async () => {
+    const reads: string[] = [];
+    const card = await cardForCutComment(
+      "omitted-comment-read",
+      (path) => {
+        if (path !== `/api/v1/comments/${CUT_COMMENT}`) return undefined;
+        reads.push(path);
+        return response({
+          comment: { id: CUT_COMMENT, issue_key: "INFRA-370", body: WHOLE },
+          replies: [],
+        });
+      },
+      true
+    );
+
+    expect(reads).toEqual([`/api/v1/comments/${CUT_COMMENT}`]);
+    expect(card).toContain(`body: ${JSON.stringify(WHOLE)}`);
+    expect(card).not.toContain("too large for the bus");
+  });
+
+  test("gives the note for a stand-in whose read fails, having no body to keep", async () => {
+    const card = await cardForCutComment(
+      "omitted-comment-read-fails",
+      (path) =>
+        path === `/api/v1/comments/${CUT_COMMENT}`
+          ? new Response(JSON.stringify({ code: "INTERNAL", error: "down" }), { status: 500 })
+          : undefined,
+      true
+    );
+
+    expect(card).not.toContain("The second paragraph");
+    expect(card).toContain(
+      `this event carries no body: it was too large for the bus; read it whole with GET /api/v1/comments/${CUT_COMMENT}`
+    );
+  });
+});
