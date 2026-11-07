@@ -1378,8 +1378,8 @@ type AskEventPayload struct {
 	Restored bool `json:"restored,omitempty"`
 	// ThreadLogins is carried by ask.opened, ask.answered and ask.resolved: every login with a
 	// Replies row (user_threads) on the ask's thread once the write is in, read in its own
-	// transaction (events.ThreadLogins), so a viewer knows whether their Replies count can have
-	// moved. Absent on every other ask event; [] when nobody has a row.
+	// transaction (events.ThreadLogins), so a viewer knows whether their Inbox can have moved.
+	// Absent on every other ask event; [] when nobody has a row.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
@@ -1418,10 +1418,12 @@ type AskAnsweredEventPayload struct {
 // for a close or a reopen, rank, priority, assignee, parent, labels, route, repo, components,
 // blocked_by, external_links; for issue.created every field the new issue holds a value in),
 // Ancestors the issue's parent chain,
-// parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
-// whose Replies count the move can change: for a close or a reopen every login with a Replies row
-// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
-// Each is absent from an event written before them.
+// parent first up to the root ([] for a root), and ThreadLogins, only when the status or the
+// assignee moved, whose Inbox rows the write can move (api.issueWriteThreadLogins): for a close
+// or a reopen every login with a Replies row on one of the issue's open asks
+// (events.IssueThreadLogins), for an assignee move the assignee the issue was taken from and the
+// one it was given to, for the two together the sorted union of both, and for any other status
+// move []. Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue
 	ReferenceChangesPayload
@@ -1592,26 +1594,75 @@ type MyReplyReply struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// MyReplyRow is one thread the caller wrote in where someone else has written since the caller
-// last read it: an ask's thread, a comment thread by its root, or an issue message thread by its
-// root. Ref is the SPA route of the thread's root, never the reply's.
+// MyReplySession is the agent session an Agent row's thread was sent to: the session's id and the
+// name Dispatch knows it by (its newest stamped session title, or the id when it has stamped
+// none).
+type MyReplySession struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// MyReplyRow is one thread the caller is reading in the Inbox: a Reply row - an ask's thread, a
+// comment thread by its root, or an issue message thread by its root, which somebody else has
+// written in - or an Agent row, one of the caller's one-off messages to an agent session with a
+// reply from that session. Ref is the SPA route of the thread's root, never the reply's; for an
+// Agent row it is the session's live view.
 type MyReplyRow struct {
-	ThreadID string           `json:"thread_id"`
+	ThreadID string `json:"thread_id"`
+	// Kind is ask | comment | message for a Reply row, or agent for an Agent row.
 	Kind     string           `json:"kind"`
 	Ref      string           `json:"ref"`
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`
 	Document *OpenAskDocument `json:"document,omitempty"`
-	Subject  string           `json:"subject"`
-	Reply    MyReplyReply     `json:"reply"`
+	// Priority is the owning issue's coarse priority, absent on a row with no issue or none set.
+	Priority *int `json:"priority,omitempty"`
+	// Project is the thread owner's project key, absent on an Agent row, which has no owner.
+	Project *string      `json:"project,omitempty"`
+	Subject string       `json:"subject"`
+	Reply   MyReplyReply `json:"reply"`
+	// ReadThrough is the caller's read mark on the thread (user_threads.read_through), absent on
+	// an Agent row, whose replies are read by id rather than by a mark.
+	ReadThrough *time.Time `json:"read_through,omitempty"`
+	// Unread says whether the row still holds a write the caller has not read: always true under
+	// state=unread, either way under state=inbox and state=dismissed.
+	Unread bool `json:"unread"`
+	// UnreadCount is how many writes in the thread the caller has not read: for a Reply row the
+	// comments, messages and answers somebody else wrote after ReadThrough, for an Agent row the
+	// session replies in UnreadReplyIDs.
+	UnreadCount int `json:"unread_count"`
+	// UnreadReplyIDs are an Agent row's unread session replies, which the Inbox marks read by id.
+	UnreadReplyIDs []string `json:"unread_reply_ids,omitzero"`
+	// Anchor is the document mark the thread's root is anchored to, when it has one.
+	Anchor *Anchor `json:"anchor,omitempty"`
+	// Session is the agent session an Agent row's thread was sent to.
+	Session *MyReplySession `json:"session,omitempty"`
+	// DismissedAt is when the caller dismissed the thread out of their Inbox, absent on a thread
+	// that is in it. It is the order state=dismissed answers in and the cursor it resumes from.
+	DismissedAt *time.Time `json:"dismissed_at,omitempty"`
+	// Version is a Reply row's user_threads.version, which counts the writes somebody else has
+	// made in the thread: a dismissal of the row carries it back and the route writes the mark
+	// only while the row still holds it, so a press can bury no write the page never drew. Only
+	// the Reply scan sets it (readMyReplyRows, api/replies.go), so an Agent row - which has no
+	// user_threads row and no version at all - sends no version key, and a Reply row's own 0
+	// still goes out. What a dismissal of an Agent row carries instead is the reply it drew and
+	// the ids it drew as unread (api/inbox_dismiss.go).
+	Version *int64 `json:"version,omitempty"`
 }
 
-// MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
-// there are in all.
+// MyRepliesResponse is the caller's Inbox threads in one state's own order, and how many there are
+// in all - except under state=dismissed, where Total is the page it answers: that view reads 200
+// rows at a time from a cursor and nothing reads a total of it, and counting every thread a person
+// has ever dismissed is the most expensive read the Inbox has (INFRA-450's a14). AsOf is the
+// database time of the one snapshot every row was read in, which is what a mark-all passes back as
+// its read mark. NextCursor is where the next state=dismissed page resumes, empty when the page
+// that answered it was the last.
 type MyRepliesResponse struct {
-	Rows   []MyReplyRow `json:"rows"`
-	Total  int          `json:"total"`
-	Limit  int          `json:"limit"`
-	Offset int          `json:"offset"`
+	Rows       []MyReplyRow `json:"rows"`
+	Total      int          `json:"total"`
+	Limit      int          `json:"limit"`
+	Offset     int          `json:"offset"`
+	AsOf       time.Time    `json:"as_of"`
+	NextCursor string       `json:"next_cursor,omitzero"`
 }
 
 // SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.
@@ -2079,10 +2130,12 @@ type MessageEventPayload struct {
 	ThreadTarget string `json:"thread_target,omitempty"`
 	// ReferenceChangesPayload carries the same signal comment events do.
 	ReferenceChangesPayload
-	// ThreadLogins is every login with a Replies row on the message's thread (its root, up
-	// in_reply_to) once the message is in, read in its own transaction (events.ThreadLogins).
-	// Carried by an issue message's message.created and message.answered; absent on a direct
-	// (issue-less) conversation's, which has no Replies thread, and on a delivery frame.
+	// ThreadLogins is every login whose Inbox the message can have moved, read in its own
+	// transaction. On an issue message it is every login with a Replies row on the message's
+	// thread (its root, up in_reply_to, events.ThreadLogins); on a direct (issue-less)
+	// conversation's, which keeps no Replies row, it is the thread root author's login, the one
+	// Inbox an Agent row of that thread sits in, and [] when no person opened the thread. Carried
+	// by message.created and message.answered; absent on a delivery frame.
 	ThreadLogins []string `json:"thread_logins,omitzero"`
 }
 
@@ -2095,12 +2148,15 @@ type UserAgentStateEventPayload struct {
 	SessionID string `json:"session_id"`
 }
 
-// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read mark on one thread
-// of the Replies page moved. It names the viewer so their other open tabs and devices drop the row;
-// it is owned by the thread's project, like `user_state.updated`, and never notifies.
+// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read of the Inbox's
+// threads moved. It names the viewer so their other open tabs and devices drop the row, and the
+// thread when one thread was marked (PUT /api/v1/me/threads/{id}/read); a mark-all
+// (POST /api/v1/me/inbox/read) names no thread, since one event stands for every thread it marked
+// in that project. It is owned by the thread's project, like `user_state.updated`, and never
+// notifies.
 type UserThreadStateEventPayload struct {
 	Login    string `json:"login"`
-	ThreadID string `json:"thread_id"`
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.

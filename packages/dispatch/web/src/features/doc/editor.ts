@@ -4,6 +4,7 @@ import type { Doc } from "yjs";
 import type { BlockSchema } from "../../api/types";
 import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
+import type { AnchoredBlock } from "./ask-block";
 import type { WatchPicture } from "./picture-view";
 import { MARKS_MAP_NAME } from "./roots";
 import type { AskBlockHost } from "./typed-block-drawing";
@@ -21,6 +22,10 @@ export type {
 
 export type EditorHandle = ProofEditorHandle;
 export type EditorOptions = CreateProofEditorOptions & {
+  /** Which block hosts a thread, and who to tell when its slot comes and goes, for the
+   *  `AnchoredBlockView` `installTypedBlocks` mounts below. The reading pane passes one; a
+   *  document's own page passes none, and then no such view is installed at all. */
+  anchoredBlock?: AnchoredBlock;
   blockSchema: BlockSchema;
   /** The document's decision blocks, in document order, whenever the set changes. */
   onAskBlockHosts: (hosts: readonly AskBlockHost[]) => void;
@@ -63,7 +68,8 @@ export const createEditor: CreateEditor = async (root, options) => {
     handle.view,
     options.blockSchema,
     options.onAskBlockHosts,
-    options.watchPicture
+    options.watchPicture,
+    options.anchoredBlock
   );
   return handle;
 };

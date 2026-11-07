@@ -2598,11 +2598,14 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — `title`, `status`, `closed_at` (whether the issue is closed, so a close or a reopen, which a status alone cannot say), `rank`, `priority`, `assignee`, `parent`, `labels`, `route`, `repo` (its own or the one it resolves to), `components` (the effective attachment, an inherited change included), `blocked_by`, `external_links`;
   for `issue.created`, measured from `unsetIssue`, every field the new issue holds a value in) and `ancestors` (`issueAncestors`:
   the parent chain, parent first up to the root, `[]` for a root, capped at `parentDepthCap`).
-  `thread_logins` is every login with a Replies row (`user_threads`) on the write's thread once the write is in (`events.ThreadLogins`, sorted, never nil):
-  on `comment.created` and `comment.answered` (the thread its trigger files it under:
-  its ask, else the root it replies to, else itself), an issue message's `message.created` and `message.answered` (its root up `in_reply_to`;
-  a direct conversation has no Replies thread and carries none), and `ask.opened`, `ask.answered` and `ask.resolved` (the ask's own thread);
-  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueThreadLogins` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
+  `thread_logins` is every login whose Inbox the write can have moved, sorted and never nil:
+  on `comment.created` and `comment.answered` the logins with a Replies row (`user_threads`) on the thread its trigger files it under (`events.ThreadLogins`:
+  its ask, else the root it replies to, else itself), on an issue message's `message.created` and `message.answered` the logins with a row on its root up `in_reply_to`, and on `ask.opened`, `ask.answered` and `ask.resolved` the logins with a row on the ask's own thread.
+  A direct (issue-less) conversation keeps no `user_threads` row, so its `message.created` and `message.answered` name the thread root's author instead, the one person whose Inbox holds that conversation's Agent row (`api/thread_logins.go`, `directThreadLogins`), and `[]` when no person opened the thread.
+  An `issue.updated` or `issue.closed` that moved the status or the assignee carries it too (`issueWriteThreadLogins`), as the sorted union of two sets:
+  for a close or a reopen `events.IssueThreadLogins`, the logins with a row on one of the issue's open asks, which the Replies list leaves out while the issue is open and assigned to them, and `[]` for any other status move;
+  for an assignee move the assignee the issue was taken from and the one it was given to, since that same rule moves those rows out of one Inbox and into the other.
+  A login in both sets is named once, and a write that moved neither carries no `thread_logins` at all.
   `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read (`api/state.go`), or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`askSnoozeEvent`, `api/ask_snooze.go`), whose payload is exactly `{login, changed: ["snoozed"]}`:
   the stream has no per-viewer filter, so every signed-in person and agent replays it, and it names no ask and no `state` of the writer's (the writer's tabs refetch their whole Inbox);
   an event without `changed` predates snooze events, so a reader takes it as any of `pinned`, `last_read_seq` and `dismissed`.
@@ -2801,10 +2804,10 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   The SPA folds a row whose moment is still ahead into a collapsed `Later` band, ahead of whose turn it is:
   an agent replying to a deferred ask hands the turn back without bringing the row back (`sectionOf` and `waitingOnYou`, `packages/dispatch/web/src/features/inbox/`).
 
-- A person's Replies page is its own table and route pair, like per-user agent state.
-  `user_threads(login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id, unread)` (migrations `0095`-`0099`) holds one row per person per thread they wrote in:
+- The Inbox's Reply rows are their own table and route pair, like per-user agent state.
+  `user_threads(login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id, unread, dismissed_at, version)` (migrations `0095`-`0099`, `20261105093500`, whose two columns are the dismissal's mark and the row version a dismissal is held to) holds one row per person per thread they wrote in:
   an ask's thread (they asked it, answered it or replied in it), a comment thread by its root, or an issue message thread by its root (`in_reply_to` walked up, at most 64 deep, by the trigger, the seed and the catch-up alike).
-  An issue-less direct message makes no row, since its replies are the Agents badge's.
+  An issue-less direct message makes no row: its replies are the Agents badge's, and the Inbox reads them straight from the messages as its Agent rows (`myAgentRootFilter` and the roots each state reads, below).
   Triggers keep the rows, so no read scans `comments`:
   `after insert on comments`, `after insert or update of answer on asks` and `after insert on messages` each call `user_threads_record`, which moves every other participant's `replied_at` and `last_reply_id` on a comment, a message or an answer (an answer names its ask, so the asker's row goes unread when someone else answers), and the writer's own `read_through` on any write of theirs; asking moves only the asker's own mark.
   Only an insert or an answer counts: an edit, an anchor refresh or a resolution moves nothing, so a resolved comment thread stays listed until it is read.
@@ -2813,23 +2816,73 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the author id lowercased and trimmed of ASCII white space, as `model.CanonicalLogin` lowercases and trims), so a row's login always matches the one the routes read.
   A write whose owner has no project (an agent conversation's file, which no route comments on) makes no row.
   `0098` seeds every row read through the newest write stored at the migration's own time, and `0099` moves a row forward to any write by someone else newer than its `replied_at` - a write that committed while `0098` ran, on a thread whose participant `0098` was still inserting, which the trigger could not see - so a write before the deploy stays read and one during it is not lost.
-  `unread` is a stored generated column (`replied_at > read_through`) under the partial index `user_threads_unread` on `(login, replied_at desc, thread_id desc) where unread`, so the page and the count read only the person's unread rows.
+  `unread` is a stored generated column (`replied_at > read_through`) under the partial index `user_threads_unread` on `(login, replied_at desc, thread_id desc) where unread`, so the page and the count read only the person's unread rows;
+  the three states' indexes are partial on the state's own filter, so none of them scans the table: `user_threads_unread` for `?state=unread`, `user_threads_inbox` (`20261105093502`, the same columns `where replied_at is not null and dismissed_at is null`) for `?state=inbox`, and `user_threads_dismissed` (`20261105093503`, `(login, dismissed_at desc, thread_id desc) where dismissed_at is not null`) for `?state=dismissed`, which is also the cursor that view resumes from.
+  `dismissed_at` (`20261105093500`) is the dismissal mark: a thread stays in the Inbox, read or not, until the person dismisses it, and `20261105093501` adds one assignment to `user_threads_record` so the statement that moves `replied_at` on a write by somebody else clears the mark when that write is newer than it.
+  "Dismissed" is therefore exactly `dismissed_at is not null` for a Reply row, with no comparison of the two marks in any read, and the person's own reply never clears it, since their own write only moves their own `read_through`.
   Rows are keyed on `model.CanonicalLogin`.
   The table has no foreign key to the thread it names:
   nothing deletes a comment, ask, message, issue or document, so a row's thread exists, and a harness that empties those tables empties `user_threads` with them (`packages/dispatch/e2e/seed.ts`).
 
-- `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (needs the `person` scope, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply.
+- `GET /api/v1/me/replies?kind=&state=&limit=&offset=&cursor=&issue=|artifact=` (needs the `person` scope, `api/replies.go`) answers the Inbox's threads as `{rows, total, limit, offset, as_of, next_cursor}`, in the state's own order, ties by thread id descending.
+  It answers two kinds of row, as `?kind=` names them: `reply`, the default, a thread the caller wrote in - an ask's thread, a comment thread by its root, an issue message thread by its root - where somebody else has written since they last read it;
+  `agent`, one of the caller's one-off messages to an agent session (a BTW, a broadcast's copy, or a Send or an Aside the session did not take as a turn of its live conversation) holding a reply from that session;
+  `reply,agent`, both in one order.
+  Anything else is `400 INVALID_QUERY`.
+  The two kinds come from unrelated tables, so they are merged in Go rather than unioned in SQL, and the page is cut from the merged list.
+  A Reply read leaves out an open ask the Inbox already lists in Waiting on you, whose row there shows its reply:
+  that is an open ask on an open issue assigned to the caller alone (`myRepliesOwner`), so an open ask on a project document, on an unassigned issue or on another person's issue is a Reply row here.
   A close withdraws its issue's open asks, so an open ask on a closed issue is one a close by an older release left during a roll;
   its row stays, since the Inbox hides it.
-  A row's `reply` is the thread's newest write by someone else:
+  `?state=` is `unread`, the default and the Inbox count's own read, which lists the rows somebody else has written in since the caller read them, newest reply first; `inbox`, every row in their Inbox, read or not, less what they have dismissed, newest reply first; or `dismissed`, what they dismissed out of it, newest dismissal first, 200 rows at a time from `?cursor=` (the `next_cursor` of the page before it, which a page that filled answers).
+  `limit` and `offset` under `dismissed`, and `cursor` under any other state, are each `400 INVALID_QUERY`, as `GET /api/v1/issues` refuses a cursor: answering one paging scheme's request with the other's page hands the caller rows it cannot tell from the ones it asked for.
+  The three states are three constants over one filter (`myRepliesUnread`, `myRepliesInbox` and `myRepliesDismissed`), and the cursor a fourth beside them, rather than bound parameters, since a parameter leaves the planner nothing to imply a partial index's predicate from and turns a cursor into a filter over every dismissed row of the caller's.
+  `total` is how many rows the state holds, except under `dismissed`, where it is the page the read answers: nothing counts that view, which pages from `next_cursor`, and counting every thread a person has ever dismissed was 8 s of the 9.4 s that read took at 110,000 of them (INFRA-450's a14).
+  A Reply page is read in two steps - the page's thread ids out of the state's own index, by an index-only scan in the state's order, then each row by its id - because one step over a table one login owns is cheaper for the planner as a scan of the whole table than as a walk of the index, and the pile is what it would then scan.
+  The Agent half reads one root at a time: each state's roots (the unread ones, the undismissed ones, or a page of the dismissal marks themselves) and then each root's own thread by `messages_in_reply_to`, so a Dismissed page costs the page; the Inbox's own two states answer their total with the page, since both read every root they hold to order it.
+  The Agent half's dismissal is cleared by a trigger of its own (`20261105093507`), as a Reply thread's is by `user_threads_record`: a session's reply newer than the mark deletes it, in the reply's own transaction, so "dismissed" on this half is a mark existing and nothing else, and `state=inbox`, the unread read and Mark all read leave a dismissed root out by that mark alone, without reading its thread. Before it, each of those three asked every thread the person had ever dismissed whether a session had written in it since - one index read a thread, 66 ms of the Inbox read's 69 at 10,000 of them (INFRA-450's a14).
   `kind: "reply"` for a comment or a message, `kind: "answer"` for an answer, whose `id` is the ask's, whose `author` is the answerer and whose `first_line` is the chosen options and the answer's text (`<selected> - <text>`, as the outbox's `payload_summary` renders it).
-  `issue` and `artifact` together are `400 INVALID_QUERY`, and `limit` is 1-200 (default 50), as `GET /api/v1/me/answers` reads it.
+  A row also carries its issue's `priority`, its owner's `project`, the caller's `read_through`, `unread`, `unread_count` (the writes in the thread they have not read), an Agent row's `unread_reply_ids` and `session`, and the document mark its root is anchored to.
   A row's `ref` names the thread's root, never the reply, so an anchored root still redirects to its document.
-  `PUT /api/v1/me/threads/{id}/read` `{read_through}` stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it);
+  `issue` and `artifact` together are `400 INVALID_QUERY`, and either leaves every Agent row out, since an Agent row has no issue and no document.
+  An absent `limit` is every row, which is what the Inbox reads - it sorts, groups, filters and counts over all of them - and a `limit` the caller names is 1-200, as `GET /api/v1/me/answers` reads it.
+  Every read runs in one read-only repeatable-read transaction and `as_of` is that snapshot's database time, which is what a mark-all passes back as its read mark:
+  two reads in two snapshots would leave a row committed between them marked read without ever having been shown.
+  How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
+
+- `PUT /api/v1/me/threads/{id}/read` `{read_through}` (needs the `person` scope, `api/replies.go`) stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it);
   a non-uuid id is `400 THREAD_ID_INPUT`, a thread the caller has no row for writes nothing, and both answer `204`.
   It locks the thread's owner row `for share` before it touches the caller's row, since every writer holds that owner `for no key update` before its trigger fires, and appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing.
+  That is the Inbox's read-mark lock order over one thread, written once on `markInboxReadThreads` (`api/inbox_read.go`).
   A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction.
-  How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
+
+- `POST /api/v1/me/inbox/read` (needs the `person` scope, `api/inbox_read.go`) is the Inbox's Mark all read: one request marks every thread the list route would show the caller as unread, loaded on the page or not.
+  The body is `{read_through}` (RFC3339, required; missing, unparsable or more than a minute ahead of the server is `400 INVALID_STATE`) and the Inbox's own narrowing - `kind` (`reply`, `agent`; both by default, unlike the list route's default of `reply` alone, since the button sits over one list of both), `priority` (`P0`-`P3` and `none`), `urgency` (`low`, `med`, `high`, `blocking` and `none`), `project` (a project key and `none`), and `issue` or `artifact` - each absent list meaning every value.
+  It answers `{marked}`, the threads it moved.
+  The set it marks is exactly what `GET /api/v1/me/replies?state=unread` answers under the same narrowing, read through that route's own filters rather than predicates of its own, whose newest reply is at or before `read_through`:
+  a thread written in since stays unread, and one already read past the mark keeps its later mark.
+  An Agent row carries no issue, no document, no project and no priority, so any narrowing to one of those leaves it out;
+  no thread of either kind carries an urgency - only an ask the Inbox lists in Waiting on you does - so a request that names urgencies without `none` marks nothing at all.
+  It takes the read-mark lock order `PUT /api/v1/me/threads/{id}/read` takes, over every thread it marks rather than one, and prunes the agent-reply rows its sessions' own marks now cover: that order, and which cycles it rules out, is written once, on `markInboxReadThreads` (`api/inbox_read.go`).
+  Every statement runs under a ten-second `statement_timeout`, because that transaction holds those owner rows and a statement that hangs holds every comment, answer and issue message on them behind it.
+  It appends one `user_thread_state.updated` per project it marked in, naming no thread (`{login}`, the payload's `thread_id` being optional for exactly this), and one `user_agent_state.updated` per session whose replies it wrote, as `putUserAgentState` appends one.
+  A request that moved nothing appends none and answers `{"marked": 0}`.
+  Marking read takes no thread out of the Inbox; the Dismiss below does.
+
+- `POST /api/v1/me/inbox/dismiss` (needs the `person` scope, `api/inbox_dismiss.go`) takes threads out of the caller's Inbox and puts them back.
+  A thread stays in the Inbox, read or not, until it is dismissed, as an email stays until it is archived, so this route is the only one that takes it out.
+  The body names either `{threads}`, the Inbox's own row ids (`reply:<thread id>`, `agent:<root message id>`), with `{seen_replies}`, what the page drew in each of those rows, or the mark-all's narrowing with `{dismiss_through}`, never both (`400 INVALID_QUERY`), and `{restore}`, which clears the marks instead of writing them.
+  `seen_replies` holds one object per named row, keyed by that row's own id: a `reply:` row's is `{version}`, the row's `user_threads.version` as the list route answers it, and an `agent:` row's is `{newest_reply, unread_replies}`, that row's `reply.id` and its `unread_reply_ids`, an Agent thread having no `user_threads` row and so no version.
+  Seven refusals, each `400 INVALID_QUERY`: a named row `seen_replies` leaves out, a key naming a row `threads` does not, a `reply:` entry that is not that row's one `version` (of the wrong type, missing it, or carrying an Agent field), an `agent:` entry that is not the `newest_reply` and `unread_replies` the page drew (the same three), a non-uuid id, and `seen_replies` on a restore, which checks nothing, or with the narrowing, where the server draws the rows itself.
+  Under the narrowing it changes exactly the threads the list route answers - `state=inbox` for a dismissal, `state=dismissed` for a restore - whose newest reply, or whose dismissal, is at or before the mark, read through those states' own constants rather than predicates of its own, and the mark is read as the mark-all reads `read_through` (RFC3339, a minute's allowance, `400 INVALID_STATE` past it).
+  A dismissal writes `user_threads.dismissed_at` for a Reply thread and a `user_agent_thread_dismissed` row for an Agent thread, and marks the thread read as well - the Reply thread's `read_through` moves forward, the Agent thread's unread replies are written by id, as the mark-all writes them - so a dismissed thread counts as unread nowhere.
+  A later write by somebody else clears either kind of mark in the write's own transaction - a Reply thread's in `user_threads_record`'s own statement, an Agent thread's by the trigger of `20261105093507` - so either comes back unread; the caller's own reply moves only their read mark and leaves the thread dismissed.
+  A write that lands between the request's read and its write is held to what the page drew, not to a time: the Reply write updates only a row whose `version` is still the one the request carries, which `user_threads_record` increments on every write by somebody else, and the Agent half reads which roots it may write once the root lock is given (`inboxDismissCheckAgentRoots`), keeping a root whose newest session reply is the one the page drew and whose unread replies are all ids it drew.
+  Why no comparison of this request's mark with a row's own times can stand in for those checks is written once, on `20261105093501`'s increment.
+  An Ask row's id is refused with its own words, since the Inbox draws no Dismiss on one, and a row id of neither shape or an id that is not a uuid is `400 INVALID_QUERY`.
+  It takes the lock order `markInboxReadThreads` writes down, whose steps 2 and 4 are this route's alone, runs under the same `statement_timeout`, and appends the same events: one `user_thread_state.updated` per project it changed rows in, naming no thread, and one `user_agent_state.updated` per session it touched.
+  Step 2, the root message of every Agent thread it writes a mark for, is what orders a dismissal against the clearing trigger of `20261105093507`, and the level it takes that row at - why that level is the one that orders the two - is written on `inboxDismissLockAgentRoots` (`api/inbox_dismiss.go`): whichever of the two commits first, the thread ends in the Inbox when the reply is one nobody has read.
+  It answers `{dismissed}`, the threads it changed; a request that changes nothing appends none and answers `{"dismissed": 0}`.
 
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (both need the `person` scope) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title.
   A live subscriber's `last_seen` is its session's;

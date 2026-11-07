@@ -409,8 +409,12 @@ type rig struct {
 	// node, past workspace-init, and Running at once.
 	hold      atomic.Bool
 	autoStart atomic.Bool
-	// suspendDelay is how long a pod the controller deletes stays terminating first.
-	suspendDelay time.Duration
+	// suspendDelay is how long a pod the controller deletes stays terminating first, in
+	// nanoseconds. It is atomic because a test may shorten it while control() is running, to ask
+	// for a pod it has been holding terminating to end now: g.suspendDelay.Store(0) in
+	// TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs (drift_test.go) ends the pod its
+	// replacement is waiting out, as the cluster would.
+	suspendDelay atomic.Int64
 	// noController leaves every object as the test wrote it.
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
@@ -754,15 +758,24 @@ func (g *rig) control() {
 			pod := g.pod(s.Name)
 			owned := ownedBy(pod, s.UID)
 			switch {
+			case owned && pod.DeletionTimestamp != nil:
+				// A pod the cluster is terminating goes once its grace has passed, whatever its
+				// Sandbox says by then. Only the suspended branch below used to remove one, so a
+				// pod still terminating when its Sandbox came back to Running was in a state this
+				// controller could not leave: it neither removed that pod nor made a replacement,
+				// since a replacement needs none to be there. A launch whose own wait for the pod
+				// to go accepts a terminating one - which production's does, because in a cluster
+				// such a pod is on its way out - then waited for a pod this controller was never
+				// going to create. That is what red this package's pod-drift row about 4 times in
+				// 100 under load, at every bound it was given, with the controller reading
+				// `generation 3, Running, pod uid-pod-13 terminating` for ever (INFRA-985).
+				if started, ok := terminating[pod.UID]; ok && time.Since(started) >= time.Duration(g.suspendDelay.Load()) {
+					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+				}
 			case s.mode() == modeSuspended && owned:
-				started, ok := terminating[pod.UID]
-				if !ok {
+				if _, ok := terminating[pod.UID]; !ok {
 					terminating[pod.UID] = time.Now()
 					g.update(pod, func(p *corev1.Pod) { now := metav1.Now(); p.DeletionTimestamp = &now })
-					continue
-				}
-				if time.Since(started) >= g.suspendDelay {
-					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
 				}
 			case s.mode() == modeRunning && pod == nil && !g.hold.Load():
 				g.createPod(s)

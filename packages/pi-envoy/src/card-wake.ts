@@ -183,15 +183,37 @@ const RETRY_CANCELLED = "Retry cancelled";
  *  entry: an id no other card in the process shares, and what the card's `message_end` arms, decided
  *  when it is sent: `startup` for a card sent in the startup phase, `fold` for one the wake covers
  *  if the host folds it, and nothing for one it never covers. The session's own notices carry
- *  `LOCAL_ENVOY_NOTICE` instead. A type rather than an interface, so it is the host's
- *  `Record<string, unknown>` `details`. */
-export type EnvoyCardMarker = {
+ *  `LOCAL_ENVOY_NOTICE` instead. This is what a record written before the hand-over state below
+ *  was added carries too, so it is all the entry parser reads. A type rather than an interface, so
+ *  it is the host's `Record<string, unknown>` `details`. */
+type EnvoyCardEntryMarker = {
   readonly envoyCard: string;
   readonly wake?: "startup" | "fold";
 };
 
-/** The card marker a host message's or a branch entry's `details` carries; undefined for none. */
-function envoyCardMarker(details: unknown): EnvoyCardMarker | undefined {
+/** The host state at the hand-over, which the card's `details` carry onto the record and the entry
+ *  the host persists, so a later reading of the stored transcripts can say which state held a
+ *  waiting card:
+ *  - `startup`: the host was idle in the startup phase, so the card goes as a follow-up that
+ *    starts no turn and waits for the wake;
+ *  - `run-active`: a run was going as this module sees it, so the run reads the card;
+ *  - `prompt-setup`: the host was busy with no run, setting a prompt up or settling after one, so
+ *    the card is never woken;
+ *  - `idle`: the host was idle with the startup phase over, so the card starts its own turn;
+ *  - `inert`: an inert card (a replayed BTW, or a failure notice naming one), which the extension
+ *    hands a settled host as a steer rather than through this module;
+ *  - `unknown`: the host's context reports no idle state, so no state of it can be read. */
+export type CardHandOver = "startup" | "run-active" | "prompt-setup" | "idle" | "inert" | "unknown";
+
+/** What a card this module hands over carries in its `details`: the marker above, and the host
+ *  state at the hand-over, which every card handed over since that state was added has. */
+export type EnvoyCardMarker = EnvoyCardEntryMarker & { readonly handOver: CardHandOver };
+
+/** The card marker a host message's or a branch entry's `details` carries; undefined for none. A
+ *  record written before the hand-over state was added carries no `handOver`, so this reads none:
+ *  `unreadCards` and `messageEnd`, its only readers, need no more than the fields every record
+ *  has. */
+function envoyCardMarker(details: unknown): EnvoyCardEntryMarker | undefined {
   if (typeof details !== "object" || details === null || !("envoyCard" in details)) {
     return undefined;
   }
@@ -341,6 +363,21 @@ export class CardWake {
       this.#startupPhase &&
       idle === true &&
       (context?.mode === "rpc" || this.#startTurnHold() !== undefined);
+    // The host state at this hand-over, read in the order the delivery itself is decided, so the
+    // record says what this module acted on: a context with no idle state says nothing, a startup
+    // card is the startup phase's whatever else holds, and the clear above means an idle host has
+    // no active run, so `idle` wins over `run-active`. What is left is a busy host with no run,
+    // which is setting a prompt up or settling after one, the `setup` the wake reads below.
+    const handOver: CardHandOver =
+      typeof idle !== "boolean"
+        ? "unknown"
+        : startup
+          ? "startup"
+          : idle
+            ? "idle"
+            : this.#runActive
+              ? "run-active"
+              : "prompt-setup";
     // A card sent while the host sets a prompt up is never woken. Under main every targeted Aside
     // went as an aside, which the host folds with no turn under the latch or in plan mode, so a
     // wake for one would start a turn main never started. A startup targeted Aside does get one:
@@ -348,10 +385,11 @@ export class CardWake {
     // aside started a turn outside the latch and plan mode, and a fresh process has no latch. Plan
     // mode at startup is the one case where that wake starts a turn main did not, which
     // `AGENTS.md` states.
-    const setup = idle === false && !this.#runActive;
+    const setup = handOver === "prompt-setup";
     const wake = startup ? "startup" : setup || targetedAside ? undefined : "fold";
     const details: EnvoyCardMarker = {
       envoyCard: randomUUID(),
+      handOver,
       ...(wake !== undefined && { wake }),
     };
     if (startup) {
