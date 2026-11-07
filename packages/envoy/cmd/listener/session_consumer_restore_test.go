@@ -475,6 +475,71 @@ func TestADeleteRestoresTheConsumerWithTheTopicItsCacheHasNotHeardOf(t *testing.
 	registering.awaitPending(t, sessionID, 1)
 }
 
+// A registration's own repair gives back the topic another listener's restore left out. The
+// order is the one a consumer delete and a registration of the same session can really take
+// across two listeners: the second listener deletes the record (a reaper pass, a clean stop),
+// the session registers again on the first and writes the record and the row back, the
+// registration after it adds a topic and makes its consumer call, and only then does the second
+// listener delete the consumer and give it back from the record and the row it reads of the
+// bucket - which are the ones the registration before wrote, this registration's row being
+// unwritten. The consumer then stands filtered without the topic this registration is answered
+// 200 for.
+//
+// A repair that asks only whether a consumer exists leaves that filter there, and every message
+// published on the added topic is skipped until the session's next heartbeat. What the case
+// asserts is that delivery and not the consumer's existence: the consumer is there either way,
+// and only a message published on the added topic says which filter it carries.
+//
+// The interleaving is built rather than waited for: afterRegisterFilter runs under the
+// registering listener's session lock, after that registration's consumer call and before the
+// row and the entry it writes, and the second listener's whole delete runs from there, so its
+// bucket reads really precede that row write. The second listener's lock is another process's
+// and holds none of this one's calls.
+func TestARegistrationsOwnRepairGivesBackTheTopicAnotherListenersRestoreLeftOut(t *testing.T) {
+	registering := newSessionConsumerRig(t)
+	deleting := newSessionConsumerRig(t)
+	const sessionID = "ses_confirm_filter"
+	const added = "notifications.dispatch.issue.CONFIRM.>"
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// The record delete the consumer delete below follows: the first half of a clean stop, or of
+	// a reaper pass, made on the second listener.
+	if err := deleting.deps.sessions.Delete(ctx, sessionID); err != nil {
+		t.Fatalf("the second listener could not delete the record of %s: %v", sessionID, err)
+	}
+	// The registration that writes the record and the row back, and so the pair the second
+	// listener's restore reads: this session follows no topic of its own yet.
+	registering.subscribe(t, consumerRegistration(sessionID, "epoch-2"))
+
+	var raced sync.Once
+	registering.deps.consumers.afterRegisterFilter = func() {
+		raced.Do(func() {
+			if err := deleting.deps.consumers.deleteConsumer(ctx, deleting.deps, sessionID); err != nil {
+				t.Errorf("the delete the second listener made inside the registration of %s: %v", sessionID, err)
+				return
+			}
+			if filters := registering.filters(t, sessionID); slices.Contains(filters, added) {
+				t.Errorf("the consumer the second listener gave back to %s filters on %v; this case needs it given back without %s, which is the row the bucket held when it read it",
+					sessionID, filters, added)
+			}
+		})
+	}
+	answer := registering.subscribe(t, consumerRegistration(sessionID, "epoch-2", added))
+	registering.deps.consumers.afterRegisterFilter = nil
+	if answer.Delivery == nil || answer.Delivery.Mode != deliveryModeConsumer {
+		t.Fatalf("the registration that added %s to %s was answered delivery %+v, want %s",
+			added, sessionID, answer.Delivery, deliveryModeConsumer)
+	}
+
+	// A message on the topic that registration was answered 200 for is its consumer's to
+	// deliver: the repair reads the bucket's newest row, which is that registration's own, and
+	// sets the filter the restore left.
+	registering.store(t, "notifications.dispatch.issue.CONFIRM.comment")
+	registering.awaitPending(t, sessionID, 1)
+}
+
 // awaitDeleteWaitingOrDone holds a registration inside its hook until the delete it started waits
 // for the session's lock (two callers, this registration and it) or is done, which is what a
 // delete taking no lock is by then: the delete's first call is made the moment the registration

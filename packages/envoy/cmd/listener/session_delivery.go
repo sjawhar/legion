@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -308,99 +310,168 @@ func (m *sessionDelivery) ackFloorBeforeDelete(ctx context.Context, sessionID st
 }
 
 // confirmRegistered reads sessionID's consumer again once its registration has written the
-// session's entry, under the lock that registration holds (registerPass), and creates it
-// again when the consumer is gone. It is the registration's side of the invariant a session
-// answered 200 with consumer delivery holds a consumer, whatever delete raced it, on whatever
-// listener: a delete on another listener can take that consumer away between this registration's
-// consumer call and its entry write, and that delete's own record read, made before the write,
-// finds no record to restore from. This read is after the entry write, so a delete that took the
-// consumer before it is found here, and one that takes it after reads the entry this registration
-// wrote and restores the consumer itself (deleteConsumer).
+// session's entry, under the lock that registration holds (registerPass), and makes that consumer
+// what the bucket's newest record and interest row ask for: it creates it again when the consumer
+// is gone, and sets its filter again when the live one is not the filter those topics build. It
+// is the registration's side of the invariant a session answered 200 with consumer delivery holds
+// a consumer, filtered on the topics it was answered for, whatever delete raced it, on whatever
+// listener.
 //
-// The create goes through the bucket as the delete's does (restoreRegistered), rather than
-// creating a consumer outright: the record this registration wrote may itself have been deleted
-// since, by a stop or a reaper pass that ran wholly after it, and a consumer created for a
-// session the bucket no longer holds would stand until the stream's inactive threshold took it.
-// ackFloor is the floor this registration's own consumer call read
-// (bus.SessionConsumerStart.AckFloor), the last floor anyone read of the consumer that is gone.
+// A consumer that exists is no confirmation of itself. A delete on another listener can take the
+// consumer away between this registration's consumer call and its entry write and give it back
+// from the record and the row an earlier registration wrote, which is a consumer without the
+// topics this registration added: the session is answered 200 for them and receives nothing on
+// them until its next heartbeat. That delete's own bucket read ran before this entry write, so it
+// restored nothing or restored an older registration's topics; this read is after that write, so
+// a delete that landed before it is repaired here, and one that lands after it reads the entry
+// and the row this registration wrote and repairs itself (deleteConsumer).
 //
-// It costs one consumer info per registration answered with a consumer; the record read and the
-// create follow only where the consumer is really gone.
+// Both repairs go through the bucket (registeredTarget) rather than through this registration's
+// own topics: the record this registration wrote may itself have been deleted since, by a stop or
+// a reaper pass that ran wholly after it, and a consumer created for a session the bucket no
+// longer holds would stand until the stream's inactive threshold took it; and the newest row is
+// the one every registration of that session was answered for, this one's and any another
+// listener wrote since. ackFloor is the floor this registration's own consumer call read
+// (bus.SessionConsumerStart.AckFloor), the last floor anyone read of the consumer, and it holds
+// the start of a create as it does for the delete's repair; a consumer the stream holds keeps its
+// own position whatever start the call names (bus.SessionConsumers.Ensure), so what a repair of
+// it changes is the filter.
+//
+// The filters are compared as sets (consumerFilters): the server reports the list a call reduced
+// to (bus.ReduceFilterSubjects), in an order of its own. A consumer already filtered on what the
+// newest row asks for costs the one consumer info and the two bucket reads and no consumer call
+// beyond them; the create or the filter write follows only where the live consumer differs.
 func (m *sessionDelivery) confirmRegistered(ctx context.Context, d *listenerDeps, sessionID string, ackFloor uint64) {
 	if m == nil || m.consumers == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionConsumerCallTimeout)
 	defer cancel()
-	switch _, err := m.consumers.Info(ctx, sessionID); {
-	case err == nil:
+	info, err := m.consumers.Info(ctx, sessionID)
+	switch {
+	case errors.Is(err, bus.ErrSessionConsumerNotFound):
+		m.restoreRegistered(ctx, d, sessionID, ackFloor)
 		return
-	case !errors.Is(err, bus.ErrSessionConsumerNotFound):
+	case err != nil:
 		m.logger.Warn("listener could not read the consumer of the session it has just registered",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return
 	}
-	m.restoreRegistered(ctx, d, sessionID, ackFloor)
+	want, ok := m.registeredTarget(ctx, d, sessionID, ackFloor)
+	if !ok {
+		return
+	}
+	live, asked := consumerFilters(info), bus.ReduceFilterSubjects(want.filter)
+	if slices.Equal(live, asked) {
+		return
+	}
+	if _, err := m.consumers.Ensure(ctx, sessionID, want.filter, want.start); err != nil {
+		m.logger.Warn("listener could not set the filter of the consumer of the session it has just registered to the topics the bucket holds for it",
+			slog.String("session_id", sessionID), slog.Any("filter", asked), slog.Any("had", live), slog.String("error", err.Error()))
+		return
+	}
+	m.logger.Warn("listener set the filter of the consumer of the session it has just registered to the topics the bucket holds for it",
+		slog.String("session_id", sessionID), slog.Any("filter", asked), slog.Any("had", live))
+}
+
+// consumerFilters is the subjects a consumer filters on as the server reports them, sorted and
+// each once, so that two filter lists compare as the sets they are (confirmRegistered): a
+// consumer carries the list a call reduced to (bus.ReduceFilterSubjects) in FilterSubjects, or a
+// single subject in FilterSubject, which is where the server puts the one filter of a consumer
+// created before this build.
+func consumerFilters(info *jetstream.ConsumerInfo) []string {
+	filters := slices.Clone(info.Config.FilterSubjects)
+	if info.Config.FilterSubject != "" {
+		filters = append(filters, info.Config.FilterSubject)
+	}
+	slices.Sort(filters)
+	return slices.Compact(filters)
+}
+
+// registeredConsumer is what the bucket's newest record and interest row of a session ask of its
+// consumer: both repairs write it (restoreRegistered, confirmRegistered).
+type registeredConsumer struct {
+	// filter is the subjects the consumer filters on, built from the row's topics
+	// (sessionConsumerFilter); a consumer call reduces them to the filters the server holds.
+	filter []string
+	// start is the stream sequence a create starts the consumer at. A consumer the stream holds
+	// keeps the position it has, whatever start says (bus.SessionConsumers.Ensure).
+	start uint64
+}
+
+// registeredTarget reads sessionID's record and interest row from the bucket and builds what they
+// ask of its consumer. It reports false where they ask for none - the bucket holds no record, the
+// record records no consumer delivery and so names no consumer to repair, or a read failed - and
+// the caller then leaves the consumer as it is.
+//
+// Both reads are of the bucket and not of the cache (session.SessionRegistry.Refresh,
+// store.Registry.Refresh), since the watch that fills the cache may not have delivered the
+// registration this repair answers for yet, and a cache that has not is exactly the reader that
+// would leave the session with no consumer, or with one filtered on topics a registration has
+// replaced: a topic it was answered 200 for would be left out, and the session would receive
+// nothing on it until its next heartbeat.
+//
+// The start is the later of the start the record names (session.SessionEntry.ConsumerStart) and
+// the sequence after ackFloor, the floor the caller read of the consumer that is gone: the
+// record's start is the sequence that registration's own answer promised the session, so nothing
+// the answer named is skipped, and the floor is what the session has acked since, so nothing it
+// has acked is offered again. A caller that read no floor passes 0 - the stream held no such
+// consumer when it looked, or the read failed - and the start is the record's own. A record
+// naming no start leaves the start to the consumer call, which then creates the consumer at the
+// first message the stream holds for the session (bus.SessionConsumers.Ensure).
+//
+// A read that failed is logged, not returned: the caller's answer does not change, and the
+// session's next registration confirms the consumer again. The line names the session, which is
+// what an operator reading a pause in its delivery has to go on.
+func (m *sessionDelivery) registeredTarget(ctx context.Context, d *listenerDeps, sessionID string, ackFloor uint64) (registeredConsumer, bool) {
+	entry, err := d.sessions.Refresh(ctx, sessionID)
+	switch {
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return registeredConsumer{}, false
+	case err != nil:
+		m.logger.Warn("listener could not read the record of a session whose consumer it is repairing",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return registeredConsumer{}, false
+	case entry.Delivery != session.DeliveryConsumer:
+		return registeredConsumer{}, false
+	}
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID, true)
+	if err != nil {
+		m.logger.Warn("listener could not read the topics of a session whose consumer it is repairing",
+			slog.String("session_id", sessionID), slog.String("error", err.Error()))
+		return registeredConsumer{}, false
+	}
+	start := entry.ConsumerStart
+	if ackFloor > 0 {
+		start = max(start, ackFloor+1)
+	}
+	return registeredConsumer{filter: sessionConsumerFilter(sessionID, topics), start: start}, true
 }
 
 // restoreRegistered gives sessionID its consumer back when the bucket holds a record for it: the
 // delete of a consumer follows the delete of that session's record (the reaper's pass, a clean
 // stop), so a record that is there once the consumer is gone was written by a registration that
 // landed in between, and that registration was answered 200 with consumer delivery. It is the
-// repair of both sides, the delete's and the registration's (deleteConsumer, confirmRegistered).
-// Both reads are of the bucket and not of the cache (session.SessionRegistry.Refresh,
-// store.Registry.Refresh), since the watch that fills the cache may not have delivered that
-// registration's writes yet, and a cache that has not is exactly the reader that would leave the
-// session with no consumer, or with one filtered on topics the registration has replaced.
-//
-// The consumer is created again at the later of the start the record names
-// (session.SessionEntry.ConsumerStart) and the sequence after ackFloor, the floor the caller read
-// of the consumer that is gone: the record's start is the sequence that registration's own answer
-// promised the session, so nothing the answer named is skipped, and the floor is what the session
-// has acked since, so nothing it has acked is offered again. A caller that read no floor passes
-// 0 - the stream held no such consumer when it looked, or the read failed - and the start is the
-// record's own. A record naming no start leaves the start to the consumer call, which then
-// creates it at the first message the stream holds for the session
-// (bus.SessionConsumers.Ensure); an entry that records no consumer delivery names no consumer to
-// restore and is left alone.
+// repair of both sides where the consumer is gone, the delete's and the registration's
+// (deleteConsumer, confirmRegistered), on the filter and the start the bucket asks for
+// (registeredTarget).
 //
 // A failure is logged, not returned: the record is deleted or not whatever this call did, the
 // caller's answer does not change, and the session's next registration creates the consumer at
 // its own resume point. The line names the session, which is what an operator reading a pause in
 // its delivery has to go on.
 func (m *sessionDelivery) restoreRegistered(ctx context.Context, d *listenerDeps, sessionID string, ackFloor uint64) {
-	entry, err := d.sessions.Refresh(ctx, sessionID)
-	switch {
-	case errors.Is(err, nats.ErrKeyNotFound):
-		return
-	case err != nil:
-		m.logger.Warn("listener could not read the record of a session whose consumer it deleted",
-			slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		return
-	case entry.Delivery != session.DeliveryConsumer:
+	want, ok := m.registeredTarget(ctx, d, sessionID, ackFloor)
+	if !ok {
 		return
 	}
-	// The topics are the bucket's and not the cache's: the cache of the listener doing the
-	// restore can be behind the row the registration it repairs has just written on another
-	// listener, and a filter built from it leaves out a topic that registration was answered 200
-	// for, on which the session then receives nothing until its next heartbeat.
-	topics, err := storedInterestTopics(ctx, d.registry, sessionID, true)
-	if err != nil {
-		m.logger.Warn("listener could not read the topics of a session that registered while its consumer was deleted",
-			slog.String("session_id", sessionID), slog.String("error", err.Error()))
-		return
-	}
-	start := entry.ConsumerStart
-	if ackFloor > 0 {
-		start = max(start, ackFloor+1)
-	}
-	if _, err := m.consumers.Ensure(ctx, sessionID, sessionConsumerFilter(sessionID, topics), start); err != nil {
+	if _, err := m.consumers.Ensure(ctx, sessionID, want.filter, want.start); err != nil {
 		m.logger.Warn("listener could not restore the consumer of a session that registered while its consumer was deleted",
-			slog.String("session_id", sessionID), slog.Uint64("consumer_start", start), slog.String("error", err.Error()))
+			slog.String("session_id", sessionID), slog.Uint64("consumer_start", want.start), slog.String("error", err.Error()))
 		return
 	}
 	m.logger.Warn("listener restored the consumer of a session that registered while its consumer was deleted",
-		slog.String("session_id", sessionID), slog.Uint64("consumer_start", start), slog.Uint64("ack_floor", ackFloor))
+		slog.String("session_id", sessionID), slog.Uint64("consumer_start", want.start), slog.Uint64("ack_floor", ackFloor))
 }
 
 // mark returns the next of the marks that order registrations against the relay's restarts: a
