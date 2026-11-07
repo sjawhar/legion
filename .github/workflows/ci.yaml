@@ -3190,11 +3190,12 @@ jobs:
       # and the refusal of the raise of a lower cap, naming the field, the cap and the first
       # server taking the change - is provable only against a real image (INFRA-1384). Each
       # package runs only the tests its tag adds: `-tags natslive ./pkg` would re-run the
-      # package's untagged tests, which the unit step above already ran, so the -run comes from
-      # .github/scripts/go-tagged-tests.sh, which reads the names off the source at run time, and
-      # no test name is spelled here. Each assignment is a line of its own: under bash -e it
-      # carries the script's exit status, so an empty or refused list fails the step instead of
-      # running -run "", which matches every test.
+      # package's untagged tests, which already run elsewhere - internal/testnats in the unit step
+      # above, and internal/bus in envoy-go-race, which the unit step's grep -Ev leaves out - so
+      # the -run comes from .github/scripts/go-tagged-tests.sh, which reads the names off the
+      # source at run time, and no test name is spelled here. Each assignment is a line of its
+      # own: under bash -e it carries the script's exit status, so an empty or refused list fails
+      # the step instead of running -run "", which matches every test.
       - name: Test the container-backed NATS matrix (natslive)
         run: |
           rig=$(../../.github/scripts/go-tagged-tests.sh natslive ./internal/testnats)
