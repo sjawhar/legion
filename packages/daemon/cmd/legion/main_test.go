@@ -1789,6 +1789,10 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	released := `[{"issue":"LEGION-208","role":"implementer","state":"suspended"},` +
 		`{"issue":"LEGION-209","role":"tester","state":"suspended"},` +
 		`{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`
+	// The phrase `legion state` puts before the claims a workflow start brings back
+	// (main.go's strandedPhrases), which names a retired claim beside a failed one and the acts
+	// that queue such a start (INFRA-1480).
+	const workflowStart = "failed or retired, needs a workflow start: the architect's retry_or_escalate of a held phase, a transition into the phase, or a tree close and re-admission"
 	for _, tc := range []struct {
 		name, stranded, want string
 		// bearer reads the daemon with --operator-token-file, as an operator does; otherwise the
@@ -1799,12 +1803,13 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			name: "every move",
 			stranded: `[{"issue":"LEGION-208","role":"architect","state":"suspended"},{"issue":"LEGION-208","role":"implementer","state":"suspended"},` +
 				`{"issue":"LEGION-210","role":"architect","state":"failed"},{"issue":"LEGION-211","role":"reviewer","state":"failed"}]`,
-			want: "claims nothing will wake: 4 — resume LEGION-208 architect; suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer; failed, retry LEGION-210 architect; failed, needs a workflow start LEGION-211 reviewer\n",
+			want: "claims nothing will wake: 4 — resume LEGION-208 architect; suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer; failed, retry LEGION-210 architect; " +
+				workflowStart + " LEGION-211 reviewer\n",
 		},
 		{
 			name:     "only failed",
 			stranded: `[{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
-			want:     "claims nothing will wake: 1 — failed, needs a workflow start LEGION-210 reviewer\n",
+			want:     "claims nothing will wake: 1 — " + workflowStart + " LEGION-210 reviewer\n",
 		},
 		// INFRA-945 R6: a claim whose idle pod the daemon released and whose wake never brought
 		// the pod back reads as that, under a move of its own, never as a suspension to resume or
@@ -1813,12 +1818,21 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 			name: "a released claim apart from a suspended and a failed one", bearer: true,
 			stranded: released,
 			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-209 tester; " +
-				"released, woken over ten minutes ago and the pod never came back LEGION-208 implementer; failed, needs a workflow start LEGION-210 reviewer\n",
+				"released, woken over ten minutes ago and the pod never came back LEGION-208 implementer; " + workflowStart + " LEGION-210 reviewer\n",
 		},
 		{
 			name: "no bearer to read the suspensions with", stranded: released,
 			want: "claims nothing will wake: 3 — suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) LEGION-208 implementer, LEGION-209 tester; " +
-				"failed, needs a workflow start LEGION-210 reviewer\n",
+				workflowStart + " LEGION-210 reviewer\n",
+		},
+		// INFRA-1480: a retired claim needs the same workflow start a failed worker does, and the
+		// operator claim list still names the one a release suspended before its close retired it
+		// as released: the line names it under the workflow start, never as a pod coming back.
+		{
+			name: "a retired claim beside a failed one", bearer: true,
+			stranded: `[{"issue":"LEGION-208","role":"implementer","state":"retired"},` +
+				`{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
+			want: "claims nothing will wake: 2 — " + workflowStart + " LEGION-208 implementer, LEGION-210 reviewer\n",
 		},
 		{name: "none", stranded: `[]`, want: "claims nothing will wake: none\n"},
 	} {

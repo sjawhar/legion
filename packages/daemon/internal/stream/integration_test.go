@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
@@ -58,7 +60,19 @@ func TestMain(m *testing.M) {
 	if os.Getenv(fakeOMPEnv) == "1" {
 		os.Exit(fakeOMP())
 	}
+	// The shim this package starts runs the real jj of a real adoption, and inherits this
+	// process's environment: in a Legion issue pod that names the pod's own live workspace, its
+	// git configuration and its credential, so the guard takes them out first, after the branch
+	// above where this binary runs as the shim's child (docs/testing.md).
+	if err := fixtureenv.Guard(); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.Exit(1)
+	}
 	os.Exit(runRemovingTheBuiltLegion(m))
+}
+
+func TestTheTestProcessIsGuarded(t *testing.T) {
+	fixtureenv.RequireGuarded(t)
 }
 
 // runRemovingTheBuiltLegion runs the package's tests and removes the directory the built
@@ -331,7 +345,11 @@ type fakeOMPShim struct {
 	process     *exec.Cmd
 }
 
-func startFakeOMPShim(t *testing.T, legion, addr string, flags ...string) *fakeOMPShim {
+// startFakeOMPShim starts the real shim against addr. env is appended to the environment the
+// shim inherits and passes on to the process it wraps, which is how a test names the workspace
+// the shim adopts (LEGION_WORKSPACE) and the home its jj reads its configuration from; a test
+// that needs neither passes nil.
+func startFakeOMPShim(t *testing.T, legion, addr string, env []string, flags ...string) *fakeOMPShim {
 	t.Helper()
 	work := t.TempDir()
 	tokenPath := filepath.Join(work, "boot-token")
@@ -350,7 +368,8 @@ func startFakeOMPShim(t *testing.T, legion, addr string, flags ...string) *fakeO
 	}
 	args := append([]string{"worker-shim", "--connect", addr, "--boot-token-file", tokenPath}, flags...)
 	shim.process = exec.Command(legion, append(args, "--", self)...)
-	shim.process.Env = append(os.Environ(), fakeOMPEnv+"=1", "FAKE_OMP_STDIN="+shim.stdinRecord, "FAKE_OMP_PID="+shim.pidPath)
+	shim.process.Env = append(append(os.Environ(), fakeOMPEnv+"=1",
+		"FAKE_OMP_STDIN="+shim.stdinRecord, "FAKE_OMP_PID="+shim.pidPath), env...)
 	shim.process.Stdout = shim.output
 	shim.process.Stderr = shim.output
 	// The fake OMP writes its stderr into the shim's, so a test that fails with the child alive
@@ -436,7 +455,7 @@ func TestTheRealShimReadsItsProjectedTokenAgainForTheRealListener(t *testing.T) 
 		t.Fatal(err)
 	}
 	d := listen(t, "tcp://127.0.0.1:0", (&gate{open: true}).resolve)
-	shim := startFakeOMPShim(t, legion, d.listener.Addr(),
+	shim := startFakeOMPShim(t, legion, d.listener.Addr(), nil,
 		"--agent-secrets-key-dir", keyDir, "--pod-token-file", tokenFile, "--agent-secrets-bin", agentSecrets)
 	hello, ok := d.next(t).(stream.Hello)
 	if !ok || hello.AgentSecrets == nil || *hello.AgentSecrets != (stream.AgentSecretsIdentity{Thumbprint: thumbprint, PodToken: atHello}) {
@@ -462,13 +481,84 @@ func TestTheRealShimReadsItsProjectedTokenAgainForTheRealListener(t *testing.T) 
 	}
 }
 
+// The adoption the daemon sends ahead of every task is the shim's own command, run with the real
+// jj on the workspace its pod gave it, and a working copy jj cannot write is answered `ok:false`
+// rather than by taking the agent down: a stale `.git/index.lock` another role's container left
+// behind wedges every jj in that workspace until the pod is replaced. The daemon side reads that
+// answer as the typed refusal the supervisor charges a prompt budget for, carrying the shim's own
+// words — which name the lock's path and its age — so the claim walks to failed with the reason
+// on its record instead of re-sending for ever (INFRA-1480).
+func TestTheRealShimRefusesAnAdoptionAStaleLockWedges(t *testing.T) {
+	legion := buildLegion(t)
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		t.Fatalf("jj is required: %v", err)
+	}
+	home, workspace := t.TempDir(), t.TempDir()
+	// The init takes no -R and opens no workspace, so with no Dir jj would walk up from the test
+	// process's directory to the closest .jj and write that repository (docs/testing.md).
+	initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+	initialize.Dir = workspace
+	initialize.Env = append(fixtureenv.Isolated(home), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
+	if output, err := initialize.CombinedOutput(); err != nil {
+		t.Fatalf("jj git init: %v\n%s", err, output)
+	}
+	// A file the adoption's first jj snapshots, so that jj rewrites the git index it cannot lock.
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(workspace, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	written := time.Now().Add(-31 * time.Minute)
+	if err := os.Chtimes(lock, written, written); err != nil {
+		t.Fatal(err)
+	}
+
+	d := listen(t, "unix://"+testtmp.Socket(t, "worker-stream.sock"), (&gate{open: true}).resolve)
+	shim := startFakeOMPShim(t, legion, d.listener.Addr(),
+		append(fixtureenv.Home(home), "LEGION_WORKSPACE="+workspace))
+	if _, ok := d.next(t).(stream.Hello); !ok {
+		t.Fatal("the shim's first event was not its hello")
+	}
+	testwait.Eventually(t, "the shim to spawn OMP after the ack", shim.childStarted)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationWait)
+	defer cancel()
+	conn, err := d.listener.Await(ctx, integrationClaim)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+
+	err = conn.AdoptWorkingCopy(ctx, runtime.GitIdentity{
+		Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com",
+	}, integrationWait)
+
+	var refused *stream.RefusedError
+	if !errors.As(err, &refused) || !errors.Is(err, runtime.ErrAdoptRefused) {
+		t.Fatalf("AdoptWorkingCopy = %v, want a *stream.RefusedError that is runtime.ErrAdoptRefused", err)
+	}
+	if !strings.Contains(refused.Reason, lock) {
+		t.Fatalf("the refusal's reason %q does not name the lock %s the adoption failed on", refused.Reason, lock)
+	}
+	if errors.Is(err, runtime.ErrPromptRefused) {
+		t.Fatalf("the refused adoption %v reads as a refused prompt", err)
+	}
+	if _, err := os.Lstat(lock); err != nil {
+		t.Fatalf("the lock after the failed adoption: %v, want it left in place", err)
+	}
+	if frames := childFrames(t, shim.stdinRecord); len(frames) != 0 {
+		t.Fatalf("the fake OMP read %q; the adoption is the shim's own command", frames)
+	}
+}
+
 func bridge(t *testing.T, legion, addr string) {
 	g := &gate{}
 	first := listen(t, addr, g.resolve)
 	// The address the shim is told, and the one the restarted daemon binds again: under TCP it is
 	// the port the kernel chose for the first listener.
 	addr = first.listener.Addr()
-	shim := startFakeOMPShim(t, legion, addr)
+	shim := startFakeOMPShim(t, legion, addr, nil)
 
 	// hello → refused while the token resolves to nothing: the shim redials with its hello, and
 	// never spawns OMP without an ack.
@@ -604,7 +694,7 @@ func TestTheRealShimRedialsAHelloTheDaemonCouldNotResolve(t *testing.T) {
 		return integrationClaim, integrationGeneration, false, true, nil
 	})
 
-	shim := startFakeOMPShim(t, legion, d.listener.Addr())
+	shim := startFakeOMPShim(t, legion, d.listener.Addr(), nil)
 
 	d.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
 	testwait.Eventually(t, "the shim to spawn OMP after the redial's ack", shim.childStarted)

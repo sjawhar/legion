@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -187,22 +188,28 @@ func keysOf(state map[string]json.RawMessage) []string {
 // but a start for that phase resumes it, and its start already ran), one whose phase start the
 // outbox still holds (that start waits for the operator's resume, since the operator suspended the
 // claim), a suspended tree architect (a notice to it is held, and only an admission starts it), a
-// failed phase worker (its issue is held from that phase) and a failed tree architect. It names
-// none of the claims something will still start: a worker whose phase is not its own, and the
-// members of a tree that lingers, which re-admission starts again. One error line names them all,
+// failed phase worker (its issue is held from that phase), a failed tree architect and a retired
+// worker owning its issue's phase (no rule the daemon runs starts a retired claim, and the boot's
+// repair reads only a suspension). It names none of the claims something will still start: a
+// worker whose phase is not its own, and the members of a tree that lingers, which re-admission
+// starts again. One error line names them all,
 // each under the key of the move that brings it back (api.StrandedClaim.Move): the suspended
 // architects under `resume`, the suspended phase workers under `suspendedWorkers`, the failed
-// architects under `retry` and the failed phase workers under `needsWorkflowStart`; the state
-// carries the same claims, each with its state.
+// architects under `retry` and the failed phase workers and the retired claims under
+// `needsWorkflowStart`; the state carries the same claims, each with its state, `retired` among
+// them (INFRA-1480).
 //
-// Every slot here holds a worker with work, as a previous daemon's slot does: the suspended and
-// failed workers kept the task their start gave them (holdingTask) and the planner's start is
-// still queued. A slot whose worker has neither is not stranded but repaired, since admission
-// starts that worker's phase again on its first pass (admit's resumeSlottedWorkers).
+// Every slot here holds a worker with work, as a previous daemon's slot does: the suspended,
+// failed and retired workers kept the task their start gave them (holdingTask) and the planner's
+// start is still queued. A slot whose worker has neither is not stranded but repaired, since
+// admission starts that worker's phase again on its first pass (admit's resumeSlottedWorkers).
 func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	key := func(n string) string { return cfg.Project + "-" + n }
 	implementing, reviewing, tested, lingering, lingeringChild, planning := key("1"), key("2"), key("3"), key("4"), key("5"), key("6")
+	// The tree whose tester a close retired while the tree runs again: its session is kept and
+	// the start executor would retry it, but nothing queues that start.
+	retired := key("7")
 	until := time.Now().Add(time.Hour)
 	parked := record.Issue{Key: lingering, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
 	child := runningRoot(lingeringChild, phase.Retro)
@@ -220,8 +227,8 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	putPreviousRun(t, cfg, previousRun{
-		issues: []record.Issue{runningRoot(implementing, phase.Implementing), runningRoot(reviewing, phase.Reviewing), runningRoot(tested, phase.Testing), parked, child, runningRoot(planning, phase.Planning)},
-		slots:  []string{implementing, reviewing, tested, planning},
+		issues: []record.Issue{runningRoot(implementing, phase.Implementing), runningRoot(reviewing, phase.Reviewing), runningRoot(tested, phase.Testing), parked, child, runningRoot(planning, phase.Planning), runningRoot(retired, phase.Testing)},
+		slots:  []string{implementing, reviewing, tested, planning, retired},
 		claims: []supervise.Claim{
 			previousClaim(t, cfg, implementing, implementing, claim.RoleArchitect, supervise.StateSuspended),
 			previousClaim(t, cfg, implementing, implementing, claim.RolePlanner, supervise.StateSuspended),
@@ -230,6 +237,7 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 			operatorHeld(previousClaim(t, cfg, tested, tested, claim.RoleTester, supervise.StateSuspended)),
 			previousClaim(t, cfg, lingering, lingeringChild, claim.RoleImplementer, supervise.StateSuspended),
 			previousClaim(t, cfg, planning, planning, claim.RoleArchitect, supervise.StateFailed),
+			holdingTask(previousClaim(t, cfg, retired, retired, claim.RoleTester, supervise.StateRetired), phase.Testing, "Test it."),
 		},
 		rows: []record.OutboxRow{queuedStart, queuedPlan},
 	})
@@ -257,7 +265,7 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	resume := []string{implementing + " architect"}
 	workers := []string{implementing + " implementer", tested + " tester"}
 	retry := []string{planning + " architect"}
-	workflowStart := []string{reviewing + " reviewer"}
+	workflowStart := []string{reviewing + " reviewer", retired + " tester"}
 	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workers)+len(retry)+len(workflowStart)) ||
 		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("suspendedWorkers"), workers) ||
 		!reflect.DeepEqual(listed("retry"), retry) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
@@ -270,6 +278,7 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 		{"issue": reviewing, "role": "reviewer", "state": "failed"},
 		{"issue": tested, "role": "tester", "state": "suspended"},
 		{"issue": planning, "role": "architect", "state": "failed"},
+		{"issue": retired, "role": "tester", "state": "retired"},
 	}
 	if got := strandedOnTheWire(t, bootState(t, d)); !reflect.DeepEqual(got, wantWire) {
 		t.Fatalf("strandedClaims = %v, want %v", got, wantWire)
@@ -399,14 +408,20 @@ func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
 // view and strandedClaims must both say what the snapshot saw. Reading worker state from the live
 // supervisor after beginning the transaction, while RoleRuns stayed in the transaction, used to
 // answer the newer `suspended` worker with no stranded entry.
+//
+// The claim the snapshot saw retired is the other half of that consistency (INFRA-1480): its
+// worker view says `retired` and the report names it, since only a start of its phase relaunches
+// it and no rule queues one.
 func TestStateSnapshotKeepsStrandedClaimsConsistentWithWorkerStates(t *testing.T) {
 	cfg := testConfig(t)
 	issue := cfg.Project + "-1"
+	retiredIssue := cfg.Project + "-2"
 	held := previousClaim(t, cfg, issue, issue, claim.RoleImplementer, supervise.StateIdle)
+	retired := previousClaim(t, cfg, retiredIssue, retiredIssue, claim.RoleTester, supervise.StateRetired)
 	putPreviousRun(t, cfg, previousRun{
-		issues: []record.Issue{runningRoot(issue, phase.Implementing)},
-		slots:  []string{issue},
-		claims: []supervise.Claim{held},
+		issues: []record.Issue{runningRoot(issue, phase.Implementing), runningRoot(retiredIssue, phase.Testing)},
+		slots:  []string{issue, retiredIssue},
+		claims: []supervise.Claim{held, retired},
 	})
 
 	ctx := context.Background()
@@ -457,7 +472,11 @@ func TestStateSnapshotKeepsStrandedClaimsConsistentWithWorkerStates(t *testing.T
 		t.Fatalf("State: %v", err)
 	}
 	worker := state.Issues[issue].Workers[claim.RoleImplementer].Claim
-	if worker.State != string(supervise.StateIdle) || len(state.StrandedClaims) != 0 {
-		t.Fatalf("snapshot state = worker %s, stranded %v; want idle worker and no stranded claims", worker.State, state.StrandedClaims)
+	tester := state.Issues[retiredIssue].Workers[claim.RoleTester].Claim
+	wantStranded := []api.StrandedClaim{{Issue: retiredIssue, Role: claim.RoleTester, State: string(supervise.StateRetired)}}
+	if worker.State != string(supervise.StateIdle) || tester.State != string(supervise.StateRetired) ||
+		!reflect.DeepEqual(state.StrandedClaims, wantStranded) {
+		t.Fatalf("snapshot state = implementer %s, tester %s, stranded %v; want the idle implementer the snapshot saw, a retired tester and %v",
+			worker.State, tester.State, state.StrandedClaims, wantStranded)
 	}
 }

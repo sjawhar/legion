@@ -765,6 +765,15 @@ func waitFor(t *testing.T, what string, ch <-chan string) string {
 
 var errBoom = errors.New("boom")
 
+// adoptRefusal is the shim answering an adoption `ok: false`, as that answer reaches the machine
+// from the stream: an error that is runtime.ErrAdoptRefused (stream.RefusedError.Is) and carries
+// the shim's own words, which the refusal's log line names. The sentinel is passed in from here
+// rather than scripted on the runtime double, so what a test drives is the error the connection
+// really returns.
+func adoptRefusal(reason string) error {
+	return fmt.Errorf("worker-stream: %s refused adopt-working-copy: %s: %w", testToken, reason, runtime.ErrAdoptRefused)
+}
+
 // fakeEnroller is the broker as the machine sees it: it records every enrollment and revocation,
 // mints ids, and fails what the test told it to. It verifies the pod token's expiry against now
 // as the broker does (enroll.Service.Create): an expired token is refused POD_TOKEN_EXPIRED and

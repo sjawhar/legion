@@ -1066,30 +1066,81 @@ func ackedInTurn(m *Machine, _ context.Context, _ Event) error {
 	return nil
 }
 
-// refused is a prompt that did not reach a turn from its own send: the agent refused it
-// (runtime.ErrPromptRefused), or the transport lost it. Either way a turn that confirmed the send
-// meanwhile was not the delivery's, and the delivery keeps its id — the shim drops a refused
+// refused is a send that did not reach a turn from its own goroutine: the agent refused the prompt
+// (runtime.ErrPromptRefused), the shim refused to adopt the working copy ahead of it
+// (runtime.ErrAdoptRefused), or the transport lost the send. Either way a turn that confirmed the
+// send meanwhile was not the delivery's, and the delivery keeps its id — the shim drops a refused
 // delivery's record, and answers a lost one it did see without a second turn.
 //
+// Which failures cost budget is decided here, and this doc is where the split is stated.
+// Charged are the two answers the far side gave about this very workspace: a refused prompt and a
+// refused adoption. Uncharged are the failures that are no answer at all — no reply within the RPC
+// timeout, a closed connection, a frame lost on the way, and a failure to mint the role's App
+// identity, which never leaves the daemon and is an outage of the GitHub App rather than a fault of
+// this workspace. Nothing is ever re-sent on the spot: every retry waits for the next sweep, hello,
+// turn end, or ready.
+//
 // A refusal is the agent's answer and is charged like a prompt that started no turn (LEGION-60:
-// an agent that refused every prompt would otherwise be retried forever); it is retried by the next
-// sweep, hello, turn end, or ready, never on the spot. Oh My Pi's busy answer (agentBusy) is the
-// exception, as it is for a late refusal (lateRefused): the agent is in a turn of its own — an
-// Envoy notice's, which a tree publishes freely while its worker boots — so it is working, not
-// refusing to work, and charging it would spend the budget of the very turn doing the work, three
-// such collisions retiring the agent mid-turn. The task waits unread, charged nothing, and that
-// turn's end sends it (the next sweep does, when the turn's start was not seen). A prompt lost to
-// the transport is not charged and waits for the shim's next hello — which may already have come
-// while the send was out.
+// an agent that refused every prompt would otherwise be retried forever). Oh My Pi's busy answer
+// (agentBusy) is the exception, as it is for a late refusal (lateRefused): the agent is in a turn
+// of its own — an Envoy notice's, which a tree publishes freely while its worker boots — so it is
+// working, not refusing to work, and charging it would spend the budget of the very turn doing the
+// work, three such collisions retiring the agent mid-turn. The task waits unread, charged nothing,
+// and that turn's end sends it (the next sweep does, when the turn's start was not seen).
+//
+// A refused adoption is charged the same way, and the busy exemption is not read for it: those are
+// the reasons Oh My Pi gives about a turn of its own, while this is the shim's own answer about a
+// working copy. Every `ok: false` the shim gives the adoption counts, its own command timeout
+// included — a jj wedged on a stale lock reports as exactly that — and the refusal's text is never
+// read to classify it, only carried into the log, where the shim's words already name the stale
+// lock's path and its age (INFRA-1480: unbounded re-sends of a refused adoption held two planning
+// tasks 31 and 33 hours, logged at warning level and charged nothing). With the shipped budgets
+// (prompt_failure_limit 3, prompt_retire_limit 2) the sixth consecutive charge fails the claim,
+// which workflow.Stranded and `legion state` report.
+//
+// A send lost to the transport is not charged and waits for the shim's next hello — which may
+// already have come while the send was out. So does an identity the daemon could not mint
+// (runtime.ErrIdentityUnavailable), which is uncharged for the same reason and logged under a
+// name of its own: it is raised before any frame leaves, and an operator told the transport lost
+// the prompt would look at the network while the GitHub App is the thing that is down.
+//
+// Every failure here, charged or not, is recorded on the pending delivery before the split is
+// read: how many sends of this task have failed, when this one failed and the error it failed
+// with (Delivery.SendFailures and its two companions). That record is a diagnosis rather than a
+// second budget, and the uncharged failures are exactly the ones it exists for: a transport loss
+// costs nothing and is retried for ever, so without it the only trace of a claim waiting days on
+// a send that never lands is a log line inside its pod. It rides out on the write this already
+// makes of the delivery, so one persist covers the taken-back confirmation and the record alike;
+// that write is unconditional because the record changes on every failed send, where the
+// confirmation it takes back is there to clear only on some.
+//
+// Two things keep that record from deciding anything about the charge, because the charge is
+// what bounds the re-sends and the record is only a diagnosis.
+//
+// The text is the far side's own, so it is scrubbed and bounded before it is stored
+// (scrubSendError): a refused adoption carries the wedged command's whole stderr and a refused
+// prompt Oh My Pi's decoded `error`, neither of which the store is obliged to take. The log
+// lines below carry the whole text as it arrived.
+//
+// The write may still fail — the store has its own weather — and a failed write is logged and
+// carried past rather than returned, so the split below is always read. A return there would
+// charge a refused adoption nothing and re-send it with no bound, which is the stall this split
+// exists to end. Nothing of the delivery is lost by carrying on: the failed write left it
+// unsaved (saved), and settle writes the claim and the delivery together before the next
+// decision, so the taken-back confirmation and this record reach the store on the first write
+// the store takes.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
 	m.helloDuringSend = false
-	if p := m.claim.Pending; !p.ConfirmedAt.IsZero() {
-		p.ConfirmedAt = time.Time{}
-		if err := m.putPending(ctx); err != nil {
-			return err
-		}
+	p := m.claim.Pending
+	p.ConfirmedAt = time.Time{}
+	p.SendFailures++
+	p.LastSendFailureAt = m.deps.Clock.Now()
+	p.LastSendError = scrubSendError(r.Err.Error())
+	if err := m.putPending(ctx); err != nil {
+		m.log.Warn("supervise: the failed send was not recorded on the delivery; settle writes it again and the charge goes on",
+			"delivery", r.DeliveryID, "error", err)
 	}
 	if errors.Is(r.Err, runtime.ErrPromptRefused) {
 		if agentBusy(runtime.RefusalReason(r.Err)) {
@@ -1100,7 +1151,17 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		m.log.Warn("supervise: the agent refused the prompt", "delivery", r.DeliveryID, "error", r.Err)
 		return m.chargePrompt(ctx, "refused: "+r.Err.Error())
 	}
-	m.log.Warn("supervise: the prompt was lost to the transport; the delivery waits", "delivery", r.DeliveryID, "error", r.Err)
+	if errors.Is(r.Err, runtime.ErrAdoptRefused) {
+		m.log.Warn("supervise: the shim refused to adopt the working copy; the prompt was never sent",
+			"delivery", r.DeliveryID, "error", r.Err)
+		return m.chargePrompt(ctx, "the working copy was not adopted: "+r.Err.Error())
+	}
+	if errors.Is(r.Err, runtime.ErrIdentityUnavailable) {
+		m.log.Warn("supervise: the role's GitHub App identity could not be minted; the prompt was never sent and the delivery waits",
+			"delivery", r.DeliveryID, "error", r.Err)
+	} else {
+		m.log.Warn("supervise: the prompt was lost to the transport; the delivery waits", "delivery", r.DeliveryID, "error", r.Err)
+	}
 	if resend {
 		return m.sendPending(ctx)
 	}

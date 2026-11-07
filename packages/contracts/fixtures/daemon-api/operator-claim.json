@@ -29,7 +29,10 @@
     "queuedAt": "2026-09-22T09:30:58Z",
     "deliveredAt": "2026-09-22T09:31:04Z",
     "confirmedAt": "2026-09-22T09:31:04Z",
-    "interrupted": true
+    "interrupted": true,
+    "sendFailures": 2,
+    "lastSendFailureAt": "2026-09-22T09:31:02Z",
+    "lastSendError": "prompt the agent: context deadline exceeded"
   },
   "suspensionHeld": true,
   "pluginContract": 0,

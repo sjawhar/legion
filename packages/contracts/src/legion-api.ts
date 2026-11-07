@@ -332,7 +332,12 @@ const legionPendingStatusWrite = z.object({
 /** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
  * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
  * the issue's entry under `issues` carries the rest. Its state, role and suspension say the move
- * that brings it back (`api.StrandedClaim.Move`).
+ * that brings it back (`api.StrandedClaim.Move`). A `retired` entry is a claim a close or a stop
+ * retired while its tree runs: only a start of the phase it owns relaunches it, and no rule the
+ * daemon runs queues that start, so nothing will wake it either. That state arrived with contract
+ * 56, and a pod whose claims record a contract below it is served this report without its retired
+ * entries (`api`'s `stateFor`, `withoutRetiredStranded`) rather than being made to refuse the
+ * whole state over a third value its enum does not name.
  *
  * Who suspended a suspended one is not here and must never be added: a session parses this body
  * with the schema of the contract its plugin was built at, and a Kubernetes deployment relaunches
@@ -343,7 +348,7 @@ const legionPendingStatusWrite = z.object({
 const legionStrandedClaim = z.object({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
-  state: z.enum(["suspended", "failed"]),
+  state: z.enum(["suspended", "failed", "retired"]),
 });
 
 /** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
@@ -856,6 +861,16 @@ const legionDeliveryView = z.object({
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
   interrupted: z.literal(true).optional(),
+  /** How many sends of this task came back without reaching a turn, when the last of them failed
+   * and the error it failed with. The three are a diagnosis record, not a budget: the budget is
+   * `budgets.promptFailures` and `budgets.promptRetires`, which only a charged failure spends,
+   * while these count every send that failed that way, charged or not — a send lost to the
+   * transport costs nothing and is retried for ever, which is the stall they exist to name. A
+   * prompt the agent acknowledged and then refused is charged and read in the budget instead. A
+   * send that reaches a turn clears all three, so a task no send has failed for carries none. */
+  sendFailures: z.number().int().nonnegative().optional(),
+  lastSendFailureAt: timestamp.optional(),
+  lastSendError: nonEmptyString.optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST

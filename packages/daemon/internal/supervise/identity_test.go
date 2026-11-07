@@ -11,24 +11,38 @@ import (
 
 // Every delivery first hands the agent's working copy its role's App identity for the claim's
 // issue, so a commit the task makes is authored by the bot rather than by whoever the workspace
-// last named.
+// last named. A send the adoption stops never reaches the agent, and what the claim is charged
+// for it is the split refused makes (table.go): the shim's own refusal of the working copy is the
+// far side's answer about this workspace and spends the prompt budget, while a transport failure
+// under the frame and a failure to mint the role's App identity — which never leaves the daemon,
+// and is an outage of the App rather than a fault of this workspace — spend nothing and are
+// retried for ever (INFRA-1480).
 func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	for _, tc := range []struct {
-		name      string
+		name string
+		// mint is what the role's App identity is answered with, and fail what the runtime
+		// answers the adoption itself with.
+		mint      error
 		fail      error
 		prompts   int
 		adoptions int
+		budgets   Budgets
 	}{
-		{"an adopted working copy gets the task", nil, 1, 1},
-		{"a working copy that cannot be adopted does not", errors.New("the working copy is stale"), 0, 1},
+		{name: "an adopted working copy gets the task", prompts: 1, adoptions: 1},
+		{name: "a working copy the shim refuses to adopt does not, and is charged",
+			fail:      adoptRefusal("jj metaedit exited 1: the git lock /w/.git/index.lock was last written 31m ago"),
+			adoptions: 1, budgets: Budgets{PromptFailures: 1}},
+		{name: "an adoption the transport loses is charged nothing", fail: errBoom, adoptions: 1},
+		{name: "an App identity that cannot be minted is charged nothing",
+			mint: errors.New("mint the implementer's installation token: the GitHub App is unreachable")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			var asked []string
 			h.deps.Identity = func(_ context.Context, role claim.Role, issue string) (runtime.GitIdentity, error) {
 				asked = append(asked, string(role)+" "+issue)
-				return bot, nil
+				return bot, tc.mint
 			}
 			h.restart()
 			if tc.fail != nil {
@@ -47,6 +61,10 @@ func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 			}
 			if want := string(h.claim().Role) + " " + h.claim().Issue; len(asked) != 1 || asked[0] != want {
 				t.Fatalf("identity asked for %v, want once for %q, the claim's role and issue", asked, want)
+			}
+			h.wantBudgets(tc.budgets)
+			if p := h.pending(); p.Task != "implement the plan" || !p.ConfirmedAt.IsZero() {
+				t.Fatalf("pending %+v, want the task still queued for the next send", p)
 			}
 		})
 	}

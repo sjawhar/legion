@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -174,11 +175,19 @@ func TestStrandedNamesAReleasedClaimOnlyWhenItsWakeNeverBroughtThePodBack(t *tes
 }
 
 // Each claim nothing will wake is named, and every claim something will still wake, or that
-// waits correctly, is not.
+// waits correctly, is not. A retired claim is read by the same questions as a failed one
+// (INFRA-1480): it owns the phase its issue's worker works, or it is its running tree's
+// architect, and no start that would relaunch it is queued. The start executor retries a retired
+// claim, so a queued start of that phase takes it out of the report, and a tree that does not run
+// strands nothing of its own.
 func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	held := strandedIssue("LEGION-3", "LEGION-3", phase.Held)
 	held.Hold = &record.Hold{From: phase.Reviewing}
+	// The hold of a retired worker's issue: its reviewer retired, which held the issue from
+	// reviewing, and workingPhase still gives that phase, the one whose start relaunches it.
+	retiredHeld := strandedIssue("LEGION-14", "LEGION-14", phase.Held)
+	retiredHeld.Hold = &record.Hold{From: phase.Reviewing}
 	lingering := strandedIssue("LEGION-7", "LEGION-7", phase.Done)
 	lingering.LingerUntil = &until
 	// A lingering root re-admitted while every slot is taken: readmit has cleared its linger and
@@ -200,6 +209,11 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		waiting,
 		strandedIssue("LEGION-11", "LEGION-11", phase.Testing),
 		strandedIssue("LEGION-12", "LEGION-1", phase.Accepting),
+		strandedIssue("LEGION-13", "LEGION-13", phase.Testing),
+		retiredHeld,
+		strandedIssue("LEGION-15", "LEGION-15", phase.Implementing),
+		strandedIssue("LEGION-16", "LEGION-7", phase.Retro),
+		strandedIssue("LEGION-17", "LEGION-17", phase.Planning),
 	}
 
 	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
@@ -224,6 +238,17 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	operatorArchitect.SuspendedBy = supervise.SuspendedByOperator
 	operatorTester := strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleTester, supervise.StateSuspended)
 	operatorTester.SuspendedBy = supervise.SuspendedByOperator
+	// A retired worker of the phase its issue stands in: its session is kept and the start
+	// executor would retry it, but no rule queues that start.
+	retiredWorker := strandedClaim(t, "LEGION-13", "LEGION-13", claim.RoleTester, supervise.StateRetired)
+	// A retired worker whose issue a hold took from its phase: workingPhase gives reviewing, so
+	// the claim is named until its architect's retry_or_escalate queues that phase's start.
+	retiredHeldWorker := strandedClaim(t, "LEGION-14", "LEGION-14", claim.RoleReviewer, supervise.StateRetired)
+	// The retired implementer's start for implementing is queued, and that start retries it.
+	retiredStartQueued := strandedClaim(t, "LEGION-15", "LEGION-15", claim.RoleImplementer, supervise.StateRetired)
+	// A tree architect a close retired while its tree runs again: only its tree's admission
+	// starts it, and no admission start is queued.
+	retiredArchitect := strandedClaim(t, "LEGION-17", "LEGION-17", claim.RoleArchitect, supervise.StateRetired)
 	claims := []supervise.Claim{
 		failedArchitect,
 		implementer,
@@ -241,9 +266,15 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		startUndone,
 		operatorArchitect,
 		operatorTester,
+		retiredWorker,
+		retiredHeldWorker,
+		retiredStartQueued,
+		retiredArchitect,
 		// A tree that lingers holds its members, and its re-admission starts them again.
 		strandedClaim(t, "LEGION-7", "LEGION-7", claim.RoleArchitect, supervise.StateFailed),
 		strandedClaim(t, "LEGION-7", "LEGION-8", claim.RoleImplementer, supervise.StateSuspended),
+		// A retired member of that lingering tree: a tree that does not run strands nothing.
+		strandedClaim(t, "LEGION-7", "LEGION-16", claim.RoleImplementer, supervise.StateRetired),
 		// An issue whose tree root is not recorded, and an issue not recorded at all.
 		strandedClaim(t, "LEGION-404", "LEGION-9", claim.RolePlanner, supervise.StateSuspended),
 		strandedClaim(t, "S2-1", "S2-1", claim.RoleImplementer, supervise.StateSuspended),
@@ -258,7 +289,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 	s := &strandedStore{
 		issues: issues,
-		slots:  slotsOf("LEGION-1", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6", "LEGION-11"),
+		slots: slotsOf("LEGION-1", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6", "LEGION-11",
+			"LEGION-13", "LEGION-14", "LEGION-15", "LEGION-17"),
 		claims: stored,
 		queued: map[claim.Token][]record.QueuedSupervise{
 			startQueued.Token:          {{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-4", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
@@ -267,8 +299,9 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 				{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2, Phase: phase.Merging}},
 				{ID: 12, Request: record.SuperviseRequest{Op: "suspend", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2}},
 			},
-			operatorArchitect.Token: {{ID: 14, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleArchitect, Generation: 2}}},
-			operatorTester.Token:    {{ID: 15, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-11", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
+			operatorArchitect.Token:  {{ID: 14, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleArchitect, Generation: 2}}},
+			operatorTester.Token:     {{ID: 15, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-11", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
+			retiredStartQueued.Token: {{ID: 16, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-15", Role: claim.RoleImplementer, Generation: 2, Phase: phase.Implementing}}},
 		},
 	}
 
@@ -277,7 +310,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		t.Fatalf("Stranded: %v", err)
 	}
 
-	want := []supervise.Claim{suspendedArchitect, implementer, operatorTester, retro, failedReviewer, operatorArchitect, startUndone, failedArchitect}
+	want := []supervise.Claim{suspendedArchitect, implementer, operatorTester, retiredWorker, retiredHeldWorker,
+		retiredArchitect, retro, failedReviewer, operatorArchitect, startUndone, failedArchitect}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stranded = %v, want %v", names(got), names(want))
 	}
@@ -289,6 +323,12 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 // migration 0038 (unknown) is stranded while no start is queued for it, since the boot resumes no
 // such claim; a start queued for it resumes it, as on main. A tree architect is stranded whoever
 // suspended it, since no rule resumes an architect.
+//
+// A retired worker is stranded whatever its row's suspendedBy says (INFRA-1480): the rule that
+// leaves out a worker the daemon or its own exit suspended reads the suspended state itself, and
+// nothing resumes a retired claim. The one a release suspended and a close then retired keeps
+// `suspendedBy: released` on its row, so the report both names it and names its move as the
+// workflow start it needs, never as a pod still coming back from a wake.
 func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 	issues := []record.Issue{
 		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
@@ -296,6 +336,8 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		strandedIssue("LEGION-3", "LEGION-3", phase.Reviewing),
 		strandedIssue("LEGION-4", "LEGION-4", phase.Merging),
 		strandedIssue("LEGION-5", "LEGION-5", phase.Testing),
+		strandedIssue("LEGION-6", "LEGION-6", phase.Testing),
+		strandedIssue("LEGION-7", "LEGION-7", phase.Merging),
 	}
 	by := func(c supervise.Claim, source supervise.SuspendSource) supervise.Claim {
 		c.SuspendedBy = source
@@ -307,13 +349,16 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 	exitWorker := by(strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleMerger, supervise.StateSuspended), supervise.SuspendedByExit)
 	daemonArchitect := by(strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleArchitect, supervise.StateSuspended), supervise.SuspendedByDaemon)
 	unknownStarted := by(strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleTester, supervise.StateSuspended), supervise.SuspendedByUnknown)
-	claims := []supervise.Claim{daemonWorker, operatorWorker, unknownWorker, exitWorker, daemonArchitect, unknownStarted}
+	releasedThenRetired := by(strandedClaim(t, "LEGION-6", "LEGION-6", claim.RoleTester, supervise.StateRetired), supervise.SuspendedByReleased)
+	daemonRetired := by(strandedClaim(t, "LEGION-7", "LEGION-7", claim.RoleMerger, supervise.StateRetired), supervise.SuspendedByDaemon)
+	claims := []supervise.Claim{daemonWorker, operatorWorker, unknownWorker, exitWorker, daemonArchitect, unknownStarted,
+		releasedThenRetired, daemonRetired}
 	stored := map[claim.Token]supervise.Claim{}
 	for _, c := range claims {
 		stored[c.Token] = c
 	}
 
-	store := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5"), claims: stored,
+	store := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6", "LEGION-7"), claims: stored,
 		queued: map[claim.Token][]record.QueuedSupervise{
 			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		}}
@@ -322,9 +367,28 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		t.Fatalf("Stranded: %v", err)
 	}
 
-	want := []supervise.Claim{daemonArchitect, operatorWorker, unknownWorker}
+	want := []supervise.Claim{daemonArchitect, operatorWorker, unknownWorker, releasedThenRetired, daemonRetired}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stranded = %v, want %v", names(got), names(want))
+	}
+
+	// The move the state states for the released claim a close then retired: the operator claim
+	// list still names it released, and the report must answer the workflow start that relaunches
+	// it rather than the released claim's "the pod never came back".
+	suspenders := api.SuspendersOfOperatorClaims([]api.OperatorClaim{{
+		Token: releasedThenRetired.Token, Issue: releasedThenRetired.Issue, Role: releasedThenRetired.Role,
+		State: string(releasedThenRetired.State), SuspendedBy: string(supervise.SuspendedByReleased),
+	}})
+	views := api.StrandedClaimsOf(got)
+	index := slices.IndexFunc(views, func(v api.StrandedClaim) bool {
+		return v.Issue == releasedThenRetired.Issue && v.Role == releasedThenRetired.Role
+	})
+	if index < 0 {
+		t.Fatalf("the stranded claims %v name no entry for the released claim its close retired", views)
+	}
+	if move := views[index].Move(suspenders.Of(views[index])); move != api.StrandedWorkflowStart {
+		t.Fatalf("the move of %+v, released and then retired, = %q, want %q and never %q",
+			views[index], move, api.StrandedWorkflowStart, api.StrandedReleasedNoResume)
 	}
 }
 

@@ -293,6 +293,11 @@
       "issue": "LEGION-211",
       "role": "implementer",
       "state": "suspended"
+    },
+    {
+      "issue": "LEGION-212",
+      "role": "tester",
+      "state": "retired"
     }
   ],
   "wakesWaiting": [

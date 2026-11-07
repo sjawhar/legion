@@ -859,7 +859,7 @@ var strandedPhrases = map[api.StrandedMove]string{
 	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
 	api.StrandedReleasedNoResume: "released, woken over ten minutes ago and the pod never came back",
 	api.StrandedRetry:            "failed, retry",
-	api.StrandedWorkflowStart:    "failed, needs a workflow start",
+	api.StrandedWorkflowStart:    "failed or retired, needs a workflow start: the architect's retry_or_escalate of a held phase, a transition into the phase, or a tree close and re-admission",
 }
 
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,

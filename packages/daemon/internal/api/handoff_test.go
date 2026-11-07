@@ -1640,13 +1640,21 @@ func TestACompletionFromATurnThatStartedLateNamesTheTaskTheWorkerHolds(t *testin
 // A task the agent refused is not a task it read, whichever way it refused. In a turn of its own
 // ("Agent is already processing", the d9194522 sequence) it never saw this prompt; with no turn
 // running (a provider answering "No API key found" before any turn began) the prompt did not run
-// at all. Either way a completion arriving in whatever turn follows is not that task's run, and a
-// claim that has confirmed nothing has no run to attribute it to.
+// at all. Either way the refusal leaves the claim serving no run, and what becomes of a
+// completion arriving in whatever turn follows is decided by the task the claim still holds
+// rather than by the refusal: a task the route can place in the issue's current work — its own
+// generation and its own phase — carries the run and the assignment that completion is recorded
+// against, and a claim holding anything else is refused HANDOFF_NO_RUN. The two refused cases
+// here hold a task that names no phase, which places it in no phase's work; the third holds a
+// task of the issue's own generation and phase, and the worker that went on and did that phase's
+// work in the turn after the refusal is not made to lose it.
 func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		refusal   string
 		turnFirst bool
+		taskPhase phase.Phase
+		accepted  bool
 	}{
 		{
 			name:      "refused in a turn of the agent's own",
@@ -1654,9 +1662,16 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 			turnFirst: true,
 		},
 		{name: "refused with no turn running", refusal: "No API key found for provider anthropic"},
+		{
+			name:      "refused in a turn of the agent's own, holding the issue's own phase's task",
+			refusal:   "Agent is already processing. Use steer() or followUp() to queue messages",
+			turnFirst: true,
+			taskPhase: phase.Testing,
+			accepted:  true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+			h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			token, boot := h.launch("LEGION-208", claim.RoleTester)
@@ -1673,8 +1688,9 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 			}
 			// The claim has confirmed no task: run 1's prompt was acknowledged and its turn was
 			// never seen. The child re-entered at run 2, whose task is delivered and acknowledged.
+			// The phase the task names is the case's own: none, or the one the issue is in.
 			second := "outbox:42"
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "run 2's task", ID: second, Generation: 2}); err != nil {
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "run 2's task", ID: second, Generation: 2, Phase: tc.taskPhase}); err != nil {
 				t.Fatalf("deliver run 2's task: %v", err)
 			}
 			if err := machine.Handle(ctx, supervise.PromptAcked{Claim: token, Generation: machine.Claim().Generation, DeliveryID: second}); err != nil {
@@ -1699,7 +1715,17 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 				notice()
 			}
 
-			assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1}), http.StatusConflict, "HANDOFF_NO_RUN")
+			request := HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass", HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1}
+			if !tc.accepted {
+				assertFailure(t, h.complete(request), http.StatusConflict, "HANDOFF_NO_RUN")
+				return
+			}
+			if recorder := h.complete(request); recorder.Code != http.StatusOK {
+				t.Fatalf("the completion of the refused task's own run and phase = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			if completion := lastCompletion(t, facts); completion.Generation != 2 {
+				t.Fatalf("the completion names generation %d, want the held task's 2", completion.Generation)
+			}
 		})
 	}
 }
@@ -1803,6 +1829,172 @@ func TestHandoffCompleteRefusesACompletionFromAClaimThatTookNoTask(t *testing.T)
 	untasked := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: "LEGION-208", issue: "LEGION-208"}
 
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: untasked.grant(t), Summary: "tests pass", Verdict: "pass", HandoffID: untasked.writeHandoff("test", 1), HandoffVersion: 1}), http.StatusConflict, "HANDOFF_NO_RUN")
+}
+
+// untaskedClaim launches role's claim on issue and registers its session, with no task delivered
+// and no turn started: a worker that has served no run (Claim.ServingRun answers 0, and
+// ServingAssignment "").
+func untaskedClaim(t *testing.T, h *harness, issue string, role claim.Role) liveClaim {
+	t.Helper()
+	token, boot := h.launch(issue, role)
+	session := "ses_" + string(role) + "_" + issue
+	registration := h.registered(boot, session)
+	machine, ok := h.supervisor.Machine(token)
+	if !ok {
+		t.Fatalf("no machine for %s", token)
+	}
+	if err := machine.Handle(context.Background(), supervise.RequestReady{Claim: token, Generation: machine.Claim().Generation, Session: session}); err != nil {
+		t.Fatalf("ready %s: %v", token, err)
+	}
+	return liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+}
+
+// holdingTask hands c the task and leaves it holding it: the prompt is never acknowledged and no
+// turn confirms it, so the claim serves no run and no assignment while the task waits on it. That
+// is the state a lost prompt, a busy refusal, a late refusal or a failed adoption leaves behind,
+// and the one the completion route takes the run and the assignment from.
+func holdingTask(t *testing.T, h *harness, c liveClaim, task supervise.RequestDeliver) {
+	t.Helper()
+	machine, ok := h.supervisor.Machine(c.token)
+	if !ok {
+		t.Fatalf("no machine for %s", c.token)
+	}
+	task.Claim = c.token
+	if err := machine.Handle(context.Background(), task); err != nil {
+		t.Fatalf("deliver %s to %s: %v", task.ID, c.token, err)
+	}
+	held := machine.Claim()
+	if held.Pending == nil || !held.Pending.DeliveredAt.IsZero() || !held.Pending.ConfirmedAt.IsZero() {
+		t.Fatalf("the pending task = %+v, want it held unacknowledged and unconfirmed", held.Pending)
+	}
+	if run, assignment := held.ServingRun(), held.ServingAssignment(); run != 0 || assignment != "" {
+		t.Fatalf("the claim serves run %d and assignment %q, want none: this test is about the claim that serves neither", run, assignment)
+	}
+}
+
+// A worker whose task was sent and never acknowledged — a lost prompt, a refusal the agent made
+// in a turn of its own, an adoption that failed — does the phase's work anyway, in whatever turn
+// follows, and its claim serves no run to attribute the completion to. Refusing it costs the
+// issue a phase for nothing, so the route takes the run and the assignment from the task the
+// claim is holding when that task is the issue's own current generation and phase: the completion
+// is recorded against that task's run, not refused and not credited to some other one. The
+// assignment it adopts with the run is what
+// TestHandoffCompleteHoldsAnAdoptedRunToTheHeldTasksOwnAssignment pins.
+func TestHandoffCompleteAdoptsTheRunOfTheTaskTheClaimIsHolding(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Testing)
+	seedAssignment(t, h, "LEGION-208", claim.RoleTester, "A1")
+	tester := untaskedClaim(t, h, "LEGION-208", claim.RoleTester)
+	holdingTask(t, h, tester, supervise.RequestDeliver{
+		Task: "test LEGION-208", ID: "outbox:77", Generation: 1, Phase: phase.Testing, Assignment: "A1"})
+
+	if recorder := h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass",
+		HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1}); recorder.Code != http.StatusOK {
+		t.Fatalf("the completion of the held task = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if completion := lastCompletion(t, facts); completion.Generation != 1 {
+		t.Fatalf("the completion names generation %d, want the held task's 1", completion.Generation)
+	}
+}
+
+// The fallback is only as wide as the state it was written for: the task the claim holds has to
+// be the issue's own current generation and its own current phase. A claim holding no task, one
+// of a run the issue has left, or one of another phase is still refused HANDOFF_NO_RUN with
+// nothing recorded, and the refusal says what the claim holds — naming the run or the phase of
+// the task when it holds one — that nothing was recorded, and what the worker does next, which is
+// what skills/legion-worker/SKILL.md tells it for this code: never the work again, never a second
+// handoff.
+func TestHandoffCompleteRefusesTheCompletionNoTaskOfTheIssuesOwnWorkBacks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		at         phase.Phase
+		role       claim.Role
+		generation uint64
+		pending    *supervise.RequestDeliver
+		says       []string
+	}{
+		{
+			name: "no task at all", at: phase.Testing, role: claim.RoleTester, generation: 1,
+			says: []string{"this claim holds no task at all, and LEGION-208 is on generation 1 in testing"},
+		},
+		{
+			// The tester's task of run 1 was never read; the child was re-admitted and the issue
+			// is on run 2, whose testing task has not reached this claim.
+			name: "a task of the run the issue has left", at: phase.Testing, role: claim.RoleTester, generation: 2,
+			pending: &supervise.RequestDeliver{Task: "test run 1", ID: "outbox:77", Generation: 1, Phase: phase.Testing},
+			says:    []string{"the task this claim holds (outbox:77) is generation 1's, and LEGION-208 is on generation 2"},
+		},
+		{
+			// The implementer's implementing task was never read, the issue went on without it
+			// and came back to the same role in retro: the task it holds is the other phase's.
+			name: "a task of another phase", at: phase.Retro, role: claim.RoleImplementer, generation: 1,
+			pending: &supervise.RequestDeliver{Task: "implement LEGION-208", ID: "outbox:77", Generation: 1, Phase: phase.Implementing},
+			says:    []string{"the task this claim holds (outbox:77) is the implementing phase's, and LEGION-208 is in retro"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+			seedIssueAt(t, h, "LEGION-208", tc.at)
+			if tc.generation != 1 {
+				setIssue(t, h, "LEGION-208", func(issue *record.Issue) { issue.Generation = tc.generation })
+			}
+			worker := untaskedClaim(t, h, "LEGION-208", tc.role)
+			if tc.pending != nil {
+				holdingTask(t, h, worker, *tc.pending)
+			}
+			request := HandoffCompleteRequest{GrantID: worker.grant(t), Summary: "the work is done", Commit: headSHA}
+			if tc.role == claim.RoleTester {
+				request = HandoffCompleteRequest{GrantID: worker.grant(t), Summary: "tests pass", Verdict: "pass",
+					HandoffID: worker.writeHandoff("test", 1), HandoffVersion: 1}
+			}
+
+			message := refused(t, h.complete(request), http.StatusConflict, "HANDOFF_NO_RUN")
+			for _, want := range append(tc.says,
+				"nothing was recorded",
+				"Push nothing further, end this turn without completing and tell the architect",
+				fmt.Sprintf("if the daemon queues this claim a generation-%d %s task", tc.generation, tc.at),
+				"call the same handoff_complete in that task's turn, and never redo the work or write a second handoff") {
+				if !strings.Contains(message, want) {
+					t.Fatalf("the refusal = %q, want it to say %q", message, want)
+				}
+			}
+			if recorded := facts.recorded(); len(recorded) != 0 {
+				t.Fatalf("the refused completion reached the workflow as %+v, want no fact", recorded)
+			}
+		})
+	}
+}
+
+// The run adopted from the held task never buys that task's completion past the assignment fence:
+// the tester's first testing task was lost, CI went red while it worked, and the issue came back
+// to testing with a second assignment its row already names — which the claim cannot be given,
+// since a second delivery is refused while the first is pending. So the completion is the earlier
+// assignment's, and the route reads the assignment from the very task it took the run from.
+// Without that, the fence would compare the row against the "" a claim serving no run answers,
+// stop comparing for every completion this fallback admits, and take the next testing phase's
+// completion from the turn before it.
+func TestHandoffCompleteHoldsAnAdoptedRunToTheHeldTasksOwnAssignment(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Testing)
+	seedAssignment(t, h, "LEGION-208", claim.RoleTester, "A2")
+	tester := untaskedClaim(t, h, "LEGION-208", claim.RoleTester)
+	holdingTask(t, h, tester, supervise.RequestDeliver{
+		Task: "test LEGION-208", ID: "outbox:77", Generation: 1, Phase: phase.Testing, Assignment: "A1"})
+
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "tests pass", Verdict: "pass",
+		HandoffID: tester.writeHandoff("test", 1), HandoffVersion: 1}), http.StatusConflict, "HANDOFF_STALE_ASSIGNMENT")
+	for _, want := range []string{
+		"LEGION-208 handed the tester phase testing again, and this completion is of the assignment before it",
+		"nothing was recorded",
+		"do the work it asks for and complete it with a handoff of its own",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("the refusal = %q, want it to say %q", message, want)
+		}
+	}
+	if recorded := facts.recorded(); len(recorded) != 0 {
+		t.Fatalf("the refused completion reached the workflow as %+v, want no fact", recorded)
+	}
 }
 
 // The run a completion belongs to is the run of the task the worker is working, and the daemon

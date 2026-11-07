@@ -1142,6 +1142,68 @@ func TestListShowsAClaimsDeathsAndItsInterruptedTask(t *testing.T) {
 	}
 }
 
+// A claim's view carries the record of the sends of its task that never reached a turn — how
+// many failed, when the last of them failed and the error it failed with — beside the queued,
+// delivered and confirmed times. Without it, a claim that has waited days on a send which never
+// lands says so only in a log line inside its own pod (INFRA-1480). The three are omitempty, and
+// the send that reaches a turn clears them, so a task no send has failed for carries none of
+// them on the wire.
+func TestClaimViewCarriesTheSendFailures(t *testing.T) {
+	h := newHarness(t)
+	token := claim.Token("legion-legion-legion-209-implementer")
+	queued := time.Date(2026, 9, 26, 7, 0, 0, 0, time.UTC)
+	failedAt := queued.Add(30 * time.Second)
+	if err := h.store.PutClaim(h.ctx, supervise.Claim{Token: token, Project: testProject, Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, State: supervise.StateReady}); err != nil {
+		t.Fatalf("put the claim: %v", err)
+	}
+	failing := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", QueuedAt: queued,
+		SendFailures: 4, LastSendFailureAt: failedAt,
+		LastSendError: "worker-stream: " + string(token) + " refused adopt-working-copy: " +
+			"the git lock /legion/workspaces/acme/widgets/legion-209/.git/index.lock was last written 31m ago"}
+	if err := h.store.PutDelivery(h.ctx, token, failing); err != nil {
+		t.Fatalf("put the delivery: %v", err)
+	}
+
+	var got OperatorClaims
+	decodeInto(t, h.operator(http.MethodGet, "/legion/v1/operator/claims", nil), &got)
+
+	if len(got.Claims) != 1 || got.Claims[0].Pending == nil {
+		t.Fatalf("list answered %+v, want the claim with its pending task", got.Claims)
+	}
+	pending := got.Claims[0].Pending
+	if pending.SendFailures != failing.SendFailures || pending.LastSendFailureAt == nil ||
+		!pending.LastSendFailureAt.Equal(failedAt) || pending.LastSendError != failing.LastSendError {
+		t.Fatalf("pending %+v, want %d failed sends, the last at %v, with its error", pending, failing.SendFailures, failedAt)
+	}
+	if !pending.QueuedAt.Equal(queued) || pending.DeliveredAt != nil || pending.ConfirmedAt != nil {
+		t.Fatalf("pending %+v, want the record beside the three times, of which only the queue has happened", pending)
+	}
+
+	// The send that reached a turn: the task is acknowledged and confirmed, and supervise's
+	// confirm cleared all three with the budgets.
+	confirmed := failing
+	confirmed.DeliveredAt, confirmed.MarkedBy, confirmed.ConfirmedAt = failedAt.Add(time.Second), failing.ID, failedAt.Add(2*time.Second)
+	confirmed.SendFailures, confirmed.LastSendFailureAt, confirmed.LastSendError = 0, time.Time{}, ""
+	if err := h.store.PutDelivery(h.ctx, token, confirmed); err != nil {
+		t.Fatalf("put the confirmed delivery: %v", err)
+	}
+
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+	body := recorder.Body.String()
+	for _, key := range []string{"sendFailures", "lastSendFailureAt", "lastSendError"} {
+		if strings.Contains(body, key) {
+			t.Errorf("the wire carries %q for a task no send has failed for: %s", key, body)
+		}
+	}
+	got = OperatorClaims{}
+	decodeInto(t, recorder, &got)
+	if len(got.Claims) != 1 || got.Claims[0].Pending == nil || got.Claims[0].Pending.ConfirmedAt == nil {
+		t.Fatalf("list answered %+v, want the confirmed task the cleared record belongs to", got.Claims)
+	}
+}
+
 // A daemon supervising no claim answers `claims` as the empty array, never `null`, and the
 // sweep's record beside it with each of its own lists the same way: the readers on the other
 // side of this wire require each list as an array, and one of them is the operator's own listing.

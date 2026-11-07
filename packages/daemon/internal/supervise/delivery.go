@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -97,6 +98,29 @@ type Delivery struct {
 	// (runtime.Observation.OutOfMemory), so the task is sent behind outOfMemoryTask as well as
 	// behind interruptedTask from then on (message). The task text stays as the workflow wrote it.
 	OutOfMemory bool
+	// SendFailures, LastSendFailureAt and LastSendError are the diagnosis record of this task's
+	// sends that came back from their own send goroutine without reaching a turn (table.go's
+	// refused): how many of them failed, when the last one failed by the machine's clock, and
+	// the error it failed with. They are a record of what happened, not a budget. The budget is
+	// the claim's (Claim.Budgets.PromptFailures and PromptRetires), which only the failures
+	// charged as the far side's answer about this workspace spend; this counts every send that
+	// failed there, charged or not, and that difference is the point of recording it. A send
+	// lost to the transport is charged nothing and waits for the next hello, sweep, turn end or
+	// ready — for ever, by design — so a claim can sit for days with its budget untouched and
+	// nothing on it saying why, and that is the case an operator most needs named (INFRA-1480:
+	// two planning tasks held 31 and 33 hours, whose only record of each failed send was a log
+	// line inside the pod, so diagnosing the stall took a person and a hand-run check in there).
+	// A prompt the agent acknowledged and then refused is not counted here: it comes back as a
+	// late refusal of its own (lateRefused), which charges the budget, so it bounds itself and
+	// is read there rather than in this record of the silent ones. All three are written
+	// together on every send that fails in refused, and cleared together where the budgets are
+	// cleared (confirm), so a task that got through carries zeroes. LastSendError is never the
+	// far side's text as it arrived: the write that records it scrubs and bounds it first
+	// (scrubSendError), because the text is the far side's own and the store takes only some of
+	// what the far side can say.
+	SendFailures      int
+	LastSendFailureAt time.Time
+	LastSendError     string
 	// Kept is what the task names of the decisions a person made while nobody in the root's tree
 	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
 	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
@@ -106,6 +130,45 @@ type Delivery struct {
 	// owes them. It is rewritten, with the task text, by the send-time narrowing of what the task
 	// still names of this claim's tree (Deps.RootTask). Empty for a task that names none.
 	Kept []byte
+}
+
+// maxSendErrorRunes bounds the text of a failed send kept on a delivery (scrubSendError). What a
+// reader of that record needs is why the send failed: the first line of the far side's answer and
+// enough of what follows to name the failure — the shim's words name the stale lock's path and
+// its age within the first two hundred characters — so this is more room than the diagnosis asks
+// for and far less than the text can be. What it cuts is the rest of a relayed command's output:
+// a refused adoption carries the wedged command's whole stderr, measured at about a megabyte
+// (INFRA-1480), which would otherwise be stored on every failed send of the task and served
+// again in every operator listing of the claim.
+const maxSendErrorRunes = 2048
+
+// scrubSendError is the text of a failed send as a delivery may hold it. The text is the far
+// side's own and is not this daemon's to trust: a refused adoption carries the wedged command's
+// whole stderr, relayed by the shim, and a refused prompt carries the `error` Oh My Pi decoded
+// from JSON, where a `\u0000` in it becomes a NUL byte.
+//
+// The rule the store holds is that the text is valid UTF-8. Postgres refuses any byte its server
+// encoding cannot read — on the UTF8 encoding production runs, `select E'wedged\000lock'` is
+// "invalid byte sequence for encoding \"UTF8\": 0x00" and a lone 0xff is the same refusal — so
+// the NUL is one instance of that rule rather than the rule itself, and an SQL_ASCII server,
+// which takes the 0xff and refuses the NUL, draws the line in another place. So the text is made
+// valid UTF-8, with each run of bytes that reads as no character replaced by the replacement
+// character rather than dropped, so the record still shows where the far side's words were
+// unreadable; the NUL — valid UTF-8 and still refused by every encoding — goes; and what is left
+// is cut to maxSendErrorRunes. The start is what is kept, because that is where the far side
+// names the failure: the shim's own words give the stale lock's path and its age there. The cut
+// counts runes rather than bytes, so it can never make the text invalid again by ending inside a
+// character.
+//
+// Nothing of the far side's answer is lost this way, only moved: the whole unscrubbed text goes
+// to the log line this record stands beside (table.go's refused), which has no store to refuse
+// it, so the operator who needs the megabyte still reads it in the pod's log.
+func scrubSendError(text string) string {
+	text = strings.ReplaceAll(strings.ToValidUTF8(text, "\uFFFD"), "\x00", "")
+	if runes := []rune(text); len(runes) > maxSendErrorRunes {
+		return string(runes[:maxSendErrorRunes]) + "…"
+	}
+	return text
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -606,6 +669,10 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 // adopt hands the working copy the role's App identity before every task reaches the agent, so
 // the task's commits are authored by the bot. A failure keeps the task from being sent. The
 // controller works no checkout, so it adopts nothing.
+//
+// A mint that failed is marked as what it is (runtime.ErrIdentityUnavailable) rather than left to
+// read as the transport's silence: it is raised here, before any frame leaves the daemon, and the
+// send's refusal is logged by that name (table.go's refused).
 func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if m.deps.Identity == nil || role == claim.RoleController {
 		return nil
@@ -615,7 +682,7 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	}
 	id, err := m.deps.Identity(m.ctx, role, m.claim.Issue)
 	if err != nil {
-		return fmt.Errorf("the git identity of %s: %w", m.claim.Token, err)
+		return fmt.Errorf("%w: the git identity of %s: %w", runtime.ErrIdentityUnavailable, m.claim.Token, err)
 	}
 	return m.deps.Runtime.AdoptWorkingCopy(m.ctx, *loc, id)
 }
@@ -627,12 +694,19 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 // nothing retires. Once the write holds, the workflow is told the agent took its work
 // (Deps.TaskConfirmed): a root whose wait that untaken task held is decided on this fact rather
 // than at the next tick. A write that failed tells no one.
+//
+// The send that reached this turn clears the claim's prompt budgets and, with them, the
+// delivery's record of the sends that failed before it (Delivery.SendFailures and its two
+// companions): a task that got through carries zeroes, so what an operator reads on a pending
+// delivery is the run of failures standing in the way of the send it is still waiting for,
+// never one an earlier turn of the same task already got past.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
+	p.SendFailures, p.LastSendFailureAt, p.LastSendError = 0, time.Time{}, ""
 	if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
 		return err
 	}

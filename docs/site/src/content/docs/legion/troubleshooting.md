@@ -523,7 +523,8 @@ starting it. A suspended worker of its issue's current phase that the daemon sus
 by the daemon at boot. One an operator suspended (`legion claims suspend`, one claim at a time or a
 whole fleet before a restart), or whose suspension predates the release that records who suspended
 it (`suspendedBy: unknown`), is not; neither is an operator-suspended or failed tree architect, nor
-a claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
+a claim whose launches ran out, nor a claim a close or a stop retired while its tree runs, whatever
+its role. Each of those is woken by nothing: the daemon looks healthy and the
 state shows the tree active, but the tree stops for good at the worker's phase, or at the first
 decision that needs its architect. Once a boot has re-adopted its claims, the daemon names every
 such claim in one error line, under the move that brings it back:
@@ -599,10 +600,15 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   When a tree's architect and its workers failed together, retry the architect first: the held
   workers are its to retry once it runs.
 
-- **`needsWorkflowStart`** (a failed phase worker): its issue is held
+- **`needsWorkflowStart`** (a failed phase worker, or a claim a close or a stop retired while its
+  tree runs, whatever its role): a failed worker's issue is held
   ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or escalates
   it to the controller; `legion claims retry` applies the same retry when the architect cannot. A
   failed claim ignores `legion claims resume` and `legion claims deliver`.
+  A retired claim ignores those two as well, and `legion claims retry` refuses it because it has
+  not failed, so what relaunches it on the session it kept is a start of the phase it owns — its
+  architect's `retry_or_escalate` of a held phase, a transition into that phase, or a tree close
+  and re-admission — and, for a retired tree architect, its tree's admission.
 
 The list names only claims of trees that run — the trees `admission.trees` names, whether or not
 an issue of them holds a slot — and leaves out claims that

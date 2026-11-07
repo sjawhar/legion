@@ -1,0 +1,5 @@
+kind: Changed
+body: A stranded claim on `GET /legion/v1/state` may now be `retired` as well as `suspended` or `failed`, and the operator claim view's pending task carries `sendFailures`, `lastSendFailureAt` and `lastSendError`. Daemon API contract 55.
+time: 2026-11-07T07:08:34.885528885Z
+custom:
+    Issue: pr2919

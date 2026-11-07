@@ -423,10 +423,13 @@ func populatedState(t *testing.T) State {
 		// implementer is the other kind, a released pod whose wake never brought it back: who
 		// suspended it is read on the operator claim routes, and the entry here carries the same
 		// three keys as every other, which is what a session on the contract before this one
-		// parses.
+		// parses. LEGION-212's tester is the third, a worker that retired while its issue stood in
+		// its phase: only a start of that phase brings it back, so it is a claim nothing will wake
+		// until its architect's retry_or_escalate or a transition queues one.
 		StrandedClaims: []StrandedClaim{
 			{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"},
 			{Issue: "LEGION-211", Role: claim.RoleImplementer, State: "suspended"},
+			{Issue: "LEGION-212", Role: claim.RoleTester, State: "retired"},
 		},
 		// A wave going out at the pace its operator set, with one wake of each lane still held:
 		// LEGION-207's implementer, working its production check in the pod the daemon keeps, waits
@@ -841,6 +844,7 @@ func TestErrorResponseGolden(t *testing.T) {
 // operatorClaim carries every optional an operator's view of a claim has.
 func operatorClaim() OperatorClaim {
 	delivered := time.Date(2026, 9, 22, 9, 31, 4, 0, time.UTC)
+	lastSendFailure := time.Date(2026, 9, 22, 9, 31, 2, 0, time.UTC)
 	return OperatorClaim{
 		Token:       "legion-legion-legion-209-implementer",
 		Tree:        "LEGION-208",
@@ -865,6 +869,12 @@ func operatorClaim() OperatorClaim {
 			DeliveredAt: &delivered,
 			ConfirmedAt: &delivered,
 			Interrupted: true,
+			// The record of the sends that failed, carried here beside the confirmation the way
+			// this fixture carries every other optional at once. A live delivery shows one or
+			// the other: the send that confirms a task clears all three (supervise's confirm).
+			SendFailures:      2,
+			LastSendFailureAt: &lastSendFailure,
+			LastSendError:     "prompt the agent: context deadline exceeded",
 		},
 		SuspensionHeld: true,
 		// The claim's own plugin round: its process speaks a plugin contract this daemon does not,

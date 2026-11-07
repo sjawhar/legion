@@ -249,8 +249,12 @@ and the daemon attributes it to the run of the task the worker took, reading the
 steps — the task whose turn is running; or, once that turn ends and retires it, the run the claim
 is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
 served no run at all, a task it holds that the agent may have read. A task the agent refused is
-not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
-`HANDOFF_NO_RUN` to a claim that has taken no task at all, and `HANDOFF_STALE_GENERATION` to a
+not one it read, so it answers for none of them. The route adds a fourth step of its own: where
+those three leave the claim serving no run, it takes the run and the assignment of the task the
+claim is holding, when that task is of the issue's own current generation and current phase.
+`POST /legion/v1/handoff/complete` answers 409 `HANDOFF_NO_RUN` to a claim those four steps leave
+serving no run — one holding no task at all, or one whose task is of another run, of another
+phase, or of no phase — naming what the claim holds, and `HANDOFF_STALE_GENERATION` to a
 completion of a run the issue has left, naming the current run's queued task when the claim holds
 one. Both are refused before the fact is applied, so neither is recorded: the same call in that
 task's turn is applied. The workflow's own stale refusal, for an issue that moves between the
