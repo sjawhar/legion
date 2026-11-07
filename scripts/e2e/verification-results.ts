@@ -563,11 +563,11 @@ A result stands while its commit is the head of a pull request of this repositor
     : `the result at this repository's head reads ${atOwnHead}`;
 });
 
-// A5. The one write a closed issue takes.
+// A5. A closed issue takes an after-merge result, and still refuses a document write.
 await runCase("a5-a-closed-issue-takes-the-after-merge-result", async () => {
   const a5Issue = await seedIssue(
     "VRF",
-    "A closed issue takes an after-merge result alone",
+    "A closed issue takes an after-merge result",
     `:::check{#after when="after_merge" surface="api" run="curl the production route"}
 The production check runs after the merge.
 :::

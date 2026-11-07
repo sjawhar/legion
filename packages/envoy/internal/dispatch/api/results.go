@@ -191,10 +191,10 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The one write a closed issue takes. A check that runs after the merge, or on the default
-	// branch, can only be proved once the issue has closed, so refusing it would make the
-	// production check unrecordable; every other write on a closed issue — a comment, a
-	// document version, a result for a pre-merge check — stays refused as it was.
+	// A closed issue takes a result only for a check that runs after the merge or on the default
+	// branch: such a check can only be proved once the issue has closed, so refusing it would make
+	// the production check unrecordable. A result for a pre-merge check stays refused there, as a
+	// document version does; a comment and a message are the other writes a closed issue takes.
 	if (!recordingOpen || !checkOpen) && check.When != checkWhenAfterMerge && check.When != checkWhenDefaultBranch {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict,
 			fmt.Sprintf("issue is closed: only a result for a check whose when is after_merge or default_branch is recorded there, and %s is %s", check.BlockID, check.When))
