@@ -203,10 +203,13 @@ events and sends them to the current Claude Code session as supported
   very session, which keeps the role and the record here and asks again on the next heartbeat.
   Only a refusal naming a different session ends the role and removes the record. Every healthy
   registration heartbeat checks and reasserts the role if the listener lost it, and it confirms
-  the role only when the lookup names this session *and* this process; each heartbeat also
-  renews the claims this process holds, and renews one only while the interest record that
-  registration leaves still names that role's lane topic, which a claim writes there and this
-  process never hands back. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a
+  the role only when the lookup names this session *and* this process and reports no hand-back
+  (`handed_back`); each heartbeat also renews the claims this process holds, whatever topics
+  that registration carries, and renews no claim the listener has marked handed back. A client
+  built before a release stated its process can hand this session's role lane back without
+  freeing the claim, which the listener marks rather than frees, so the mark is read as a role
+  this process does not hold and the next heartbeat claims it back, its grant a fresh record
+  with no mark. This process hands no lane back itself. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a
   closing pane sends the whole process group) drains NATS and deregisters the session, naming
   this process's client instance id, so the listener removes the registry entry only while it
   still carries that id or none, and every topic hand-back names it too, so a release frees only

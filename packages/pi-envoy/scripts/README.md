@@ -280,12 +280,18 @@ a log rather than inferred.
 The listener runs with windows of its own, because every row turns on whether a claim's holder is
 still answering for it: `ENVOY_SESSION_LIVE_WINDOW=10s`, which is how long a claim stands renewed
 after its holder's last registration, and `ENVOY_ROLE_CLAIM_REAP_INTERVAL=2s`, so every row is
-swept several times. The reaper frees nothing in the run: `ENVOY_SESSION_GONE_HORIZON` keeps its
-hour-long default, so each row is decided by the claim's own renewal and not by a claim the
-reaper removed. A row that waits the window out waits for the listener to say so, never for a
-sleep.
+swept several times. The reaper does free claims in the run, because what a pass weighs is the
+claim's own renewal and not the liveness of the session id its holder registered under: a claim
+nobody has answered for inside the live window is gone within one more reap interval, whoever
+goes on registering that session id. `ENVOY_SESSION_GONE_HORIZON` keeps its hour-long default
+all the same, since a claim that names no process is the one kind a pass still reads its
+holder's liveness for. The rows still read the listener's own word for each outcome — a claim
+granted, a `409`, or the lookup's `404` — which reads the same whether a standing claim lapsed
+where it stood or a pass had already removed it, and a row whose claimant must be refused is
+decided inside the window, its holder having answered for the claim immediately before. A row
+that waits the window out waits for the listener to say so, never for a sleep.
 
-Fourteen rows are printed, each with its outcome:
+Seventeen rows are printed, each with its outcome:
 
 - **row 1**, twice — a claim under the id that holds the role is granted because nobody renewed
   the standing claim inside the live window: an Oh My Pi plugin reload, and a Claude Code channel
@@ -314,6 +320,16 @@ Fourteen rows are printed, each with its outcome:
 - **A5**, two rows — a refused process stays registered, and after the holder exits the refused
   Oh My Pi process takes the role on its next session event.
 
+- **INFRA-783**, three further rows — an older client's hand-back, which is a release of a
+  role's own lane topic under the holder's session id stating no `client_instance_id`, frees
+  nothing and marks the claim: the lookup answers `handed_back`, the real Oh My Pi holder reads
+  that as a role it does not hold, claims it back at its next heartbeat and takes the lane's
+  next message. The same hand-back against an old-build holder, driven by `curl` because a
+  current client would take the role straight back, frees the role one live window later while
+  that client is still registering. And a client that states no process at all — the shape every
+  claim standing at a deploy is in — keeps its role across three live windows of registrations
+  that carry no `client_instance_id`.
+
 ### Usage
 
 ```bash
@@ -322,11 +338,15 @@ bash packages/pi-envoy/scripts/smoke-role-takeover.sh --base-rev main@origin   #
 ```
 
 `--base-rev <rev>` builds only the listener from that revision, leaving every client as it is in
-the working copy, which is the negative control: against `main@origin` nine of the fourteen rows
-fail. Every INFRA-783 row does, because that listener hands a role held under a session id to any
-process that claims under that id; A5's two scenarios and row 5 do, because it takes a role from
-any predecessor a claim names, live or not; and the two row 1 rows do, because it grants the
-claim but names no process for the holder. It reads the revision without touching the working
+the working copy, which is the negative control: against `main@origin` eleven of the seventeen
+rows fail. The four original INFRA-783 rows do, because that listener hands a role held under a
+session id to any process that claims under that id; A5's two scenarios and the row where the
+refused process takes the role once the holder exits do, because it takes a role from any
+predecessor a claim names, live or not; the two row 1 rows do, because it grants the claim but
+names no process for the holder; and the two hand-back rows do, because it has no mark to
+leave — it takes the live holder's lane topic out of the record and renews that holder's claim
+for ever. The third new row passes there, a claim naming no process never having been aged out
+by that listener either. It reads the revision without touching the working
 copy (`jj --ignore-working-copy log` resolves it, `git archive` extracts `packages/envoy`), moves
 no bookmark and writes nothing outside its scratch.
 
@@ -336,7 +356,7 @@ the two binaries, the JetStream store, each client's home and state directory, e
 request log — lives in one `mktemp -d` under `$TMPDIR`, which an exit trap removes after a pass
 and keeps after anything else. Nothing it starts inherits this shell's environment (`env -i` plus
 `PATH` and what the script sets), so an operator's `ENVOY_*`, `NATS_*` or `DISPATCH_*` variables
-never reach a client. A local run takes about a minute.
+never reach a client. A local run takes about two minutes, and about four with `--base-rev`.
 
 ### Exit codes
 

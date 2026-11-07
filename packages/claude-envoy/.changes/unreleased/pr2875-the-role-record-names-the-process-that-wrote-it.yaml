@@ -11,8 +11,18 @@ body: |-
   record's mtime is refreshed as it is on a confirmed holder, so the age sweep never expires a
   record a process is still claiming for. Only a refusal naming a different session ends the
   role. The heartbeat's re-assertion confirms the role only when the lookup names this session
-  *and* this process, and every claim and every topic hand-back states this process's instance,
-  so a release frees only the role claims this process holds.
+  *and* this process and reports no hand-back, and every claim and every topic hand-back states
+  this process's instance, so a release frees only the role claims this process holds.
+
+  A lookup that answers `handed_back` is a role this process does not hold: a client built
+  before a release stated its process can hand this session's role lane back without freeing
+  the claim, and the listener marks the claim rather than freeing it, after which no
+  registration renews it. The re-assertion claims the role again on that heartbeat and the
+  grant writes a fresh record with no mark, so the role is back before the listener's role
+  claim reaper could free it. Each registration renews every claim of this process the listener
+  has not marked, whatever topics that registration carries, where it once renewed a claim only
+  while the interest record still named that role's lane topic — which this process, giving a
+  role up by deregistering the session rather than by releasing the lane, never removed.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875

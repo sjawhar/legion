@@ -42,15 +42,21 @@ session event once the holder is gone. A refusal naming this session's own id is
 as one of those, since it is that other process's standing claim, which the listener grants the
 moment that process stops renewing it: nothing is said, and the next heartbeat claims again.
 Each healthy heartbeat also re-asserts a role this session already holds, and confirms it only
-when the lookup names this session and this process; a re-assertion the listener refuses naming
+when the lookup names this session and this process and reports no hand-back; a re-assertion the listener refuses naming
 this session's own id is that same standing claim, so the role stays held here, nothing is
 recorded, nothing is said, and the next heartbeat asks again, while a refusal naming a different
-session ends the role here. Each extension instance mints its client instance id when it starts
+session ends the role here. A lookup that answers `handed_back` is a role this process does not
+hold, however exactly it names this session and this process: a client built before a release
+stated its process hands a role's lane topic back under this session id without being able to
+free the claim, and the listener marks the claim rather than freeing it, after which no
+registration renews it. The pass that reads the mark claims the role again at once, and that
+grant writes a fresh record with no mark, so a hold marked this way is back before the role
+claim reaper could free it. Each extension instance mints its client instance id when it starts
 and sends it on every registration, on every claim and release, and on the deregistration at
 shutdown, where the listener removes the registration only while it carries the same id or none.
 A registration also renews every role claim this session holds that names this same instance,
-and only while the interest record it leaves still names that role's lane topic, so a hand-back
-stops the renewal; a release frees only the claims naming it, so a second process that resumed
+whatever topics it carries and unless the listener has marked that claim handed back;
+a release frees only the claims naming it, so a second process that resumed
 this session's id neither ends this one's role nor outlasts it. A hand-back the listener could
 not make — a release its own holder's renewal beat under each of its three conditional deletes,
 which fails the route rather than reporting a release it did not make — is sent again by the

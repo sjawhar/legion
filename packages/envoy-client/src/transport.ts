@@ -447,9 +447,12 @@ export type UnsubscribeInput = {
    * The client instance handing these interests back: the same id its registration carries
    * ({@link SubscribeInput.clientInstanceID}). The listener frees only the role claims that
    * name this process, and never forces one from another, so a second process that resumed
-   * this session id keeps the role it holds. A release that names no process frees no claim at
-   * all; the session's topics are removed either way. Omitted from the wire when absent, so an
-   * older listener sees an unchanged body.
+   * this session id keeps the role it holds. A release that names no process frees a claim
+   * that names none, and marks one it cannot free handed back, which stops that claim's
+   * renewal and frees the role one live window later. A role lane topic whose claim the
+   * release did not free stays on the session's record, since one record serves every process
+   * under that id, and the answer names the topics that actually left it. Omitted from the
+   * wire when absent, so an older listener sees an unchanged body.
    */
   readonly clientInstanceID?: string;
 };

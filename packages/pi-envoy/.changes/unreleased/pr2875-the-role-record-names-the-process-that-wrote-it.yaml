@@ -15,13 +15,24 @@ body: |-
   claim; every other refusal stays latched until a session event lands.
 
   A heartbeat's re-assertion of a role this session already holds now confirms it only when the
-  lookup names this session and this process, a holder naming no process being read as this
-  one's, so a lane whose role a continuation took under this very session's id claims again
+  lookup names this session and this process and reports no hand-back, a holder naming no
+  process being read as this one's, so a lane whose role a continuation took under this very
+  session's id claims again
   instead of reading itself as the holder for ever and never handing the role back. The refusal
   that re-assertion may get is weighed on the session it names: one naming this session's own id
   is the other process's standing claim, so the role stays held here, no refusal is latched,
   nothing is said, and the next heartbeat asks again; one naming a different session ends the
   role here as before.
+
+  A lookup that answers `handed_back` is a role this process does not hold, however exactly it
+  names this session and this process: a client built before a release stated its process hands
+  a role's lane topic back without being able to free the claim, and the listener marks the
+  claim rather than freeing it, after which no registration renews it. The pass that reads the
+  mark claims the role again at once and the grant writes a fresh record with no mark, so a hold
+  marked that way is back before the listener's role claim reaper could free the role. Each
+  registration renews every claim of this process the listener has not marked, whatever topics
+  that registration carries, where it once renewed a claim only while the interest record still
+  named that role's lane topic.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875

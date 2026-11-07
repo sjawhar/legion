@@ -298,8 +298,9 @@ above says how to run it).
   A claim of a role already held under this session's own id is decided on the standing claim:
   granted to the process that claim names, granted once nobody renewed it inside the listener's
   live window, and otherwise refused naming this very session. The re-assertion confirms the
-  role only when the lookup names this session *and* this process, since a claim another process
-  made under this id is not this one's to renew; a refusal naming this session keeps the role,
+  role only when the lookup names this session *and* this process and reports no hand-back,
+  since a claim another process made under this id is not this one's to renew and a claim the
+  listener marked handed back is nobody's to renew; a refusal naming this session keeps the role,
   refreshes the record's mtime and asks again on the next heartbeat, and only a refusal naming a
   different session ends the role and removes the file. The restore keeps asking on the same
   rule: a refusal naming this session's own id leaves the restore pending on `roleTransferFrom`,
@@ -317,9 +318,13 @@ above says how to run it).
   hand-back states this process's instance too, so a release frees only the role claims this
   process holds, and a release the holder's own renewal beat under each of the route's three
   conditional deletes fails rather than reporting one it did not make. The registration that
-  renews those claims renews one only while the interest record it leaves still names that
-  role's lane topic, which a claim writes there and this process never hands back: it gives a
-  role up by deregistering the session, not by releasing the lane.
+  renews those claims renews every one of them whatever topics it carries, and renews no claim
+  the listener has marked handed back: the lane-topic condition that once gated a renewal is
+  gone, and what says a role was given up is the mark a hand-back leaves on a claim it could not
+  free. This process writes no such mark — it gives a role up by deregistering the session, not
+  by releasing the lane — but a client built before a release stated its process can leave one
+  on this session's claim, and the re-assertion above claims the role back on the next
+  heartbeat, its grant a fresh record with no mark.
   The handoff directory `sessions/<claude-pid>/` is pruned at startup when its pid is gone —
   never deleted on shutdown, because Claude Code restarts the server inside the same `claude`
   process — and the two id-keyed directories, `roles/` and `titles/`, are pruned there too at
