@@ -2856,8 +2856,10 @@ jobs:
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
       # pinned list is .github/playwright-apt-packages.txt, read below with its blank lines and
       # `#` comments dropped: ci-caches.yaml's apt-debs job downloads that same file to fill the
-      # archive cache this step seeds itself from, and one file is what holds the set it fetches
-      # and the set this installs to each other. That file's own header says what the list is -
+      # archive cache this step seeds itself from. The file holds Playwright's list alone, and
+      # this step and that job each add gstreamer1.0-tools to it themselves - here as
+      # `step_tools` below - so the set the fill fetches is the set this installs as long as both
+      # read the file and both name that package. That file's own header says what the list is -
       # Playwright's ubuntu24.04-x64 list exactly, the union of the `tools`, `chromium`,
       # `firefox` and `webkit` entries of that table in playwright-core's lib/coreBundle.js.
       # Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456: Playwright's 79
@@ -2897,30 +2899,28 @@ jobs:
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
-      # origin's indexes and a third 300 s download attempt, then the unpack, the keeping of the
-      # archives for the cache, the decoder guard, the browser download and the one apt
-      # simulation of the list check, none of which touch the Ubuntu mirror. So the arithmetic is
-      # 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, 13.6 s of unpack, 1.1 s of keeping,
-      # 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the list check:
-      # 1170 + 13.6 + 1.1 + 0.4 + 90 + 1.6 = 1276.7 s, rounded up to 22 min. The budget has to
-      # carry the fallback's own update, because the path that needs every one of those bounds is
+      # origin's indexes and a third 300 s download attempt, then the unpack, the decoder guard,
+      # the browser download and the one apt simulation of the list check, none of which touch the
+      # Ubuntu mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt,
+      # 13.6 s of unpack, 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the
+      # list check: 1170 + 13.6 + 0.4 + 90 + 1.6 = 1275.6 s, rounded up to 22 min. The budget has
+      # to carry the fallback's own update, because the path that needs every one of those bounds is
       # the path on which the step still succeeds.
       #
-      # The five readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
+      # The four readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
       # at 5ff42456, at its 182 packages. The unpack is the 13.6 s from `Download complete and in
       # download only mode` at 23:14:13.884 to the last line of the unbounded install at
-      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping 182`
-      # at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above. The
-      # decoder guard is the 0.4 s to `the decoders WebKit plays through are in the registry: ...`
-      # at 23:14:28.984. The browsers and the list check together are the 1.6 s to `The pinned list
-      # is current: ...` at 23:14:30.540 - but that job restored its browsers from the Actions cache
-      # (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54), so that 1.6 s is no
-      # reading of the cold browser download and the budget has to carry the cold case. That is what
-      # the 90 s term is: the step's estimate for the cold browsers, not a reading, which the
-      # package set does not reach. The list check is measured inside that 1.6 s, so 1.6 s is the
-      # term the reading supports for it. The whole step took 30 s in that job, 23:14:00 to
-      # 23:14:30: one reading at this package set, not a distribution. Each is one reading, so each
-      # moves a little from run to run; the margin the sum leaves under 22 min is what carries that.
+      # 23:14:27.475. The decoder guard is the 0.4 s to `the decoders WebKit plays through are in
+      # the registry: ...` at 23:14:28.984. The browsers and the list check together are the 1.6 s
+      # to `The pinned list is current: ...` at 23:14:30.540 - but that job restored its browsers
+      # from the Actions cache (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54),
+      # so that 1.6 s is no reading of the cold browser download and the budget has to carry the
+      # cold case. That is what the 90 s term is: the step's estimate for the cold browsers, not a
+      # reading, which the package set does not reach. The list check is measured inside that
+      # 1.6 s, so 1.6 s is the term the reading supports for it. The whole step took 30 s in that
+      # job, 23:14:00 to 23:14:30: one reading at this package set, not a distribution. Each is one
+      # reading, so each moves a little from run to run; the margin the sum leaves under 22 min is
+      # what carries that.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
       # scaled onto the step's fetch of 13.0 MB of indexes and the list's 114 MB of packages. The

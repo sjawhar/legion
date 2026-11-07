@@ -385,8 +385,9 @@ jobs:
           packages=$(grep -vE '^[[:space:]]*(#|$)' .github/playwright-apt-packages.txt)
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends -d $packages gstreamer1.0-tools
-          # apt's archive directory is root's and the cache action runs as the runner user, so
-          # the copies change hands, as the dispatch job's own keeping of them does it.
+          # apt fetches into its own directory as root, and the cache action that saves the entry
+          # runs as the runner user, which can read neither root's directory nor root's files, so
+          # the .deb files are copied out and handed over below.
           shopt -s nullglob
           fetched=(/var/cache/apt/archives/*.deb)
           shopt -u nullglob

@@ -13,8 +13,9 @@
 #
 # Two readers take this file with blank lines and `#` comments dropped: ci.yaml's dispatch job,
 # which installs it, and .github/workflows/ci-caches.yaml's apt-debs job, which downloads the same
-# list on a push to main to fill the ~/apt-archives cache entry that job restores. One file, so
-# the fill cannot download a set other than the one the install asks for.
+# list on a push to main to fill the ~/apt-archives cache entry that job restores. This file holds
+# Playwright's list and nothing else, and each of the two writes gstreamer1.0-tools itself beside
+# it, so what holds their two sets together is this file plus that one name in each workflow.
 fonts-freefont-ttf
 fonts-ipafont-gothic
 fonts-liberation

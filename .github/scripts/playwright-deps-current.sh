@@ -159,14 +159,14 @@ done
 failed=false
 if [ "${#unpinned[@]}" -gt 0 ]; then
   echo "::error::Playwright asks for system packages the install step's list does not pin:" \
-    "${unpinned[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unpinned[*]} - re-derive .github/playwright-apt-packages.txt from playwright-core's" \
+    "lib/coreBundle.js, as that file's header says."
   failed=true
 fi
 if [ "${#unasked[@]}" -gt 0 ]; then
   echo "::error::the install step's list pins system packages Playwright does not ask for:" \
-    "${unasked[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unasked[*]} - re-derive .github/playwright-apt-packages.txt from playwright-core's" \
+    "lib/coreBundle.js, as that file's header says."
   failed=true
 fi
 if [ "${#missing[@]}" -gt 0 ]; then
