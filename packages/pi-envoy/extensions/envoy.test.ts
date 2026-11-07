@@ -13490,6 +13490,24 @@ console.log(JSON.stringify(args));
       for (let index = 0; index < 10; index += 1) await Promise.resolve();
     };
 
+    /** The frames the session answers a replay with, as the Dispatch relay asks for it: the
+     *  history, and the settings, context and command frames of its tail. */
+    const replayedFrames = async (inbox: string): Promise<readonly { kind: string }[]> => {
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      const answered = Promise.withResolvers<void>();
+      natsState.onPublish = (subject) => {
+        if (subject === inbox) answered.resolve();
+      };
+      control.push(JSON.stringify({ type: "replay", v: 1 }), inbox);
+      await answered.promise;
+      const published = natsState.published.findLast((each) => each.subject === inbox);
+      const replay: { readonly frames: readonly { kind: string }[] } = JSON.parse(
+        new TextDecoder().decode(published?.data)
+      );
+      return replay.frames;
+    };
+
     test("carries the window the host reports once a turn's message ends", async () => {
       const { context, fixture } = await bootDirectSession("context-frame-message", {
         contextUsage: () => ({ contextWindow: 200_000, percent: 25, tokens: 50_000 }),
@@ -13549,7 +13567,10 @@ console.log(JSON.stringify(args));
       });
     }
 
-    test("sends nothing on a host too old to report one", async () => {
+    // The negative control of the check: a session context with no `getContextUsage` publishes no
+    // frame at all, and the replay a view opens on carries none either, so the view draws no ring
+    // rather than a stale or invented one.
+    test("sends nothing on a host too old to report one, and replays none", async () => {
       const { context, fixture } = await bootDirectSession("context-frame-no-method");
       await attachViewer();
 
@@ -13557,6 +13578,8 @@ console.log(JSON.stringify(args));
       await fixture.handlers.get("message_end")?.({ message }, context);
 
       expect(publishedContext()).toEqual([]);
+      const replayed = await replayedFrames("inbox-context-no-method");
+      expect(replayed.map((frame) => frame.kind)).not.toContain("context");
     });
   });
 
