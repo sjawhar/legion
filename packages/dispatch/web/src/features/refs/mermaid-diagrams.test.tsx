@@ -4,7 +4,7 @@ import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { MERMAID_SOURCES } from "../../../../e2e/mermaid-sources";
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
 import {
@@ -60,8 +60,11 @@ restorePageGlobals();
  * arrives, as from a worker stuck in a layout. An answer may be a promise, as the worker module's
  * own is. Before each it posts the job's `drawing` phase, which is the one phase the real worker
  * posts for a source beautiful-mermaid draws, and which arms the page's render bound; without it
- * every source here would sit under the renderer's load bound instead. `sent` records each
- * request's source as it is posted. A terminated one posts nothing more.
+ * every source here would sit under the renderer's load bound instead. It is the only phase it
+ * posts, so a source that falls through to Mermaid loads it under the render bound too, where
+ * the real worker reports `loading`: the one row whose source does that widens that bound
+ * itself. `sent` records each request's source as it is posted. A terminated one posts nothing
+ * more.
  */
 class FakeWorker {
   static created: FakeWorker[] = [];
@@ -168,13 +171,27 @@ describe("Mermaid diagrams", () => {
   });
 
   test("a source the renderer refuses shows the reason and its source open, and no diagram", async () => {
+    // This is the one source here that reaches Mermaid, so it pays for loading it: 31 chunks of
+    // it, which took a second of a loaded two-CPU machine. Both of the waits that load sits
+    // inside are widened for it. The page's own is the render bound, because the stand-in worker
+    // reports every job as `drawing` where the real worker reports `loading` for a download
+    // (`RENDERER_LOAD_LIMIT_MS`); testing-library's is one second by default, and a block still
+    // waiting for its answer is still a `<pre>`.
+    resetMermaidDiagrams(60_000);
     const view = render(<MarkdownBody markdown={`Broken:\n\n${fence("graph TD\n  A -->")}`} />);
     try {
-      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1), { timeout: 4_000 });
       const [figure] = figuresIn(view.container);
-      expect(figure.querySelector('[role="status"]')?.textContent).toMatch(
-        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
-      );
+      // beautiful-mermaid refuses this source in its own validation, so it falls through to
+      // Mermaid, whose parser refuses it in turn and whose reason the reader is shown: one line
+      // of at most `STATUS_LINE_MAX_CHARS` characters, cut and joined by the worker
+      // (`mermaid-render.worker.ts`), naming neither renderer's own words for the source.
+      const status = figure.querySelector('[role="status"]')?.textContent ?? "";
+      expect(status).toMatch(/^Unable to render Mermaid diagram: Parse error on line \d+: /);
+      expect(status).not.toContain("Dangling Mermaid edge");
+      expect(status).not.toContain("Invalid mermaid header");
+      expect(status.split("\n")).toHaveLength(1);
+      expect(status.length).toBeLessThanOrEqual(200);
       expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
       const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
       expect(source?.open).toBe(true);
@@ -784,5 +801,24 @@ describe("Mermaid diagrams", () => {
         logged.mockRestore();
       }
     });
+  });
+});
+
+// The table of one source per diagram type mermaid registers (`e2e/mermaid-sources.ts`). It is
+// level with the library or it is not: a type a mermaid upgrade registers that the table has no
+// entry for is a type no row ever draws, and a row would go on passing while a reader's diagram
+// went undrawn. Nothing here renders, so this costs one import of mermaid and no drawing.
+describe("the diagram types mermaid registers", () => {
+  test("every one has a source in the table, and the table names none mermaid dropped", async () => {
+    const { default: mermaid } = await import("mermaid");
+    // A diagram type registers itself when mermaid is configured, not when it is imported.
+    mermaid.initialize({ startOnLoad: false });
+
+    const registered = mermaid.getRegisteredDiagramsMetadata().map(({ id }) => id);
+    // The two the table leaves out, because no reader writes either: mermaid's own drawing for a
+    // source it could not parse, and the front-matter marker.
+    const covered = [...MERMAID_SOURCES.map(({ id }) => id), "error", "---"];
+    expect(registered.filter((id) => !covered.includes(id))).toEqual([]);
+    expect(covered.filter((id) => !registered.includes(id))).toEqual([]);
   });
 });
