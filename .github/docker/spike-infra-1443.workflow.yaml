@@ -1,0 +1,341 @@
+# THIS FILE BELONGS AT .github/workflows/spike-infra-1443.yaml, and is here because it could
+# not be pushed there: the Legion role App this spike runs under (legion-reviewer) has no
+# `workflows` permission, so GitHub refuses every create or update under .github/workflows/
+# ("refusing to allow a GitHub App to create or update workflow ... without `workflows`
+# permission", and 403 `Resource not accessible by integration` through the Contents API). The
+# same App also has no ghcr push (`POST /v2/cybermonklabs/legion/ci/blobs/uploads/` -> 403), so
+# the `image` job below could not publish an image for the `suite` job to pull either. Someone
+# holding the legion-implementer App can `git mv` this file into .github/workflows/ and push it
+# unchanged.
+#
+# What ran instead, through .github/workflows/e2e.yaml's `workflow_dispatch`, which runs
+# scripts/e2e/<name>.sh and reads .github/e2e-scripts.json from the ref it is dispatched at:
+# scripts/e2e/infra-1443-browser-image.sh, the same measurement without GitHub's own
+# `container:` plumbing.
+
+# The measurement spike of dispatch://INFRA-1443, on the throwaway branch
+# spike/infra-1443-browser-image and nowhere else. It builds .github/docker/browser.Dockerfile,
+# pushes it to this repository's own ci package under a spike- tag, and then runs the real
+# Dispatch WebKit and Firefox browser suite inside it as a `container:` job, twice: once as the
+# image's default user (root) and once as `--user 1001`, the uid GitHub's runner owns
+# $GITHUB_WORKSPACE with. The question the two variants answer is which of the two a
+# `container:` job can actually run the suite as, since `initdb` refuses to run as root and the
+# workspace is not root's.
+#
+# No `workflow_dispatch`: GitHub offers that only for a workflow already on the default branch,
+# and this file never reaches main.
+name: Spike INFRA-1443 browser image
+
+on:
+  push:
+    branches: ["spike/infra-1443-browser-image"]
+
+# packages: write is the ghcr push of the image job. Workflow level, so both jobs' tokens are
+# the same shape; the suite job only pulls.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      digest: ${{ steps.record.outputs.digest }}
+      ref: ${{ steps.record.outputs.ref }}
+      tag: ${{ steps.record.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compute the spike tag
+        id: meta
+        run: |
+          short="${GITHUB_SHA::12}"
+          echo "tag=ghcr.io/cybermonklabs/legion/ci:spike-infra-1443-$short" >> "$GITHUB_OUTPUT"
+
+      # The three action pins, the driver's BuildKit image and the three provenance settings are
+      # copied from .github/workflows/worker-image.yaml rather than invented, for the reasons
+      # that file's own comments give: provenance-add-gha=false and provenance: false keep the
+      # event payload out of any predicate, BUILDX_METADATA_PROVENANCE=disabled drops it from
+      # the metadata file the action logs, and DOCKER_BUILD_SUMMARY=false drops the summary
+      # artifact.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: |
+            provenance-add-gha=false
+            image=ghcr.io/cybermonklabs/legion/ci@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the candidate browser image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          BUILDX_METADATA_PROVENANCE: disabled
+          DOCKER_BUILD_SUMMARY: "false"
+        with:
+          # The Dockerfile copies nothing out of the build context, so the context is the
+          # directory the Dockerfile is in rather than the repository root: a whole-repository
+          # context would be sent to the builder for nothing.
+          context: .github/docker
+          file: .github/docker/browser.Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: ${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=spike-infra-1443
+          cache-to: type=gha,mode=min,scope=spike-infra-1443,ignore-error=true
+
+      # The pushed image's own numbers, read from the registry rather than from the builder: the
+      # compressed size is the sum of the layer sizes in its manifest, which is what a
+      # `container:` job pulls.
+      - name: Record the digest, the compressed size and the layer count
+        id: record
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -eu
+          test -n "$DIGEST"
+          ref="ghcr.io/cybermonklabs/legion/ci@${DIGEST}"
+          docker buildx imagetools inspect "$ref" --raw > manifest.json
+          # A single-platform push with provenance off is an image manifest; an index would name
+          # its amd64 child. Both are read, so the numbers are the amd64 image's either way.
+          if jq -e '.manifests' manifest.json > /dev/null; then
+            child=$(jq -r '.manifests[] | select(.platform.architecture == "amd64" and .platform.os == "linux") | .digest' manifest.json)
+            docker buildx imagetools inspect "ghcr.io/cybermonklabs/legion/ci@${child}" --raw > manifest.json
+          fi
+          layers=$(jq '.layers | length' manifest.json)
+          bytes=$(jq '[.layers[].size] | add' manifest.json)
+          {
+            echo "digest=$DIGEST"
+            echo "ref=$ref"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### INFRA-1443 candidate browser image"
+            echo
+            echo "- ref: \`$ref\`"
+            echo "- tag: \`$TAG\`"
+            echo "- compressed size: $bytes bytes ($(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1048576 }') MiB)"
+            echo "- layers: $layers"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.layers[] | "\(.size)\t\(.digest)"' manifest.json
+
+  # The real Dispatch browser suite, in a container of the image the job above pushed, with no
+  # apt and no docker anywhere in it. It reproduces the `dispatch` job of ci.yaml less those two
+  # things: the file store is the baked `weed` on the same 127.0.0.1:18333, and each lane's
+  # Postgres comes from DISPATCH_E2E_PG_BIN rather than a `docker run` of DISPATCH_E2E_PG_IMAGE
+  # (packages/dispatch/e2e/harness-postgres.ts). A `services:` Postgres cannot stand in: the
+  # server's dev sign-in refuses a DATABASE_URL whose host is not loopback or a unix socket
+  # (packages/dispatch/e2e/run-server.sh), and a service is reachable only at a service hostname
+  # from inside a job container.
+  suite:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The image's own default user, which is root: `initdb` refuses to run as root.
+          - variant: root
+            options: ""
+          # The uid the runner owns $GITHUB_WORKSPACE and every bind mount with. The image
+          # carries a passwd entry for it, since `initdb` refuses a uid that has none too.
+          - variant: uid-1001
+            options: "--user 1001"
+    container:
+      image: ghcr.io/cybermonklabs/legion/ci@${{ needs.image.outputs.digest }}
+      options: ${{ matrix.options }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # First, before the checkout: the uid question is answered whatever else happens.
+      - name: Who this job is and what the image holds
+        run: |
+          echo "variant: ${{ matrix.variant }}"
+          echo "id -u: $(id -u)"
+          echo "id -g: $(id -g)"
+          echo "id: $(id)"
+          echo "whoami: $(whoami 2>&1 || true)"
+          echo "HOME=$HOME"
+          ls -ld "$HOME" || true
+          ls -ld "$GITHUB_WORKSPACE" || true
+          ls -ld "$RUNNER_TEMP" || true
+          ls -ld /__w /__e /github/home 2>/dev/null || true
+          ls -ld /opt/hostedtoolcache 2>/dev/null || true
+          ls -ld /ms-playwright
+          echo "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-<unset>}"
+          for tool in psql initdb pg_ctl pg_config python3 flock gh jq yq weed git openssl unzip tar curl node npm go bun docker sudo; do
+            printf '%-10s %s\n' "$tool" "$(command -v "$tool" || echo MISSING)"
+          done
+          pg_config --version
+          python3 --version
+          node --version
+          df -h /tmp "$RUNNER_TEMP" | cat
+          nproc
+          free -m | cat
+          ls -ld /dev/shm; df -h /dev/shm | cat
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-bun
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+
+      - run: bun install --frozen-lockfile
+
+      # ci.yaml:2957-2967, unchanged: contracts' dist/ is what Playwright's own Node resolution
+      # reads the values the specs import from, and the server built here is the one every
+      # lane's run-server.sh finds current.
+      - name: Build contracts for dispatch e2e
+        run: bun run build
+        working-directory: packages/contracts
+      # ci.yaml's dispatch job builds the dashboard too, and run-server.sh serves what it
+      # writes (`web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"`). Leaving it
+      # out serves every row an empty page: measured in run 42336738799, where all 80 rows
+      # failed waiting 15 s for a status element that was never rendered.
+      - name: Build dispatch dashboard
+        run: |
+          bun run build:web
+          ls -l web/dist/THIRD_PARTY_NOTICES.txt
+        working-directory: packages/dispatch
+      - name: Build the Dispatch server
+        run: go build -o ./dispatch-e2e ./cmd/dispatch
+        working-directory: packages/envoy
+
+      # The `docker run` of chrislusf/seaweedfs ci.yaml does, as the baked binary instead, on the
+      # same address the suite reads through DISPATCH_E2E_FILE_STORE_ENDPOINT. Started before
+      # the measurements below and waited for after them, so its own start overlaps them, as
+      # ci.yaml overlaps it with the Playwright install.
+      - name: Start the baked file store
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/weed"
+          nohup weed server -s3 -dir="$RUNNER_TEMP/weed" -ip=127.0.0.1 -s3.port=18333 \
+            > "$RUNNER_TEMP/weed.log" 2>&1 &
+          echo "weed pid $!"
+
+      # The DISPATCH_E2E_PG_BIN provider's own cost, reproduced step for step from
+      # packages/dispatch/e2e/harness-postgres.ts: one initdb, one cluster started to create the
+      # lane database and its pgvector extension, then one `cp -a` per lane. The figure to hold
+      # it against is that file's own 5.9-6.2 s for one initdb and a copy per lane at four lanes,
+      # measured in an issue pod.
+      #
+      # Under the root variant this is where the design meets `initdb`, so it is allowed to fail
+      # and the job goes on to the suite, which meets the same refusal through the harness.
+      - name: Time the Postgres binaries provider (one initdb, four lane copies)
+        id: pg-timing
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -eu
+          bin=/usr/lib/postgresql/18/bin
+          work="$RUNNER_TEMP/pg-timing"
+          rm -rf "$work"
+          mkdir -p "$work/template"
+          start=$(date +%s.%N)
+          "$bin/initdb" -D "$work/template/pgdata" -U postgres --auth=trust --no-sync -E UTF8
+          after_initdb=$(date +%s.%N)
+          "$bin/pg_ctl" -D "$work/template/pgdata" -l "$work/template/postgres.log" \
+            -o "-p 55432 -h 127.0.0.1 -k $work/template" -w start
+          "$bin/psql" "postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable" \
+            -v ON_ERROR_STOP=1 -c 'create database dispatch_e2e'
+          "$bin/psql" "postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable" \
+            -v ON_ERROR_STOP=1 -c 'create extension vector'
+          "$bin/pg_ctl" -D "$work/template/pgdata" -m fast -w stop
+          after_template=$(date +%s.%N)
+          for lane in 0 1 2 3; do
+            mkdir -p "$work/lane-$lane"
+            cp -a "$work/template/pgdata" "$work/lane-$lane/pgdata"
+          done
+          done_at=$(date +%s.%N)
+          awk -v a="$start" -v b="$after_initdb" -v c="$after_template" -v d="$done_at" 'BEGIN {
+            printf "initdb:                 %.2f s\n", b - a
+            printf "template db + vector:   %.2f s\n", c - b
+            printf "four lane copies:       %.2f s\n", d - c
+            printf "whole provider:         %.2f s\n", d - a
+          }'
+          du -sh "$work/template/pgdata"
+          rm -rf "$work"
+
+      - name: Wait for the file store
+        run: |
+          set -eu
+          for attempt in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:18333/ && break
+            [ "$attempt" -lt 60 ] || { cat "$RUNNER_TEMP/weed.log"; exit 1; }
+            sleep 1
+          done
+          curl -sf -X PUT -o /dev/null http://127.0.0.1:18333/dispatch-e2e-files
+          echo "the baked weed answers on 127.0.0.1:18333"
+
+      # The engines the apt set this spike removes exists for. Four projects, none of which has
+      # a `dependencies:` entry, so none pulls the rest of the suite in: `webkit` and `firefox`
+      # are the tagged engine projects, `webkit-iphone` is the phone layout in WebKit and
+      # `firefox-download-navigation` is the one download row. The three `-alone` projects are
+      # left out on purpose: each names every parallel project in `dependencies`, so selecting
+      # one would run the whole suite.
+      #
+      # Four lanes, as ci.yaml runs, so the provider timing above and the lanes here are read at
+      # the same width as the 5.9-6.2 s figure harness-postgres.ts records.
+      - name: Browser-test dispatch dashboard (WebKit and Firefox)
+        timeout-minutes: 40
+        run: |
+          export TMPDIR="$RUNNER_TEMP"
+          export DISPATCH_E2E_PG_BIN=/usr/lib/postgresql/18/bin
+          export DISPATCH_E2E_WORKERS=4
+          export PLAYWRIGHT_JSON_OUTPUT_NAME="$RUNNER_TEMP/report.json"
+          status=0
+          bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts \
+            --project webkit --project webkit-iphone \
+            --project firefox --project firefox-download-navigation \
+            --reporter=list,json || status=$?
+          exit "$status"
+        working-directory: packages/dispatch
+        env:
+          DISPATCH_E2E_FILE_STORE_ENDPOINT: http://127.0.0.1:18333
+          DISPATCH_E2E_FILE_STORE_BUCKET: dispatch-e2e-files
+
+      - name: What the run left behind
+        if: always()
+        run: |
+          echo "=== weed.log (tail) ==="
+          tail -40 "$RUNNER_TEMP/weed.log" 2>/dev/null || echo "no weed log"
+          echo "=== lane postgres logs ==="
+          for log in "$RUNNER_TEMP"/dispatch-e2e-run-*/lane-*/postgres.log "$RUNNER_TEMP"/dispatch-e2e-run-*/template/postgres.log; do
+            [ -f "$log" ] || continue
+            echo "--- $log"
+            tail -20 "$log"
+          done
+          echo "=== report.json summary ==="
+          if [ -f "$RUNNER_TEMP/report.json" ]; then
+            jq '{expected: .stats.expected, unexpected: .stats.unexpected, flaky: .stats.flaky, skipped: .stats.skipped, duration: .stats.duration}' "$RUNNER_TEMP/report.json"
+          else
+            echo "no report.json"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: spike-infra-1443-${{ matrix.variant }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/report.json
+            ${{ runner.temp }}/weed.log
+            ${{ runner.temp }}/dispatch-e2e-run-*/lane-*/log/*.log
+            packages/dispatch/e2e/test-results
+          if-no-files-found: ignore

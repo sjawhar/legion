@@ -53,6 +53,26 @@
       "jj": true
     },
     {
+      "script": "infra-1443-browser-image.sh",
+      "go_version_file": "packages/envoy/go.mod",
+      "apt": [],
+      "bun": true,
+      "evidence_variable": "INFRA_1443_EVIDENCE_DIR",
+      "timeout_minutes": 90,
+      "why_hosted": "The measurement spike of dispatch://INFRA-1443, on the branch spike/infra-1443-browser-image alone: it builds .github/docker/browser.Dockerfile and runs the Dispatch WebKit and Firefox browser suite inside that image, as root and as uid 1001. A GitHub-hosted runner has the docker, bun and go it needs and pulls only mcr.microsoft.com and this repository's own ghcr package; it starts its own Postgres from the image's binaries and its own file store from the image's weed, so it reaches the job's postgres service not at all",
+      "jj": false
+    },
+    {
+      "script": "infra-1443-upload-row.sh",
+      "go_version_file": "packages/envoy/go.mod",
+      "apt": [],
+      "bun": true,
+      "evidence_variable": "INFRA_1443_UPLOAD_EVIDENCE_DIR",
+      "timeout_minutes": 60,
+      "why_hosted": "The one open row of the dispatch://INFRA-1443 spike, on the branch spike/infra-1443-browser-image alone: it runs e2e/keyed-writes.e2e.ts:491 three times inside the candidate image and three times on the bare runner, to say whether the container causes that row to fail. A GitHub-hosted runner has the docker, bun and go it needs and pulls only mcr.microsoft.com and this repository's own ghcr package",
+      "jj": false
+    },
+    {
       "script": "merged-root-waits.sh",
       "go_version_file": "packages/daemon/go.mod",
       "apt": [],
