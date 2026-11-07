@@ -148,7 +148,7 @@ jobs:
           ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
       # The built site, generated reference pages and copied media captions include no private
       # deployment repository, company, internal host, or Tailscale MagicDNS host. ci.yaml's lint
-      # job checks the sources, on a pull request and on a push to main alike.
+      # job checks the sources, on a pull request and on a merge group alike.
       - name: Check the built site has no private name, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh docs/site/dist
       # The caller's deploy job publishes this artifact. Only docs-pages.yaml asks for it.
@@ -163,8 +163,12 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
-      # ci.yaml's call only: this job's result, and ci-ok itself when this job is that run's last.
-      - name: Report ci-ok when this is the run's last job
+      # ci.yaml's call only: on a merge-group run whose group this job's own result decides it
+      # posts the failing ci-ok at once, and on every other run it posts nothing, the verdict
+      # being ci.yaml's `ci-ok` job's own check run (.github/actions/ci-ok-report says how).
+      # ci.yaml's docs job runs on a pull request and on a merge group alike, so the step is live
+      # here; docs-pages.yaml's call passes no `ci-ok-changes`, and the step skips.
+      - name: Report ci-ok when this job decides a merge-group run
         if: always() && inputs.ci-ok-changes != ''
         uses: ./.github/actions/ci-ok-report
         with:

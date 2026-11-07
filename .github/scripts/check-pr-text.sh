@@ -25,23 +25,26 @@
 # push can land while the job runs and gets a run of its own. A payload without one is refused.
 # The rest it reads with gh (GH_TOKEN, GITHUB_REPOSITORY). The title, body and branch name come
 # from the pull request route as the pull request has them now, not from the payload: ci.yaml's
-# lint job checks at a push and can finish long after a later edit's pr-title.yaml run, and both
-# post pr-title on the head, so a check of the push's own text would post a pass over the edit's
-# refusal. The commits come from the compare route between the event's base and head, which pages
-# through every commit and reports their total, so a list that comes back shorter than that total
-# is refused loudly here instead of silently scanning part of it; and the issue comments, reviews
-# and review comments from their list routes, which report no total, so each is read 100 at a time
-# until a page comes back short. There is no total to cross-check those lists against, and none is
+# `pr-title` job checks at a push and can finish long after a later edit's pr-title.yaml run, and
+# both carry pr-title on the head, so a check of the push's own text would report a pass over
+# the edit's refusal. The commits come from the compare route between the event's base and head,
+# which pages through every commit and reports their total, so a list that comes back shorter
+# than that total is refused loudly here instead of silently scanning part of it; and the issue
+# comments, reviews and review comments from their list routes, which report no total, so each
+# is read 100 at a time until a page comes back short. There is no total to cross-check those
+# lists against, and none is
 # needed: a list that changes while a run reads it is read again by the next push, edit or review
-# run and by ci.yaml's lint job's next run (ci.yaml says when it runs), and those runs' checks are
-# the ones the merge reads. A NUL byte in any of them, which would make `grep -I` treat the file as
-# binary and skip it, is stripped first.
+# run and by ci.yaml's `pr-title` job's next run (ci.yaml says when it runs), and those runs'
+# checks are the ones the merge reads. A NUL byte in any of them, which would make `grep -I`
+# treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
-# CI runs it in ci.yaml's lint job at every push to a pull request that is not a draft and when a
-# draft is marked ready (lint posts the verdict as pr-title), and in pr-title.yaml when a pull
-# request is opened, reopened or edited, when a review on it is submitted or edited, and when the
-# merge queue runs its group; its tests are in check-private-names.test.sh.
+# CI runs it in ci.yaml's `pr-title` job at every push to a pull request that is not a draft, when
+# a draft is marked ready, and on the merge queue's group, where that job finds the queued pull
+# request with find-pr-payload.sh; that job's own check run carries the verdict as pr-title on
+# each. It runs in pr-title.yaml when a pull request is edited and when a review on it is
+# submitted or edited, the two events ci.yaml does not run on (that file's header says why it
+# runs on no other); its tests are in check-private-names.test.sh.
 set -euo pipefail
 
 event=${GITHUB_EVENT_PATH:?GITHUB_EVENT_PATH must name the pull request event payload}

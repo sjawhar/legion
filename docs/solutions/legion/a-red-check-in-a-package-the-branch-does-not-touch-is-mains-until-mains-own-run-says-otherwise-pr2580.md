@@ -31,11 +31,17 @@ whole procedure follows, so this page stands on its own.
    `jj diff --from <fork point> --to <head> --stat <package>` prints nothing.
 2. **Run the named test at your own head's tree.** A pass there and a red in CI already tells you
    the two trees differ, and the only difference is the base's tip.
-3. **Read the base's own push run for that job at the base's tip**, not only its history:
-   `gh run list --repo <owner>/<repo> --workflow <ci file> --event push --branch <base> --limit 10 --json databaseId,headSha,conclusion`,
-   then the failing job's log. This is the discriminator, and it is the step the older page
-   leaves out.
-   - **Green on the base:** the red is yours or a flake. Re-run the failed jobs once.
+3. **Read the base's own run for that job at the base's tip**, not only its history. The router
+   runs on a pull request, a merge group and a dispatch, so the run that tested a commit of the
+   base is the merge-group run whose head commit that commit is. Walk the base's ancestors, newest
+   first, until a run that ran the job turns up:
+   `gh run list --repo <owner>/<repo> --commit <sha> --event merge_group --json databaseId,conclusion,headSha`,
+   then that run's failing job log. A `workflow_dispatch` run on `main` counts the same way. This
+   is the discriminator, and it is the step the older page leaves out.
+   - **Green on the base:** the red is yours or a flake. Re-run the failed jobs once, where the
+     red is on a `pull_request` run: every job of a re-run attempt of a merge-group run skips, so
+     a merge-group run is never re-run, and the pull request is tested again when it is queued
+     again.
    - **Red on the base:** the cause is the base's. Change nothing and push nothing — a push onto
      a red head spends a fix attempt on a defect that is not yours. Never re-run the run: it
      replays its own merge ref and fails again.

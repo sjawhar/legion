@@ -72,8 +72,8 @@ jobs:
         with:
           go-version-file: packages/envoy/infra/go.mod
           cache: false
-      # ci.yaml's go-envoy-infra, restored and never saved: only ci.yaml's main-push jobs write Go
-      # caches.
+      # ci.yaml's go-envoy-infra, restored and never saved: .github/workflows/ci-caches.yaml
+      # fills that family on a push to main.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

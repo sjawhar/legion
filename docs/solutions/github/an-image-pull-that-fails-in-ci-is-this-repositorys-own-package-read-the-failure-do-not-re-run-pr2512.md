@@ -59,10 +59,10 @@ own fault.
   that order, so a pull request that adds a row does not race **that half**. It does race the
   other consumers: `worker-image`, `envoy-smoke` and the Dockerfile builds wait on the `changes`
   job alone, so one of them can pull a new digest while the `ci-images` job of the same run is
-  still copying it. That job is the one copy path, and it runs on a pull request, on a merge
-  group and on a push to main. Adding an image is one edit of that file. Moving one to a new
-  version is two commits: the new version's row first, which the `ci-images` job of that run
-  copies while nothing pulls it yet, then the pin (`.bun-version`, or `ARG GO_VERSION` of
+  still copying it. That job is the one copy path, and it runs on every event `ci.yaml` runs on:
+  a pull request, a merge group and a dispatch. Adding an image is one edit of that file. Moving
+  one to a new version is two commits: the new version's row first, which the `ci-images` job of
+  that run copies while nothing pulls it yet, then the pin (`.bun-version`, or `ARG GO_VERSION` of
   `packages/daemon/docker/worker.Dockerfile`) and every `FROM` onto it, with the row they leave
   deleted. `.github/scripts/check-ci-images.sh` admits that extra row for this reason: it asks
   for one row at each version this repository pins, and refuses no row beside it.
@@ -83,9 +83,10 @@ own fault.
    no retry. One case is fixed by a re-run: a consumer that pulled before the copy landed. The
    commit under test adds a row, the consumer job waits on `changes` alone, and it reached
    ghcr.io while the `ci-images` job of the same run was still copying. Wait for that job to
-   finish, then re-run the failed consumer job alone. A version bump that lands its row in an
-   earlier commit never reaches this case. In every other case the answer came from this
-   repository's own package, and a second request gets the same answer.
+   finish, then re-run the failed consumer job alone — on a `pull_request` run, since every job
+   of a re-run attempt of a merge-group run skips, and such a run is never re-run. A version bump
+   that lands its row in an earlier commit never reaches this case. In every other case the
+   answer came from this repository's own package, and a second request gets the same answer.
 3. Read the failure for which of three things it is:
    - The package does not hold that digest. A row was added or edited, and the `ci-images` job
      for that commit has not copied it yet, or its copy failed. Read that job's log. A copy

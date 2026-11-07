@@ -37,8 +37,10 @@ list the places that **read** the old value, and handle each one on purpose:
   review: `packages/daemon/internal/prompts/go/`, `skills/`, the generated
   `packages/claude-envoy/legion/skills/` copy (rebuilt with `bun scripts/build.ts`), `docs/site/`,
   and Go doc comments.
-- **A comment that says "this fails on main" quotes a run on main.** Before you write it, run the
-  step against main's behaviour.
+- **A comment that says "this fails on main" quotes the run that tested that commit of main.**
+  That run is the merge-group run whose head commit it is, or a `workflow_dispatch` run on main;
+  there is no push run to quote. Before you write the comment, run the step against main's
+  behaviour.
 
 ## Evidence
 

@@ -1,6 +1,6 @@
 name: Docs (main)
 
-# Builds the documentation site (docs/site) on every push to main whose change could change it, and
+# Builds the documentation site (docs/site) on a push to main whose change could change it, and
 # publishes it to GitHub Pages, at the address .github/scripts/repo-paths.sh derives from the
 # repository this runs in (https://cybermonklabs.github.io/legion/ today). The build is docs-site.yaml's,
 # which holds those steps once. Pull requests and merge groups call the same workflow from
@@ -11,12 +11,10 @@ name: Docs (main)
 # a dispatch of a branch proves that step before the merge. The deploy job runs on main alone
 # (`github.ref`), so a dispatch of a branch deploys nothing to the live site.
 #
-# A workflow of its own, so deployments happen in push order and the site ends at the newest
-# docs-selecting commit's build. A workflow-level concurrency group takes runs in the order they
-# start, and GitHub starts a push's run when the push lands. A job-level group takes jobs in the
-# order the jobs they need end: in ci.yaml every push to main is a run of its own, so a deploy job
-# there joined its group when its build ended, and a slower build of an older commit could deploy
-# after a newer one.
+# A workflow of its own, so a push to main builds and deploys the site at all: ci.yaml has no
+# `push:` trigger, and its docs job runs on pull requests and merge groups alone. Of the pushes
+# waiting in the group below only the newest builds, and the site loses nothing by that: each
+# build covers the whole tree, so the site still ends at the newest docs-selecting commit.
 #
 # The paths below are ci.yaml's docs filter flattened as dorny/paths-filter reads it (each
 # anchor's group in its place and order, the one duplicate kept), so main builds the site on
@@ -30,7 +28,7 @@ on:
       - '.github/workflows/ci.yaml'
       - '.github/workflows/docs-pages.yaml'
       - '.github/workflows/docs-site.yaml'
-      # ci.yaml's *bun_install, 16 patterns:
+      # ci.yaml's *bun_install:
       - 'package.json'
       - 'bun.lock'
       - 'patches/**'
@@ -47,10 +45,10 @@ on:
       - 'docs/site/package.json'
       - '.bun-version'
       - '.github/actions/setup-bun/**'
-      # ci.yaml's *biome, 2 patterns:
+      # ci.yaml's *biome:
       - 'biome.json'
       - '.gitignore'
-      # ci.yaml's *go_workspace, 6 patterns:
+      # ci.yaml's *go_workspace:
       - 'go.work'
       - 'go.work.sum'
       - 'packages/daemon/go.mod'
@@ -59,7 +57,7 @@ on:
       - 'packages/envoy/go.sum'
       # The docs filter's own:
       - 'docs/site/**'
-      # ci.yaml's *legion_command, 73 patterns:
+      # ci.yaml's *legion_command:
       - 'packages/daemon/cmd/legion/*'
       - 'packages/daemon/internal/admit/*'
       - 'packages/daemon/internal/agentsecrets/*'
@@ -134,7 +132,7 @@ on:
       - 'packages/envoy/migrationid/*'
       - 'packages/envoy/roleholder/*'
       - 'packages/envoy/sessiontiming/*'
-      # ci.yaml's *dispatch_server, 61 patterns:
+      # ci.yaml's *dispatch_server:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/going/*'
       - 'packages/envoy/going/goingtest/*'
@@ -237,17 +235,21 @@ on:
       - '.github/scripts/repo-paths.sh'
   workflow_dispatch:
 
-# One run at a time, in push order: `queue: max` keeps up to 100 runs waiting in the group, first
-# in, first out, where the default keeps one and replaces it with the next arrival
+# One run at a time per ref, and only the newest waiting push builds: the default queue (no
+# `queue:` key) keeps one run waiting in the group and replaces it with the next arrival
 # (docs.github.com, "Control the concurrency of workflows and jobs"), and cancel-in-progress: false
-# never cancels a running one. GitHub promises two bounds and no more: a run past the 100 waiting
-# is not queued, and the `paths:` filter skips a push whose diff holds more than 3,000 files when
-# none of the first 3,000 matches (workflow syntax, "Git diff comparisons"). A push either bound
-# drops leaves the site at the last build published; the next docs-selecting push heals it.
+# never cancels the running one. A replaced run is cancelled having started no job at all, so it
+# costs no runner minute (measured on this repository: probe run 41869015055 and its three
+# successors on branch probe/infra1066-queue, where each cancelled run listed no job and the
+# newest waiting run started its job 4 s after the running one's job ended), and the tree it would
+# have built is in the newer run's build. The group is keyed on the ref, so a `workflow_dispatch`
+# of a branch is a group of its own and never replaces a waiting main build. GitHub's other bound
+# stands: the `paths:` filter skips a push whose diff holds more than 3,000 files when none of the
+# first 3,000 matches (workflow syntax, "Git diff comparisons"). Such a push leaves the site at
+# the last build published; the next docs-selecting push heals it.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
-  queue: max
 
 # Read-only: the token clones and downloads pinned tools. The deploy job declares what publishing
 # to GitHub Pages needs in a block of its own.

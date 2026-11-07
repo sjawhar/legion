@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  The legion-worker skill says that a merge-group run is never re-run: a repository
+  whose base branch has a merge queue tests each group once, so the implementer finishes
+  its round and the pull request is tested again when it is queued again.

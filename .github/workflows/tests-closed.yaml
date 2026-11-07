@@ -3,15 +3,19 @@ name: CI (closed pull request)
 # Cancels a closed pull request's CI run (ci.yaml) still waiting or running, every job in it
 # included: the worker-image build its worker-image job calls, too. This workflow joins ci.yaml's
 # concurrency group, ci-<pull request number>, with cancel-in-progress, so that CI run ends
-# `cancelled`. ci-ok is posted only once every job that runs has reported (ci.yaml's header), and
-# a cancelled job reports `cancelled`, which ci-ok fails, while one cancelled before it started
-# reports nothing, which leaves ci-ok unposted by that run: it fails closed, never a skipped pass.
+# `cancelled`. What that cancelled run leaves on the head is a verdict, not a skipped pass:
+# ci.yaml's `ci-ok` job is gated on `always()`, which runs a job in a cancelled run too (a
+# force-cancel is the one that does not, as the comment above ci.yaml's `cancel-started` says),
+# so the verdict job takes a runner there and judges the jobs it needs, and a cancelled job is no
+# success to ci-ok.sh. One runner is the price of that rule, and the rule is why it is paid: a
+# cancelled run on a head that is still live must not leave a passing ci-ok behind it.
 # No paths filter, because ci.yaml has none.
 #
-# The group is set at workflow level, and the one job is always skipped. A run whose jobs all skip
-# still enters its workflow's group when GitHub creates it, and cancels the older run there. So a
-# close takes no runner and posts no required check: main's ruleset requires ci-ok and pr-title,
-# and this job is cancel-ci.
+# The group is set at workflow level, and this workflow's one job is always skipped. A run whose
+# jobs all skip still enters its workflow's group when GitHub creates it, and cancels the older
+# run there. So the close itself takes no runner and reports neither check main's ruleset
+# requires, ci-ok and pr-title: this workflow's one job is cancel-ci, and the runner above is the
+# cancelled CI run's own.
 #
 # It is a workflow of its own because a `closed` run inside ci.yaml would post skipped jobs, which
 # GitHub and the Legion daemon count as passing, at a head another run tested, and so could turn a
@@ -19,9 +23,10 @@ name: CI (closed pull request)
 #
 # The quick-reopen race: when a pull request is reopened within about a minute of its close, GitHub
 # can create this closed run after the reopened pull request's CI run. This run then cancels it,
-# so that run posts no passing ci-ok; the head keeps the ci-ok an earlier run of it posted. To
-# refresh a pull request's runs, push, or wait a minute between close and reopen. If the CI run
-# shows cancelled after a quick reopen, push or reopen again.
+# and that run's ci-ok job judges its cancelled jobs, so the reopened head carries a failing ci-ok
+# rather than a pass nothing tested. To refresh a pull request's runs, push, or wait a minute
+# between close and reopen. If the CI run shows cancelled after a quick reopen, push or reopen
+# again.
 on:
   pull_request:
     types: [closed]

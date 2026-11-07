@@ -1,9 +1,12 @@
-# ci-ok's one reading of whether `changes` selected a job, shared by ci-ok.sh (the verdict) and
-# ci-ok-report.sh (whether every job that runs has reported), so the two never disagree on which
-# jobs run. $map is SELECTED_BY (job to the `changes` output its `if:` tests), $out is `changes`'
-# outputs, $pr is PULL_REQUEST_ONLY and $event is `github.event_name`. A job is selected when its
-# output is 'true' and, for a PULL_REQUEST_ONLY job, the run is a pull_request run; `why` says
-# which. Both scripts read it with `jq -L .github/scripts 'include "ci-ok"; …'`.
+# ci-ok's one reading of whether `changes` selected a job, so no reading of it disagrees with
+# another.
+#
+# `selection` is read by ci-ok.sh, the verdict ci.yaml's ci-ok job reaches over every job's result
+# and ci-ok-report.sh posts at once on a merge-group run one job's failure has decided. $map is
+# SELECTED_BY (job to the `changes` output its `if:` tests), $out is `changes`' outputs, $pr is
+# PULL_REQUEST_ONLY and $event is `github.event_name`. A job is selected when its output is 'true'
+# and, for a PULL_REQUEST_ONLY job, the run is a pull_request run; `why` says which. ci-ok.sh
+# reads this file with `jq -L .github/scripts 'include "ci-ok"; …'`.
 def selection($job; $map; $out; $pr; $event):
   $map[$job] as $output
   | ($out[$output] // "unset") as $value

@@ -51,6 +51,9 @@ tester and a reviewer in one pull request:
 
 sjawhar/legion#2726 (dispatch://INFRA-1052) sized a CI job's `timeout-minutes` from the 30 newest
 counted `test` jobs of main push runs.
+That population has since stopped existing: `ci.yaml` runs on a pull request, a merge group and a
+dispatch, and on no push, so the same window read today is the merge-group runs' jobs, which is
+where a change is tested on the tree it lands as.
 
 - **The window.** The implementer read it at about 15:55Z while three jobs of it were still
   running, so none of them counted yet: jobs 126005315512, 126005997200 and 126006026475, all

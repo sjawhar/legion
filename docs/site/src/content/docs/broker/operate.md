@@ -13,8 +13,11 @@ Secrets Manager or Google Cloud Secret Manager, and it starts nothing else.
 ## What to run
 
 The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/cybermonklabs/legion/envoy:<commit>`,
-which every push to `main` that touches the image's sources publishes (the image's default
-entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Pin it by digest
+which `.github/workflows/release-envoy-listener.yaml` publishes on a push to `main` that touches
+the image's sources (the image's default
+entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Of the builds
+waiting at once only the newest runs, and the build that replaces another holds that commit's
+change, so a commit may reach `main` without an image tag of its own. Pin the image by digest
 and verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows. To build it yourself:
 
 ```sh
@@ -384,13 +387,22 @@ whenever they find no key directory, no sign-in and no helper. What they read is
 `AGENT_SECRETS_URL`, the broker's public URL, and `AGENT_SECRETS_MACHINE_IDENTITY`, which says
 which identity this machine proves: `metadata` with `AGENT_SECRETS_MACHINE_AUDIENCE`, a Compute
 Engine machine's own token from its metadata server, which is the fleet above; `kubernetes` with
-`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's projected service-account token; or `pool` with
-`AGENT_SECRETS_POOL_AUDIENCE` and `AGENT_SECRETS_POOL_ACCOUNT`, a token minted through a workload
-identity pool. `AGENT_SECRETS_SESSION` names the session a trade writes under for a caller that
-acts as no session of its own — `agent-secrets`, the helper, a daemon — and is the only name
-such a caller has. A caller that is a session writes under its own session id and reads that
-variable for nothing: an agent session's id is minted when the session starts, and its token
-must name it, since the Envoy listener refuses a subscribe, an unsubscribe, a role claim or a
+`AGENT_SECRETS_MACHINE_TOKEN_FILE`, a pod's projected service-account token; or `pool`, a token
+minted through a workload identity pool, which takes all four of
+`AGENT_SECRETS_MACHINE_TOKEN_FILE`, the projected service-account token the pool federates as the
+external credential; `AGENT_SECRETS_POOL_AUDIENCE`, the pool provider that credential is
+presented to, Google's full
+`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`
+resource name; `AGENT_SECRETS_POOL_ACCOUNT`, the service account the pool lets that credential
+act as, by email address or unique id, which `generateIdToken` is called on; and
+`AGENT_SECRETS_MACHINE_AUDIENCE`, here the `aud` of the token that mint returns, the client id the
+broker checks against `BROKER_GOOGLE_OIDC_AUDIENCE`. A `pool` machine missing any of the four
+trades nothing and its helper restart-loops, as Azure dev boxes did for want of the token file
+(theorem-labs/agent-infra#2200). `AGENT_SECRETS_SESSION` names the session a trade writes under
+for a caller that acts as no session of its own — `agent-secrets`, the helper, a daemon — and is
+the only name such a caller has. A caller that is a session writes under its own session id and
+reads that variable for nothing: an agent session's id is minted when the session starts, and its
+token must name it, since the Envoy listener refuses a subscribe, an unsubscribe, a role claim or a
 send from a session whose token names another. So a fleet whose entry fixes a session, or whose
 pods write under registered names, is a fleet no agent session can trade at: the broker refuses
 the trade, naming what the entry writes as. For a person to sign in there, give the machine the

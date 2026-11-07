@@ -46,6 +46,31 @@ on:
         type: number
         default: 0
 
+# One build at a time per ref, and of the pushes waiting in the group only the newest builds: the
+# default queue (no `queue:` key) keeps one run waiting and replaces it with the next arrival
+# (docs.github.com, "Control the concurrency of workflows and jobs"), and cancel-in-progress:
+# false never cancels the running one. A replaced run is cancelled having started no job at all,
+# so it costs no runner minute, and the push that replaced it holds its commit: what the replaced
+# commit loses is an image and a version number of its own, never its change (release-push.sh
+# version counts every commit since the newest tag, and packages/envoy/deploy/scripts/autodeploy.sh
+# deploys the newest of main's last 30 commits that has a published image, so the next release
+# carries every older commit's change). That sentence is this repository's one copy of the
+# reasoning: the Confirm the version step below, .github/scripts/release-push.sh's `restart` and
+# .github/scripts/check-release-credentials.sh's rule 4 point here instead of restating it, so
+# the day autodeploy reads another number of commits there is one paragraph to correct.
+#
+# Each `workflow_dispatch` is a group of its own, keyed on github.run_id, and is never replaced:
+# release-push.sh restart starts a dispatch when a run loses its version race, and a group keyed
+# on the ref alone would let a newer push replace that waiting restart and leave its commit in no
+# release — the state .github/scripts/check-release-credentials.sh rule 4 exists to prevent.
+#
+# release_publish keeps the job-level `release-envoy-listener` group with `queue: max` below:
+# this group coalesces runs that have started no job, that one serializes the jobs of runs that
+# have already built and pushed an image, and none of them is dropped.
+concurrency:
+  group: release-envoy-listener-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
+
 # Every job declares its own permissions (targets, build, docker, image_index, attest,
 # release_build, release_publish below); nothing runs under this workflow-level default, so it
 # stays empty rather than becoming an unreviewed grant to a job added later with no block of its
@@ -792,6 +817,10 @@ jobs:
       # job, so a chain of started runs ends once releases stop landing; the bound only ends a
       # chain a fault keeps alive: a started run gets lost_races + 1, and the one that loses with
       # lost_races 3 fails instead of starting a fourth, naming the command a person runs.
+      # A commit this job leaves to another run loses an image and a version number of its own,
+      # never its change: this file's header, above `concurrency:`, says why, and is the one copy
+      # of that reasoning. The run started here is a workflow_dispatch, a concurrency group of
+      # its own, which no newer push replaces while it waits.
       # $LEGION_ENVOY_VERSION_ARGS is expanded unquoted on purpose, as in release_build.
       - name: Confirm the version
         id: confirm

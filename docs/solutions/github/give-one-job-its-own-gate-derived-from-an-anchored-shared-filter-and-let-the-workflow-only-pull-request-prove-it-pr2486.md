@@ -18,8 +18,8 @@ Extends docs/solutions/github/gate-an-expensive-step-inside-a-required-job-with-
 
 - **Before you change one job's definition, read its `if:` gate.** If the job's paths filter does
   not list the workflow file that holds the job, a pull request that changes only that job skips
-  it. Then "the job passes on the pull request" cannot hold, and the change does not run on main
-  after the merge either.
+  it. Then "the job passes on the pull request" cannot hold, and the change does not run in the
+  merge group that lands it either.
 - **Do not widen a filter that other jobs share.** Every job gated on it then runs on every edit
   of the workflow. Put an `&anchor` on the shared key and add a key of its own for the one job:
   the workflow file plus `- *anchor`. Point only that job's `if:` at the new key, and add the key
@@ -30,8 +30,8 @@ Extends docs/solutions/github/gate-an-expensive-step-inside-a-required-job-with-
 - **The pull request that adds the gate is its own proof.** It changes only the workflow file, so
   at its head the job must show `success`, not `skipped`. A job still on the shared filter must
   show `skipped` at the same head. The `changes` job's log must print
-  `Filter <shared> = false` and `Filter <new> = true`. Use the same job's last run on main before
-  the change as the negative control. No scratch pull request is needed for this half.
+  `Filter <shared> = false` and `Filter <new> = true`. Use the same job's last merge-group run
+  before the change as the negative control. No scratch pull request is needed for this half.
 - **The shared-paths half is not exercised by this pull request.** That half is a file inside the
   shared filter changed with no change to the workflow. Prove it on the pinned action's own code
   (docs/solutions/github/prove-a-path-filter-change-with-the-pinned-actions-own-code-and-a-skip-and-run-pair-of-scratch-pull-requests-based-on-the-branch-INFRA-583.md),

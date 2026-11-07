@@ -646,6 +646,58 @@ run_check "$root"
 check "a gate missing one input fails, though the trigger covers it" "$(is "$status" 1)"
 check "names that input" "$(contains "$out" 'does not cover .dockerignore')"
 
+echo "case: a narrowed output is read as narrowed, and admitted only where nothing is published"
+# ci.yaml's `full-ci` shape: the filter reaches the job only while the term beside it holds, so
+# the job runs on fewer changes than the filter selects. Read as the plain shape — a search for
+# `steps.<id>.outputs.<name>` anywhere in the expression — it would credit the job with the
+# filter's whole coverage while the real gate is narrower. A job whose builds publish nothing has
+# no pin that could miss a commit, so there the narrowing is admitted; a job that publishes one
+# would leave a change the filter selects with no image built for it.
+#
+# narrow_output <root> <term>: rewrites the changes job's output into that shape, behind the
+# workflow_dispatch term, which can only hand the job 'true' and so only widens.
+narrow_output() {
+  local root=$1 term=$2
+  python3 - "$root/.github/workflows/image.yaml" "$term" <<'PY'
+import sys
+path, term = sys.argv[1], sys.argv[2]
+text = open(path).read()
+plain = "      gated: ${{ steps.filter.outputs.gated }}\n"
+assert text.count(plain) == 1, "the fixture's output is not the plain shape"
+narrowed = (
+    "      gated: ${{ github.event_name == 'workflow_dispatch' && 'true' || "
+    + term
+    + " && steps.filter.outputs.gated || 'false' }}\n"
+)
+open(path, "w").write(text.replace(plain, narrowed))
+PY
+}
+
+# publishing_build <root>: the build pushes its result, which is what forbids a narrowed gate.
+publishing_build() {
+  sed -i 's|^          file: docker/Dockerfile$|&\n          push: true|' \
+    "$1/.github/workflows/image.yaml"
+}
+
+full_ci="(github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci'))"
+
+root=$(fixture narrowed-gate-loads)
+gate_build_job "$root" "$all_inputs"
+narrow_output "$root" "$full_ci"
+run_check "$root"
+check "a narrowed output passes where every build of the job publishes nothing" "$(is "$status" 0)"
+check "and its filter still decides the build" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated)')"
+
+root=$(fixture narrowed-gate-publishes)
+gate_build_job "$root" "$all_inputs"
+narrow_output "$root" "$full_ci"
+publishing_build "$root"
+run_check "$root"
+check "a narrowed output fails where the job's build publishes" "$(is "$status" 1)"
+check "names the job and the narrowing term" \
+  "$(contains "$out" "^::error::jobs.docker builds or calls an image its job publishes, and is gated on needs.changes.outputs.gated, which hands it steps.filter.outputs.gated only while \`$(printf '%s' "$full_ci" | sed 's|[.*]|\\&|g')\` holds")"
+check "says what the author must do" "$(contains "$out" 'drop the narrowing term from that output, which leaves the filter deciding the job, or keep the narrowed output for a job whose every docker/build-push-action step publishes nothing')"
+
 echo "case: a gate reaches the build however it is written"
 # gate_probe <root> <docker job header> [extra job yaml]: a changes job exposing img (covers
 # every input) and narrow (covers docker/** only), with the build job's header supplied.
@@ -765,10 +817,14 @@ check "always() is read as ungated" "$(is "$status" 0)"
 
 echo "case: an if: this check does not model is refused, never read as ungated"
 shape_index=0
-# The last three are a positive draft test and an == 'closed' test, which would skip every
-# pinnable build (the next case's comment says why).
+# The three after the first four are a positive draft test and an == 'closed' test, which would
+# skip every pinnable build (the next case's comment says why). The last four are the attempt
+# guard's neighbours: only `github.run_attempt == '1'`, which skips no first attempt, is
+# neutral, and an event exclusion is read beside a neutral term alone.
 for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false" \
-  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
+  "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'" \
+  "github.run_attempt" "github.run_attempt == '2'" "github.run_attempt != '1'" \
+  "github.event_name != 'merge_group' || github.actor == 'dependabot'"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-unmodelled-$shape_index")
   gate_probe "$root" "  docker:
@@ -792,7 +848,10 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
   "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'" \
   '"!github.event.pull_request.draft"' "github.event.action != 'closed'" \
   "\${{ !github.event.pull_request.draft && needs.changes.outputs.img == 'true' }}" \
-  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'"; do
+  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'" \
+  "github.run_attempt == '1'" \
+  "github.run_attempt == '1' && needs.changes.outputs.img == 'true'" \
+  "\${{ (github.event_name != 'merge_group' || github.run_attempt == '1') && needs.changes.outputs.img == 'true' }}"; do
   shape_index=$((shape_index + 1))
   root=$(fixture "gate-neutral-$shape_index")
   gate_probe "$root" "  docker:
@@ -842,6 +901,33 @@ gate_probe "$root" "  docker:
 changes_if "$root" "github.event.pull_request.draft"
 run_check "$root"
 check "a positive draft test on the needed changes job is refused" "$(is "$status" 1)"
+check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
+
+# ci.yaml's shape: the changes job every image gate is inherited from skips a merge-group re-run
+# attempt, which runs on the commit attempt 1 ran on, so the build's coverage is unchanged and
+# the filter beside the gate is still read.
+root=$(fixture gate-attempt-on-changes)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ !github.event.pull_request.draft && (github.event_name != 'merge_group' || github.run_attempt == '1') }}"
+run_check "$root"
+check "the merge-group re-run guard on the needed changes job passes" "$(is "$status" 0)"
+check "  and the build job's filter is still read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+
+# The control: the same guard against any other attempt skips the first attempt of a change, so
+# it is refused on the needed job too.
+root=$(fixture gate-attempt-on-changes-refused)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ github.event_name != 'merge_group' || github.run_attempt == '2' }}"
+run_check "$root"
+check "an attempt test the allowlist does not admit is refused on the needed job" "$(is "$status" 1)"
 check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
 
 echo "case: the draft term is admitted only under pull request triggers that list ready_for_review"

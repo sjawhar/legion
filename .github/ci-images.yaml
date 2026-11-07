@@ -23,8 +23,9 @@
 #
 # To add an image: add its row and push. ci.yaml's ci-images job copies the rows the package
 # does not hold yet, and then reads the package, which is the half of the gate that answers for
-# it. That job is the one copy path, and it runs on a pull request, on a merge group and on a
-# push to main. The gate refuses a consumer that names anything but a digest this file holds.
+# it. That job is the one copy path, and it runs on every event ci.yaml runs on: a pull request,
+# a merge group and a dispatch. The gate refuses a consumer that names anything but a digest this
+# file holds.
 #
 # To move an image to a new version, push two commits. The first adds the new version's row and
 # leaves every consumer on the row it has, so the ci-images job of that run copies the new

@@ -35,7 +35,14 @@
 #    a later step.
 # 4. release-envoy-listener.yaml's release_publish runs in the concurrency group
 #    `release-envoy-listener` with `cancel-in-progress: false` and `queue: max`: a pending job that
-#    GitHub cancelled for the next one would leave its commit in no release.
+#    GitHub cancelled for the next one would leave its commit in no release. That file's
+#    workflow-level group does not stand in for this one and does not weaken it: it coalesces runs
+#    before they start a job, so a waiting build is replaced by a newer push that still holds the
+#    commit and the replaced commit loses an image and a version number of its own, never its
+#    change (that file's header, above its `concurrency:` block, is the one copy of why); a run
+#    that reached release_publish has already built and pushed its image, and a run
+#    release-push.sh restart started is a workflow_dispatch in a group of its own, which no push
+#    replaces.
 # 5. A job's `if:` that calls `always()` tests `needs.<X>.result` for every X whose
 #    `needs.<X>.outputs` it reads; one that calls no `always()` belongs to a job with no skippable
 #    ancestor — no job upstream of it through `needs`, at any distance, carrying an `if:` of its

@@ -1,0 +1,412 @@
+name: CI caches
+
+# Fills the Actions caches ci.yaml's jobs restore, so a pull request or a merge group finds
+# them warm. ci.yaml runs on a pull request, a merge group and a dispatch, and no longer on a push
+# to main: the queue tests every change on the tree it lands as, so a run on main would only test
+# that tree again (ci.yaml's header says it). No job of that workflow saves a cache entry any
+# more, so the families it restores need a filler of their own, and this workflow is it.
+#
+# Why the filler runs on a push: a run reads the cache scope of its own branch and that of the
+# default branch, and only an event that writes the default branch's scope - a push to main among
+# them - leaves an entry every later run can read. A save made in a merge group or on a pull
+# request lands in that run's own scope, which the next pull request's run cannot read, so it
+# would reach nobody.
+#
+# Five Go families, each one a restore step of ci.yaml names, keyed on the Go version the
+# family's own module installs: go-notices (lint's notices step), go-daemon (typecheck, test and
+# pi-legion), go-envoy (dispatch, dispatch-browser-multiprocess, envoy-go-checks,
+# envoy-go-race-docs, envoy-go-docs-finalizers, listener-server-change, envoy-e2e-local and
+# envoy-session-stall), go-envoy-test (envoy-go) and go-envoy-infra (envoy-infra-go). One job per
+# Go setup, since the key carries the version that module's go.mod names: the daemon's go.mod for
+# go-daemon and for go-notices, which lint installs the daemon's Go for; the envoy module's for
+# go-envoy and go-envoy-test; the infra module's for go-envoy-infra. Each family is first looked up
+# (`lookup-only`, and no `restore-keys`: the question is whether that exact key exists, and the
+# answer downloads nothing), and only a miss runs the build the ci.yaml job runs and saves what
+# it left in the module cache and the build cache. A family whose key is already there builds
+# nothing, so a run that finds every key costs a checkout and a setup-go. Where a job fills two
+# families it fills the smaller one first, so the entry that carries the other's objects too is
+# the one that was large already.
+#
+# Two entries are no Go family, both of ci.yaml's dispatch job, and both looked up, filled on a
+# miss and saved as the Go families are. The Playwright browsers, which the browsers job below
+# fills: its key is bun.lock's hash, since the lockfile pins the Playwright version that decides
+# the browsers' revisions, so that entry is refreshed when the pin moves rather than when Go is
+# bumped. The .deb archives of the apt list that job's Playwright install needs, which the
+# apt-debs job below fills: its key names that same Playwright version and the runner image, so
+# that entry is refreshed by a Playwright bump or an image roll, and both jobs compute it with
+# one script, .github/scripts/apt-archive-cache-key.sh, so the save's key cannot drift from the
+# restore's.
+#
+# go-docs is not here: docs-pages.yaml saves it on this same push, from the build job it shares
+# with ci.yaml's docs job. The Bun cache is not here either: .github/actions/setup-bun reads and
+# writes it on main, and five workflows that run there call it.
+
+# A push to main is what writes the default branch's cache scope; workflow_dispatch fills a family
+# by hand, after a Go bump, a Playwright bump, an image roll or an eviction. No `paths:`: a key
+# holds a Go version, bun.lock's hash, or a Playwright version and a runner image, not a file
+# list, so what the push touched decides nothing, and a run whose keys are all there is seconds.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One fill at a time per ref, and no cancellation: a cancelled run saves nothing, so cutting the
+# running fill short would leave the caches empty and make the next push pay for them again. The
+# default queue holds the newer run until this one ends, and a push after it replaces the one
+# waiting, since both would fill the same keys.
+concurrency:
+  group: ci-caches-${{ github.ref }}
+  cancel-in-progress: false
+
+# Reading the tree and the caches is all this workflow does: the cache scope needs no token scope
+# of its own, and nothing here reports a check or writes an artifact.
+permissions:
+  contents: read
+
+# The proxy fall-through ci.yaml's env block explains: with `|`, a go command that hits ANY error
+# from proxy.golang.org - a reset mid-stream among them - fetches the same bytes from the source
+# and checks them against go.sum.
+env:
+  GOPROXY: https://proxy.golang.org|direct
+
+jobs:
+  # go-daemon and go-notices. Both key on packages/daemon/go.mod's Go: ci.yaml's typecheck, test
+  # and pi-legion set Go up from it, and so does lint, whose notices step the go-notices family
+  # belongs to, though that step also builds the envoy and infra modules' commands.
+  daemon:
+    runs-on: ubuntu-24.04
+    # The notices build is the long one: it writes the notices of, and cross-compiles, every
+    # release target of three modules on a cold module cache.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache: false
+
+      - id: go-daemon
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          lookup-only: true
+
+      # What typecheck and test build: the vet behind the e2e tag, the test binary of every
+      # package, and the race build of the three packages test runs under the detector, whose
+      # objects are cache entries of their own. Those three are the list
+      # .github/scripts/ci_job_reads.py's DAEMON_RACE_PACKAGES holds, which check-ci-filters.sh
+      # holds ci.yaml's two steps to, so a package that joins or leaves the detector there is the
+      # side this command follows. The test binaries are compiled and never run (`go test -c -o
+      # /dev/null` links each one and writes nothing): running them would want tmux, jj, Oh My Pi,
+      # uv, container images and a Postgres service, and the build cache this entry holds is what
+      # a compile leaves.
+      - name: Build what typecheck and test build of the daemon module
+        if: steps.go-daemon.outputs.cache-hit != 'true'
+        run: |
+          go vet -tags e2e ./...
+          go test -c -o /dev/null ./...
+          go test -c -o /dev/null -race ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
+        working-directory: packages/daemon
+
+      - if: steps.go-daemon.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+      # go-notices after go-daemon, and saved second: this entry is the large one (the notices
+      # build loads every release target of three modules), so it is the one that can carry the
+      # daemon build's objects without changing what a run pays for.
+      - id: go-notices
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/legion
+          key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          lookup-only: true
+
+      # The very script lint's notices step runs, .github/scripts/go-release-notices.sh: the
+      # same loops over .github/go-release-targets.json, .github/agent-secrets-client-targets.json
+      # and .github/envoy-infra-targets.json, with the same GOOS, GOARCH and CGO_ENABLED per
+      # target, so the modules it downloads, the go-licenses it builds under ~/.cache/legion and
+      # the objects it leaves are the ones lint restores. One script and not a copy of those
+      # loops, because a copy stops warming a target the day lint gains one, and nothing fails:
+      # lint just builds those objects cold on every run.
+      - name: Write every Go release archive's third-party notices and cross-build the commands
+        if: steps.go-notices.outputs.cache-hit != 'true'
+        run: .github/scripts/go-release-notices.sh "$RUNNER_TEMP/notices"
+
+      - if: steps.go-notices.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/legion
+          key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+  # go-envoy and go-envoy-test. Both key on packages/envoy/go.mod's Go, the module every job that
+  # restores them sets Go up from, so one setup serves the two; their lookups and their builds are
+  # independent, and each build is gated on its own lookup.
+  envoy:
+    runs-on: ubuntu-24.04
+    # Compiling the test binary of every package of the envoy module on a cold module cache is
+    # the long step; the listener and natsd are minutes.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+
+      - id: go-envoy
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          lookup-only: true
+
+      # The two binaries envoy-e2e-local's scripts/e2e-local.sh and envoy-session-stall's
+      # test/envoy-stack.ts build, and whose packages listener-server-change compiles too: the
+      # listener and the in-process NATS server's natsd. An -o ending in a separator names a
+      # directory, as envoy-stack.ts's build does, so both main packages build in one command.
+      - name: Build the listener and natsd of the envoy module
+        if: steps.go-envoy.outputs.cache-hit != 'true'
+        run: go build -o "$RUNNER_TEMP/envoy-bin/" ./cmd/listener ./internal/testnats/cmd/natsd
+        working-directory: packages/envoy
+
+      - if: steps.go-envoy.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+      - id: go-envoy-test
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          lookup-only: true
+
+      # envoy-go's set: the test binary of every package of the envoy module, the integration
+      # package's and the natslive build of internal/testnats among them. `go test -c` links each
+      # package's test binary and `-o /dev/null` writes none of them, so every object the restored
+      # build cache holds is made and no test runs: envoy-go's tests want the job's Postgres
+      # service and container images, which a cache fill has no reason to start.
+      - name: Build the test binary of every package of the envoy module
+        if: steps.go-envoy-test.outputs.cache-hit != 'true'
+        run: |
+          go test -c -o /dev/null ./...
+          go test -c -o /dev/null -tags natslive ./internal/testnats/
+        working-directory: packages/envoy
+
+      - if: steps.go-envoy-test.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+  # go-envoy-infra. The infra module is not in the root go.work - its own go.work binds it and
+  # packages/envoy - so it keys on packages/envoy/infra/go.mod's Go and builds in a job of its own,
+  # as ci.yaml's envoy-infra-go does.
+  envoy-infra:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache: false
+
+      - id: go-envoy-infra
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          lookup-only: true
+
+      # What envoy-infra-go builds: the vet with both live-test tags, the test binary of every
+      # package, and the natslive binaries of the three packages its live step runs. Compiled, not
+      # run: the live tests need nats-server, Postgres and container images, and the unit tests
+      # nothing a build cache keeps.
+      - name: Build what envoy-infra-go builds
+        if: steps.go-envoy-infra.outputs.cache-hit != 'true'
+        run: |
+          go vet -tags pulumilive,natslive ./...
+          go test -c -o /dev/null ./...
+          go test -c -o /dev/null -tags natslive ./core/ ./seed/ ./gcp/
+        working-directory: packages/envoy/infra
+
+      - if: steps.go-envoy-infra.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+
+  # The Playwright browsers ci.yaml's dispatch job restores, the one entry here that is no Go
+  # family: no setup-go, and the key is bun.lock's hash rather than a Go version, since that
+  # lockfile pins the Playwright version whose browsers the install downloads.
+  browsers:
+    runs-on: ubuntu-24.04
+    # Three browser downloads on a miss; a run that finds the key costs the checkout alone.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: playwright
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          lookup-only: true
+
+      # The install reads the Playwright the lockfile pins out of node_modules, as the dispatch
+      # job's does: `bunx playwright` without it would fetch the newest release instead, whose
+      # browser revisions are other than the ones that job will look for.
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-bun
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        run: bun install --frozen-lockfile
+
+      # The three browsers the dispatch job's suite runs. No `--with-deps`: the apt packages it
+      # installs land outside ~/.cache/ms-playwright, so no entry could carry them, and that job
+      # installs them itself on every run.
+      - name: Download the browsers the dispatch job's suite runs
+        if: steps.playwright.outputs.cache-hit != 'true'
+        run: bunx playwright install chromium webkit firefox
+        working-directory: packages/dispatch
+
+      - if: steps.playwright.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+  # The .deb files of the apt list ci.yaml's dispatch job installs before its browser suite,
+  # .github/playwright-apt-packages.txt: with their dependencies, 182 packages and 114 MB of
+  # archives, measured in job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. That job
+  # seeds apt's archive directory from the entry and installs out of it, so a hit costs it no
+  # download at all; the family exists because that download is the one unbounded cost of its
+  # install step, the step whose whole retry budget is written for the case where the mirror is
+  # slow. The fill is here and not there because the save has to write the default branch's cache
+  # scope: a save on a pull request or in a merge group lands in that run's own scope, which the
+  # next pull request cannot read.
+  #
+  # ubuntu-24.04 because the key names ImageOS and ImageVersion: the entry holds the package
+  # versions that image's indexes resolve, so a fill from another image writes a key no dispatch
+  # run ever reads. No setup-bun and no setup-go either - the key script reads bun.lock as text,
+  # and apt needs neither - so the checkout is all this job sets up.
+  apt-debs:
+    runs-on: ubuntu-24.04
+    # The arithmetic, from the two readings ci.yaml's install step is bounded by: at 186 kB/s,
+    # the slowest package download a green dispatch job of its window met (job 127238648049),
+    # the list's 114 MB need 613 s, and at 233 kB/s, the slowest `apt-get update` of that window
+    # (job 127357441704), the 13.0 MB of indexes need 56 s. Copying the archives out of apt's
+    # directory took 1.1 s in job 128209099649. Uploading the 114 MB entry has no reading yet
+    # and is estimated at 120 s. 613 + 56 + 1.1 + 120 = 790 s, rounded up to 20 min. The apt
+    # calls below carry no bound and no second origin of their own, unlike the install step's:
+    # a fill that meets a slower mirror than those two ends on this budget, and the next push
+    # to main fills the family again.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The very script ci.yaml's dispatch job computes the key with, so the save below writes
+      # the key that job's restore reads: a key that drifted would make every restore there miss
+      # and nothing would fail, the job just fetching the whole 114 MB set again on every run.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          key=$(.github/scripts/apt-archive-cache-key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
+          lookup-only: true
+
+      # The same file the dispatch job's install reads, with the same expression: its `#` header
+      # and its blank lines dropped, and $packages left unquoted on purpose, to split into words.
+      # `-d` downloads and unpacks nothing, which is all this job wants: it fills the directory
+      # that job seeds apt from, and installs none of it. gstreamer1.0-tools is asked for beside
+      # the list, because that job's install asks for both - the list is Playwright's own, which
+      # playwright-deps-current.sh holds it to, and the tool carries the gst-inspect-1.0 its
+      # decoder guard runs - and an entry holding the list alone would leave that package and
+      # whatever it pulls in to be fetched on every run that hit. Measured on the probe run
+      # 42362119894 of this branch: the list alone is 181 .deb files, and the install step's
+      # whole set is the 182 of job 128209099649.
+      - name: Download the .deb files the dispatch job's install needs
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        run: |
+          # The runner image preconfigures Google's chrome-stable apt source, whose index
+          # intermittently fails `apt-get update` with a hash-sum mismatch; the dispatch job's
+          # install drops it for that reason, and an update that fails here leaves the family
+          # empty until the next push.
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          packages=$(grep -vE '^[[:space:]]*(#|$)' .github/playwright-apt-packages.txt)
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -d $packages gstreamer1.0-tools
+          # apt fetches into its own directory as root, and the cache action that saves the entry
+          # runs as the runner user, which can read neither root's directory nor root's files, so
+          # the .deb files are copied out and handed over below.
+          shopt -s nullglob
+          fetched=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          # An entry is written once and never replaced, so an empty one would hold this key for
+          # as long as the Playwright pin and the image stand, and every dispatch run under it
+          # would restore nothing and fetch the whole set. A download that left no .deb file is
+          # therefore this job's failure, not an entry to save.
+          [ "${#fetched[@]}" -gt 0 ] || {
+            echo "::error::apt fetched no .deb file for the pinned list, so there is nothing to" \
+              "keep under this key; the entry is not written"
+            exit 1
+          }
+          mkdir -p "$HOME/apt-archives"
+          sudo cp "${fetched[@]}" "$HOME/apt-archives/"
+          sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          echo "apt archives: keeping ${#fetched[@]} .deb files"
+
+      - if: steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}

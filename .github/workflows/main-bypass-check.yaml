@@ -1,0 +1,118 @@
+name: CI (main bypass check)
+
+# The backstop for a commit that reached main without the merge queue: an administrator's merge, a
+# direct push, a ruleset bypass. ci.yaml runs on no push (its header says why), so nothing else in
+# this repository would test such a commit at all. On every push to main this workflow reads the
+# push's head alone, decides whether the merge queue tested it
+# (.github/scripts/main-bypass-check.sh), and when it did not, starts ci.yaml on main by
+# workflow_dispatch, where `changes` selects every job. That one run tests main's tip, which
+# contains the head, so one run answers for the whole push; the job summary holds what the check
+# read of the head.
+#
+# Why the head alone answers for the push: a ci.yaml merge-group run at the head tested the tree
+# that head names, which holds every commit the push carried, and the queue lands a group by
+# pushing that group's own tested head onto main. So a push whose head is the head of a passing
+# merge-group run carries nothing untested, and a push carrying anything the queue never saw
+# arrives with a head that is the head of no such run. The script's header sets that out.
+#
+# A workflow_dispatch made with this job's GITHUB_TOKEN does create a run, unlike most events that
+# token causes (docs.github.com, "Triggering a workflow from a workflow"), and `actions: write` is
+# what lets the token make it. The run it starts is a run of ci.yaml on main, whose own ci-ok is
+# posted on main's tip, where a person reading the commit finds it.
+#
+# Why push: branches: [main], and no concurrency group at all. The event has to be the push,
+# because the bypass is a commit arriving on main by some route the queue never saw; nothing else
+# fires for it. There is no `concurrency:` block, so a newer push can never replace a run of this
+# check that is waiting or running: every push is read, and a push that lands while this run works
+# gets a check of its own. A coalescing group here would drop exactly the push a bypass arrived in.
+#
+# What it deliberately does not do:
+#   * it starts at most one run per push, named for the push's head; it does not test a commit in
+#     isolation, and it reads no other commit of the push — neither their merge-group runs nor
+#     their ci-ok check runs, nor the compare route for a payload GitHub cut at its documented
+#     2048-commit cap, since the head answers for all of them;
+#   * it reverts nothing, reopens nothing and blocks nothing. It makes the missing CI run, and
+#     what that run reports is for a person to act on;
+#   * it passes over a head whose own message carries one of GitHub's skip markers (the script's
+#     header lists them). GitHub reads those markers on the push's head too and starts no workflow
+#     at all for such a push, this one included — a release or changelog push says that way that
+#     it needs no CI — so that reading rarely has anything to pass over;
+#   * it never answers its own dispatch. The ci-ok that dispatched run posts sits on a commit that
+#     is the head of no merge-group run, so this check reads that commit as untested — and starts
+#     nothing for it, because only a push starts this check and the run it dispatches pushes
+#     nothing.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  bypass-check:
+    runs-on: ubuntu-24.04
+    # The checkout, two API reads at the push's head, and at most one dispatch.
+    timeout-minutes: 10
+    # The dispatch of ci.yaml needs `actions: write`, and `gh run list` needs no more than that;
+    # nothing here needs another scope. The checkout needs no `contents: read`, because this
+    # repository is public and GitHub serves a public repository's git data to any valid token,
+    # and the check-runs read is the one ci.yaml's `cancel-started` makes under the same one
+    # scope.
+    permissions:
+      actions: write
+    steps:
+      # The job reads nothing of the tree but .github/scripts/main-bypass-check.sh, so the
+      # .github cone is the whole checkout it needs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github
+          persist-credentials: false
+
+      # `shell: bash` runs the step as `bash --noprofile --norc -eo pipefail {0}`; naming no
+      # shell would run it as `bash -e {0}`, which has no `pipefail` (docs.github.com, "Workflow
+      # syntax for GitHub Actions", the default shell table). Both reads below are single
+      # commands, which `-e` alone already ends the step on, and `shell: bash` is what keeps that
+      # true of a pipeline a later change adds: a `gh` that GitHub answered with a 502 or a rate
+      # limit at the head of a pipeline must end the step, because the alternative is a decision
+      # handed an empty reading, going green having started nothing — the one outcome this
+      # backstop exists to prevent. main-bypass-check.test.sh holds every `run:` step of this
+      # workflow to that shell.
+      - name: Start ci.yaml when this push's head was never tested
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.after }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # The merge-group runs at the push's head. `--workflow ci.yaml` is what holds the list
+          # to this repository's router; the decision reads each run's headSha itself, so a run
+          # this filter returned for another commit is no run of this head.
+          RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yaml --event merge_group \
+            --commit "$HEAD_SHA" --limit 20 --json conclusion,headSha,workflowName)
+          export RUNS
+          # filter=all, because the default returns one check run per name and a commit can carry
+          # two: a failing ci-ok from the run whose job failed, and a passing one from a later run
+          # of the same group. per_page=100, because the default page holds the 30 newest check
+          # runs of the commit, and a commit the queue tested more than once can carry more.
+          CI_OK=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=ci-ok&filter=all&per_page=100" \
+            --jq '[.check_runs[] | {name, conclusion}]')
+          export CI_OK
+
+          set +e
+          tokens=$(.github/scripts/main-bypass-check.sh 2>"$RUNNER_TEMP/reasoning")
+          decided=$?
+          set -e
+          cat "$RUNNER_TEMP/reasoning"
+          {
+            echo "## What this push's head carried"
+            echo
+            sed 's/^/- /' "$RUNNER_TEMP/reasoning"
+          } >>"$GITHUB_STEP_SUMMARY"
+          [ "$decided" -eq 0 ] || exit "$decided"
+
+          while read -r act sha; do
+            case $act in dispatch) ;; *) continue ;; esac
+            gh workflow run ci.yaml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "::notice::$sha reached $GITHUB_REF_NAME with no passing merge-group ci-ok, so ci.yaml was started on $GITHUB_REF_NAME, whose tip contains it"
+            {
+              echo
+              echo "Started \`ci.yaml\` on \`$GITHUB_REF_NAME\` for commit \`$sha\`."
+            } >>"$GITHUB_STEP_SUMMARY"
+          done <<<"$tokens"
