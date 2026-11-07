@@ -1328,8 +1328,11 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // launching, which sendPending hands nothing (delivery.go), so the send costs that case nothing.
 //
 // The turn's end is logged here (turnEndedLine), and this is the only exit from working that
-// writes that line. Every other way out of a turn writes a line of its own instead, which is
-// what a reader who found a start and no end looks for:
+// writes that line. The line names the delivery only where the turn is that task's
+// (Claim.turnsDelivery), as the start line does, because a turn of the agent's own ending while a
+// task waits unread would otherwise read as that task's turn. Every other way out of a turn
+// writes a line of its own instead, which is what a reader who found a start and no end looks
+// for:
 //
 //   - a death of the process (died): "supervise: process died";
 //   - a held suspension whose deadline runs out (suspendAtTimeout): "supervise: the agent's turn
@@ -1353,7 +1356,7 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 //
 // answerByTurnEnd runs first of all, before the marks it reads are cleared (askFirst, unseenTurn).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
-	m.logTurn(turnEndedLine, pendingID(m.claim.Pending))
+	m.logTurn(turnEndedLine, m.claim.turnsDelivery())
 	m.answerByTurnEnd()
 	m.askFirst, m.unseenTurn = false, false
 	if m.held != nil {

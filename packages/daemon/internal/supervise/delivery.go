@@ -132,6 +132,25 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
+// turnsDelivery is the delivery the turn now running is the turn of, and "" where that turn is no
+// task's. The claim's confirmation is the whole of the test: turnStarted confirms the delivery
+// whose turn it reads starting (confirm) and leaves a turn that is no task's unconfirmed, so a
+// pending delivery that is confirmed is the turn now running, and an unconfirmed one is a task
+// still waiting to be read. A task taken back from a prompt that came to nothing
+// (takeBackPending, reached from lateRefused and promptFailed) is exactly that: pending and
+// unconfirmed while a turn of the agent's own runs.
+//
+// This is what makes the turn's end line name what its start line named (table.go's turnEnded and
+// turnStarted), so a reader can pair the two: an end that named whatever the claim held pending
+// would give a turn of the agent's own the id of a task nobody has started, and the task would
+// read as run while it is still queued.
+func (c Claim) turnsDelivery() string {
+	if c.Pending == nil || c.Pending.ConfirmedAt.IsZero() {
+		return ""
+	}
+	return c.Pending.ID
+}
+
 // queue gives the claim the task a deliver request carries, with the phase and the assignment it
 // was queued for. An outbox repeats its row id after a crash before FinishOutbox; the same task
 // and id are therefore accepted without changing the persisted delivery. A request from an outbox
