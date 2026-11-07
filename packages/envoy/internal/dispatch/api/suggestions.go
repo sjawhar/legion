@@ -560,9 +560,18 @@ func (s *server) runRelatedCheck(
 // relatedMeaningStage is stage 2: the text's embedding, started at once, then, once stage 1 has
 // picked the terms, the meaning query over them. Its reason is empty when it answered and names
 // why it did not otherwise; ctx ends at the meaning allowance.
+//
+// A meaning search this stage's own context ended, and one the server ended itself at
+// searchMeaningScan's statement bound, are the same thing to the caller: the meaning search did
+// not answer, so the check answers by keywords alone and says so (INFRA-148). Which of the two
+// clocks ran out first is not the caller's business, and only one of them shows in ctx: a
+// statement Postgres ended arrives as SQLSTATE 57014 (meaningStatementEnded) and may arrive
+// while this stage's own context is still live, so the reason is read from the error too. Were
+// it not, the bound this server holds on its own query would reach the writer as "meaning search
+// failed", which is what the check says when something broke.
 func (s *server) relatedMeaningStage(ctx context.Context, project, text string, pick *relatedPick) relatedStage {
 	failed := func(reason string, err error) relatedStage {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || meaningStatementEnded(err) {
 			reason = relatedReasonMeaningTimeout
 		}
 		if err != nil {
@@ -593,7 +602,9 @@ func (s *server) relatedMeaningStage(ctx context.Context, project, text string, 
 // relatedMeaningSearch runs relatedMeaningQuery in a read transaction of its own
 // (beginMeaningScan), so that the check's meaning query reads the index as search's own does: it
 // runs the same arms, and searchMeaningScan, which that transaction sets, is what either of them
-// needs of the index scan (searchMeaningScan says what each setting is for).
+// needs of the index scan (searchMeaningScan says what each setting is for) - the bound the
+// server holds on the statement included, which its caller reports as the meaning search not
+// answering (relatedMeaningStage).
 func (s *server) relatedMeaningSearch(
 	ctx context.Context, project string, picked relatedTerms, vector []float32,
 ) (model.SearchResponse, error) {
