@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -118,6 +121,22 @@ func readyImplementer(t *testing.T, h *harness) claim.Token {
 	token, _ := h.launchIn("LEGION-208", "LEGION-209", claim.RoleImplementer)
 	h.ready(token, "ses_implementer", 1)
 	workingIssue(t, h, phase.Implementing)
+	return token
+}
+
+// suspendedImplementer is readyImplementer suspended by source: what the daemon's own suspend
+// leaves, and what the release of an idle issue pod leaves. Neither suspension holds against a
+// rule, so a start the phase's restart queues can reach such a claim while this route works.
+func suspendedImplementer(t *testing.T, h *harness, by supervise.SuspendSource) claim.Token {
+	t.Helper()
+	token := readyImplementer(t, h)
+	m, _ := h.supervisor.Machine(token)
+	if err := m.Handle(h.ctx, supervise.RequestSuspend{Claim: token, Reason: string(by) + " suspended the claim", By: by}); err != nil {
+		t.Fatalf("suspend %s by %s: %v", token, by, err)
+	}
+	if got := h.stored(token); got.State != supervise.StateSuspended || got.SuspendedBy != by {
+		t.Fatalf("the worker is %s suspended by %q, want it suspended by %q", got.State, got.SuspendedBy, by)
+	}
 	return token
 }
 
@@ -273,42 +292,157 @@ func TestAFreshSessionStartsEveryClaimThatIsNotInATurn(t *testing.T) {
 	}
 }
 
+// refusedRestart is the phase's restart the workflow refuses, in the words it refuses it with.
+func refusedRestart() *phaseRestarter {
+	facts := &phaseRestarter{}
+	facts.refusal = &intake.Refusal{
+		Status: http.StatusConflict, Code: "PHASE_REFUSED",
+		Message: "LEGION-209 works no phase the implementer can be restarted on",
+	}
+	return facts
+}
+
+// freshSessionNote is the sentence both doors carry when the claim is back in a new session and
+// nothing restarted its phase (api.FreshSessionResponse, api.OperatorClaim), and empty when the
+// answer carries none. The operator's door answers the whole claim, so this reads the one member
+// rather than the body.
+func freshSessionNote(t *testing.T, recorder *httptest.ResponseRecorder) string {
+	t.Helper()
+	var answer struct {
+		PhaseNotRestarted string `json:"phaseNotRestarted"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode the answer %s: %v", recorder.Body, err)
+	}
+	return answer.PhaseNotRestarted
+}
+
 // A phase worker that owes no task is started through its issue's phase, and a restart the
-// workflow refuses is the whole answer: nothing was relaunched. The restart runs before the
-// resume, so the refusal leaves the claim suspended and the runtime asked nothing, which is
-// what the refusal says. Run after the resume, the same refusal reported a failure for a worker
-// this route had just relaunched, and the operator who read it found the claim launching rather
-// than suspended.
-func TestAFreshSessionRelaunchesNothingWhenThePhaseRestartIsRefused(t *testing.T) {
+// workflow refuses is no refusal of the fresh session: the resume runs first, so the claim is
+// back in a new session whatever the workflow answers, and that is what the caller is told. The
+// answer names the refused restart, because nothing in the claim's state records that its phase
+// was not restarted. A refusal here instead would tell the caller nothing happened for a worker
+// this route had just relaunched, and, for the worker it suspended itself, leave it stopped
+// behind an operator's hold no rule of the daemon's can lift.
+func TestAFreshSessionStartsTheClaimWhenThePhaseRestartIsRefused(t *testing.T) {
 	for _, door := range freshSessionDoors() {
-		t.Run(door.name, func(t *testing.T) {
-			facts := &phaseRestarter{}
-			facts.refusal = &intake.Refusal{
-				Status: http.StatusConflict, Code: "PHASE_REFUSED",
-				Message: "LEGION-209 works no phase the implementer can be restarted on",
-			}
-			h := freshSessionHarness(t, facts)
-			token := readyImplementer(t, h)
-			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/suspend", nil); recorder.Code != http.StatusOK {
-				t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
-			}
-			calls := len(h.runtime.Calls())
+		for _, tc := range []struct {
+			name  string
+			start func(t *testing.T, h *harness) claim.Token
+		}{
+			{"a claim the operator suspended", func(t *testing.T, h *harness) claim.Token {
+				t.Helper()
+				token := readyImplementer(t, h)
+				if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/suspend", nil); recorder.Code != http.StatusOK {
+					t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+				}
+				return token
+			}},
+			{"a claim the daemon suspended", func(t *testing.T, h *harness) claim.Token {
+				t.Helper()
+				return suspendedImplementer(t, h, supervise.SuspendedByDaemon)
+			}},
+			{"a claim an idle release suspended", func(t *testing.T, h *harness) claim.Token {
+				t.Helper()
+				return suspendedImplementer(t, h, supervise.SuspendedByReleased)
+			}},
+			{"a ready worker owing no task", readyImplementer},
+		} {
+			t.Run(door.name+": "+tc.name, func(t *testing.T) {
+				facts := refusedRestart()
+				h := freshSessionHarness(t, facts)
+				token := tc.start(t, h)
+				spawns, resumes := len(h.runtime.CallsOf("Spawn")), len(h.runtime.CallsOf("Resume"))
 
-			recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
+				recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
 
-			// The workflow's own refusal is answered as the route gives it, its sentence and no
-			// code of its own (restartWorkedPhase).
-			wantRefusal(t, recorder, http.StatusConflict, "LEGION-209 works no phase the implementer can be restarted on")
-			if applied := facts.recorded(); len(applied) != 1 {
-				t.Fatalf("the refused fresh session applied %#v, want the phase's restart alone", applied)
-			}
-			if after := h.stored(token); after.State != supervise.StateSuspended {
-				t.Errorf("the claim is %s, want it suspended: a refused restart relaunches nothing", after.State)
-			}
-			if got := h.runtime.Calls()[calls:]; len(got) != 0 {
-				t.Errorf("the refused fresh session asked the runtime %+v, want it to launch nothing", got)
-			}
-		})
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("the fresh session = %d, want 200: the claim started, and only its phase did not; body %s", recorder.Code, recorder.Body)
+				}
+				want := string(token) + " is back in a new session owing no task, and nothing restarted its phase: " +
+					"LEGION-209 works no phase the implementer can be restarted on"
+				if got := freshSessionNote(t, recorder); got != want {
+					t.Errorf("the answer says %q, want %q", got, want)
+				}
+				if applied := facts.recorded(); len(applied) != 1 {
+					t.Fatalf("the fresh session applied %#v, want the phase's restart alone", applied)
+				}
+				after := h.stored(token)
+				if after.State != supervise.StateLaunching || after.Session != "" || after.SessionFile != "" {
+					t.Errorf("the claim is %s recording session %q (%q), want it launching in a new session", after.State, after.Session, after.SessionFile)
+				}
+				if got := len(h.runtime.CallsOf("Spawn")); got != spawns+1 {
+					t.Errorf("the fresh session made %d spawns, want one more than the %d before it", got, spawns)
+				}
+				if got := len(h.runtime.CallsOf("Resume")); got != resumes {
+					t.Errorf("the fresh session resumed a session %d times, want the %d before it: the claim records none", got, resumes)
+				}
+			})
+		}
+	}
+}
+
+// ruleResumingRestart is the phase's restart with the outbox lane behind it: the fact's own
+// commit hook posts the rule's resume that lane posts once the fact commits (intake.OnCommit,
+// which is how the lane is woken), and that resume is what relaunches a claim no operator
+// suspended. The hook runs after the commit, as the lane does, because a machine event posted
+// inside the fact's transaction would wait on the fact lock that transaction holds.
+type ruleResumingRestart struct {
+	phaseRestarter
+	resume func() error
+	posted bool
+	failed error
+}
+
+func (r *ruleResumingRestart) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	intake.OnCommit(ctx, func() {
+		r.posted = true
+		r.failed = r.resume()
+	})
+	return r.phaseRestarter.Apply(ctx, tx, fact)
+}
+
+// The resume runs before the phase's restart, so the start that restart queues finds the claim
+// already relaunched and does nothing. Run the other way round, the lane's rule resume reached
+// the suspended claim first — neither the daemon's suspension nor an idle release's holds
+// against a rule — and this route's own resume then met a launching claim, which the machine
+// refuses: the caller read a 409 for a claim that was relaunching.
+func TestAFreshSessionOutrunsTheRuleResumeThePhaseFactWakes(t *testing.T) {
+	for _, door := range freshSessionDoors() {
+		for _, by := range []supervise.SuspendSource{supervise.SuspendedByDaemon, supervise.SuspendedByReleased} {
+			t.Run(door.name+": suspended by "+string(by), func(t *testing.T) {
+				facts := &ruleResumingRestart{}
+				h := freshSessionHarness(t, facts)
+				token := suspendedImplementer(t, h, by)
+				m, _ := h.supervisor.Machine(token)
+				facts.resume = func() error {
+					return m.Handle(h.ctx, supervise.RequestRuleResume{Claim: token, Reason: "it owns its issue's phase"})
+				}
+				spawns := len(h.runtime.CallsOf("Spawn"))
+
+				recorder := door.ask(t, h, "LEGION-209", claim.RoleImplementer)
+
+				if recorder.Code != http.StatusOK && recorder.Code != http.StatusAccepted {
+					t.Fatalf("the fresh session = %d, want 200 or 202; body %s", recorder.Code, recorder.Body)
+				}
+				if !facts.posted {
+					t.Fatal("the fresh session applied no fact, so no lane's resume raced it")
+				}
+				if facts.failed != nil {
+					t.Fatalf("the lane's resume under the fact: %v", facts.failed)
+				}
+				if note := freshSessionNote(t, recorder); note != "" {
+					t.Errorf("the answer says %q, want nothing: the phase was restarted", note)
+				}
+				after := h.stored(token)
+				if after.State != supervise.StateLaunching || after.Session != "" {
+					t.Errorf("the claim is %s recording session %q, want it launching in a new session", after.State, after.Session)
+				}
+				if got := len(h.runtime.CallsOf("Spawn")); got != spawns+1 {
+					t.Errorf("the fresh session made %d spawns, want one more than the %d before it: the lane's resume finds the claim launching", got, spawns)
+				}
+			})
+		}
 	}
 }
 

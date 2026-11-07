@@ -24,7 +24,15 @@ type ClaimRequest struct {
 // FreshSessionResponse confirms the claim left its session behind and its start ran: either the
 // daemon relaunched it here, or the phase's restart it queued will. The controller is told
 // nothing else, since what it does next it reads in the state.
-type FreshSessionResponse struct{}
+type FreshSessionResponse struct {
+	// PhaseNotRestarted is why nothing restarted the claim's phase: the claim is back in a new
+	// session owing no task, and the workflow refused the restart that would have handed it
+	// one. It is absent wherever the phase was restarted, and wherever none was due — a claim
+	// that still owes a task, and an architect, work no phase start. The answer carries it
+	// because the state records nowhere that the phase restart did not run, and that is the one
+	// thing this answer knows which a reader of the claim cannot tell.
+	PhaseNotRestarted string `json:"phaseNotRestarted,omitempty"`
+}
 
 // The refusals both recoveries write themselves, which all four doors give word for word
 // (freshSession, compact).
@@ -125,12 +133,13 @@ func (s *server) claimFreshSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := s.freshSession(w, r, target.machine, target.token); !ok {
+	_, notRestarted, ok := s.freshSession(w, r, target.machine, target.token)
+	if !ok {
 		return
 	}
 	s.log.Info("api: the controller started a claim in a fresh session",
-		"claim", target.token, "issue", target.issue, "role", target.role)
-	writeJSON(w, http.StatusOK, FreshSessionResponse{})
+		"claim", target.token, "issue", target.issue, "role", target.role, "phaseNotRestarted", notRestarted)
+	writeJSON(w, http.StatusOK, FreshSessionResponse{PhaseNotRestarted: notRestarted})
 }
 
 // roleList names the roles a claim can be on, in the order the workflow reaches them.
@@ -145,7 +154,8 @@ func roleList() string {
 // freshSession is the one fresh-session effect, which `legion claims retry --fresh-session`
 // (retryClaim) and the controller's fresh_session (claimFreshSession) both run: the claim leaves
 // the session it recorded behind and starts again in a new one. It answers every refusal itself
-// and reports the status its caller's success answer takes.
+// and reports the status its caller's success answer takes, with the sentence that answer
+// carries when nothing restarted the claim's phase (FreshSessionResponse.PhaseNotRestarted).
 //
 // It reaches every claim of the project that is not in a turn — one idle on the provider-error
 // ladder, a suspended one, one an operator stopped, a failed one, and a root architect as much
@@ -171,17 +181,28 @@ func roleList() string {
 // machine answers a refusal: the caller reads an error and the phase runs on in the session the
 // provider keeps refusing.
 //
-// The phase's restart goes before the resume, and that is what makes a refused restart cost
-// nothing: an operator's suspension holds its claim until an operator resumes it, so the start
-// the fact queues waits on the outbox row's backoff instead of launching anything (supervise's
-// Claim.RuleHolds, which the outbox's start row and supervise.Machine.StartedBy both answer
-// with a wait). A restart this route answers a failure for — a fact the store would not apply,
-// the workflow's own refusal of it, an issue the retry leaves held because its tree lingers —
-// leaves the claim suspended and running nothing, which is what those answers say. Run after
-// the resume, as it once was, each of them reported a failure for a worker this route had just
-// relaunched, and the operator's next try found the claim launching rather than suspended. A
-// resume that fails behind a restart that ran answers its own failure the same way: the claim
-// stays suspended, and the start the restart queued waits for the resume that comes next.
+// The resume goes before the phase's restart, so the claim is back in its new session before
+// anything the workflow may refuse is asked for. Only an operator's own suspension holds the
+// start a restart queues (supervise's Claim.RuleHolds, which the outbox's start row and
+// supervise.Machine.StartedBy both answer with a wait): a claim the daemon suspended, and one
+// an idle release suspended, has no such hold. A restart run first on such a claim wakes the
+// outbox lane on the committed fact, the lane's start row finds a claim the rule may resume and
+// resumes it, and this route's own resume then meets a launching claim, which the table ignores
+// and the machine answers a refusal for (supervise's onResume rows): the caller reads a 409 for
+// a claim that is already relaunching. Run first, the resume has the claim launching before the
+// fact commits, and the lane's rule resume finds a live claim with nothing left to do
+// (supervise's onRuleResume rows).
+//
+// A restart the workflow refuses is therefore no refusal of the fresh session — not a fact the
+// store would not apply, not the workflow's own refusal of it, not an issue the retry leaves
+// held because its tree lingers. The claim is back in a new session whichever of them comes,
+// and this answers success with the refusal named in it (FreshSessionResponse.PhaseNotRestarted,
+// OperatorClaim.PhaseNotRestarted). A refusal here would be false twice over: it would tell the
+// caller that nothing happened, for a worker this route had just relaunched, and for a ready or
+// idle worker, which this route suspends itself as the operator, it would leave the worker
+// stopped behind a suspension no rule of the daemon's lifts and the controller's own door
+// cannot — the controller asks for a fresh session and a compaction, never a resume, so such a
+// worker would stand until an operator resumed it.
 //
 // What this order costs is the session id of a refused start, which the forget has dropped by
 // then. The claim such a refusal leaves behind records no session, so its next accepted start
@@ -201,55 +222,57 @@ func roleList() string {
 // (supervise's operatorRetry refuses the controller's retry for the same reason), and the
 // controller's own door cannot name it at all, since `controller` is no role a claim token is
 // built from (claimFreshSession).
-func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (int, bool) {
+func (s *server) freshSession(w http.ResponseWriter, r *http.Request, m *supervise.Machine, token claim.Token) (status int, notRestarted string, ok bool) {
 	c := m.Claim()
 	if c.Role == claim.RoleController {
 		writeFailure(w, http.StatusConflict, "NOT_THE_CONTROLLER", fmt.Sprintf(
 			"%s is the project's controller: the daemon's controller keeper starts it, and a fresh session of it would cut the project's one controller off", token))
-		return 0, false
+		return 0, "", false
 	}
 	switch {
 	case c.State == supervise.StateWorking:
-		return 0, refuseInATurn(w, token, freshSessionOp)
+		return 0, "", refuseInATurn(w, token, freshSessionOp)
 	case startsAgain(c.State):
 	case agentRunning(c.State):
 		if !s.suspendForFreshSession(w, r, m, token) {
-			return 0, false
+			return 0, "", false
 		}
 	default:
 		writeFailure(w, http.StatusConflict, claimUnsettled, fmt.Sprintf(
 			"%s is %s: a fresh session reaches a claim whose agent is ready or idle, and one that is suspended, stopped or failed; ask again when %s is one of those",
 			token, c.State, token))
-		return 0, false
+		return 0, "", false
 	}
 	if session := m.Claim().Session; session != "" && !s.forgetRecordedSession(w, r, m, token, session) {
-		return 0, false
+		return 0, "", false
 	}
 	if m.Claim().State != supervise.StateSuspended {
-		return s.retryStart(w, r, m, token)
+		status, ok := s.retryStart(w, r, m, token)
+		return status, "", ok
+	}
+	if _, ok := s.claimEvent(w, r, m, token, "resume", supervise.RequestResume{Claim: token}); !ok {
+		return 0, "", false
 	}
 	// A phase worker that owes no task is handed one by its issue's phase, through the same
-	// restart the start of a stopped claim runs (restartWorkedPhase): the resume below starts
+	// restart the start of a stopped claim runs (restartWorkedPhase): the resume above starts
 	// the agent and nothing more, so without it a tester waiting on CI, or a worker an idle
 	// release suspended, comes back in a new session with nothing to do. A claim that still
 	// owes a task keeps it — the resume sends that one — and an architect is never started
-	// through a phase at all. It runs before the resume so that a restart the workflow refuses
-	// relaunches nothing: the start it queues waits for the resume, which a refusal never
-	// reaches.
-	status := http.StatusOK
+	// through a phase at all.
+	status = http.StatusOK
 	if m.Claim().Pending == nil {
-		if phaseStatus, ok, restarted := s.restartWorkedPhase(w, r, token, m.Claim()); restarted {
-			if !ok {
-				return 0, false
-			}
+		if phaseStatus, refusal, restarted := s.restartWorkedPhase(r, token, m.Claim()); restarted {
 			status = phaseStatus
+			if refusal != "" {
+				status, notRestarted = http.StatusOK, fmt.Sprintf(
+					"%s is back in a new session owing no task, and nothing restarted its phase: %s", token, refusal)
+				s.log.Info("api: a fresh session started a claim whose phase was not restarted",
+					"claim", token, "refusal", refusal)
+			}
 		}
 	}
-	if _, ok := s.claimEvent(w, r, m, token, "resume", supervise.RequestResume{Claim: token}); !ok {
-		return 0, false
-	}
 	s.log.Info("api: a fresh session was started for a claim that was suspended", "claim", token)
-	return status, true
+	return status, notRestarted, true
 }
 
 // refuseInATurn is the refusal of a claim whose turn is running, which both recoveries give:

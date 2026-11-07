@@ -833,7 +833,8 @@ const legionDeliveryView = z.object({
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
  * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|forget-session|close`):
  * the claim as its supervisor holds it, but its hashes. `forgottenSession` and
- * `forgottenSessionFile` appear only in a successful `forget-session` response. */
+ * `forgottenSessionFile` appear only in a successful `forget-session` response, and
+ * `phaseNotRestarted` only in a `retry` that asked for a fresh session. */
 export const LegionOperatorClaimResponse = z.object({
   token: nonEmptyString,
   tree: nonEmptyString,
@@ -845,6 +846,12 @@ export const LegionOperatorClaimResponse = z.object({
   sessionFile: z.string(),
   forgottenSession: nonEmptyString.optional(),
   forgottenSessionFile: nonEmptyString.optional(),
+  /** Why nothing restarted the claim's phase, on a `retry` that asked for a fresh session
+   * (`{"freshSession":true}`) and nowhere else: the claim is back in a new session owing no
+   * task, and the workflow refused the restart that would have handed it one. The claim started
+   * either way, which is why the refusal rides a successful answer; absent when the phase was
+   * restarted, and when no restart was due. */
+  phaseNotRestarted: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: z.object({
     launchFailures: z.number().int().nonnegative(),

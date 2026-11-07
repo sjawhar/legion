@@ -672,9 +672,14 @@ package api
 // leaves the session it recorded behind and starts again in a new one, which also puts its run
 // of provider-error turns back to zero. One effect stands behind both doors (api's
 // freshSession), and it reaches every claim of the project that is not in a turn, where the
-// plain retry reaches only a claim that failed and one an operator stopped. The controller's
-// `legion` tool gains `fresh_session (issue, role)`, which posts it, and
-// `packages/contracts/src/legion-api.ts` mirrors the request. `POST /legion/v1/claims/compact`
+// plain retry reaches only a claim that failed and one an operator stopped. Its answer
+// (`api.FreshSessionResponse`), and the `api.OperatorClaim` the operator's retry answers, carry
+// an optional `phaseNotRestarted`: the claim came back owing no task and the workflow refused
+// the restart of its phase, which is the one thing the claim's state does not record, so the
+// fresh session reports the refusal rather than giving it, and the claim is started either way.
+// The controller's `legion` tool gains `fresh_session (issue, role)`, which posts it, and
+// `packages/contracts/src/legion-api.ts` mirrors the request and that member.
+// `POST /legion/v1/claims/compact`
 // (the same `api.ClaimRequest`) is the recovery the controller reaches for
 // first: it compacts the claim's Oh My Pi session and sends the claim whatever task it owed again,
 // where a fresh session keeps nothing the old one held. It answers `api.CompactResponse`

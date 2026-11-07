@@ -529,12 +529,25 @@ func (s *server) logFailure(msg string, args ...any) {
 // halt waits on the supervisor's lock before the daemon's serve shuts the server down, which closes
 // its listener.
 func (s *server) stopped(w http.ResponseWriter, request string) bool {
-	if s.stopping.Err() == nil {
+	refusal := s.stopRefusal(request)
+	if refusal == "" {
 		return false
 	}
-	s.log.Info("api: refused an operator request: the daemon is stopping", "request", request)
-	writeJSON(w, http.StatusServiceUnavailable, errorBody(request+" refused: the daemon is stopping; ask again once it is back"))
+	writeJSON(w, http.StatusServiceUnavailable, errorBody(refusal))
 	return true
+}
+
+// stopRefusal is that refusal's sentence, and empty while the daemon runs: one caller writes it
+// as its own answer (stopped), and one hands it back for a caller that answers something else
+// around it (restartWorkedPhase, whose fresh session started the claim and reports only that
+// nothing restarted its phase). The log line is written here, so a request refused by the stop
+// is logged once whichever of the two gives it.
+func (s *server) stopRefusal(request string) string {
+	if s.stopping.Err() == nil {
+		return ""
+	}
+	s.log.Info("api: refused an operator request: the daemon is stopping", "request", request)
+	return request + " refused: the daemon is stopping; ask again once it is back"
 }
 
 func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
