@@ -3,7 +3,6 @@
 // session. One bounded call per reading: a busy shared tmux server must not hold up a heartbeat.
 
 import type { TmuxPlace } from "@legion/contracts";
-import { z } from "zod";
 
 import { type ExecFn, TMUX_PANE_LOOKUP_MS, tryExec } from "./dispatch-cwd";
 import { isAncestor } from "./process-ancestry";
@@ -12,45 +11,12 @@ import { tmuxServer } from "./tmux-server";
 /** A session's pane and the window and tmux session holding it, in the wire names the listener
  *  and Dispatch read: the contract's own type, which the listener and the pages read it by.
  *  `layout` is tmux's `window_layout` string, which draws the window's split; it is absent when
- *  the window is split so finely that the string outgrew what a registration carries. */
+ *  the window is split so finely that the string outgrew what a registration carries.
+ *  A place crosses the wire outwards only: a registration carries the one this module reads
+ *  (`transport.ts`'s `SubscribeInput.place`), and nothing here parses one back, so there is no
+ *  wire schema for it — the contract's type is what holds both ends together.
+ *  `@legion/contracts`' `Agent.tmux_place` is the same place as Dispatch answers it. */
 export type { TmuxPlace } from "@legion/contracts";
-
-/** A place as it crosses the wire, which a registration's answer is parsed by
- *  (`SessionWireSchema`, transport.ts). The type above is what it parses to:
- *  `TmuxPlaceParsesTheContract` below fails the typecheck if the two ever drift apart. */
-export const TmuxPlaceSchema = z.object({
-  socket: z.string(),
-  server_pid: z.string(),
-  session_name: z.string(),
-  window_id: z.string(),
-  window_index: z.number().int(),
-  window_name: z.string(),
-  pane_id: z.string(),
-  pane_index: z.number().int(),
-  // Absent when the window's layout string outgrew what a registration carries.
-  layout: z.string().optional(),
-  zoomed: z.boolean(),
-});
-
-/** Each member of `T`, with an optional one readable as absent or as `undefined`, so a
- *  comparison below is about the members and their types rather than about how each side spells
- *  an optional one (`exactOptionalPropertyTypes`, which only some of this repo's packages set). */
-type Loosened<T> = { [K in keyof T]: T[K] | undefined };
-
-/** True only where both types hold exactly the same members. */
-type SameShape<Left, Right> = [Loosened<Left>] extends [Loosened<Right>]
-  ? [Loosened<Right>] extends [Loosened<Left>]
-    ? true
-    : false
-  : false;
-
-type Assert<Held extends true> = Held;
-
-/** A member added to, dropped from or retyped in either the schema or the contract's type, and
- *  not in the other, fails the typecheck here. */
-export type TmuxPlaceParsesTheContract = Assert<
-  SameShape<z.infer<typeof TmuxPlaceSchema>, TmuxPlace>
->;
 
 /**
  * What one reading came to. The two ways of having no place are kept apart because they mean

@@ -811,8 +811,8 @@ describe("EnvoyClient", () => {
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
   });
 
-  test("reads a session row's tmux place, and a row carrying a member this build does not know", async () => {
-    const placed = {
+  test("drops a session row's tmux place, and any other member this build does not read", async () => {
+    const row = {
       session_id: "ses_placed",
       machine_id: "host-a",
       dir: "/work",
@@ -820,6 +820,13 @@ describe("EnvoyClient", () => {
       title: "Envoy QA",
       topics: ["notifications.agent.ses_placed"],
       self_subscribed: false,
+    };
+    const placed = {
+      ...row,
+      // The listener answers the place of a session in a pane. Nothing on this side reads it —
+      // the one reader of this list is the `envoy_sessions` tool, which hands the model every
+      // member of every row, and a layout string is up to 2 000 characters of them — so the
+      // schema leaves it off and zod drops it.
       tmux_place: {
         socket: "/tmp/tmux-1000/default",
         server_pid: "4242",
@@ -844,9 +851,10 @@ describe("EnvoyClient", () => {
 
     const sessions = await client.listSessions();
 
-    // The layout is the one member a place may lack: the listener drops an outsized one.
-    expect(sessions[0]).toEqual({ ...placed, state: "live" });
-    expect(sessions[1]).toEqual({ ...placed, session_id: "ses_newer", state: "live" });
+    // A row carrying a place still parses, which is what keeps an older reader working against a
+    // listener that answers one.
+    expect(sessions[0]).toEqual({ ...row, state: "live" });
+    expect(sessions[1]).toEqual({ ...row, session_id: "ses_newer", state: "live" });
   });
 
   test("keeps an unresponsive row's state and its last registration, and asks for it by name", async () => {

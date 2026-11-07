@@ -111,6 +111,7 @@ import {
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
 import { readTmuxPlace, type TmuxPlace } from "@legion/envoy-client/tmux-place";
+import { createTmuxPlaceCache } from "@legion/envoy-client/tmux-place-cache";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -2729,57 +2730,26 @@ export default function envoyExtension(pi: PiApi): void {
     await registrationState.deregister(id);
   };
 
-  // Where this session's pane sits in tmux, as the last reading left it, when that reading was
-  // taken, and the reading in flight where one is. Every registration carries the place, so
-  // Dispatch can draw the machine's layout from what the sessions themselves report; a tmux
-  // server driving a wall of panes answers slowly under load, so one reading serves every
-  // registration for `tmuxPlaceCacheMs` — several heartbeats — instead of each paying for its
-  // own round trip.
-  let tmuxPlace: TmuxPlace | undefined;
-  let tmuxPlaceReadAt: number | undefined;
-  let tmuxPlaceReading: Promise<TmuxPlace | undefined> | undefined;
+  /** The directory the place reading's one tmux call is spawned in. Not the session's own: tmux
+   *  reads nothing from the cwd here — the socket `TMUX` names is absolute — while a workspace
+   *  removed under a live session would make the spawn fail, which `tryExec` reports as
+   *  `refused` and a reading reads as a session that has left its pane. The root outlives every
+   *  session, and `process.cwd()` throws for a deleted one. */
+  const TMUX_PLACE_CWD = "/";
 
-  // One reading, however many registrations are waiting on it. The cache is stamped only once a
-  // reading comes back, so two registrations in flight together — a queued pass and the
-  // heartbeat's stall backstop, which refreshes outside the queues — would otherwise each shell
-  // out to tmux, and the slower of the two would overwrite the newer answer with its older one.
-  // A reading of any kind restamps the cache, so a session outside tmux and a server too loaded
-  // to answer each cost one call per lifetime rather than one per registration. `refused` drops
-  // the place, which clears the listener's entry for a session that has left its pane;
-  // `timedOut` keeps the last place read, so one slow call does not take a live session off the
-  // layout. A reader that throws says nothing about where the session sits, so it is kept like a
-  // timeout — and above all it never reaches the caller: a failed place read must not fail the
-  // registration, and with it the heartbeat.
-  const readTmuxPlaceOnce = async (): Promise<TmuxPlace | undefined> => {
-    try {
-      const reading = await readTmuxPlace(
-        process.env,
-        defaultExec,
-        sessionDirectory || process.cwd()
-      );
-      if (reading.kind === "place") tmuxPlace = reading.place;
-      else if (reading.kind === "refused") tmuxPlace = undefined;
-    } catch (error) {
-      logger.debug("envoy: the tmux place reading failed", { error: messageFor(error) });
-    } finally {
-      // Cleared before this answer reaches anyone, so the next cold read starts a reading of
-      // its own rather than taking this one's.
-      tmuxPlaceReading = undefined;
-    }
-    tmuxPlaceReadAt = Date.now();
-    return tmuxPlace;
-  };
-
-  /** The place the registration going out now carries: the cached one while it stands, else the
-   *  reading already in flight, else a reading of its own. */
-  const currentTmuxPlace = async (): Promise<TmuxPlace | undefined> => {
-    const lifetimeMs = active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS;
-    if (tmuxPlaceReadAt !== undefined && Date.now() - tmuxPlaceReadAt < lifetimeMs) {
-      return tmuxPlace;
-    }
-    tmuxPlaceReading ??= readTmuxPlaceOnce();
-    return await tmuxPlaceReading;
-  };
+  // Where this session's pane sits in tmux, so Dispatch can draw the machine's layout from what
+  // the sessions themselves report. The reading runs between registrations, never inside one: a
+  // registration takes what the cache holds in the turn it is built (`sendRegistration`), so a
+  // tmux server driving a wall of panes delays no registration and leaves none in flight behind
+  // a slow call. One reading serves every registration for `tmuxPlaceCacheMs` — several
+  // heartbeats — instead of each paying for its own round trip, and a session shutting down
+  // stops the reading already away from writing anything (`createTmuxPlaceCache`).
+  const tmuxPlaces = createTmuxPlaceCache({
+    read: () => readTmuxPlace(process.env, defaultExec, TMUX_PLACE_CWD),
+    lifetimeMs: () => active?.settings.tmuxPlaceCacheMs ?? DEFAULT_TMUX_PLACE_CACHE_MS,
+    onFailure: (error) =>
+      logger.debug("envoy: the tmux place reading failed", { error: messageFor(error) }),
+  });
 
   // What this session registers with the listener, read afresh at every registration. The
   // listener delivers nothing to a self-subscribed session (it takes its topics over its own
@@ -2831,9 +2801,12 @@ export default function envoyExtension(pi: PiApi): void {
   const sendRegistration = async (
     send: (input: RegistrationInput) => Promise<SubscribeResult>
   ): Promise<SubscribeResult> => {
-    // Before anything else the body is built from, so the first registration a session sends
-    // carries its place: nothing refreshes it out of band, and a cached reading costs no wait.
-    const place = await currentTmuxPlace();
+    // Taken in the turn this call starts, with no await ahead of it, so the whole body is built
+    // and posted without a tmux call in between: the session the deregistration at shutdown
+    // waits out is the one that reaches the wire, and no registration can resume behind the
+    // DELETE (dispatch://INFRA-392). The cache answers the last reading, none while it has had
+    // none, and starts the reading the registration after this one carries.
+    const place = tmuxPlaces.place();
     const registeringFor = sessionID;
     // While a sweep still owes the session's own inbox from the stream's oldest message (its start
     // could not be read when it registered with NATS down, `ReplayEngine.startPending`), the
@@ -3659,6 +3632,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
+    // A reading still away answers nobody from here on: the DELETE below is what the session
+    // leaves behind, and a place written after it would be a registration the heartbeat has
+    // stopped refreshing (dispatch://INFRA-392).
+    tmuxPlaces.shutDown();
     cardWake.cancel();
     if (publishedInterface !== undefined) {
       const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);

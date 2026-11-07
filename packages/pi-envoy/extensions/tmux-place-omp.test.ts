@@ -209,6 +209,15 @@ function layoutOf(body: Record<string, unknown>): string {
   return layout;
 }
 
+/** The layout a registration draws, where it carries a place at all: what a case waits on while
+ *  registrations the session sent before a reading answered are still arriving. */
+function layoutIfAny(body: Record<string, unknown>): string | undefined {
+  const place = body.tmux_place;
+  if (typeof place !== "object" || place === null) return undefined;
+  const layout = (place as Record<string, unknown>).layout;
+  return typeof layout === "string" ? layout : undefined;
+}
+
 /** The panes a `window_layout` string names, in its own order: every leaf cell is
  *  `<width>x<height>,<x>,<y>,<pane id>`, the id written without its `%`, while a cell holding
  *  other cells ends in `{` or `[` instead and names no pane. */
@@ -238,8 +247,10 @@ async function until<T>(
 // tmux, and the layout against the window the case built. A member read from the wrong field of
 // the tmux answer, or dropped on the way to the wire, shows here and nowhere else — `window_id`
 // and `zoomed` are reported by nothing else at all. The split then proves the place is read afresh
-// rather than worked out once: the window the session sits in grows a pane, and the next
-// registration draws four.
+// rather than worked out once: the window the session sits in grows a pane, and a later
+// registration draws four. Which registration carries a place is not fixed: a registration takes
+// whatever the cache holds when it is built and waits on no tmux call, so the session's first
+// goes out before its first reading has answered and a heartbeat behind it carries the answer.
 test.skipIf(skip)(
   "a session in a tmux pane registers the pane it sits in, and the split that follows it",
   async () => {
@@ -281,8 +292,8 @@ test.skipIf(skip)(
       await run(["split-window", "-d", "-t", `${window}.${PANE_INDEX}`, "sleep 600"]);
 
       const first = await until(
-        "the session's first registration with the listener",
-        () => registrations(requests)[0],
+        "a registration carrying the session's place",
+        () => registrations(requests).find((body) => body.tmux_place !== undefined),
         said
       );
       // What tmux told the pane, as the pane itself saw it: `TMUX` is
@@ -312,13 +323,20 @@ test.skipIf(skip)(
 
       await run(["split-window", "-d", "-t", `${window}.2`, "sleep 600"]);
       // The registrations taken from here on read the window after the split: a reading stands for
-      // `PLACE_CACHE_MS`, and this waits that out before it counts what the stand-in holds, so the
-      // one it then waits for is a heartbeat that ran the reading again.
+      // `PLACE_CACHE_MS`, and this waits that out before it counts what the stand-in holds. The
+      // first registration past that starts the reading of the split window, and a heartbeat
+      // behind it carries what that reading found.
       await Bun.sleep(PLACE_CACHE_MS);
       const taken = registrations(requests).length;
       const next = await until(
-        "the registration after the split",
-        () => registrations(requests)[taken],
+        "a registration carrying the window the split left",
+        () =>
+          registrations(requests)
+            .slice(taken)
+            .find((body) => {
+              const layout = layoutIfAny(body);
+              return layout !== undefined && layout !== threePanes;
+            }),
         said
       );
       expect(layoutPanes(layoutOf(next))).toEqual(
@@ -336,8 +354,9 @@ test.skipIf(skip)(
 );
 
 // The same binary, started the way every other case of this package starts it: no pane, no `TMUX`,
-// nothing to report. The place is left off the body rather than sent empty, which is what keeps a
-// listener holding a place for a session that has one from being told it has none.
+// nothing to report. The place is left off the body rather than sent empty: the listener builds
+// its entry fresh from each registration, so a body carrying no place leaves the session with
+// none, which is what a session outside tmux is.
 test.skipIf(skip)(
   "a session outside tmux registers no place at all",
   async () => {

@@ -371,13 +371,9 @@ const tmuxPlaceState = {
   ) => TmuxPlaceReading | Promise<TmuxPlaceReading>,
 };
 // Copied out before the mock replaces the module: the row that drives the real reader over an
-// exec that records every call (`@legion/envoy-client/tmux-place` runs none outside tmux), and
-// the wire schema, which the transport parses every registration answer with.
-const { readTmuxPlace: realReadTmuxPlace, TmuxPlaceSchema } = await import(
-  "@legion/envoy-client/tmux-place"
-);
+// exec that records every call (`@legion/envoy-client/tmux-place` runs none outside tmux).
+const { readTmuxPlace: realReadTmuxPlace } = await import("@legion/envoy-client/tmux-place");
 mock.module("@legion/envoy-client/tmux-place", () => ({
-  TmuxPlaceSchema,
   readTmuxPlace: async (env: Record<string, string | undefined>, exec: ExecFn, cwd: string) => {
     tmuxPlaceState.calls.push({ env, cwd });
     return tmuxPlaceState.reading(env, exec, cwd);
@@ -15023,26 +15019,15 @@ console.log(JSON.stringify(args));
           for (const tick of heartbeats) tick();
           await sent.promise;
         },
-        /** Ticks every interval and waits for nothing: what a case that overlaps two
-         *  registrations drives each of them from. */
-        tick: () => {
-          for (const tick of heartbeats) tick();
-        },
-        /** Resolves once `count` further registrations have landed at the listener. */
-        landed: (count: number) => {
-          const reached = Promise.withResolvers<void>();
-          const target = places.length + count;
-          registered = () => {
-            if (places.length >= target) reached.resolve();
-          };
-          return reached.promise;
-        },
       };
     }
 
     /** The next registration a session sends once its cached reading has aged out, crossed on
-     *  the clock the cache reads (`Date.now`): a real wait would cost every run the lifetime. */
+     *  the clock the cache reads (`Date.now`): a real wait would cost every run the lifetime.
+     *  The pass the previous tick started is let settle first, since a tick that finds one still
+     *  holding the queue refreshes nothing while the registration it would refresh is fresh. */
     async function heartbeatPastTheLifetime(session: { heartbeat: () => Promise<void> }) {
+      await settle();
       setSystemTime(new Date(Date.now() + 1_000));
       try {
         await session.heartbeat();
@@ -15051,45 +15036,39 @@ console.log(JSON.stringify(args));
       }
     }
 
-    test("two registrations in flight together read tmux once", async () => {
-      await withEnvoyTimings({ heartbeatMs: 25, tmuxPlaceCacheMs: 25 }, async () => {
+    test("two registrations while one reading is away read tmux once", async () => {
+      await withEnvoyTimings({ tmuxPlaceCacheMs: 25 }, async () => {
         tmuxPlaceState.reading = () => ({ kind: "place", place: PLACE });
         const session = await bootPlacedSession("tmux-place-one-flight", "ses_tmux_one_flight");
-        // A reading that has not answered yet. The pass the first tick starts waits on it; the
-        // second tick finds that pass still holding the queue and refreshes the registration on
-        // its own, outside it, while the first reading is still in flight.
+        // A reading that has not answered yet: the registration past the lifetime starts it, and
+        // the one after that finds it still away. Two readings at once would have the slower of
+        // them overwrite the newer answer with its older one.
         const reading = Promise.withResolvers<TmuxPlaceReading>();
-        const started = Promise.withResolvers<void>();
-        tmuxPlaceState.reading = () => {
-          started.resolve();
-          return reading.promise;
-        };
-        setSystemTime(new Date(Date.now() + 1_000));
-        try {
-          const landed = session.landed(2);
-          session.tick();
-          // The pass's own reading is away; the tick that follows it finds the pass still
-          // holding the queue and registers outside it, with that reading unanswered.
-          await started.promise;
-          session.tick();
-          reading.resolve({ kind: "place", place: MOVED });
-          await landed;
-        } finally {
-          setSystemTime();
-        }
+        tmuxPlaceState.reading = () => reading.promise;
+        await heartbeatPastTheLifetime(session);
+        await heartbeatPastTheLifetime(session);
 
-        // Two registrations, and the one reading they shared: the second took the first's
-        // answer rather than shelling out to tmux of its own.
+        // Two registrations, and the one reading they share, which neither waited for: both
+        // carry the place the cache held while it was away.
         expect(tmuxPlaceState.calls).toHaveLength(2);
-        expect(session.places).toEqual([PLACE, MOVED, MOVED]);
+        expect(session.places).toEqual([undefined, PLACE, PLACE]);
+        reading.resolve({ kind: "place", place: MOVED });
       });
     });
 
-    test("the first registration a session sends carries its place", async () => {
+    test("the first registration waits on no reading, and the next carries its place", async () => {
       tmuxPlaceState.reading = () => ({ kind: "place", place: PLACE });
       const session = await bootPlacedSession("tmux-place-first", "ses_tmux_first");
 
-      expect(session.places).toEqual([PLACE]);
+      // The first registration starts the reading and goes out without it: a cold reading is a
+      // tmux call of up to a second, and a registration that waited one out could reach the
+      // listener behind its own session's shutdown (dispatch://INFRA-392). The reading answers
+      // between registrations, and the next one carries it.
+      expect(session.places).toEqual([undefined]);
+      expect(tmuxPlaceState.calls).toHaveLength(1);
+      await session.heartbeat();
+
+      expect(session.places).toEqual([undefined, PLACE]);
       expect(tmuxPlaceState.calls).toHaveLength(1);
     });
 
@@ -15102,7 +15081,7 @@ console.log(JSON.stringify(args));
       await session.heartbeat();
 
       expect(tmuxPlaceState.calls).toHaveLength(1);
-      expect(session.places).toEqual([PLACE, PLACE]);
+      expect(session.places).toEqual([undefined, PLACE]);
     });
 
     test("reads tmux again for a registration past the cache lifetime", async () => {
@@ -15111,10 +15090,14 @@ console.log(JSON.stringify(args));
         tmuxPlaceState.reading = () => next;
         const session = await bootPlacedSession("tmux-place-expired", "ses_tmux_expired");
         next = { kind: "place", place: MOVED };
+        // The registration past the lifetime starts the reading of the moved pane; the one after
+        // it is the first to carry it, and reads nothing itself — both heartbeats cross the same
+        // second, so the reading in between is still fresh.
+        await heartbeatPastTheLifetime(session);
         await heartbeatPastTheLifetime(session);
 
         expect(tmuxPlaceState.calls).toHaveLength(2);
-        expect(session.places).toEqual([PLACE, MOVED]);
+        expect(session.places).toEqual([undefined, PLACE, MOVED]);
       });
     });
 
@@ -15126,8 +15109,9 @@ console.log(JSON.stringify(args));
         // The session left its pane: the listener's entry must lose the place, not keep a stale one.
         next = { kind: "refused" };
         await heartbeatPastTheLifetime(session);
+        await heartbeatPastTheLifetime(session);
 
-        expect(session.places).toEqual([PLACE, undefined]);
+        expect(session.places).toEqual([undefined, PLACE, undefined]);
       });
     });
 
@@ -15139,9 +15123,10 @@ console.log(JSON.stringify(args));
         // A server too loaded to answer in time must not take a live session off the layout.
         next = { kind: "timedOut" };
         await heartbeatPastTheLifetime(session);
+        await heartbeatPastTheLifetime(session);
 
         expect(tmuxPlaceState.calls).toHaveLength(2);
-        expect(session.places).toEqual([PLACE, PLACE]);
+        expect(session.places).toEqual([undefined, PLACE, PLACE]);
       });
     });
 
@@ -15150,8 +15135,9 @@ console.log(JSON.stringify(args));
         throw new Error("the tmux reader broke");
       };
       const session = await bootPlacedSession("tmux-place-throws", "ses_tmux_throws");
+      await session.heartbeat();
 
-      expect(session.places).toEqual([undefined]);
+      expect(session.places).toEqual([undefined, undefined]);
     });
 
     test("a session with neither TMUX nor TMUX_PANE runs no tmux call at all", async () => {
@@ -15170,6 +15156,25 @@ console.log(JSON.stringify(args));
       expect(tmuxPlaceState.calls[0]?.env.TMUX_PANE).toBeUndefined();
       expect(calls).toEqual([]);
       expect(session.places).toEqual([undefined]);
+    });
+
+    test("spawns the tmux call in a directory no session can delete under it", async () => {
+      const directories: string[] = [];
+      const exec: ExecFn = async (_file, _args, options) => {
+        directories.push(options.cwd);
+        return { stdout: "" };
+      };
+      process.env.TMUX = "/tmp/tmux-1000/default,4242,0";
+      process.env.TMUX_PANE = "%7";
+      // The real reader again, so the directory the extension chose is the one the call is
+      // spawned in: tmux reads nothing from it — the socket `TMUX` names is absolute — while a
+      // workspace removed under a live session makes the spawn fail, and `tryExec` reports that
+      // failure as `refused`, which would clear the place of a session still in its pane.
+      tmuxPlaceState.reading = (env, _exec, cwd) => realReadTmuxPlace(env, exec, cwd);
+      await bootPlacedSession("tmux-place-cwd", "ses_tmux_cwd");
+
+      expect(tmuxPlaceState.calls[0]?.cwd).toBe("/");
+      expect(directories).toEqual(["/"]);
     });
   });
 
