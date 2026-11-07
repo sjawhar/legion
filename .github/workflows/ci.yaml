@@ -3100,15 +3100,29 @@ jobs:
     #   every other step summed                                         68 s   94 s  135 s
     #   the whole job                                                  207 s  305 s  516 s
     #
+    # The dashboard step's own figure moved after that window, so it is measured again below;
+    # the others stand. That step builds the dashboard twice inside itself, and the diagram
+    # worker now carries upstream Mermaid, 62 code-split chunks of about 5.6 MB
+    # (`packages/dispatch/web/vite.config.ts`), which each of the two builds pays for
+    # (INFRA-925). Read from the runners' own `built in` lines: a build takes 28.9 s to 36.0 s
+    # on main over the 8 of the newest 10 push runs whose log could be read, and 54.9 s to
+    # 72.0 s with Mermaid in the worker, so the step carries up to about 72 s more than it did.
+    # Measured again for the step itself, over the 31 of the newest 40 main push runs that
+    # could be read, created between 2026-11-07T10:39:00Z and 2026-11-07T13:36:34Z, over the
+    # jobs of this name that concluded success:
+    #
+    #   step                                                          median   95th    max
+    #   Browser-test dispatch dashboard against two server processes   191 s  197 s  200 s
+    #
     # The rule, and the reason the budgets sit on the steps rather than on the job alone, are in
     # the dispatch job's comment above its `timeout-minutes`; this job states only what it
-    # measured and what that rule gives here. 202 s x 1.15 = 232 s -> 4 min for the dashboard
-    # step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 4 min for the
-    # install step, for the reason its own comment gives. The job budget is the sum of its step
-    # budgets plus the measured maximum of every step without one, rounded up: 4 + 4 + 2 min
-    # plus 135 s = 13 min. With budgets on the steps, the `if: failure()` upload below still
-    # runs, which a cancelled job skips.
-    timeout-minutes: 13
+    # measured and what that rule gives here. (200 s + 72 s) x 1.15 = 313 s -> 6 min for the
+    # dashboard step, 13 s x 1.15 = 15 s -> the two-minute floor for the sign-in step, and 4 min
+    # for the install step, for the reason its own comment gives. The job budget is the sum of
+    # its step budgets plus the measured maximum of every step without one, rounded up: 6 + 4 +
+    # 2 min plus 135 s = 15 min. With budgets on the steps, the `if: failure()` upload below
+    # still runs, which a cancelled job skips.
+    timeout-minutes: 15
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -3189,8 +3203,9 @@ jobs:
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard against two server processes
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
-        # multiprocess specs through the round-robin proxy.
-        timeout-minutes: 4
+        # multiprocess specs through the round-robin proxy. Both builds carry upstream Mermaid
+        # in the diagram worker, which is where the budget above measures its 72 s.
+        timeout-minutes: 6
         run: bun run e2e:multiprocess
         working-directory: packages/dispatch
       - name: Browser-test a sign-in across two server processes

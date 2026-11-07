@@ -317,7 +317,11 @@ async function load(): Promise<MermaidRenderer> {
    * with the library by a row of its own (`mermaid-diagrams.test.tsx`), so a type a Mermaid
    * upgrade adds cannot reach here with no stand-in.
    *
-   * A failure warms nothing and refuses nothing: the reader's own render is what answers.
+   * A failure warms nothing and refuses nothing: the reader's own render is what answers. The
+   * type stays marked warm, so a second source of it is not warmed again after a warm whose
+   * chunk failed. That costs nothing either way: a chunk the browser refused took the worker
+   * with it, since the source it was drawing is refused and an abandoned job replaces the
+   * worker, and a chunk it merely served late is in its cache for the next source.
    */
   async function warmLayoutFor(diagramType: string, beganDownload: () => void): Promise<void> {
     if (warmedTypes.has(diagramType)) return;
