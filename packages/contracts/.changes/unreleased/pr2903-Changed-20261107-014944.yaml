@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The envelope''s `expects_reply` is now `false | "optional" | "required"`: the JSON literal `false` replaces the string `none`, so a reader asking whether a message wants a reply reads the value itself. `EXPECTS_REPLY_VALUES` is exported and feeds both the envelope schema and the agent-facing tool argument, and the tool schema gains a `literal` member whose Zod adapter keeps a host''s own literal node only when it accepts every value of the set.'
+time: 2026-11-07T01:49:44.795163916Z
+custom:
+    Issue: pr2903

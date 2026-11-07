@@ -30,14 +30,15 @@ usage() {
 Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
-fixtures plus one direct message to a session that takes them from its own NATS
-consumer, prove that a registration naming a port is refused and how a send to
-an unknown session and a send whose bus is gone are refused, prove the kept
-lane — a role message nobody holds is kept and answered 202 and reaches the
-session that claims the role next exactly once, carrying kept_at, while a role
-whose holder's claim has lapsed keeps nothing and is refused 404 and a role a
-live session holds still answers 200 — and write raw and rendered acceptance
-evidence to
+fixtures plus three direct messages to a session that takes them from its own
+NATS consumer — two of them spelling "no reply wanted" the two ways the wire
+allows, the JSON literal false and the old string "none" — prove that a
+registration naming a port is refused and how a send to an unknown session and
+a send whose bus is gone are refused, prove the kept lane — a role message
+nobody holds is kept and answered 202 and reaches the session that claims the
+role next exactly once, carrying kept_at, while a role whose holder's claim has
+lapsed keeps nothing and is refused 404 and a role a live session holds still
+answers 200 — and write raw and rendered acceptance evidence to
 packages/envoy/out/e2e/. NATS is a server of this checkout's own build
 (internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
@@ -80,6 +81,10 @@ readonly envelopes_file="${out_dir}/envelopes.jsonl"
 readonly session_frames_file="${out_dir}/session-frames.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
+# The two sends that carry an expects_reply. Each is answered in its sender's own dialect, so the
+# two answers are kept apart rather than read from one file.
+readonly no_reply_false_response_file="${out_dir}/no-reply-false-send-response.json"
+readonly no_reply_none_response_file="${out_dir}/no-reply-none-send-response.json"
 readonly registry_session_response_file="${out_dir}/registry-session-response.json"
 readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
 readonly subscribe_response_file="${out_dir}/subscribe-response.json"
@@ -165,6 +170,7 @@ trap 'cleanup 143' TERM
 
 rm -f "$envelopes_file" "$session_frames_file" "$rendered_ts_file" \
   "$direct_response_file" "$subscribe_response_file" "$unwired_response_file" "$port_registration_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+  "$no_reply_false_response_file" "$no_reply_none_response_file" \
   "$lapsed_role_claim_response_file" "$lapsed_registry_response_file" "$lapsed_role_response_file" "$lapsed_role_reclaim_response_file" \
   "$keep_false_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
@@ -532,6 +538,49 @@ jq -e --arg recipient "$session_id" --arg message "$direct_message" \
   exit 1
 }
 
+# The two spellings of "no reply wanted", sent one after the other to the session already
+# registered above. The envelope's expects_reply is the JSON literal false; a plugin build older
+# than that change writes the string "none" for the same thing and cannot parse the literal back.
+# Nothing else in this repository proves the three claims that split apart against a real
+# listener, a real bus and the renderer a session reads: the listener answers each sender in the
+# dialect it spoke, it puts one vocabulary on the bus whichever arrived, and a session is shown
+# one spelling.
+printf 'posting the two spellings of a message that wants no reply\n'
+no_reply_false_message="No-reply direct message written false."
+no_reply_false_body="$(jq -nc \
+  --arg session_id "$session_id" \
+  --arg message "$no_reply_false_message" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message,expects_reply:false}')"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$no_reply_false_body" >"$no_reply_false_response_file"
+# jq's == tells the literal false from the string "false", so this fails on an answer that quotes
+# it as surely as on one that writes the old word back to a sender that never used it.
+jq -e --arg message "$no_reply_false_message" \
+  '.payload_summary == $message and .expects_reply == false' \
+  "$no_reply_false_response_file" >/dev/null || {
+  printf 'ERR: a send writing expects_reply false was not answered the JSON literal false.\n' >&2
+  cat "$no_reply_false_response_file" >&2
+  exit 1
+}
+
+no_reply_none_message="No-reply direct message written none."
+no_reply_none_body="$(jq -nc \
+  --arg session_id "$session_id" \
+  --arg message "$no_reply_none_message" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message,expects_reply:"none"}')"
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$no_reply_none_body" >"$no_reply_none_response_file"
+# The older sender gets its own word back. Its envelope schema holds the three-word enum and
+# refuses the literal, so an answer written false is one it cannot parse: its send would be
+# reported unconfirmed and sent again, and its publish would throw.
+jq -e --arg message "$no_reply_none_message" \
+  '.payload_summary == $message and .expects_reply == "none"' \
+  "$no_reply_none_response_file" >/dev/null || {
+  printf 'ERR: a send writing the old expects_reply "none" was not answered that same word.\n' >&2
+  cat "$no_reply_none_response_file" >&2
+  exit 1
+}
+
 # A send to a session id nothing registered. The store holds no key for it, so the listener refuses
 # the send by name instead of publishing into a topic no one reads: the sender is told which
 # session is gone, and can route around that pane. `curl -fsS` cannot assert a refusal (it prints
@@ -857,7 +906,7 @@ post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-without-pr.json"
 post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_consumer_frame_count 16
+wait_for_consumer_frame_count 18
 
 # The keep-false control, read now the consumer's frame count has settled: its claim went in
 # before the lapsed window, so a drain of the unkept role would have run by now. The session was
@@ -873,24 +922,30 @@ fi
 printf 'keep-false control: the unheld role answered 404, nothing was stored and its claimant was handed nothing\n'
 
 # What the session itself took, which is the whole point of a consumer: every GitHub delivery, the
-# direct message and both role forwards reached it as frames of its own consumer, each exactly
-# once, with no connection opened to it from anywhere. Both role forwards are the reviewer role's
-# — the copy kept while nobody held it and the publish its live holder took. The escalation role
-# has none: its holder's claim stood while the holder was gone, so the listener kept nothing for
-# it and refused that publish (dispatch://INFRA-392). The unkept role has no frame either, since
-# its own publish asked for nothing to be kept.
+# three direct messages and both role forwards reached it as frames of its own consumer, each
+# exactly once, with no connection opened to it from anywhere. Both role forwards are the
+# reviewer role's — the copy kept while nobody held it and the publish its live holder took. The
+# escalation role has none: its holder's claim stood while the holder was gone, so the listener
+# kept nothing for it and refused that publish (dispatch://INFRA-392). The unkept role has no
+# frame either, since its own publish asked for nothing to be kept.
 printf 'consumer frames by topic:\n'
 jq -r '.topic' "$session_frames_file" | sort | uniq -c
+# The two no-reply sends are checked on the bus here rather than at the session's card: whichever
+# spelling a sender wrote, the envelope the stream carries holds the one vocabulary, the literal
+# false. An answer written "none" is the listener's alone and never leaves it.
 jq -es --arg session_id "$session_id" --arg role_topic "notifications.role.${role}" \
   --arg lapsed_role_topic "notifications.role.${lapsed_role}" \
-  --arg unkept_role_topic "notifications.role.${keep_false_role}" --arg message "$direct_message" '
-  (map(select(.topic == "notifications.agent." + $session_id)) | length == 1 and .[0].payload == $message)
+  --arg unkept_role_topic "notifications.role.${keep_false_role}" --arg message "$direct_message" \
+  --arg no_reply_false "$no_reply_false_message" --arg no_reply_none "$no_reply_none_message" '
+  (map(select(.topic == "notifications.agent." + $session_id)) | length == 3 and .[0].payload == $message)
+  and ([.[] | select(.payload_summary == $no_reply_false or .payload_summary == $no_reply_none)]
+       | length == 2 and all(.expects_reply == false))
   and (map(select(.topic == $role_topic)) | length) == 2
   and (map(select(.topic == $lapsed_role_topic)) | length) == 0
   and (map(select(.topic == $unkept_role_topic)) | length) == 0
   and (map(select(.topic | startswith("notifications.github.example-org.example-repo."))) | length) == 13
 ' "$session_frames_file" >/dev/null || {
-  printf 'ERR: the session did not take its GitHub deliveries, its direct message and its two reviewer-role forwards from its consumer, with nothing for the lapsed role and nothing for the unkept one.\n' >&2
+  printf 'ERR: the session did not take its GitHub deliveries, its three direct messages carrying one expects_reply vocabulary, and its two reviewer-role forwards from its consumer, with nothing for the lapsed role and nothing for the unkept one.\n' >&2
   exit 1
 }
 
@@ -937,10 +992,30 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     const directSummary = "Direct acceptance summary.";
     const directBody = `${directSummary}\n\nDirect second paragraph.\n\nDirect third paragraph.`;
     const directTopic = `notifications.agent.${sessionID}`;
-    const direct = withTopic(directTopic);
-    require(direct.length === 1, `direct envelope count = ${direct.length}, want 1`);
+    // Three sends reached this session subject: the three-paragraph message, and the two below
+    // that want no reply. The one read here is the first of them, whose card the renderer
+    // assertions at the end of this block are about.
+    const directAll = withTopic(directTopic);
+    require(directAll.length === 3, `direct envelope count = ${directAll.length}, want 3`);
+    const direct = directAll.filter((item) => item.payload_summary === directSummary);
+    require(direct.length === 1, `three-paragraph direct envelope count = ${direct.length}, want 1`);
     require(direct[0].source === "agent" && direct[0].source_session === "octocat", "direct envelope loses sender identity");
-    require(direct[0].payload_summary === directSummary && direct[0].payload === directBody, "direct envelope loses the three-paragraph body");
+    require(direct[0].payload === directBody, "direct envelope loses the three-paragraph body");
+
+    // One vocabulary on the bus. The sender that wrote the literal false and the sender that
+    // wrote the old string "none" are both carried as the literal: the leniency is the listener
+    // taking the old word in, never passing it on to whoever reads the envelope.
+    const noReply = [
+      "No-reply direct message written false.",
+      "No-reply direct message written none.",
+    ].map((summary) => {
+      const found = directAll.filter((item) => item.payload_summary === summary);
+      require(found.length === 1, `no-reply envelope count for ${summary} = ${found.length}, want 1`);
+      return found[0];
+    });
+    for (const item of noReply) {
+      require(item.expects_reply === false, `envelope ${item.payload_summary} carries expects_reply ${JSON.stringify(item.expects_reply)}, want the literal false`);
+    }
 
     const lifecycle = withTopic(topic("pr.42"));
     require(lifecycle.length === 3, `pr lifecycle count = ${lifecycle.length}, want 3`);
@@ -1030,12 +1105,31 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     const obsolete = ["pr.42.check", "pr.42.ci", "pr.42.merged", "pr.42.closed"];
     for (const suffix of obsolete) require(withTopic(topic(suffix)).length === 0, `obsolete topic was published: ${suffix}`);
 
-    const tsFirst = readFileSync(renderedTSFile, "utf8").split("\n\nenvoy:")[0];
+    const renderedText = readFileSync(renderedTSFile, "utf8");
+    // One card per envelope, in the order the bus carried them. No card holds a blank line, so
+    // the blank line before the next card opens is the only boundary there is to split on.
+    const cards = renderedText.trimEnd().split(/\n{2,}(?=envoy:\n)/);
+    const tsFirst = cards[0];
     // The direct summary is the message head, so the renderer drops the separate summary line and
     // prints the full message once: the summary text appears only where the message opens.
     const fullMessage = `message: ${JSON.stringify(directBody)}`;
     require(tsFirst.split(fullMessage).length === 2, "the renderer did not render the full direct message exactly once");
     require(tsFirst.split(directSummary).length === 2, "the renderer repeats the direct summary outside the message it opens");
+
+    // What the session reads is one spelling, whichever word its sender wrote. The whole evidence
+    // file is read for the old one too: a card that still printed it would be a session shown the
+    // same meaning written two ways.
+    for (const item of noReply) {
+      const card = cards.filter((text) => text.includes(item.payload_summary));
+      require(card.length === 1, `rendered cards naming ${item.payload_summary} = ${card.length}, want 1`);
+      require(card[0].split("\n").includes("  expects_reply: false"), `the card for ${item.payload_summary} carries no expects_reply: false line:\n${card[0]}`);
+      // And it carries no ready-made way to send something. A card that says the sender wants
+      // nothing back while printing a filled-in envoy_send under that line invites the reader to
+      // do what the line says is not wanted, which is the post this issue counts.
+      require(!card[0].includes("reply_with:"), `the card for ${item.payload_summary} wants no reply and still prints a reply_with:\n${card[0]}`);
+      require(!card[0].includes("reply_role:"), `the card for ${item.payload_summary} wants no reply and still prints a reply_role:\n${card[0]}`);
+    }
+    require(!renderedText.includes("expects_reply: none"), "a rendered card still spells wanting no reply as none");
 
     console.log("PASS: topic set, structured payloads, checks settlement, and what renderInbound shows a session match the local acceptance contract");
   '

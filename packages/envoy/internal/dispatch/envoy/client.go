@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // ErrUnavailable reports that the Envoy listener could not serve a request.
@@ -170,7 +172,9 @@ type SendInput struct {
 	Payload        json.RawMessage
 	IdempotencyKey string
 	Urgency        string
-	ExpectsReply   string
+	// ExpectsReply is what the delivery wants back. It reaches the listener's HTTP body as the
+	// JSON literal false, "optional" or "required", which is what contracts.ExpectsReply writes.
+	ExpectsReply contracts.ExpectsReply
 }
 
 // SendResult identifies the listener envelope emitted for a successful delivery. Duplicate
@@ -516,13 +520,13 @@ func (c *Client) Session(ctx context.Context, sessionID string) (Session, error)
 // Send delivers a Dispatch frame to an already-resolved live session.
 func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) {
 	body, err := json.Marshal(struct {
-		TargetSession  string `json:"target_session"`
-		Source         string `json:"source"`
-		Message        string `json:"message"`
-		Payload        string `json:"payload"`
-		IdempotencyKey string `json:"idempotency_key"`
-		Urgency        string `json:"urgency,omitempty"`
-		ExpectsReply   string `json:"expects_reply,omitempty"`
+		TargetSession  string                 `json:"target_session"`
+		Source         string                 `json:"source"`
+		Message        string                 `json:"message"`
+		Payload        string                 `json:"payload"`
+		IdempotencyKey string                 `json:"idempotency_key"`
+		Urgency        string                 `json:"urgency,omitempty"`
+		ExpectsReply   contracts.ExpectsReply `json:"expects_reply,omitempty"`
 	}{
 		TargetSession:  input.TargetSession,
 		Source:         "dispatch",

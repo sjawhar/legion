@@ -43,11 +43,11 @@ envoy:
 - `id`: the delivery id; pass it as `in_reply_to` when you reply.
 - `by`: the expiry deadline, when the sender set one.
 - `urgency`: how soon the sender asks you to act: `low`, `med`, `high` or `blocking`. It is for you to read only: it does not change when a delivery reaches you, or its place among others.
-- `expects_reply`: `none`, `optional` or `required`.
+- `expects_reply`: what the sender wants back. `false` means nothing: do not reply, and do not acknowledge. `optional` means a reply is welcome and nothing waits on it. `required` means the sender waits on your answer.
 - `re`: the delivery this one replies to. A Dispatch frame names it as a `dispatch://` ref: the ask (`dispatch://KEY/ask/<id>`, or `dispatch://PROJECT/artifact/<slug>/ask/<id>` for a document ask) or the message (`dispatch://KEY/message/<id>`), never the quoted text. On an ask, `dispatch.question` holds the start of the question's text; `dispatch read` gives the whole.
 - `supersedes`: an earlier delivery this one replaces; act on this one in its place.
-- `reply_with`: the direct-reply call to the sender. On a Dispatch frame it is `command:`, the `dispatch` command line that answers it, with `...` where your text goes.
-- `reply_role`: the role-publish reply call, when the sender holds a role.
+- `reply_with`: the direct-reply call to the sender. On a Dispatch frame it is `command:`, the `dispatch` command line that answers it, with `...` where your text goes. It is absent when `expects_reply` is `false`: a delivery that wants nothing back offers no way to send something. Where you answer one anyway, the card still names what you need — a Dispatch frame names its comment, message or ask, and an agent's delivery names its `id` and its sender.
+- `reply_role`: the role-publish reply call, when the sender holds a role. It is absent under `false` for the same reason.
 - `summary`: the one-line source summary.
 - `message`: the complete payload; it can hold several paragraphs.
 - `note`: the payload names another session; never use that quoted id as the recipient.

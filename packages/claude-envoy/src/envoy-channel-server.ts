@@ -476,7 +476,9 @@ export function createChannelDelivery(input: {
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
           from_session: envelope?.source_session,
-          expects_reply: envelope?.expects_reply,
+          // One vocabulary for the inbox: the inbound schema reads a frame old enough to carry
+          // the string "none" as `false`, and the metadata carries that one spelling.
+          expects_reply: envelope?.expects_reply?.toString(),
           in_reply_to: envelope?.in_reply_to,
         }),
       },

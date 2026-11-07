@@ -46,8 +46,11 @@ type messageBody struct {
 	InReplyTo      *string `json:"in_reply_to"`
 	Supersedes     *string `json:"supersedes"`
 	Urgency        *string `json:"urgency"`
-	ExpectsReply   *string `json:"expects_reply"`
-	ExpiresAt      *int64  `json:"expires_at"`
+	// ExpectsReply arrives as the JSON literal false, "optional" or "required" (and, until no
+	// deployment pins a plugin build old enough to write it, the old string "none"), so it is
+	// read raw and parsed by contracts.ParseExpectsReply rather than decoded as one Go type.
+	ExpectsReply json.RawMessage `json:"expects_reply"`
+	ExpiresAt    *int64          `json:"expires_at"`
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
@@ -59,7 +62,12 @@ type messageBody struct {
 // as.
 type sendResponse struct {
 	contracts.Envelope
-	Recipient string `json:"recipient"`
+	// ExpectsReply is this answer's expects_reply, written in the dialect the request spoke
+	// (expectsReplyAnswer). It shadows the embedded envelope's own field: of two fields sharing
+	// one JSON name encoding/json writes the shallower, so these bytes are what the answer
+	// carries and every sendResponse built below fills them.
+	ExpectsReply json.RawMessage `json:"expects_reply,omitempty"`
+	Recipient    string          `json:"recipient"`
 	// RecipientState is the state the recipient's record puts it in at the moment the send was
 	// accepted: live, or unresponsive for a session that has stopped answering and whose messages
 	// this listener still stores. A sender that must know whether its message will be read soon
@@ -127,10 +135,14 @@ func lastSeenOf(sessions *session.SessionRegistry, sessionID string, entry sessi
 // answers exactly as it did.
 type publishResponse struct {
 	contracts.Envelope
-	Holder       string        `json:"holder,omitempty"`
-	HolderState  session.State `json:"holder_state,omitempty"`
-	Unresponsive []string      `json:"unresponsive,omitempty"`
-	Kept         bool          `json:"kept,omitempty"`
+	// ExpectsReply is this answer's expects_reply, written in the dialect the request spoke
+	// (expectsReplyAnswer), shadowing the embedded envelope's own field exactly as
+	// sendResponse.ExpectsReply does.
+	ExpectsReply json.RawMessage `json:"expects_reply,omitempty"`
+	Holder       string          `json:"holder,omitempty"`
+	HolderState  session.State   `json:"holder_state,omitempty"`
+	Unresponsive []string        `json:"unresponsive,omitempty"`
+	Kept         bool            `json:"kept,omitempty"`
 	// KeptReason is the state the resolution found, in the same wire words the 404's own reason
 	// carries (roleHolderError.Reason). This build keeps only for a role no claim holds
 	// (roleKeepable), so unclaimed is the one reason it sends; a lapsed claim is refused 404.
@@ -429,7 +441,11 @@ func writeStoreError(ctx context.Context, w http.ResponseWriter, err error, stat
 	writeBusUnavailable(w, err)
 }
 
-func validateMessageBody(body messageBody) (string, string) {
+// validateMessageBody refuses a body no envelope may be built from, naming the refusal and the
+// field it is about, and returns the body's parsed expects_reply so messageEnvelope takes the
+// value this parse already read instead of parsing the same bytes again. A refused body returns
+// the unset value, which no caller reads.
+func validateMessageBody(body messageBody) (string, string, contracts.ExpectsReply) {
 	for _, field := range []struct {
 		name  string
 		value *string
@@ -438,20 +454,19 @@ func validateMessageBody(body messageBody) (string, string) {
 		{"supersedes", body.Supersedes},
 	} {
 		if field.value != nil && strings.TrimSpace(*field.value) == "" {
-			return field.name + " must not be empty", field.name
+			return field.name + " must not be empty", field.name, contracts.ExpectsReplyUnset
 		}
 	}
 	if body.Urgency != nil {
 		if *body.Urgency == "" || (*body.Urgency != "low" && *body.Urgency != "med" && *body.Urgency != "high" && *body.Urgency != "blocking") {
-			return "urgency must be one of low, med, high, blocking", "urgency"
+			return "urgency must be one of low, med, high, blocking", "urgency", contracts.ExpectsReplyUnset
 		}
 	}
-	if body.ExpectsReply != nil {
-		if *body.ExpectsReply == "" || (*body.ExpectsReply != "none" && *body.ExpectsReply != "optional" && *body.ExpectsReply != "required") {
-			return "expects_reply must be one of none, optional, required", "expects_reply"
-		}
+	expectsReply, err := contracts.ParseExpectsReply(body.ExpectsReply)
+	if err != nil {
+		return "expects_reply must be one of " + contracts.ExpectsReplyVocabulary, "expects_reply", contracts.ExpectsReplyUnset
 	}
-	return "", ""
+	return "", "", expectsReply
 }
 
 func optionalString(value *string) string {
@@ -461,7 +476,7 @@ func optionalString(value *string) string {
 	return *value
 }
 
-func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelope {
+func messageEnvelope(body messageBody, topic, dedupeKey string, expectsReply contracts.ExpectsReply) contracts.Envelope {
 	summary := contracts.OneLineSummary(body.Message)
 	payload := ""
 	if body.Payload != nil {
@@ -488,8 +503,30 @@ func messageEnvelope(body messageBody, topic, dedupeKey string) contracts.Envelo
 		InReplyTo:      optionalString(body.InReplyTo),
 		Supersedes:     optionalString(body.Supersedes),
 		Urgency:        optionalString(body.Urgency),
-		ExpectsReply:   optionalString(body.ExpectsReply),
+		ExpectsReply:   expectsReply,
 	}
+}
+
+// expectsReplyAnswer is the expects_reply an answer to one request writes: the request's own
+// bytes, so each sender reads back the dialect it spoke - the literal false, "optional",
+// "required", or the old string "none" - and nil for a request that said nothing about a reply
+// or wrote null, whose answer omits the field as it always has. The route refuses anything else
+// (validateMessageBody) before an answer is built, and the envelope those same bytes were parsed
+// into carries the one new vocabulary whichever spelling they used.
+//
+// Answering the request's own spelling is what keeps the ingress leniency's promise whole. A
+// plugin build old enough to write "none" holds an EnvelopeSchema whose expects_reply is the
+// three-word enum (packages/contracts/src/envelope.ts), and it parses this very answer
+// (packages/envoy-client/src/transport.ts): a literal false there fails that parse, so its send
+// is reported unconfirmed and re-sent, and its publish throws. The echo is the answer's alone -
+// every envelope this listener puts on the bus carries the one new vocabulary - and it goes with
+// the leniency itself, on the same count ParseExpectsReply's comment names: once no deployment
+// pins a plugin build old enough to write "none".
+func expectsReplyAnswer(requested json.RawMessage) json.RawMessage {
+	if len(requested) == 0 || string(requested) == "null" {
+		return nil
+	}
+	return requested
 }
 
 // senderStamp is the sender a send or a publish carries: the session, the machine and directory it
@@ -666,7 +703,8 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "message is required", "message")
 			return
 		}
-		if message, field := validateMessageBody(body); message != "" {
+		message, field, bodyExpectsReply := validateMessageBody(body)
+		if message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
 		}
@@ -674,7 +712,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if body.IdempotencyKey != "" {
 			dedupeKey = "agent." + targetSession + "." + body.IdempotencyKey
 		}
-		item := messageEnvelope(body, contracts.AgentSubject(targetSession), dedupeKey)
+		item := messageEnvelope(body, contracts.AgentSubject(targetSession), dedupeKey, bodyExpectsReply)
 		record.item = &item
 		if err := item.Validate(); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
@@ -717,6 +755,7 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		}
 		record.accept(w, sendResponse{
 			Envelope:       item,
+			ExpectsReply:   expectsReplyAnswer(body.ExpectsReply),
 			Recipient:      targetSession,
 			RecipientState: state,
 			LastSeen:       target.UpdatedAt,
@@ -916,7 +955,8 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to "+bus.KeptTopicPrefix+" topics; that lane is the listener's own, holding the copies it keeps for a role's next holder and the cursors of its drains")
 			return
 		}
-		if message, field := validateMessageBody(request.messageBody); message != "" {
+		message, field, bodyExpectsReply := validateMessageBody(request.messageBody)
+		if message != "" {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
 		}
@@ -939,12 +979,15 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		case request.IdempotencyKey != "":
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
-		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
+		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey, bodyExpectsReply)
 		record.item = &item
 		if err := item.Validate(); err != nil {
 			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
 			return
 		}
+		// The answer's own expects_reply, read from the request before any path answers: the three
+		// of them below each write it, and none of them changes the envelope that goes on the bus.
+		expectsReply := expectsReplyAnswer(request.ExpectsReply)
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
@@ -952,13 +995,13 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			// give-up (roleSend.noHolder) rather than to the envelope, which travels on to the
 			// holder and back in this route's own answer. No flag at all means keep, so every
 			// publisher that sets none is unchanged.
-			sendToRole(ctx, w, record, d, item, role, request.Keep == nil || *request.Keep, arrived)
+			sendToRole(ctx, w, record, d, item, expectsReply, role, request.Keep == nil || *request.Keep, arrived)
 			return
 		}
 		if bus.UsesCoreTransport(request.Topic) {
 			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
 			defer cancel()
-			sendToTopic(ctx, w, record, d, item, arrived)
+			sendToTopic(ctx, w, record, d, item, expectsReply, arrived)
 			return
 		}
 		// The sender stamp's read and the publish take this one deadline, derived from the
@@ -971,7 +1014,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuseBusUnavailable(w, err)
 			return
 		}
-		record.accept(w, publishResponse{Envelope: item})
+		record.accept(w, publishResponse{Envelope: item, ExpectsReply: expectsReply})
 	}
 }
 

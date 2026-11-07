@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -215,7 +216,11 @@ type roleSend struct {
 	record *requestRecord
 	d      *listenerDeps
 	item   contracts.Envelope
-	role   string
+	// expectsReply is the expects_reply this send's answers write (expectsReplyAnswer, api.go):
+	// the request's own bytes, whichever of the field's spellings it wrote. The envelope the
+	// holder is forwarded is untouched by it, and carries the parsed value.
+	expectsReply json.RawMessage
+	role         string
 	// keep is the request's keep field as the route read it, true when it set none: whether
 	// this send's give-up keeps the message for the role's next holder (noHolder). It is the
 	// send's own rather than the envelope's, so no copy the listener forwards and no answer it
@@ -251,7 +256,7 @@ func (s *roleSend) settle(outcome sendOutcome) {
 // record put it in, which GET /v1/roles/<role> names the same way.
 func (s *roleSend) delivered(outcome sendOutcome) {
 	s.record.holder = s.holder
-	s.record.accept(s.w, publishResponse{Envelope: s.item, Holder: s.holder, HolderState: s.holderState})
+	s.record.accept(s.w, publishResponse{Envelope: s.item, ExpectsReply: s.expectsReply, Holder: s.holder, HolderState: s.holderState})
 	s.settle(outcome)
 }
 
@@ -302,7 +307,7 @@ func (s *roleSend) noHolder(result roles.Resolution) {
 // must run. INFRA-514's architect decided it on 2026-10-31.
 func (s *roleSend) kept(result roles.Resolution) {
 	s.record.holder = s.holder
-	s.record.acceptWith(s.w, http.StatusAccepted, publishResponse{Envelope: s.item, Holder: s.holder, Kept: true, KeptReason: result.State})
+	s.record.acceptWith(s.w, http.StatusAccepted, publishResponse{Envelope: s.item, ExpectsReply: s.expectsReply, Holder: s.holder, Kept: true, KeptReason: result.State})
 	s.settle(sendKept)
 }
 
@@ -398,9 +403,11 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // roleReceiptTimeout. Every forward goes out under the same Nats-Msg-Id, the forward's dedupe key
 // and the holder's subject (bus.ForwardMsgID), so the stream, which captures agent subjects,
 // keeps one copy however many attempts there are. Every read takes ctx, the send's window, so
-// none outlasts it: a send whose window ends is answered 504.
-func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, keep bool, arrived time.Time) {
-	send := &roleSend{w: w, record: record, d: d, item: item, role: role, keep: keep, arrived: arrived}
+// none outlasts it: a send whose window ends is answered 504. expectsReply is the expects_reply
+// its answers write (expectsReplyAnswer, api.go), the request's own dialect; the envelope this
+// send forwards and keeps carries the envelope's own value.
+func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, expectsReply json.RawMessage, role string, keep bool, arrived time.Time) {
+	send := &roleSend{w: w, record: record, d: d, item: item, expectsReply: expectsReply, role: role, keep: keep, arrived: arrived}
 	// The sender is stamped before the holder is resolved, so the copy a keep stores carries the
 	// sender's title, roles and directory exactly as the forward of a live delivery does: the
 	// envelope is kept as it is here (keepRoleMessage), and the holder that is handed it later
@@ -593,8 +600,10 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 // forwarded, and with no recipient the send is answered 200 only once the topic was published. A
 // publish NATS refuses however often it is sent (forwardRefused) is the sender's input or the
 // grant's, answered as requestRecord.refuseBusUnavailable maps it. Every answer goes through
-// record, the route's one line per request, under the outcome it answers.
-func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
+// record, the route's one line per request, under the outcome it answers. expectsReply is the
+// expects_reply its 200 writes (expectsReplyAnswer, api.go), the request's own dialect; the
+// envelope it publishes and forwards carries the envelope's own value.
+func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, expectsReply json.RawMessage, arrived time.Time) {
 	recipients := topicRecipients(d, item)
 	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
 		switch outcome {
@@ -684,6 +693,6 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestReco
 		settle(sendNotConfirmed, delivered, undelivered, slog.Any("unresponsive", unresponsive))
 		return
 	}
-	record.accept(w, publishResponse{Envelope: item, Unresponsive: unresponsive})
+	record.accept(w, publishResponse{Envelope: item, ExpectsReply: expectsReply, Unresponsive: unresponsive})
 	settle(sendDelivered, delivered, undelivered, slog.Any("unresponsive", unresponsive))
 }

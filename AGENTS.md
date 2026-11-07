@@ -8,6 +8,59 @@ A blank line separates list items.
 Add a new item next to the item it belongs with, never at the end of a list unless it belongs there, so two pull requests that add items or change different sentences do not conflict.
 `bun scripts/semantic-line-breaks.ts AGENTS.md` checks the layout, and `--write` fixes it.
 
+## Design principles
+
+Each line is a default and its reason.
+Where two collide, decide the case and say why.
+A measurement outranks any line here.
+
+- **Everything in Dispatch is a node in the graph, and a feature is a query over it.**
+  When a feature is hard to build over the model, the model is the defect.
+
+- **The daemon is a state machine, not a gateway.**
+
+- **Agents are engineers.**
+  They get the privileges their work needs.
+
+- **Start with the standard answer, then make it agent-native.**
+
+- **Status quo is not an excuse.**
+  Reject historical mistakes.
+  Fix it now, not later.
+
+- **A self-regulating system is more robust.**
+  Event-based over polling.
+
+- **Make it modular.**
+
+- **Instrument and log everything.**
+
+- **Self-organization over coordination.**
+
+- **Waste is a design defect.**
+  Fix the waste before buying capacity; never design around a cap you have not hit.
+
+- **Read the code.
+  Read the docs.
+  Read the logs.
+  Read the goddamn code.**
+
+- **"Testing" means you boot and run it.**
+  Unit tests are just scaffolding.
+
+- **In writing, clarity of communication is the most important principle.**
+
+* **Optimizing ruthlessly is a competency we develop.**
+  Performance is part of the design, and the scale to build for is the one we are heading to.
+
+- **Make invalid input impossible to represent.**
+  Typing is your friend.
+
+* **There are no rules, there are only reasons.**
+  Explain what is not obvious, but do not turn that into law.
+
+Evidence for each line, with the issues behind it and the cases that cut against it: dispatch://INFRA-1225/artifact/principles-evidence-md.
+
 ## Architecture
 
 Legion's issue lifecycle lives entirely on native Dispatch (triage → done); the daemon never creates, reads, or writes a GitHub issue.

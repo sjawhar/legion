@@ -21,6 +21,8 @@ import {
   DispatchTargetedResourceIDSchema,
   dedupeKeyNamesItsEvent,
   EnvelopeSchema,
+  EXPECTS_REPLY_VALUES,
+  type ExpectsReply,
   IssueEventPayloadSchema as IssuePayloadSchema,
   MessageDeliveryEventPayloadSchema as MessageDeliveryPayloadSchema,
   MessageEventPayloadSchema as MessagePayloadSchema,
@@ -50,6 +52,20 @@ const InboundSenderSchema = z.object({
   roles: z.array(z.string()).optional(),
 });
 
+/**
+ * What an inbound frame may say about the reply it wants, read as the envelope's one vocabulary:
+ * the string `"none"` the field carried before the literal `false` replaced it parses as
+ * `false`. A replayed frame and a session on an older plugin build still write that word, so the
+ * card reads it rather than discarding the field, and the replay engine reads a stored frame
+ * with this schema (`replay.ts`) rather than keeping a second list of the same words. The
+ * reading happens here and nowhere else, so no reader of a parsed frame is ever shown the old
+ * spelling. `EnvelopeSchema` itself stays strict: it is what a producer of this repository is
+ * held to.
+ */
+export const InboundExpectsReplySchema = z
+  .literal([...EXPECTS_REPLY_VALUES, "none"] as const)
+  .transform((value): ExpectsReply => (value === "none" ? false : value));
+
 const InboundEnvelopeSchema = z
   .object({
     event_id: z.string().optional(),
@@ -69,7 +85,7 @@ const InboundEnvelopeSchema = z
     in_reply_to: z.string().optional(),
     supersedes: z.string().optional(),
     urgency: z.string().optional(),
-    expects_reply: z.string().optional(),
+    expects_reply: InboundExpectsReplySchema.optional(),
   })
   .passthrough();
 
@@ -90,6 +106,7 @@ const TolerantInboundEnvelopeSchema = z
   .passthrough();
 
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
+
 export type DispatchDelivery = {
   readonly resource: "message" | "comment";
   readonly id: string;
@@ -1243,7 +1260,14 @@ export function renderInbound(
     if (foreignSession !== undefined) break;
   }
   const role = envelope.sender?.roles?.[0];
-  const reply = dispatchReply ?? replyWith(envelope);
+  // A card that says the sender wants nothing back prints no ready-made reply. The two are one
+  // statement to the reader, and a filled-in envoy_send under `expects_reply: false` is an
+  // invitation to do the thing the line just said is not wanted. `optional` and `required` keep
+  // the hint. This withholds a Dispatch frame's own reply command too: the one such frame carrying
+  // `false` is a comment mention that joins no ask thread, and its card still names the comment,
+  // so a reader who answers anyway has what it needs without being invited.
+  const wantsNoReply = envelope.expects_reply === false;
+  const reply = wantsNoReply ? undefined : (dispatchReply ?? replyWith(envelope));
   const sourceIssue =
     parseIssues.includes("source") || KNOWN_SOURCES[envelope.source] !== undefined
       ? undefined
@@ -1268,7 +1292,7 @@ export function renderInbound(
     ...(inReplyTo === undefined ? {} : { re: inReplyTo }),
     ...(envelope.supersedes === undefined ? {} : { supersedes: envelope.supersedes }),
     ...(reply === undefined ? {} : { reply_with: reply }),
-    ...(role === undefined
+    ...(role === undefined || wantsNoReply
       ? {}
       : {
           reply_role: {

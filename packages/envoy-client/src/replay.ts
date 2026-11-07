@@ -13,6 +13,7 @@ import {
   type DedupeIdentity,
   type DeliveryDedupe,
   type InboundEnvelope,
+  InboundExpectsReplySchema,
   inboundTimestamp,
   type RenderInboundResult,
   senderLabel,
@@ -1406,6 +1407,18 @@ export function replayLedgerIdentity(frame: DedupeIdentity): ReplayLedgerIdentit
   };
 }
 
+/**
+ * A stored frame's envelope, read with the inbound field schema for `expects_reply`
+ * (`InboundExpectsReplySchema`): a frame a plugin build old enough to write `"none"` left on the
+ * stream is still an envelope here, read as `false` and shown rather than passed over as none.
+ * The stream holds a frame for the duplicate window, so such frames outlive the build that wrote
+ * them. `EnvelopeSchema` itself stays strict: it is what a producer of this repository is held
+ * to.
+ */
+const StoredEnvelopeSchema = EnvelopeSchema.extend({
+  expects_reply: InboundExpectsReplySchema.optional(),
+});
+
 function parseEnvelope(data: string): Envelope | undefined {
   let parsed: unknown;
   try {
@@ -1413,7 +1426,7 @@ function parseEnvelope(data: string): Envelope | undefined {
   } catch {
     return undefined;
   }
-  const result = EnvelopeSchema.safeParse(parsed);
+  const result = StoredEnvelopeSchema.safeParse(parsed);
   return result.success ? result.data : undefined;
 }
 

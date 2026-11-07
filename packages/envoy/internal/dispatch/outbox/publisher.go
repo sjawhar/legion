@@ -1264,6 +1264,13 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	if strings.HasPrefix(event.Type, "ask.") {
 		item.Urgency = payloadString(event.Payload, "urgency")
 	}
+	// An answered ask and an approved artifact are receipts: the event tells its reader what a
+	// person decided, and there is nothing to send back. Saying so spares the reader - a Legion
+	// architect among them - the answer that would cost that person another read. Every other
+	// event type says nothing about a reply, which is what the field's absence means.
+	if event.Type == "ask.answered" || event.Type == "artifact.approved" {
+		item.ExpectsReply = contracts.ExpectsReplyNone
+	}
 	return item, nil
 }
 

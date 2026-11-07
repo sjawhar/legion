@@ -1,6 +1,6 @@
 ---
 name: Legion and Dispatch
-last_updated: 2026-10-24
+last_updated: 2026-11-07
 ---
 
 # Legion and Dispatch Strategy
@@ -59,25 +59,16 @@ A recipe a deployer can roll out at once, so Legion's workers get access to ever
 
 Everything is a node, so verification, handoffs that live in Dispatch, and references to existing knowledge become possible. *Why it serves the approach:* captured relationships stop the same mistakes and the same questions.
 
-## Principles
+## Commitments
 
-- **Agents are engineers.** An agent has the minimal privileges it needs and the complete privileges it needs to do its job. Legion does not constrain agents or treat them as untrusted.
-- **The daemon is a state machine.** It moves work through its phases and keeps pods alive: start the pod; the pod is down, recreate it. It does not control agents, route their work through itself, make their GitHub calls for them, or decide what a repository's review must be. A repository that wants review criteria sets rules on the repository.
-- **Handoffs carry what agents forget, not checks on them.** A handoff tells the next role what it needs, such as the skills the planner found it should use. It is not a guard against misbehaviour and not a limit on what a role may do. A reviewer may write whatever it wants to the pull request: that is how review works.
-- **Roles talk to each other.** They are on Envoy for that reason. An implementer with a question messages the planner and gets an answer, without ending a phase.
-- **Tested means booted and run.** Agents write unit tests because they are trained to, and that is not enough: until the app has been booted and exercised, it is not tested.
 - **Cross review because intelligence is fallible.** An implementer falls for sunk cost and confirmation bias, like anyone. Cross-model-family review is a bias of Legion's, not a statement that agents are misaligned.
 - **Pluggable.** Any models; a workflow a team can change to meet its needs; repository-specific prompts.
 - **General by default.** Most changes should make Legion more general and move deployment-specific behaviour into the deployment's configuration. Legion holds an opinion about how software engineering is done only where its owner chooses to give it one.
-- **Fix the root cause.** No fallbacks, workarounds, or notes warning that something can't be trusted. No protection against a failure nobody has seen; a one-off is not a rule.
-- **Climb the enforcement ladder only as far as needed.** When agents fail to do something, first check that it is written down in their instructions and write it if not; then self review; then cross review; then a programmatic gate, for what a program can check easily. Go to the next step only when the one before it measurably failed.
-- **Less machinery, one source of truth.** Delete what isn't used, reuse what exists, and keep each fact in one place. Infrastructure, credentials and builds live in infrastructure as code and CI, never on someone's machine.
-- **Answer from data.** Rank work by its share of the whole, beat the simplest baseline, and build the key piece before approving a design that rests on it.
+- **Infrastructure, credentials and builds live in infrastructure as code and CI**, never on someone's machine.
 - **Tests run before the merge, by machine.** Automated, in CI, enforced by the repository's rules; never a manual or production check handed to a person, and never a circular test.
 - **Merged changes reach production on their own**, without downtime.
 - **In Dispatch, one element behaves the same everywhere and never blocks the person:** one renderer for mentions and markdown, and no input disabled when the action can be queued.
 - **One identity per caller.** Authentication is OAuth or workload identity federation everywhere: a workload exchanges its platform identity for a token, a session acting for a person gets its own token for that person. No shared tokens.
-- **Standard best practice first.** Where a standard solution exists, use it and do not ask. Before designing, check how the problem is normally solved and how well-regarded projects doing the same thing solve it. A design that departs sharply from standard practice is a sign to fix the underlying problem, not to keep digging.
 
 ## Boundaries
 

@@ -3,6 +3,7 @@ package contracts
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,7 @@ func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
 			mutate: func(envelope *Envelope) {
 				envelope.ExpectsReply = "later"
 			},
-			want: "expects_reply must be one of: none, optional, required",
+			want: "expects_reply must be one of: false, optional, required",
 		},
 		{
 			name: "empty sender session ID",
@@ -89,6 +90,43 @@ func TestEnvelopeValidateRejectsInvalidSignalQualityFields(t *testing.T) {
 				t.Errorf("Validate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+// A message that wants no reply says so with the JSON literal false, so a reader decides what the
+// sender wants from the value rather than from one word out of three.
+func TestEnvelopeMarshalsNoReplyAsTheJSONLiteralFalse(t *testing.T) {
+	envelope := validSignalQualityEnvelope()
+	envelope.ExpectsReply = ExpectsReplyNone
+	if err := envelope.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("decode envelope JSON: %v", err)
+	}
+	if got := string(fields["expects_reply"]); got != "false" {
+		t.Errorf("expects_reply = %s, want false; envelope JSON: %s", got, encoded)
+	}
+}
+
+// An envelope holding a token no vocabulary names never reaches a reader: the marshaller refuses
+// it by naming what a sender may write, rather than putting the token on the wire.
+func TestEnvelopeMarshalRefusesAnUnknownExpectsReply(t *testing.T) {
+	envelope := validSignalQualityEnvelope()
+	envelope.ExpectsReply = "later"
+
+	encoded, err := json.Marshal(envelope)
+	if err == nil {
+		t.Fatalf("marshal envelope = %s, want a refusal", encoded)
+	}
+	if !strings.Contains(err.Error(), "false, optional, required") {
+		t.Errorf("refusal = %q, want it to name false, optional, required", err)
 	}
 }
 

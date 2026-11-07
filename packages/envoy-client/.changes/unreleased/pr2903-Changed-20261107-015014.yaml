@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The delivery card reads `expects_reply` from the shared contract instead of re-declaring it, and prints one spelling: an envelope carrying `false` and one carrying the old `none` both render `expects_reply: false`. A card that says the sender wants nothing back now prints no ready-made reply either, neither `reply_with` nor `reply_role`, because a filled-in `envoy_send` under that line invited the reader to do what the line says is not wanted; `optional` and `required` keep both hints. A stored frame is replayed in that same lenient vocabulary, so one an older build left on the stream is still shown. The `envoy_send` and `envoy_publish` argument is built from the contract''s own vocabulary.'
+time: 2026-11-07T01:50:14.401810085Z
+custom:
+    Issue: pr2903

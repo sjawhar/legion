@@ -1,0 +1,5 @@
+kind: Changed
+body: The `expects_reply` argument of `envoy_send` and `envoy_publish` takes `false`, `optional` or `required`; the refusal an agent reads names that vocabulary.
+time: 2026-11-07T01:50:39.36039435Z
+custom:
+    Issue: pr2903

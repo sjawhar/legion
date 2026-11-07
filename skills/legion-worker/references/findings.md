@@ -56,7 +56,7 @@ Post the evidence first as a `dispatch comment` on the report issue ([Where it g
 says which), its first line exactly `Clear defect from <your role token>`. It prints
 `Posted comment <id>`. Then send the controller one message with
 `envoy_publish` to the controller topic your `Legion addressing` line names, with
-`expects_reply: none`. It holds:
+`expects_reply: false`. It holds:
 
 - your role token, from your `Legion addressing` line
 - the defect: what went wrong, where and to whom, with the numbers, and the issue it came from
@@ -139,7 +139,7 @@ answers (`409 ISSUE_CLOSED`). The question names the issue the finding came from
 When the project has no report issue yet, or a person closed it (`dispatch read` shows `Status:
 done`, and Dispatch refuses the ask with `409 ISSUE_CLOSED`), do not create or reopen one yourself
 (the controller does): send the finding to the controller as text, with `envoy_publish` to the
-controller topic your `Legion addressing` line names (`expects_reply: none`), holding the problem,
+controller topic your `Legion addressing` line names (`expects_reply: false`), holding the problem,
 the issue it came from, the evidence and the decision it needs. The controller creates or reopens
 the report issue and opens the ask. When that publish fails because no controller holds the role,
 take step 2 or 3 of [When no controller takes it](#when-no-controller-takes-it). A production
@@ -193,7 +193,7 @@ Legion refuses to record an issue on a repository the project does not map, henc
 The person answers in Dispatch, and the answer reaches only the ask's followers. So once the ask is
 open, `envoy_publish` its reference, `dispatch://<REPORT KEY>/ask/<id>` (the id from the
 `Asked <id> on …` line), to the controller topic your `Legion addressing` line names, with
-`expects_reply: none`. The controller follows the ask and files what the person's answer asks for;
+`expects_reply: false`. The controller follows the ask and files what the person's answer asks for;
 you file nothing, whatever the answer says. The controller itself skips this step, since it follows
 each ask it opens. When the listener kept that publish rather than a holder taking it, do nothing
 more for an ask on the report issue: the controller's catch-up follows it at its next start.

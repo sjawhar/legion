@@ -2,6 +2,7 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   type Envelope,
   EnvelopeSchema,
+  type ExpectsReply,
   ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS,
   LISTENER_CALL_ATTEMPTS,
   LISTENER_CALL_RETRY_DELAY_MS,
@@ -401,7 +402,7 @@ export type MessageMetadataInput = {
   readonly inReplyTo?: string;
   readonly supersedes?: string;
   readonly urgency?: "low" | "med" | "high" | "blocking";
-  readonly expectsReply?: "none" | "optional" | "required";
+  readonly expectsReply?: ExpectsReply;
   readonly expiresAt?: number;
 };
 

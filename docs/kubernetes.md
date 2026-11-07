@@ -390,6 +390,8 @@ The Legion plugin ships these in `agents/`:
 
 - `thermonuclear-code-quality`
 
+- the architect's `design-outsider`
+
 - the planner's `plan-gap-analyst` and `plan-reviewer`
 
 It ships this with Legion's other skills in its `dist/skills`:
@@ -2084,6 +2086,23 @@ A `legion` of this release against a daemon of an earlier one, which serves no s
 
 What a contract bump never refreshes is the pod's own `legion` binary:
 the launcher, the shim and `workspace-init` keep running the generation they were started with, so a release that changes the launcher's or the shim's own wire to the daemon is a pod replacement, which the update round makes ("Pinning a release that drops what a running pod still uses" above), never something the contract relaunch fixes in place.
+
+A release that changes what a producer writes **into an envelope** is rolled in one order, which the contract number above does not cover:
+that number holds a process to the daemon's API, while an envelope is written by one process and read by another, and the two are pinned separately.
+**Roll the listener Deployment, then the plugin pair, then the Dispatch Deployment**, and expect the loss the middle step leaves.
+Each of the other orders was traced on INFRA-1225, which replaced the string `none` with the literal `false`:
+
+- **Plugins before the listener breaks sends.**
+  The new skills tell an agent to write the new value, and the listener of the previous image decodes the field as a `*string`, so it answers `400` and the message is never sent.
+
+- **Dispatch before the listener loses frames.**
+  An old listener's durable consumer cannot decode what a new Dispatch outbox published, so it drops the message rather than relaying it.
+
+- **Plugins last costs a replay window, and nothing else.**
+  A `@sjawhar/pi-envoy` from before the change declares the field as the three words it knew, and its replay reads a stored frame against that strict schema, so a frame carrying the new value fails the parse and is logged and settled as "not an Envoy envelope".
+  A session on such a pair keeps every live delivery, because its card renderer reads the field leniently and drops a value it does not know, and loses from its 72-hour replay window **every message the new value marks** — on INFRA-1225 the Dispatch deliveries that carry it, an answered ask, an approved artifact and a plain comment mention, and every agent message sent as wanting no reply, including one an un-rolled sender sent itself, since a rolled listener writes each of those to the bus in the new spelling too.
+
+That last loss is the one this order accepts, so the window between the listener and the plugin pair is the window to keep short.
 
 ### Configuration
 
@@ -5212,7 +5231,7 @@ each issue's pod (every role of it alike) and the image probe's.
 
 - **Model roles.**
   Legion's shipped agents dispatch by role alias:
-  `oracle` and the planner's `plan-gap-analyst` as `@oracle`;
+  `oracle`, the planner's `plan-gap-analyst` and the architect's `design-outsider` as `@oracle`;
   both review agents and the planner's `plan-reviewer` as `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`.
   The boot gate refuses, by agent, any whose role the operator's settings (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is `@smol` and `reviewer` is `@slow`.

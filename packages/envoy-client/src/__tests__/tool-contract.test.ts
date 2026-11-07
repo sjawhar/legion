@@ -405,7 +405,7 @@ describe("message metadata", () => {
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
       "message is required (string)",
-      'expects_reply must be one of none|optional|required; got "no"',
+      'expects_reply must be one of false|optional|required; got "no"',
       'unknown field "msg"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
     ]);
     expect(failure.message).toContain("envoy_send was not called: 3 problems");

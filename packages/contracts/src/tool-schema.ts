@@ -1,5 +1,8 @@
 import type { z } from "zod";
 
+/** One value a field may be declared to carry exactly, as JSON holds it. */
+export type SchemaLiteral = string | number | boolean | null;
+
 export interface SchemaNode<E> {
   optional(): E;
   nullable(): E;
@@ -12,6 +15,11 @@ export interface SchemaApi<E extends SchemaNode<E>> {
   number(opts?: { int?: boolean; min?: number; max?: number }): E;
   boolean(): E;
   enum(values: readonly [string, ...string[]]): E;
+  /**
+   * The exact set of values a field may carry, one of which it must be, so a set that is not all
+   * strings (`false | "optional" | "required"`) stays one field rather than a union of shapes.
+   */
+  literal(values: readonly [SchemaLiteral, ...SchemaLiteral[]]): E;
   array(item: E, opts?: { min?: number; max?: number }): E;
   unknown(): E;
   object(shape: Record<string, E>, opts?: { strict?: boolean }): E;
@@ -53,9 +61,32 @@ interface ZodApi {
   number(): ZodNode;
   boolean(): ZodNode;
   enum(values: readonly [string, ...string[]]): ZodNode;
+  /**
+   * zod v4's takes the whole set. Oh My Pi's `pi.zod` facade has a `literal` of its own that
+   * takes one value and reads a set as a single literal equal to the array, so it is optional
+   * here and `literalOfSet` only keeps a node that accepts every value of the set.
+   */
+  literal?(values: readonly SchemaLiteral[]): ZodNode;
   array(item: ZodNode): ZodNode;
   unknown(): ZodNode;
   object(shape: Record<string, ZodNode>): ZodObjectNode;
+}
+
+/**
+ * The host's own literal node for the whole set, or undefined where the host cannot build one.
+ *
+ * zod v4's `literal` takes the set and refuses everything outside it, which is the refusal
+ * `formatZodIssues` renders as `false|optional|required`. Oh My Pi's `pi.zod` facade has a
+ * `literal` of its own that takes one value: measured against omp v18.16.0, it reads a set as a
+ * single literal whose value is the array (`{"k":"lit","v":[false,"optional","required"]}`), which
+ * would show a model a vocabulary no call can satisfy. So the node is kept only when it accepts
+ * every value of the set; a host that cannot say this widens the field instead, and the real
+ * refusal still comes from real zod where the arguments are parsed.
+ */
+function literalOfSet(api: ZodApi, values: readonly SchemaLiteral[]): ZodNode | undefined {
+  const node = api.literal?.(values);
+  if (node === undefined || typeof node.safeParse !== "function") return undefined;
+  return values.every((value) => node.safeParse(value).success) ? node : undefined;
 }
 
 export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
@@ -85,6 +116,7 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
     },
     boolean: () => api.boolean(),
     enum: (values) => api.enum(values),
+    literal: (values) => literalOfSet(api, values) ?? api.unknown(),
     unknown: () => api.unknown(),
     array: (item, opts = {}) => {
       let schema = api.array(item as ZodNode);

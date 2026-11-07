@@ -234,7 +234,7 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
 | `urgency` | Optional: how soon the sender asks the reader to act. Informational only: it does not change when or in what order deliveries arrive. |
 | `from_session` | Optional source session identifier. |
-| `expects_reply` | Optional Envoy reply expectation. |
+| `expects_reply` | Optional: what the sender wants back, as a string: `false` (nothing, so do not reply and do not acknowledge), `optional` or `required`. The old `none` reaches the reader as `false`. |
 | `in_reply_to` | Optional correlated inbound event id. |
 
 ## Envoy tools

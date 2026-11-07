@@ -46,6 +46,7 @@ function recordingSchemaApi(): {
       number: leaf,
       boolean: leaf,
       enum: leaf,
+      literal: leaf,
       array: leaf,
       unknown: leaf,
       object,
@@ -93,6 +94,7 @@ function argumentDescriptions(name: string): readonly string[] {
     number: node,
     boolean: node,
     enum: node,
+    literal: node,
     array: node,
     unknown: node,
     object: node,
@@ -197,6 +199,33 @@ describe("zodSchemaApi", () => {
         .array(schemaApi.string(), { max: 8 })
         .safeParse(Array.from({ length: 9 }, () => "item")).success
     ).toBe(false);
+  });
+
+  test("refuses every value outside a literal set", () => {
+    const field = schemaApi.literal([false, "optional", "required"] as const);
+
+    expect([false, "optional", "required"].map((value) => field.safeParse(value).success)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(field.safeParse("none").success).toBe(false);
+  });
+
+  // Oh My Pi's `pi.zod` facade has a `literal` that takes one value: handed the set, it builds a
+  // literal equal to the array, which would refuse every call a model can make. A field built on
+  // such a host must still take the whole vocabulary; the refusal comes from real Zod where the
+  // arguments are parsed.
+  test("takes every value of a literal set on a host whose own literal holds one value", () => {
+    const oneValueLiteral = {
+      ...z,
+      literal: (value: unknown) => z.unknown().refine((input) => input === value),
+    };
+
+    const field = zodSchemaApi(oneValueLiteral).literal([false, "optional", "required"] as const);
+
+    expect(field.safeParse("optional").success).toBe(true);
+    expect(field.safeParse(false).success).toBe(true);
   });
 });
 

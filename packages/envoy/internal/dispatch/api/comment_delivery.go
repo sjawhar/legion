@@ -83,7 +83,8 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 // the attempt's age, never frozen into the row here. A row written today would otherwise still
 // promise a safe retry next week.
 func (s *server) sendResolvedDelivery(
-	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string, frame []byte,
+	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string,
+	wanted contracts.ExpectsReply, frame []byte,
 ) (*string, bool, string) {
 	if target.ResolveError != "" {
 		return nil, false, target.ResolveError
@@ -91,9 +92,14 @@ func (s *server) sendResolvedDelivery(
 	if target.SessionID == nil {
 		return nil, false, "no live session"
 	}
-	expectsReply := "optional"
+	// What the delivered thing wants back, except in btw mode, which interrupts the session it
+	// reaches to ask something of it and so always waits on an answer, whatever the thing
+	// delivered says. The mode is read here, on every try, because a try after a listener
+	// take-over resolves the target again and sends in the mode that resolution names
+	// (mentionResolutionFor).
+	expectsReply := wanted
 	if target.Delivery == "btw" {
-		expectsReply = "required"
+		expectsReply = contracts.ExpectsReplyRequired
 	}
 	// Message is the body a second time, beside the frame, and the listener puts it on the
 	// envelope: it takes the part an event carries (model.EventBody), as the frame's own copy
@@ -118,6 +124,20 @@ func (s *server) sendResolvedDelivery(
 		return nil, true, ""
 	}
 	return &send.EnvelopeID, false, ""
+}
+
+// commentExpectsReply is what a mention of one comment wants back. A comment that joins no ask
+// thread and answers no comment is a remark: the session it names has nothing to answer, and a
+// receipt would cost the person who wrote it a read. A reply in a thread and a comment under an
+// ask are both conversation, so each keeps the invitation to reply.
+//
+// The two fields are the whole test. Nothing reads the body: a comment's text does not open an
+// ask, and a program that judged what an agent wrote is what this rule refuses to be.
+func commentExpectsReply(comment model.Comment) contracts.ExpectsReply {
+	if comment.AskID == nil && comment.ReplyTo == nil {
+		return contracts.ExpectsReplyNone
+	}
+	return contracts.ExpectsReplyOptional
 }
 
 // receiptTimeoutText is the CAUSE a receipt timeout records: what happened, and the one fact
@@ -501,11 +521,17 @@ func (s *server) deliverResolvedCommentMention(
 	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
 	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
 	key := stored.ID + ":" + target.Target + ":" + target.Delivery
+	// What the comment itself wants back, the same for every try. The mode is read inside the
+	// send instead, because a try after a listener take-over resolves the mention again and
+	// sends in the mode that resolution names (mentionResolutionFor).
+	wanted := commentExpectsReply(stored)
 	var envelopeID *string
 	var duplicate bool
 	send := func() string {
 		var failure string
-		envelopeID, duplicate, failure = s.sendResolvedDelivery(ctx, target, stored.Body, key, nil, frame)
+		envelopeID, duplicate, failure = s.sendResolvedDelivery(
+			ctx, target, stored.Body, key, nil, wanted, frame,
+		)
 		return failure
 	}
 	var deliveryError string

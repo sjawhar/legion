@@ -999,6 +999,49 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  // The hint a card drops under `expects_reply: false` is a Dispatch frame's own reply command
+  // as much as an agent's `envoy_send`, and the mention below is the one Dispatch frame its
+  // producer gives that value: a comment joining no ask thread and answering no comment
+  // (`commentExpectsReply`, packages/envoy/internal/dispatch/api/comment_delivery.go). Every
+  // other case for the suppression is an agent envelope, so a fix that dropped `replyWith`
+  // alone and let the command through would pass them all; this pair is what fails it.
+  describe("the reply command on a mention whose sender states the reply it wants", () => {
+    const mention = { ...targetedComment, ask_id: null, reply_to: null };
+    const card = (expects_reply: unknown) =>
+      decode(
+        renderInbound(
+          JSON.stringify({
+            ...envelope({
+              event_id: "dispatch-mention",
+              source: "dispatch",
+              payload: targetedCommentFrame(mention),
+            }),
+            expects_reply,
+          }),
+          reader
+        ).content
+      ) as { envoy: Record<string, unknown> & { dispatch: { payload: Record<string, unknown> } } };
+
+    test("prints no reply command when the mention wants no reply, and still names the comment", () => {
+      const decoded = card(false);
+
+      expect(decoded.envoy.reply_with).toBeUndefined();
+      // The reader is not stranded: the line that says nothing is wanted is on the card, and so
+      // is the id of the comment a reader who answers anyway addresses.
+      expect(decoded.envoy.expects_reply).toBe(false);
+      expect(decoded.envoy.dispatch.payload.id).toBe(targetedCommentID);
+    });
+
+    test("keeps the reply command when the same mention invites a reply", () => {
+      const decoded = card("optional");
+
+      expect(decoded.envoy.expects_reply).toBe("optional");
+      expect(decoded.envoy.reply_with).toEqual({
+        command: `dispatch comment --issue CORE-1 --body ... --reply-to ${targetedCommentID}`,
+      });
+    });
+  });
+
   test("gives document-owned ask comments a project document reply hint and ask ref", () => {
     const raw = JSON.stringify(
       envelope({
@@ -1566,6 +1609,102 @@ describe("renderInbound non-dispatch envelopes", () => {
         "  summary: First paragraph.",
       ].join("\n")
     );
+  });
+
+  // A card prints one vocabulary. The envelope carries the JSON literal `false` for "no reply
+  // wanted", while a replayed frame and a session on an older plugin build still carry the
+  // string "none" for the same thing. Both read as the one line, and neither leaves the field
+  // unread and listed as unrecognised.
+  test("renders either spelling of no reply as one expects_reply: false line", () => {
+    const card = (expects_reply: unknown): string =>
+      renderInbound(
+        JSON.stringify({ ...envelope({ event_id: "agent-no-reply" }), expects_reply }),
+        reader
+      ).content;
+
+    expect(card(false)).toBe(
+      [
+        "envoy:",
+        "  from: agent",
+        '  at: "1970-01-01T00:00:00Z"',
+        "  id: agent-no-reply",
+        "  expects_reply: false",
+        "  summary: message",
+      ].join("\n")
+    );
+    expect(card("none")).toBe(card(false));
+  });
+
+  // A card that says nothing is wanted must not carry a ready-made way to send something: a
+  // filled-in `envoy_send` under `expects_reply: false` invites the reader to do what the line
+  // above it says the sender does not want, and a sender holding a role was handed a filled-in
+  // `envoy_publish` as well. The suppression is tied to that one value: `optional` and
+  // `required` keep both hints.
+  describe("hints on a card whose sender states the reply it wants", () => {
+    const sender = "01a0cccc-dddd-7eee-ffff-0123456789ab";
+    const card = (expects_reply: unknown): string =>
+      renderInbound(
+        JSON.stringify({
+          event_id: "agent-no-reply-role",
+          source: "agent",
+          source_session: sender,
+          source_event_id: "agent.no-reply-role",
+          topic: `notifications.agent.${reader}`,
+          dedupe_key: "agent-no-reply-role",
+          issued_at: Date.parse("2026-09-07T04:41:12Z"),
+          payload_summary: "Status only.",
+          trace_id: "trace-agent-no-reply-role",
+          sender: { session_id: sender, title: "Reviewer", roles: ["legion-reviewer"] },
+          expects_reply,
+        }),
+        reader
+      ).content;
+
+    const head = [
+      "envoy:",
+      `  to: you (${reader})`,
+      `  from: ${sender} (Reviewer)`,
+      '  at: "2026-09-07T04:41:12Z"',
+      "  id: agent-no-reply-role",
+    ];
+    const hints = [
+      "  reply_with:",
+      "    tool: envoy_send",
+      "    args:",
+      `      session_id: ${sender}`,
+      "      in_reply_to: agent-no-reply-role",
+      "      message: ...",
+      "  reply_role:",
+      "    tool: envoy_publish",
+      "    args:",
+      "      topic: notifications.role.legion-reviewer",
+      "      message: ...",
+    ];
+    const summary = "  summary: Status only.";
+    const noHints = [...head, "  expects_reply: false", summary].join("\n");
+
+    test("prints neither hint when the sender wants no reply", () => {
+      expect(card(false)).toBe(noHints);
+    });
+
+    test("keeps both hints when a reply is optional", () => {
+      expect(card("optional")).toBe(
+        [...head, "  expects_reply: optional", ...hints, summary].join("\n")
+      );
+    });
+
+    test("keeps both hints when a reply is required", () => {
+      expect(card("required")).toBe(
+        [...head, "  expects_reply: required", ...hints, summary].join("\n")
+      );
+    });
+
+    // The retired spelling reads as `false`, so the normalisation and the suppression must
+    // agree: a frame an older build left on the stream prints that one line and drops the
+    // hints with it.
+    test("prints neither hint for the retired spelling of no reply", () => {
+      expect(card("none")).toBe(noHints);
+    });
   });
 
   test("renders when a message forwarded from a role's kept lane was kept", () => {

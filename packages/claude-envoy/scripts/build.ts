@@ -46,12 +46,15 @@ export const BUNDLE_ENTRYPOINTS = {
 /** Oh My Pi's tool names, as pi-legion's agents list them, to Claude Code's. A tool this Claude
  *  Code build lacks maps to nothing: it has no Glob or Grep tool (an agent searches with `rg` or
  *  `fd` through Bash where it has Bash), and its own task list stands in for `todo`. A name in
- *  neither list is refused, so a new tool is mapped on purpose. */
+ *  neither list is refused, so a new tool is mapped on purpose. `web_search` reads no file, and
+ *  it is here because an agent that must read no file of the repository still needs one tool
+ *  Claude Code has: `claudeAgent` refuses a definition whose every tool maps to nothing. */
 export const CLAUDE_TOOL_NAMES: Readonly<Record<string, string | null>> = {
   read: "Read",
   bash: "Bash",
   edit: "Edit",
   write: "Write",
+  web_search: "WebSearch",
   glob: null,
   grep: null,
   todo: null,

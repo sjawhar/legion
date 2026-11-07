@@ -115,6 +115,13 @@ describe("EnvelopeSchema", () => {
     );
   });
 
+  test("reads no reply as the literal false and no longer as the word none", () => {
+    const item = EnvelopeSchema.parse(buildEnvelope({ expects_reply: false }));
+
+    expect(item.expects_reply).toBe(false);
+    expectInvalidFields({ expects_reply: "none" }, ["expects_reply"]);
+  });
+
   test("rejects unrecognized urgency", () => {
     expectInvalidFields({ urgency: "urgent" }, ["urgency"]);
   });

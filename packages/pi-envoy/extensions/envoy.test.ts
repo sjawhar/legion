@@ -3124,6 +3124,7 @@ describe("envoy OMP extension", () => {
         return track(z.array(item));
       },
       enum: (values: readonly [string, ...string[]]) => track(z.enum(values)),
+      literal: (values: readonly (string | number | boolean | null)[]) => track(z.literal(values)),
       unknown: () => track(z.unknown()),
     } as unknown as typeof z;
     const fixture = createPi({ zod: injected });
@@ -3194,7 +3195,7 @@ describe("envoy OMP extension", () => {
     expect(result.content[0]?.text).toBe(
       [
         "envoy_send was not called: 2 problems",
-        '- expects_reply must be one of none|optional|required; got "no"',
+        '- expects_reply must be one of false|optional|required; got "no"',
         '- unknown field "urgent"; allowed: session_id, message, in_reply_to, supersedes, urgency, expects_reply, expires_at, idempotency_key',
       ].join("\n")
     );

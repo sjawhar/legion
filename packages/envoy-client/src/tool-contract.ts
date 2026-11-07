@@ -1,5 +1,7 @@
 import {
   EnvelopeSchema,
+  EXPECTS_REPLY_VALUES,
+  type ExpectsReply,
   type SchemaApi,
   type SchemaNode,
   SLACK_POST_TEXT_MAX,
@@ -58,8 +60,6 @@ const URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options as unknown 
   "high",
   "blocking",
 ];
-const EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap()
-  .options as unknown as readonly ["none", "optional", "required"];
 
 /** Message metadata arguments shared by envoy_send and envoy_publish, built on the host's Zod. */
 export function messageMetadataShape<Element extends SchemaNode<Element>>(
@@ -75,8 +75,8 @@ export function messageMetadataShape<Element extends SchemaNode<Element>>(
       )
       .optional(),
     expects_reply: schema
-      .enum(EXPECTS_REPLY_VALUES)
-      .describe("none | optional | required")
+      .literal(EXPECTS_REPLY_VALUES)
+      .describe("false | optional | required")
       .optional(),
     expires_at: schema.number({ int: true }).optional(),
   };
@@ -90,7 +90,7 @@ export type MessageMetadataArguments = {
   readonly in_reply_to?: string;
   readonly supersedes?: string;
   readonly urgency?: (typeof URGENCY_VALUES)[number];
-  readonly expects_reply?: (typeof EXPECTS_REPLY_VALUES)[number];
+  readonly expects_reply?: ExpectsReply;
   readonly expires_at?: number;
 };
 

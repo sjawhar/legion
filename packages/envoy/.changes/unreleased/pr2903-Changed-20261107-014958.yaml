@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A Dispatch delivery that wants nothing back says so. An answered ask and an approved artifact carry `expects_reply: false`, and so does a comment mention whose comment joins no ask thread and answers no comment; a `btw` still carries `required`. The listener reads the field as the literal `false` and still reads the old string `none`, and it answers a request that wrote `none` in that same spelling, so a live send from a session on an un-rolled plugin pair is unaffected. Roll this release as the listener Deployment, then the plugin pair, then the Dispatch Deployment: plugins first breaks sends, because the previous listener reads the field as a string and answers 400 to the literal `false`, and Dispatch first loses frames, because the previous listener''s durable consumer cannot decode one. Between the listener and the plugin pair, a session still on the old pair loses from its 72-hour replay window every message marked as wanting no reply, whatever spelling its sender used (docs/kubernetes.md, "Contract discipline").'
+time: 2026-11-07T01:49:58.792218481Z
+custom:
+    Issue: pr2903

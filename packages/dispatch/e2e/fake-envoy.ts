@@ -1,3 +1,4 @@
+import type { ExpectsReply } from "@legion/contracts";
 import { harnessPorts } from "./harness-ports";
 
 interface FakeSession {
@@ -20,7 +21,7 @@ interface SentMessage {
   readonly payload: string;
   readonly idempotency_key: string;
   readonly urgency: string;
-  readonly expects_reply: string;
+  readonly expects_reply: ExpectsReply;
 }
 
 /** A persisted interest row, served as seeded. `updated_at` is the row's own last write;

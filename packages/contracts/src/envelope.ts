@@ -3,6 +3,19 @@ import { z } from "zod";
 const isSubject = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
+/**
+ * What a message says about the reply it wants, as the envelope carries it: the JSON literal
+ * `false` for no reply, `"optional"` for one the sender invites without waiting, `"required"` for
+ * one it waits on. A message that says nothing about a reply omits the field. The literal `false`
+ * replaced the old string `"none"`, so a reader asking "does this want a reply?" reads the value
+ * itself rather than one word out of three. `scripts/gen-go.ts` emits the field as the
+ * hand-written `contracts.ExpectsReply`, which still reads `"none"` off the wire from a plugin
+ * build old enough to write it.
+ */
+export const EXPECTS_REPLY_VALUES = [false, "optional", "required"] as const;
+
+export type ExpectsReply = (typeof EXPECTS_REPLY_VALUES)[number];
+
 export const EnvelopeSchema = z.object({
   event_id: z.string().min(1),
   source: z.enum([
@@ -43,7 +56,7 @@ export const EnvelopeSchema = z.object({
   in_reply_to: z.string().min(1).optional(),
   supersedes: z.string().min(1).optional(),
   urgency: z.enum(["low", "med", "high", "blocking"]).optional(),
-  expects_reply: z.enum(["none", "optional", "required"]).optional(),
+  expects_reply: z.literal(EXPECTS_REPLY_VALUES).optional(),
 });
 
 export type Envelope = z.infer<typeof EnvelopeSchema>;
