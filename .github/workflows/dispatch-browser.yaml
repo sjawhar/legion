@@ -554,15 +554,22 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
-        # This job runs the clock specs alone (`clockSpecs`, e2e/playwright.config.ts: the
-        # `-alone` projects' testMatch), so the reader here is not the shard job's: it is
-        # e2e/heavy-document-writes.e2e.ts:14, which imports DISPATCH_BLOCK_UNITS from
-        # @legion/contracts/dispatch-tools as a value. Playwright's own Node resolution reads it
-        # from contracts' built dist/: under Node the package's "default" condition is
-        # dist/dispatch-tools.js. A type-only import needs none of it, and neither does the
-        # dashboard's own Vite build, which reaches contracts' src/ through the aliases at
-        # packages/dispatch/web/vite.config.ts (the "bun" export condition is Bun's own and is
-        # no part of how Vite resolves it).
+        # This job is a matrix and each leg runs one project, so the readers here are not the
+        # shard job's. The two every leg runs: e2e/heavy-bodies.ts:7, which imports
+        # DISPATCH_BLOCK_UNITS from @legion/contracts/dispatch-tools, reached from
+        # heavy-bodies.e2e.ts, which every leg runs; and e2e/agents.ts:1, which imports
+        # DELIVERY_CAPABILITIES from @legion/contracts, reached through e2e/seed.ts, which every
+        # clock spec imports. chromium-alone has one of its own, heavy-document-writes.e2e.ts:14,
+        # since it is the only leg that runs that spec: its testMatch is `clockSpecs`
+        # (e2e/playwright.config.ts:382), where firefox-alone and webkit-alone take
+        # /heavy-bodies\.e2e\.ts/ alone (:390, :402).
+        #
+        # Playwright's own Node resolution reads each from contracts' built dist/: under Node the
+        # package's "default" condition is dist/index.js, or dist/dispatch-tools.js for that
+        # subpath. A type-only import needs none of it, and neither does the dashboard's own Vite
+        # build, which reaches contracts' src/ through the aliases at
+        # packages/dispatch/web/vite.config.ts (the "bun" export condition is Bun's own and is no
+        # part of how Vite resolves it).
         run: bun run build
         working-directory: packages/contracts
       # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
@@ -635,12 +642,13 @@ jobs:
         # these projects' rows are read from the wall clock, and three other lanes on the machine
         # would be in the reading.
         #
-        # No file store on this machine, and no DISPATCH_E2E_FILE_STORE_* names: these three
-        # projects run the clock specs alone (heavy-bodies, heavy-document-writes and
-        # nested-directive, e2e/playwright.config.ts's clockSpecs), none of which uploads or
-        # downloads anything, and e2e/run.ts:126-130 makes no lane bucket at one worker. A
-        # container serving nothing would be charged to the very reading these rows exist for.
-        # A clock spec that later uploads fails here by name rather than quietly.
+        # No file store on this machine, and no DISPATCH_E2E_FILE_STORE_* names: every spec these
+        # legs run is a clock spec, and no clock spec uploads or downloads anything.
+        # chromium-alone runs all three (`clockSpecs`: heavy-bodies, heavy-document-writes and
+        # nested-directive, e2e/playwright.config.ts:382), firefox-alone and webkit-alone run
+        # heavy-bodies alone (:390, :402). And e2e/run.ts:126-130 makes no lane bucket at one
+        # worker. A container serving nothing would be charged to the very reading these rows
+        # exist for. A clock spec that later uploads fails here by name rather than quietly.
         #
         # The memory and CPU sampler both this job and the shard job run is
         # .github/scripts/dispatch-browser-samples.sh: MemAvailable and where the CPU goes,
@@ -675,7 +683,7 @@ jobs:
           export PLAYWRIGHT_BLOB_OUTPUT_NAME="report-alone-${{ matrix.project }}.zip"
           # `--no-deps` is required, not tidiness: each `-alone` project names every parallel
           # project in its `dependencies` (e2e/playwright.config.ts), so without it Playwright
-          # would run the whole suite here before the three clock specs, and the shard jobs would
+          # would run the whole suite here before this leg's own rows, and the shard jobs would
           # have run it already. With it this machine runs one project, one row at a time.
           #
           # `list` beside `blob`: the blob reporter prints nothing, and this leg's row count is
