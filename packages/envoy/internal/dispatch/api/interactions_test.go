@@ -1375,11 +1375,11 @@ func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.
 	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, issue.PrimaryArtifactID).Scan(&nextNumber); err != nil {
 		t.Fatalf("read next upload version number: %v", err)
 	}
-	uploadVersion, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil)
+	uploadVersion, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil, ledger.RenderStampOf(issue.PrimaryArtifactID, uploaded))
 	if err != nil {
 		t.Fatalf("write the upload version: %v", err)
 	}
-	ledger.WroteVersion(issue.PrimaryArtifactID, uploadVersion)
+	ledger.WroteVersion(issue.PrimaryArtifactID, uploadVersion, uploaded)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit upload transaction: %v", err)
 	}

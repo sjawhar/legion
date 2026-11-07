@@ -117,6 +117,6 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusOK, stored)
 }

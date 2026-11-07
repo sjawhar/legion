@@ -1,0 +1,11 @@
+kind: Added
+body: |-
+  A background pass stores the display tree of every stored text that has none at the display-parser version a build runs at, so a text written before `text_trees` existed, and every text at all after a parser change raises that version, no longer costs the reader who opens it first a markdown read.
+  It runs under the `text-tree-fill` lease, once an hour from a tick at start, with two readings in flight; it takes the stored texts newest first, in batches of a thousand, across every kind of row that holds one - comments, issue messages and direct messages, broadcasts, ask questions, option labels and descriptions, answers and resolution reasons, review reasons, component prose and document versions' markdown - so the broadcasts and direct messages no API list answers are reached too.
+  Its cursor is the `text_tree_rebuild` row of the version it fills: a restart takes the next batch below the moment the last batch committed instead of reading the corpus again, and a finished version takes no further batch.
+  A read of a text with no tree still makes and stores it, exactly as before.
+  The same pass keeps the table to the two newest parser versions and deletes only what is older: a rolling deploy runs two builds at once and a rollback runs the older one again, and deleting the rows those pods read would cost them a markdown read apiece and write every one of them straight back.
+  The fill works through a pool of its own of two connections, and a fourteenth leased loop takes a fourteenth lease connection, so a server pod opens up to 97 connections to Postgres where it opened 94 (`store.ConnectionsPerProcess`).
+time: 2026-11-05T18:20:00.000000000Z
+custom:
+    Issue: pr2712

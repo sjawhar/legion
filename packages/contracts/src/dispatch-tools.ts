@@ -5,7 +5,7 @@ import {
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
   PROJECT_NAME_MAX,
-} from "./dispatch-api";
+} from "./dispatch-api-limits";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {

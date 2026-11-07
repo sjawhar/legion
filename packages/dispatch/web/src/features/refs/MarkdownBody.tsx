@@ -1,10 +1,16 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
+import type { DisplayTree } from "../../api/types";
 import { type MarkdownEngine, markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
 import type { TextSource } from "./text-references";
-import { type PaintMarkdown, type SliceYield, useRenderedMarkdown } from "./useRenderedMarkdown";
+import {
+  ATTACH_BATCH,
+  type PaintMarkdown,
+  type SliceYield,
+  useRenderedMarkdown,
+} from "./useRenderedMarkdown";
 import { useTextReferences } from "./useTextReferences";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
@@ -95,9 +101,11 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
 /**
  * One node into `parent`, yielding where the work can be cut: a node holding several block
  * children - a list, a quote, the document itself - is opened with its own `toDOM`, as the
- * serializer would, and its children go in one at a time; everything else, a textblock and its
- * marks included, goes in whole, since splitting inline content would split a mark across
- * elements.
+ * serializer would, and its children go in one at a time; everything else goes in whole. A
+ * textblock and its marks do, since splitting inline content would split a mark across
+ * elements, and so does a node holding one child or none, which has no second child to cut
+ * between - a quote around an 8,000-item list is one such node, and serialises in the one piece
+ * its own child is.
  *
  * An opened node is opened exactly as `DOMSerializer.serializeNode` opens it: its attributes go
  * to `renderSpec` as the guard wants them, and its own marks wrap what comes back, outermost
@@ -138,19 +146,6 @@ function* appendNode(
     yield* appendNode(contentDOM, node.child(child), engine);
   }
 }
-
-/**
- * How many nodes of the built body one task puts into the page. What an engine spends on a batch
- * is the style and layout of what has just arrived, in the rendering update after that task, so
- * the batch is what one such pass costs. Measured on this pod against the dashboard's own
- * stylesheet (sjawhar/legion#2519), an 8,000-item list: put in with one `replaceChildren` the
- * thread runs no task for 918-971 ms in WebKit, 211 ms in Chromium and 173 ms in Firefox; put in
- * 500 nodes at a time, 72 ms, 124 ms and 39 ms, because each engine then lays out only the items
- * of the batch. WebKit is why the batch exists at all: it spends ~700 ms on a pass over 16,000
- * freshly attached nodes whether their boxes are laid out or skipped, so nothing but splitting
- * the attach brings it under the second a reader may wait.
- */
-const ATTACH_BATCH = 500;
 
 /** How many nodes `node` holds, itself included, counted no further than `limit`: a subtree
  *  bigger than a batch answers `limit` or a little more, which is all a batch needs to know. */
@@ -198,10 +193,10 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
 }
 
 /**
- * `paintBlock`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed:
- * the 16,000 elements of an 8,000-item list are built across several tasks rather than in one,
- * and then put into the page a batch at a time (`ATTACH_BATCH`), so no single task holds the
- * reader's thread while the body lands.
+ * `paintBlock`, a piece at a time (`PaintMarkdownInSlices`), for a body of more nodes than one
+ * task puts into the page (`paintsAcrossTasks`): the 16,000 elements of an 8,000-item list are
+ * built across several tasks rather than in one, and then put into the page a batch at a time
+ * (`ATTACH_BATCH`), so no single task holds the reader's thread while the body lands.
  *
  * The build is off the page, exactly as `paintBlock` serializes a body off the page: a tree
  * built in the page would be styled and laid out again for every piece, and everything watching
@@ -273,10 +268,12 @@ function* paintBlockInSlices(
  * layout phase of the commit that mounts it (`useRenderedMarkdown`); only the very first render
  * on a page, or a schema that failed to load, takes the asynchronous path. A longer body is
  * parsed off the page's own thread, so it holds its own text, marked `data-markdown-pending`,
- * until the parse worker answers (`markdown-engine.ts`), and the `block` variant then fills the
- * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
- * never reach the page in one task. A preview that must clamp its rendered line is
- * `MarkdownPreview`, which parses with the same engine.
+ * until the parse worker answers (`markdown-engine.ts`). A stored text waits for neither: its
+ * `tree` is drawn in the commit that mounts it, however long it is. Either way, the `block`
+ * variant fills the element a piece at a time (`paintBlockInSlices`) wherever the document holds
+ * more nodes than one task puts into the page (`paintsAcrossTasks`), so the 16,000 elements of
+ * an 8,000-item list never reach it in one task. A preview that must clamp its rendered line is
+ * `MarkdownPreview`, which draws the same trees with the same engine.
  *
  * A bare issue key, and a `#` and the id of a question block of `source`'s document, read as
  * references too, and link where they name something (`useTextReferences`). A caller names the
@@ -288,17 +285,23 @@ export function MarkdownBody({
   onRendered,
   softBreaks = "space",
   source,
+  tree,
   variant = "block",
 }: {
   markdown: string;
   onRendered?: () => void;
   /** What a single newline inside a paragraph becomes: `"space"` for a document (hard-wrapped
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
-   *  as a model's streamed turn (`SoftBreaks`). */
+   *  as a model's streamed turn (`SoftBreaks`). Read only for a text with no `tree`: a stored
+   *  text was read by the server under the document's own policy. */
   softBreaks?: SoftBreaks;
   /** The record this text is - the ask, comment, message or document version whose text it is
    *  (`TextSource`); none for text of no record, which links no `#id`. */
   source?: TextSource;
+  /** The reading Go made of this stored text, which the body draws rather than parsing the
+   *  markdown again. Absent only for the three texts Dispatch does not store: a live agent
+   *  turn, a GitHub body in a link preview, and a write the server has not stored yet. */
+  tree?: DisplayTree;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
@@ -309,6 +312,7 @@ export function MarkdownBody({
   const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
+    tree,
     inline ? paintInline : paintBlock,
     {
       pictures: variant,

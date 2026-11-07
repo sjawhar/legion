@@ -618,7 +618,7 @@ func (s *server) claimCycle(
 		return
 	}
 	if applied.event.ID != 0 {
-		s.publish(applied.event)
+		s.publish(r.Context(), applied.event)
 	}
 	WriteJSON(w, http.StatusOK, claimAnswer{Issue: applied.issue, LegionManagedStatus: applied.legionManagedStatus})
 }

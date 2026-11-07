@@ -11,6 +11,7 @@ import {
 } from "@playwright/test";
 
 import type { ArtifactUploadResponse } from "../web/src/api/types";
+import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   baseUrl,
@@ -132,15 +133,27 @@ const shown = {
   spec: "Both builds serve every page.",
 };
 
-/** The list the issue message carries under its diagram, long enough that the page parses the
- *  message in the Markdown parse worker rather than on its own thread (`markdownWorkerThreshold`,
- *  features/refs/markdown-worker-threshold.ts). It rides the message rather than the comment
- *  because the Conversation draws a message's body whole, where a comment card shows a preview
- *  until its thread is opened. The walk asks for every chunk a build emits, the parse worker's
- *  among them, and a reader on a rolling deploy meets exactly this: a long body whose formatting
- *  arrives from a worker whose code one build served and whose page another did. */
+/** The list the issue message carries under its diagram, drawn from the tree the server read the
+ *  message into: a stored text is parsed nowhere, however long it is
+ *  (features/refs/markdown-engine.ts), and the walk's point here is that the whole of it is drawn
+ *  from a build's own chunks. It rides the message rather than the comment because the
+ *  Conversation draws a message's body whole, where a comment card shows a preview until its
+ *  thread is opened. */
 const longListItems = 300;
 const longList = "- a rollout step\n".repeat(longListItems);
+
+/** The notes the agent's turn carries under its first line, long enough that the page parses the
+ *  turn in the Markdown parse worker rather than on its own thread (`markdownWorkerThreshold`,
+ *  features/refs/markdown-worker-threshold.ts). They ride the live agent turn because it is one
+ *  of the three texts Dispatch does not store, and so one of the three the worker still parses:
+ *  every stored text arrives with the tree the server read it into. The walk asks for every chunk
+ *  a build emits, the parse worker's among them, and a reader on a rolling deploy meets exactly
+ *  this: a turn whose formatting arrives from a worker whose code one build served and whose page
+ *  another did. Derived from the threshold with a margin, so the turn stays the worker's wherever
+ *  that value is set. */
+const agentReplyNote = "- a release note\n";
+const agentReplyNotes = Math.ceil(markdownWorkerThreshold / agentReplyNote.length) + 50;
+const agentReply = `${shown.agentReply}\n\n${agentReplyNote.repeat(agentReplyNotes)}`;
 
 /** The issue message's flowchart, from one node to the other, which draws only once the Mermaid
  *  renderer's worker has run. */
@@ -244,7 +257,7 @@ async function seedEveryRoute(): Promise<Seeded> {
           message: {
             at: 2_000,
             id: "a2000",
-            parts: [{ text: shown.agentReply, type: "text" }],
+            parts: [{ text: agentReply, type: "text" }],
             role: "assistant",
             streaming: false,
           },
@@ -340,9 +353,20 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `/agents/broadcasts/${seed.broadcast}`,
     },
     {
+      // The turn's notes are the parse worker's: the turn is longer than the worker's threshold
+      // and, as a live agent turn, one of the texts Dispatch does not store, so the page parses
+      // it rather than drawing a tree the server read it into (`agentReply`). The card holds the
+      // turn's own text at once and the notes as a list once the worker answers, which is why the
+      // landmark waits for the last of them: that worker's code comes from the build that did not
+      // serve this page, which is the walk's whole point.
+      loads: ["markdown-worker"],
       route: "/agents/:sessionId/live",
       shows: (page) => [
         page.getByTestId("agent-message-assistant").filter({ hasText: shown.agentReply }),
+        page
+          .getByTestId("agent-message-assistant")
+          .locator("li")
+          .nth(agentReplyNotes - 1),
       ],
       url: `${agent}/live`,
     },
@@ -362,11 +386,12 @@ function visits(seed: Seeded): readonly Visit[] {
       url: `${issue}/spec`,
     },
     {
-      // The message's diagram is the Mermaid worker's: without it the body shows its source. The
-      // message is also longer than the worker threshold, so its list is the parse worker's: the
-      // card holds the body's text at once and the list once the worker answers. Both workers'
-      // code comes from the build that did not serve this page, which is the walk's whole point.
-      loads: ["markdown-worker", "mermaid"],
+      // The message's diagram is the Mermaid worker's: without it the body shows its source. Its
+      // list is no worker's: a stored message arrives with the tree the server read it into and
+      // is parsed nowhere (`longList`), so what the list proves here is that the whole of a long
+      // stored body is drawn from the chunks of the build that did not serve this page, which is
+      // the walk's whole point.
+      loads: ["mermaid"],
       route: "/issues/:key/*",
       shows: (page) => [
         page.locator("#issue-conversation-panel").getByText(shown.comment),

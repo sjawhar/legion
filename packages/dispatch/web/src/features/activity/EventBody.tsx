@@ -2,7 +2,7 @@ import { actorActText } from "@legion/contracts";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Event } from "../../api/types";
+import type { DisplayTree, Event } from "../../api/types";
 import { linkText, textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
@@ -21,6 +21,15 @@ export function isAskEvent(event: Event): event is AskEvent {
   );
 }
 
+/** The tree of one stored text an event's payload carries, by that text's path in the envelope
+ *  (`payload.body`, `payload.resolution.reason`). A payload keeps the shape every reader of the
+ *  message bus knows, so its trees ride beside it in `trees` rather than on it
+ *  (`api/event_trees.go`); a frame from a Dispatch older than the map carries none, and the
+ *  body then renders as its own literal text. */
+function payloadTree(event: Event, path: string): DisplayTree | undefined {
+  return event.trees?.[path];
+}
+
 function AskEventBody({
   event,
   onRendered,
@@ -34,13 +43,25 @@ function AskEventBody({
   // A changed answer names the one it replaced; the first answer's event carries none. An event
   // written before answers stored an empty list holds null for either's selected: no option.
   const previous = event.type === "ask.answered" ? event.payload.previous_answer : undefined;
+  // An option's two texts are keyed by its place in the payload's own list, so the trees pair
+  // with the options by index, never by label.
+  const optionsWithTrees = options.map((option, index) => ({
+    ...option,
+    description_tree: payloadTree(event, `payload.options.${index}.description`),
+    label_tree: payloadTree(event, `payload.options.${index}.label`),
+  }));
   return (
     <>
       <p className={`text-sm font-medium ${textPrimaryOnSurface}`}>
         {event.type === "ask.opened" ? "Ask opened:" : "Ask:"}
       </p>
-      <MarkdownBody markdown={question} onRendered={onRendered} source={source} />
-      <AskOptionList options={options} selected={answer?.selected ?? []} />
+      <MarkdownBody
+        markdown={question}
+        onRendered={onRendered}
+        source={source}
+        tree={payloadTree(event, "payload.question")}
+      />
+      <AskOptionList options={optionsWithTrees} selected={answer?.selected ?? []} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
         Opened <Timestamp at={created_at} />
       </p>
@@ -51,7 +72,12 @@ function AskEventBody({
           </p>
           {answer.text === null || answer.text === "" ? null : (
             <div className="mt-2">
-              <MarkdownBody markdown={answer.text} onRendered={onRendered} source={source} />
+              <MarkdownBody
+                markdown={answer.text}
+                onRendered={onRendered}
+                source={source}
+                tree={payloadTree(event, "payload.answer.text")}
+              />
             </div>
           )}
           {previous === undefined ? null : (
@@ -77,6 +103,7 @@ function AskEventBody({
                 markdown={resolutionReason}
                 onRendered={onRendered}
                 source={source}
+                tree={payloadTree(event, "payload.resolution.reason")}
                 variant="inline"
               />
             </>
@@ -142,6 +169,7 @@ export function EventBody({
           markdown={event.payload.body}
           onRendered={onRendered}
           source={textSourceOf(message ? "message" : "comment", event.payload.id)}
+          tree={payloadTree(event, "payload.body")}
         />
         {whole === undefined ? null : (
           <p className="mt-1 text-xs">

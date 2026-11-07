@@ -44,6 +44,11 @@ func (s *server) getArchitectureTree(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if wantsDisplayTrees(r) {
+		for _, component := range components {
+			component.ProseTree = displayTree(component.Prose)
+		}
+	}
 	issues, err := loadTreeIssues(r.Context(), pool, project)
 	if err != nil {
 		s.writeHandlerError(w, err)

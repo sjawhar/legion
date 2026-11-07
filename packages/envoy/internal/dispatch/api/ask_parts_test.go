@@ -598,7 +598,10 @@ func TestAPinnedAskPartShowsTheRevisionItNames(t *testing.T) {
 		t.Helper()
 		read := readGraph(t, handler, url.Values{"to": {ref}})
 		want := model.BlockPin{Version: 1, Ref: optionRef + "@v1", Text: text, State: state, RemovedVersion: removedVersion}
-		if read.Node.Pin == nil || *read.Node.Pin != want {
+		// A pin carries the display tree of its text for a caller that asked for one, and this
+		// read sends no `Dispatch-Trees`, so the pin holds none; the tree makes the struct
+		// uncomparable, so the pin is compared deeply rather than with ==.
+		if read.Node.Pin == nil || !reflect.DeepEqual(*read.Node.Pin, want) {
 			t.Fatalf("%s: the pin reads %#v, want %#v", step, read.Node.Pin, want)
 		}
 		if read.Node.Text != current {

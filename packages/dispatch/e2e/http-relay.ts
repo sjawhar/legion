@@ -68,15 +68,46 @@ export async function requestBody(request: Request): Promise<ArrayBuffer | undef
     : await request.arrayBuffer();
 }
 
+/** The content codings `fetch` decodes as it reads an answer: it inflates the body and hands
+ *  back a Response that still carries `content-encoding` and the encoded `content-length`. A
+ *  coding it does not know arrives as the upstream wrote it and keeps both headers, so only
+ *  these are stripped. */
+const decodedEncodings: Record<string, true> = {
+  br: true,
+  deflate: true,
+  gzip: true,
+  "x-gzip": true,
+  zstd: true,
+};
+
+/** Whether `fetch` decoded the body of an answer carrying `encoding`, so neither the encoding
+ *  nor the length the upstream sent describes the bytes this relay forwards. */
+function bodyWasDecoded(encoding: string | null): boolean {
+  if (encoding === null) return false;
+  const codings = encoding.split(",");
+  return codings.every((coding) => decodedEncodings[coding.trim().toLowerCase()] === true);
+}
+
 /** Forwards one HTTP request to `url`. The response is the upstream's own, redirects included,
- *  and its body streams back as the upstream writes it. */
-export function relayHttp(
+ *  and its body streams back as the upstream writes it.
+ *
+ *  Dispatch gzips an answer for a caller that takes gzip
+ *  (packages/envoy/internal/dispatch/api/response_compression.go), and `fetch` inflates it here
+ *  while leaving `content-encoding: gzip` and the compressed `content-length` on the Response.
+ *  Handing those on with the inflated body describes bytes that are no longer the body, and the
+ *  browser's own inflate fails with `incorrect header check`. The relay drops both headers
+ *  rather than compressing the body again: what it forwards is a plain body, saying so costs one
+ *  Response, and re-encoding would spend CPU on every answer to restore a header no caller of a
+ *  loopback proxy needs. The upstream still compresses, since the request's `Accept-Encoding`
+ *  goes through untouched, so the server's compression layer is exercised as it is in
+ *  production. */
+export async function relayHttp(
   request: Request,
   url: URL,
   headers: Headers,
   body: ArrayBuffer | undefined
 ): Promise<Response> {
-  return fetch(url, {
+  const response = await fetch(url, {
     body,
     headers,
     method: request.method,
@@ -84,6 +115,19 @@ export function relayHttp(
     // A browser that leaves (a closed page, an abandoned request) ends the upstream request with
     // it, so the server under test does no work for a page that is gone.
     signal: request.signal,
+  });
+  // An answer with no body (a 204, a 304) was decoded from nothing: its headers describe the
+  // entity the caller already holds, and rebuilding it would be a Response around a null body.
+  if (response.body === null || !bodyWasDecoded(response.headers.get("content-encoding"))) {
+    return response;
+  }
+  const relayed = new Headers(response.headers);
+  relayed.delete("content-encoding");
+  relayed.delete("content-length");
+  return new Response(response.body, {
+    headers: relayed,
+    status: response.status,
+    statusText: response.statusText,
   });
 }
 

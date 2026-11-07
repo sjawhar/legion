@@ -1,8 +1,10 @@
+import { documentFromJSON } from "@legion/proof-editor/document-json";
 import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
-import { DOMSerializer, type Schema } from "prosemirror-model";
+import { DOMSerializer, Schema } from "prosemirror-model";
 
 import type { BlockSchema } from "../../api/types";
 import type { MarkdownEngine, RenderSpecWithAttrs } from "./markdown-engine";
+import type { DocumentJSON } from "./markdown-parse.worker";
 import { buildDispatchReference, buildReferencePath, pictureReference } from "./routes";
 
 /**
@@ -13,7 +15,10 @@ import { buildDispatchReference, buildReferencePath, pictureReference } from "./
  * all before the reader asks for some - buys nothing. The serializer's own `renderSpec`, which
  * the sliced painter opens a node with (`MarkdownBody`, `paintBlockInSlices`), travels on the
  * engine for the same reason: it is a static of that class, so a page that named it to call it
- * after the engine existed would parse the library before its first paint anyway.
+ * after the engine existed would parse the library before its first paint anyway. The display
+ * schema a tree the server sent is drawn into (`displaySchemaOf`) and the drawing itself
+ * (`buildEngine`'s `draw`) are built here for the same reason again: both name `Schema`, and
+ * neither can run before the editor's own schema exists.
  */
 
 /**
@@ -60,12 +65,52 @@ function pictureSerializer(schema: Schema): DOMSerializer {
   );
 }
 
+/** The mark Go puts over the words a search matched in a snippet's tree
+ *  (`pmdoc.DisplayHighlightMark`). It is a mark of the display tree alone: no document stores
+ *  it, no write accepts it, and Proof's own schema therefore has no node for it. */
+const DISPLAY_HIGHLIGHT_MARK = "searchHighlight";
+
+/** Proof's schema with the search highlight beside its own marks, which is what a tree the
+ *  server sent is drawn into: a snippet's tree carries that mark over every run the search
+ *  matched, and `Node.fromJSON` refuses a mark its schema does not know. It draws as a `<mark>`
+ *  the surface styles itself (`MarkdownPreview`'s `highlightClassName`), so one serializer
+ *  serves every surface. Every other node and mark is Proof's own, so a document of either
+ *  schema serializes identically. */
+function displaySchemaOf(schema: Schema): Schema {
+  return new Schema({
+    marks: schema.spec.marks.addToEnd(DISPLAY_HIGHLIGHT_MARK, {
+      toDOM: () => ["mark", { "data-search-highlight": "" }],
+    }),
+    nodes: schema.spec.nodes,
+    topNode: schema.spec.topNode,
+  });
+}
+
 export function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
+  const displaySchema = displaySchemaOf(proof.schema);
   return {
     blockSchema,
+    displaySchema,
     schema: proof.schema,
     renderSpec: DOMSerializer.renderSpec as RenderSpecWithAttrs,
-    serializer: pictureSerializer(proof.schema),
+    serializer: pictureSerializer(displaySchema),
+    draw(tree) {
+      try {
+        // Built node by node rather than through `Node.fromJSON`, for the reason
+        // `@legion/proof-editor/document-json` gives: that checks every attribute against the
+        // type its schema declares, and a value this page's own parser writes can fail the
+        // check - milkdown writes `title: null` for an image with no title, where `image.title`
+        // validates as a string. Go's reading of a text is that same document, so it carries
+        // the same attribute, and the check is for JSON from somewhere else than these two
+        // readers. `DisplayTree` is the same JSON `DocumentJSON` describes - one ProseMirror
+        // node - typed openly because a response carries whatever the server's schema wrote.
+        const node = tree as unknown as DocumentJSON;
+        return documentFromJSON(displaySchema, node);
+      } catch (error) {
+        console.error("Drawing a stored text, the server's tree does not fit the schema", error);
+        return undefined;
+      }
+    },
     parse(markdown, softBreaks = "space") {
       try {
         return proof.parseMarkdown(markdown, softBreaks);

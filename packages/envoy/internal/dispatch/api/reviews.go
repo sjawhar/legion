@@ -299,7 +299,7 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, reviews)
+	WriteJSON(w, http.StatusOK, artifactReviewReads(reviews, wantsDisplayTrees(r)))
 }
 
 // POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (the person and approve scopes)
@@ -403,7 +403,13 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	// The reason the review gave, which every read of the document's reviews is shown
+	// (artifactReviewReads). A review that gave none - an approval with nothing written beside
+	// it - stores nothing, as an empty text has no tree.
+	if reason != nil {
+		s.storeDisplayTrees(r.Context(), artifact.ID, *reason)
+	}
 	WriteJSON(w, http.StatusCreated, reviews[artifact.ID])
 }
 
@@ -541,7 +547,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	type response struct {
-		Ask        *model.Ask             `json:"ask"`
+		Ask        *askRead               `json:"ask"`
 		ArtifactID string                 `json:"artifact_id"`
 		Version    int                    `json:"version"`
 		Approval   model.ArtifactApproval `json:"approval"`
@@ -554,6 +560,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		// no answer about it. The request is recorded either way.
 		CoverageUnread bool `json:"coverage_unread,omitempty"`
 	}
+	trees := wantsDisplayTrees(r)
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -567,6 +574,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if settled {
+		attachApprovalTrees(trees, []model.Artifact{artifact})
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version,
 			Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 		return
@@ -608,14 +616,25 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	// The question this request wrote: the one it opened the approval ask with, or the rewording
+	// a renewal left on the open ask (renewApprovalAsk).
+	if ask != nil {
+		s.storeDisplayTrees(r.Context(), ask.ID, ask.Question)
+	}
 	// 201 says this request opened the request, reworded it or handed it to the human; 200 says the
 	// open request already stood as asked.
 	status := http.StatusOK
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version,
+	attachApprovalTrees(trees, []model.Artifact{artifact})
+	var askAnswer *askRead
+	if ask != nil {
+		read := newAskRead(*ask, trees)
+		askAnswer = &read
+	}
+	WriteJSON(w, status, response{Ask: askAnswer, ArtifactID: artifact.ID, Version: version,
 		Approval: *artifact.Approval, Coverage: coverage, CoverageUnread: coverageUnread})
 }
 
@@ -951,6 +970,6 @@ func (s *server) createArtifactPlanReview(w http.ResponseWriter, r *http.Request
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusCreated, review)
 }

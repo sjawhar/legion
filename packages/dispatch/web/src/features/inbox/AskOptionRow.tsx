@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { AskOption } from "../../api/types";
+import type { AskOptionWithTrees } from "../../api/types";
 import {
   borderDefault,
   cardHoverBorder,
@@ -18,15 +18,19 @@ const ROW_CLASS = `flex min-h-11 items-start gap-3 rounded-lg border px-3 py-2 t
  *  shrinks to the row and `MarkdownBody`'s own `break-words` folds a long word. The row's parent
  *  `<fieldset>` needs `min-w-0` too: its UA default `min-inline-size: min-content` would let the
  *  longest unbroken word widen the fieldset past a narrow card before anything here applies. */
-function OptionText({ option }: { option: AskOption }): ReactNode {
+function OptionText({ option }: { option: AskOptionWithTrees }): ReactNode {
   return (
     <span className="min-w-0">
       <span className={`font-medium ${textPrimaryOnSurface}`}>
-        <MarkdownBody markdown={option.label} variant="inline" />
+        <MarkdownBody markdown={option.label} tree={option.label_tree} variant="inline" />
       </span>
       {option.description === undefined ? null : (
         <span className={`mt-0.5 block text-sm ${textOptionDescription}`}>
-          <MarkdownBody markdown={option.description} variant="inline" />
+          <MarkdownBody
+            markdown={option.description}
+            tree={option.description_tree}
+            variant="inline"
+          />
         </span>
       )}
     </span>
@@ -53,7 +57,7 @@ export function AskChoiceRow({
   multiple: boolean;
   name: string;
   onChange: () => void;
-  option: AskOption;
+  option: AskOptionWithTrees;
 }): ReactNode {
   // A chosen option takes the same border and fill the recorded answer shows afterwards, so
   // choosing and having chosen read alike.
@@ -81,7 +85,7 @@ export function AskRecordRow({
   selected,
 }: {
   className?: string;
-  option: AskOption;
+  option: AskOptionWithTrees;
   selected: boolean;
 }): ReactNode {
   return (

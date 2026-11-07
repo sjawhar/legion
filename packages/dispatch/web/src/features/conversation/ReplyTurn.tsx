@@ -1,7 +1,7 @@
-import type { MessageDeliveryMode, ReplyBlock } from "@legion/contracts";
+import type { MessageDeliveryMode } from "@legion/contracts";
 import type { ReactNode } from "react";
 
-import type { Actor } from "../../api/types";
+import type { Actor, DisplayTree, ReplyBlockWithTrees } from "../../api/types";
 import { secondaryButtonBorder, textSecondaryOnSurface } from "../../theme/classes";
 import { AgentName, type AgentPart } from "../refs/AgentName";
 import { Timestamp } from "../refs/Timestamp";
@@ -82,8 +82,9 @@ export function ReplyTurn({
    *  `reply_block`), and its turn's path. */
   quote?: {
     readonly author: Actor | undefined;
-    readonly block?: ReplyBlock | null;
+    readonly block?: ReplyBlockWithTrees | null;
     readonly excerpt: string;
+    readonly excerptTree?: DisplayTree;
     readonly to?: string;
   };
   /** Holds the Reply button while the composer it would address is busy with a send. */
@@ -117,6 +118,7 @@ export function ReplyTurn({
             block={quote.block}
             className="mb-1"
             excerpt={quote.excerpt}
+            excerptTree={quote.excerptTree}
             to={quote.to}
           />
         )}

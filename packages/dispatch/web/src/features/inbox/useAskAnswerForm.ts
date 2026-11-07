@@ -8,6 +8,7 @@ import type {
   Ask,
   AskAnswer,
   AskRead,
+  AskWithTrees,
   Comment,
   CreateCommentInput,
   InboxRow,
@@ -25,7 +26,7 @@ import { markAnswerOutstanding } from "./outstanding-answers";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 interface UseAskAnswerFormOptions {
-  ask: Ask;
+  ask: AskWithTrees;
   answer: (id: string, input: AnswerAskInput, bounds: WriteBounds) => Promise<Ask>;
   createReply: (
     issueKey: string,

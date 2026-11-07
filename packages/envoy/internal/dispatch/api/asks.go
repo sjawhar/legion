@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/texttrees"
 )
 
 const maxAskOptions = 8
@@ -302,7 +303,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(appended...)
+	s.publish(r.Context(), appended...)
+	s.storeDisplayTrees(r.Context(), ask.ID, texttrees.AskWrittenTexts(nil, ask.Question, ask.Options)...)
 	// The related-item check. An ask on an issue searches that issue's project and, normally, rides its check's
 	// result on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the result alone, as does
@@ -315,7 +317,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		source.artifactID = *owner.ArtifactID
 	}
 	suggestions := s.relatedCheck(r.Context(), relatedInput{text: ask.Question, title: ask.Question, source: source, record: true})
-	WriteJSON(w, http.StatusCreated, withSuggestions(ask, advice, suggestions))
+	WriteJSON(w, http.StatusCreated, withSuggestions(newAskRead(ask, wantsDisplayTrees(r)), advice, suggestions))
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
@@ -552,8 +554,13 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
-	WriteJSON(w, http.StatusOK, ask)
+	s.publish(r.Context(), event)
+	// The question and options this edit replaced are stored beside the new ones: the row holds
+	// only what the ask says now, and every read of the ask's history (askEditReads) is shown the
+	// previous wording, which no other write would ever store.
+	s.storeDisplayTrees(r.Context(), ask.ID, texttrees.AskWrittenTexts(
+		texttrees.AskWrittenTexts(nil, ask.Question, ask.Options), previous.Question, previous.Options)...)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 // blockArtifactOf is the document an indexed ask's block lives in. Every write that touches the
@@ -720,7 +727,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 // thread and, when the caller asked for it, the thread a card renders. Embedding model.Ask keeps
 // every field a reader already has exactly where it was, so the row stays a superset of the ask.
 type issueAskRow struct {
-	model.Ask
+	askRead
 	LastReply *model.AskLastReply `json:"last_reply"`
 	Thread    *askThread          `json:"thread,omitempty"`
 }
@@ -751,15 +758,21 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	trees := wantsDisplayTrees(r)
+	var texts []string
+	if trees {
+		texts = askReadDisplayTexts(nil, asks...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
 	rows := make([]issueAskRow, len(asks))
 	for index := range asks {
-		rows[index] = issueAskRow{Ask: asks[index]}
+		rows[index] = issueAskRow{askRead: newAskRead(asks[index], trees)}
 		if reply, ok := lastReplies[asks[index].ID]; ok {
 			rows[index].LastReply = &reply
 		}
 	}
 	if withThread {
-		if err := s.attachIssueAskThreads(r.Context(), rows); err != nil {
+		if err := s.attachIssueAskThreads(r.Context(), rows, trees); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -770,12 +783,12 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 // attachIssueAskThreads hangs each row's thread off it. loadAskThreads leaves `answers` empty -
 // an Inbox row, its other caller, is an open ask and can have none - so this list, which does
 // carry answered asks, merges them over the same ask ids itself.
-func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) error {
+func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow, trees bool) error {
 	askIDs := make([]string, len(rows))
 	for index := range rows {
 		askIDs[index] = rows[index].ID
 	}
-	threads, err := s.loadAskThreads(ctx, askIDs)
+	threads, err := s.loadAskThreads(ctx, askIDs, trees)
 	if err != nil {
 		return err
 	}
@@ -783,9 +796,23 @@ func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) 
 	if err != nil {
 		return err
 	}
+	// The answers this list merges are its own read: loadAskThreads reads none, so the only one
+	// already primed is the single answer each ask row carries, and an ask answered twice shows
+	// the superseded one here.
+	var texts []string
+	if trees {
+		for _, byAsk := range answers {
+			texts = askAnswerDisplayTexts(texts, byAsk)
+		}
+	}
+	var subject string
+	if len(askIDs) > 0 {
+		subject = askIDs[0]
+	}
+	defer s.readDisplayTrees(ctx, trees, subject, texts)()
 	for index := range rows {
 		thread := threads[rows[index].ID]
-		thread.Answers = answers[rows[index].ID]
+		thread.Answers = askAnswerReads(answers[rows[index].ID], trees)
 		rows[index].Thread = &thread
 	}
 	return nil
@@ -864,11 +891,26 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	// The single-ask read is a thread with the ask beside it, so it and every Inbox or ask-list
 	// thread serialise through one definition and carry the same keys.
+	trees := wantsDisplayTrees(r)
+	// The ask, its replies, the wordings it went through and every answer it was given are one
+	// read of the table: the whole page the dashboard draws from this route in one query.
+	var texts []string
+	if trees {
+		texts = askReadDisplayTexts(nil, ask)
+		texts = commentDisplayTexts(texts, replies...)
+		texts = askEditDisplayTexts(texts, edits)
+		texts = askAnswerDisplayTexts(texts, answers)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, ask.ID, texts)()
 	WriteJSON(w, http.StatusOK, struct {
-		Ask model.Ask `json:"ask"`
+		Ask askRead `json:"ask"`
 		askThread
-	}{Ask: ask, askThread: askThread{
-		Replies: replies, Edits: edits, Answers: answers, Followers: followers, askReach: reaches[ask.ID],
+	}{Ask: newAskRead(ask, trees), askThread: askThread{
+		Replies:   commentReads(replies, trees),
+		Edits:     askEditReads(edits, trees),
+		Answers:   askAnswerReads(answers, trees),
+		Followers: followers,
+		askReach:  reaches[ask.ID],
 	}})
 }
 

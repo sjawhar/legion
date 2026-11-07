@@ -133,7 +133,7 @@ func (s *server) recordHandoff(ctx context.Context, issueKey, phase, body string
 	if err := tx.Commit(ctx); err != nil {
 		return model.HandoffSummary{}, err
 	}
-	s.publish(event)
+	s.publish(ctx, event)
 	return handoff, nil
 }
 

@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    Every Dispatch event payload is written once. A payload type is now `z.output` of the
+    `z.strictObject` schema that states the payload exactly as Dispatch writes it,
+    `WrittenXSchema`, and `XSchema` stays what it has always been: the reading a consumer of the
+    bus applies to a frame, derived from `WrittenXSchema` with only the keys that reading keeps,
+    the optionality a retained frame needs, unknown fields kept where it kept them, and an open
+    string where a 72-hour-old frame may name a value this release does not know.
+    `IssueEventPayloadSchema` read nine of the payload's twenty-five fields;
+    `WrittenIssueEventPayloadSchema` states all of them, and the reading still keeps the nine.
+    `dispatch-api.ts` is now the entry alone, one `export *` per area module beside it, none
+    longer than 1,000 lines; `@legion/contracts` exports everything it did, each name with the
+    meaning it had.
+time: 2026-11-03T12:00:00.000000000Z
+custom:
+    Issue: pr2712

@@ -291,7 +291,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
@@ -366,7 +366,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, newAskRead(ask, wantsDisplayTrees(r)))
 }
 
 func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {
@@ -384,7 +384,17 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	if err := ledger.Commit(ctx); err != nil {
 		return model.Ask{}, err
 	}
-	s.publish(events...)
+	s.publish(ctx, events...)
+	// What the transition wrote: an answer's own words, and the reason a resolution recorded.
+	// Which of the two the ask holds is the transition's, so both are read from the ask it left.
+	var written []string
+	if ask.Answer != nil && ask.Answer.Text != nil {
+		written = append(written, *ask.Answer.Text)
+	}
+	if ask.Resolution != nil {
+		written = append(written, ask.Resolution.Reason)
+	}
+	s.storeDisplayTrees(ctx, ask.ID, written...)
 	return ask, nil
 }
 

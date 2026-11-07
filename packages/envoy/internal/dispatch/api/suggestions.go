@@ -633,7 +633,9 @@ func (s *server) relatedSearch(
 	}
 	defer rows.Close()
 	// A document hit's link opens the document with these words highlighted.
-	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0)
+	// A write's related-item check shows no snippet tree: nothing reads one, and the trees are
+	// the dashboard's to ask for.
+	return scanSearchRows(rows, relatedSearchQuery(picked.Terms), suggestionSearchDepth, 0, false)
 }
 
 // relatedSearchQuery is Suggestions.SearchQuery: the best relatedSearchQueryTerms chosen terms,
@@ -687,7 +689,7 @@ func (s *server) fillRelatedItems(
 			candidates = append(candidates, result)
 		}
 	}
-	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates); err != nil {
+	if err := s.attachAskStates(ctx, s.deps.Store.Pool, candidates, false); err != nil {
 		// attachAskStates sets each row's state before it reads resolved asks' answers, so a
 		// failure partway would leave a resolved ask that was answered showing no answer.
 		slog.Warn("dispatch: related items carry no ask state", "error", err)

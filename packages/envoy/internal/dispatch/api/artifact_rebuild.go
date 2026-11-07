@@ -72,7 +72,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(published...)
+	s.publish(r.Context(), published...)
 	WriteJSON(w, http.StatusOK, report)
 }
 

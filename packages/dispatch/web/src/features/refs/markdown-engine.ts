@@ -1,3 +1,4 @@
+import { documentFromJSON } from "@legion/proof-editor/document-json";
 import type { SoftBreaks } from "@legion/proof-editor/headless";
 import type {
   Attrs,
@@ -8,10 +9,10 @@ import type {
 } from "prosemirror-model";
 import { useLayoutEffect, useState } from "react";
 
-import type { BlockSchema } from "../../api/types";
+import type { BlockSchema, DisplayTree } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
-import type { DocumentJSON, ParsedBody, ParseRequest, ParseSchema } from "./markdown-parse.worker";
+import type { ParsedBody, ParseRequest, ParseSchema } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
 import { parseDispatchReference, shortForm } from "./routes";
@@ -61,6 +62,16 @@ export interface MarkdownEngine {
    *  the worker's answer, a document as `ProseMirrorNode.toJSON()` gives it, back into a document
    *  of this page's own schema, the one carrying its `renderBlock`. */
   readonly schema: Schema;
+  /** `schema` with the search highlight beside its own marks: what a tree the server sent is
+   *  drawn into (`draw`). */
+  readonly displaySchema: Schema;
+  /**
+   * The document a tree Go read a stored text into describes (`pmdoc.ReadForDisplay`), drawn
+   * into `displaySchema` with no parser of this page's own; `undefined` for a tree that schema
+   * refuses, which the caller shows as the stored text's own literal characters. A tree is read
+   * once here and drawn by every surface that shows that text.
+   */
+  draw(tree: DisplayTree): ProseMirrorNode | undefined;
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
    * as one plain-text node. The engine parses read-only: a container directive the block schema
@@ -146,19 +157,22 @@ const PARSE_TIME_LIMIT_MS = 10_000;
 const ANSWER_LIMIT = 4;
 
 /**
- * One rendering of a body: the engine it renders with, the document parsed from it, and whether
- * the parse is still owed. A body of at most `markdownWorkerThreshold` characters is rendered
- * once, parsed, in the caller's own commit. A longer one is rendered at once as pending, with no
- * document - its literal text is what the reader reads meanwhile - and again with the document
- * once the worker answers.
+ * One rendering of a body: the engine it renders with, the document a surface draws, and whether
+ * it is still owed. A stored text is rendered once, from the tree the server read it into, in
+ * the caller's own commit: it is never parsed here and never sent to the worker, whatever its
+ * length. A text Dispatch does not store is parsed: one of at most `markdownWorkerThreshold`
+ * characters in the caller's own commit, a longer one at once as pending, with no document - its
+ * literal text is what the reader reads meanwhile - and again with the document once the worker
+ * answers.
  */
 export interface MarkdownRendering {
   /** `undefined` where neither the schema nor the engine could load, and while the parse is
    *  pending on a page where they are still loading. */
   readonly engine: MarkdownEngine | undefined;
-  /** The parsed document. `undefined` while `pending`, and, once not pending, for a body the
-   *  parser refused or an engine that could not load: a body's one final failure, which a
-   *  surface shows as its literal text. */
+  /** The document to draw: the server's tree for a stored text, the engine's parse for one
+   *  Dispatch does not store. `undefined` while `pending`, and, once not pending, for a tree the
+   *  schema refused, a body the parser refused or an engine that could not load: the body's one
+   *  final failure, which a surface shows as its literal text. */
   readonly parsed: ProseMirrorNode | undefined;
   /** The parse is still owed - by the worker, or by a schema and engine chunk still loading. */
   readonly pending: boolean;
@@ -200,25 +214,6 @@ let createParseWorker: ParseWorkerFactory | undefined;
 /** `PARSE_TIME_LIMIT_MS`, unless a test shortened it through `setParseDeadline`. */
 let deadlineMs = PARSE_TIME_LIMIT_MS;
 const answers = new Map<string, ParsedAnswer>();
-
-/**
- * The document `json` describes, as a document of `schema`.
- *
- * `Schema.nodeFromJSON` is not what builds it: that checks every attribute against the type its
- * schema gives it, and this page's own parser writes values its schema does not - milkdown's
- * Markdown parser writes `title: null` for an image with no title, where `image.title` is a string
- * defaulting to `""` - so a body holding a picture could never be rebuilt, though the page's own
- * parse of it holds exactly the same attribute. That check is for JSON from somewhere else; this
- * JSON is the page's own worker's parse of the body, with the page's own schema.
- */
-function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
-  const marks = json.marks?.map(({ attrs, type }) => schema.marks[type].create(attrs));
-  if (json.type === "text") {
-    return schema.text(json.text ?? "", marks);
-  }
-  const content = json.content?.map((child) => documentFromJSON(schema, child));
-  return schema.nodes[json.type].create(json.attrs, content, marks);
-}
 
 /** Parses `body` here, for a worker that could not: the reader waits for a parse on their own
  *  thread, and then reads the body formatted. */
@@ -345,16 +340,25 @@ export interface RenderWithEngineOptions {
   readonly keepAPostedParse?: boolean;
 }
 
-/** Renders `markdown` with a loaded engine: parsed here for a body up to the threshold; for a
- *  longer one the answer already cached for it, or a pending rendering now and the parsed
- *  document once the worker answers. */
+/** Renders a body with a loaded engine: the server's tree drawn for a stored text; otherwise
+ *  parsed here for a body up to the threshold, and for a longer one the answer already cached
+ *  for it, or a pending rendering now and the parsed document once the worker answers. */
 function renderLoaded(
   engine: MarkdownEngine,
   markdown: string,
+  tree: DisplayTree | undefined,
   softBreaks: SoftBreaks,
   render: (rendering: MarkdownRendering) => void,
   { keepAPostedParse = false }: RenderWithEngineOptions
 ): () => void {
+  if (tree !== undefined) {
+    // A stored text is drawn from the tree the server read it into, however long it is: there
+    // is nothing to parse, so neither the page's own thread nor the worker reads it. Its
+    // mermaid fences are closed - the server stored the whole text - so every mermaid block of
+    // it draws, and `drawMermaidDiagrams` asks for no second parse to find out.
+    render({ engine, openMermaidFence: false, parsed: engine.draw(tree), pending: false });
+    return () => undefined;
+  }
   if (!parsesInTheWorker(markdown)) {
     render({
       engine,
@@ -396,28 +400,77 @@ function renderLoaded(
 
 /**
  * The shared engine when a load has already resolved, and `undefined` until then: what a caller
- * that must answer in this task parses with. It starts no load of its own - a caller that wants
- * one awaits `warmMarkdownRenderer` first, as the change marks' caller does - and so is the
- * synchronous half of `renderWithEngine` without its callback or its background load.
+ * that must answer in this task draws or parses with. It starts no load of its own - a caller
+ * that wants one awaits `warmMarkdownRenderer` first, as the change marks' caller does - and so
+ * is the synchronous half of `renderWithEngine` without its callback or its background load.
  */
 export function loadedEngine(): MarkdownEngine | undefined {
   return readyEngine;
 }
 
 /**
- * Renders `markdown` under the soft-break policy `softBreaks`, through the shared engine.
+ * Hands `use` the shared engine: in this task where a load has already resolved, and once the
+ * schema and Proof's headless chunk arrive otherwise. `undefined` where neither could load,
+ * which the cause of is reported and the schema cache does not retain, so the next caller tries
+ * the fetch again. Returns the cancel, after which `use` never runs.
+ */
+function withEngine(use: (engine: MarkdownEngine | undefined) => void): () => void {
+  if (readyEngine !== undefined) {
+    use(readyEngine);
+    return () => undefined;
+  }
+  let cancelled = false;
+  void (async () => {
+    let engine: MarkdownEngine | undefined;
+    try {
+      engine = await loadEngine(await loadBlockSchema());
+    } catch (error) {
+      console.error("Rendering literal Markdown, the block schema is unavailable", error);
+    }
+    if (!cancelled) {
+      use(engine);
+    }
+  })();
+  return () => {
+    cancelled = true;
+  };
+}
+
+/**
+ * Draws the stored text `tree` was read from, through the shared engine, and hands the document
+ * to `drawn`: in this task where the engine has loaded, and once it does otherwise.
+ * `undefined` for a tree the schema refuses and for an engine that cannot load. Returns the
+ * cancel. It is what a caller that wants the words of a stored text rather than its nodes uses
+ * (`useMarkdownHeadline`); a surface that paints one uses `renderWithEngine`.
+ */
+export function drawWithEngine(
+  tree: DisplayTree,
+  drawn: (document: ProseMirrorNode | undefined) => void
+): () => void {
+  return withEngine((engine) => {
+    drawn(engine?.draw(tree));
+  });
+}
+
+/**
+ * Renders a body through the shared engine: `tree`, the reading Go made of a stored text, drawn
+ * as it stands; or, for a text Dispatch does not store and so sent no tree for, `markdown`
+ * parsed here under the soft-break policy `softBreaks`.
  *
- * A body of at most `markdownWorkerThreshold` characters is parsed on the page's own thread and
- * rendered synchronously, where a load has already resolved, so it renders in the layout phase of
- * the commit that mounts it (a list that inserts a turn sees the turn's full height in that same
- * commit, and `ViewportAnchor` compensates in one measurement); otherwise once the schema and the
- * engine chunk arrive. Only the very first render on a page, or a schema that failed to load,
- * takes that asynchronous path. Without the server schema (or Proof's headless engine) `render`
- * gets no engine and no document, and the surface shows the literal text instead: readable, never
- * lost. The cause is reported and the schema cache does not retain the failure, so the next render
- * tries the fetch again.
+ * A stored text is drawn in the layout phase of the commit that mounts it where a load has
+ * already resolved, whatever its length: drawing reads no markdown, so neither the page's own
+ * thread nor the parse worker parses it, and the engine's answer cache holds nothing for it.
  *
- * A longer body is parsed in the parse worker (`markdown-parse.worker.ts`), created on the first
+ * A text with no tree of its own is parsed. One of at most `markdownWorkerThreshold` characters
+ * is parsed on the page's own thread and rendered synchronously, where a load has already
+ * resolved, so it renders in the layout phase of the commit that mounts it (a list that inserts
+ * a turn sees the turn's full height in that same commit, and `ViewportAnchor` compensates in
+ * one measurement); otherwise once the schema and the engine chunk arrive. Only the very first
+ * render on a page, or a schema that failed to load, takes that asynchronous path. Without the
+ * server schema (or Proof's headless engine) `render` gets no engine and no document, and the
+ * surface shows the literal text instead: readable, never lost.
+ *
+ * A longer one is parsed in the parse worker (`markdown-parse.worker.ts`), created on the first
  * one a page draws. `render` is called at once with a pending rendering, so the reader has the
  * body's own text, and again with the parsed document when the worker answers. A worker that
  * cannot be created, whose chunk does not load, that crashes, or that holds a body past its
@@ -432,38 +485,29 @@ export function loadedEngine(): MarkdownEngine | undefined {
  */
 export function renderWithEngine(
   markdown: string,
+  tree: DisplayTree | undefined,
   softBreaks: SoftBreaks,
   render: (rendering: MarkdownRendering) => void,
   options: RenderWithEngineOptions = {}
 ): () => void {
   if (readyEngine !== undefined) {
-    return renderLoaded(readyEngine, markdown, softBreaks, render, options);
+    return renderLoaded(readyEngine, markdown, tree, softBreaks, render, options);
   }
-  let cancelled = false;
   let cancelAnswer: (() => void) | undefined;
-  if (parsesInTheWorker(markdown)) {
+  if (tree === undefined && parsesInTheWorker(markdown)) {
     // The schema and the engine chunk are still loading, and the body is one the worker will
     // parse: the reader has its text now, as they would while the worker parsed it.
     render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: true });
   }
-  void (async () => {
-    let engine: MarkdownEngine | undefined;
-    try {
-      engine = await loadEngine(await loadBlockSchema());
-    } catch (error) {
-      console.error("Rendering literal Markdown, the block schema is unavailable", error);
-    }
-    if (cancelled) {
-      return;
-    }
+  const cancelLoad = withEngine((engine) => {
     if (engine === undefined) {
       render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: false });
       return;
     }
-    cancelAnswer = renderLoaded(engine, markdown, softBreaks, render, options);
-  })();
+    cancelAnswer = renderLoaded(engine, markdown, tree, softBreaks, render, options);
+  });
   return () => {
-    cancelled = true;
+    cancelLoad();
     cancelAnswer?.();
   };
 }
@@ -514,45 +558,59 @@ export interface MarkdownHeadline {
 }
 
 /**
- * Markdown projected to one line of plain text and cut to `max` characters, for a place that can
- * hold only a string: a reference link's text, a card's title, a hover tooltip. Formatting goes
- * (a link's own styling is the formatting there) but no syntax stays: `**Blocking:** the deploy`
- * reads `Blocking: the deploy`, a code span keeps its words, a `dispatch://` reference reads as
- * its short form, and the cut happens on the projected text, so it never splits a mark (nor a
- * character outside the Basic Multilingual Plane). Blocks and hard breaks become single spaces.
- * `cut` says whether the text was cut, which an ellipsis the author typed cannot fake.
- * `undefined` until the engine has answered (one pre-paint commit once it is loaded, and for a
- * body the parse worker parses, until its answer lands) and for an `undefined` source; the
- * literal source, cut the same way, when the engine cannot load.
+ * A stored text projected to one line of plain words and cut to `max` characters, for a place
+ * that can hold only a string: a reference link's text, a card's title, a hover tooltip. The
+ * words are `tree`'s, drawn from the reading Go made of that text, so nothing on this page
+ * parses markdown for a stored text. Formatting goes (a link's own styling is the formatting
+ * there) and no syntax stays: `**Blocking:** the deploy` reads `Blocking: the deploy`, a code
+ * span keeps its words, a `dispatch://` reference reads as its short form, and the cut happens
+ * on the projected text, so it never splits a mark (nor a character outside the Basic
+ * Multilingual Plane). Blocks and hard breaks become single spaces. `cut` says whether the
+ * text was cut, which an ellipsis the author typed cannot fake.
+ *
+ * `markdown` is for a text that carries no tree to take the words from. That is the three texts
+ * Dispatch does not store — a refused broadcast send's row names its own text on hover
+ * (`BroadcastSends.tsx`) — and it is also a stored text whose answer carries no tree: a caller
+ * that did not ask for one, or a server that has not rolled, which a deploy serving two builds
+ * puts in front of one dashboard (`reference-target.ts`). It is read only where `tree` is
+ * absent, and it is parsed, as everything about such a text is.
+ *
+ * `undefined` where neither is given, until the engine has answered (one pre-paint commit once
+ * it is loaded on the page, and for a parsed body until the worker's answer lands), and for a
+ * tree the schema refuses or an engine that cannot load: the surfaces that show a headline
+ * show their own words in its place (a reference link reads as its short form).
  */
 export function useMarkdownHeadline(
-  markdown: string | undefined,
-  max: number
+  tree: DisplayTree | undefined,
+  max: number,
+  markdown?: string
 ): MarkdownHeadline | undefined {
   const [headline, setHeadline] = useState<MarkdownHeadline>();
   useLayoutEffect(() => {
-    if (markdown === undefined) {
-      setHeadline(undefined);
-      return;
-    }
-    return renderWithEngine(markdown, "space", ({ parsed, pending }) => {
-      if (pending) {
-        // A long body's headline waits for the worker rather than reading as its own source,
-        // and the source before it goes with it: `undefined` is what this hook documents for a
-        // body whose parse is still owed, where the headline left in place would be the one a
-        // streaming turn's last frame produced.
+    const fit = (document: ProseMirrorNode | undefined): void => {
+      if (document === undefined) {
         setHeadline(undefined);
         return;
       }
-      const characters = Array.from(
-        (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
-      );
+      const characters = Array.from(plainWords(document).replace(/\s+/g, " ").trim());
       const cut = characters.length > max;
       setHeadline({
         cut,
         text: cut ? `${characters.slice(0, max).join("")}…` : characters.join(""),
       });
+    };
+    if (tree !== undefined) {
+      return drawWithEngine(tree, fit);
+    }
+    if (markdown === undefined) {
+      setHeadline(undefined);
+      return;
+    }
+    return renderWithEngine(markdown, undefined, "space", ({ parsed, pending }) => {
+      // A long body's headline waits for the worker rather than reading as its own source,
+      // and the headline left in place would be the one a frame before it produced.
+      fit(pending ? undefined : parsed);
     });
-  }, [markdown, max]);
+  }, [markdown, max, tree]);
   return headline;
 }

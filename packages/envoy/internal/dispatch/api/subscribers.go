@@ -338,7 +338,7 @@ func (s *server) finishPendingRemoval(w http.ResponseWriter, r *http.Request, ow
 		return
 	}
 	if event != nil {
-		s.publish(*event)
+		s.publish(r.Context(), *event)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -423,7 +423,7 @@ func (s *server) unsubscribeSession(
 		return
 	}
 	if event != nil {
-		s.publish(*event)
+		s.publish(r.Context(), *event)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

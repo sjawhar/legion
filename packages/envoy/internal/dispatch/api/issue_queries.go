@@ -517,7 +517,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	read, err := s.readIssue(r.Context(), r.PathValue("key"))
+	read, err := s.readIssue(r.Context(), r.PathValue("key"), wantsDisplayTrees(r))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -556,8 +556,9 @@ type issueDetail struct {
 // readIssue runs getIssue's two batches, whose statements and scans are the ones the sequential
 // loaders run - loadIssueWithProgress, loadArtifacts, queryOwnerAsks with issueOpenAsksOf,
 // issueChildrenStatement with scanIssueChildren and refs.BacklinkCounts - so the two paths answer
-// the same bytes.
-func (s *server) readIssue(ctx context.Context, key string) (issueDetail, error) {
+// the same bytes. trees is what the request asked for (wantsDisplayTrees): the display trees of
+// the documents' approval reasons and of the open asks' texts, which only the dashboard reads.
+func (s *server) readIssue(ctx context.Context, key string, trees bool) (issueDetail, error) {
 	var read issueDetail
 	var links []model.ExternalLink
 	var asks []model.Ask
@@ -610,7 +611,10 @@ func (s *server) readIssue(ctx context.Context, key string) (issueDetail, error)
 	if err := s.readIssueDetails(ctx, artifactPointers(read.Artifacts), askReadPointers(asks)); err != nil {
 		return issueDetail{}, err
 	}
-	read.OpenAsks = issueOpenAsksOf(asks, replies)
+	// The approvals are read by the second batch, so their reasons are read for display after
+	// it, where the sequential loader read them after loadArtifacts.
+	attachApprovalTrees(trees, read.Artifacts)
+	read.OpenAsks = issueOpenAsksOf(asks, replies, trees)
 	return read, nil
 }
 
@@ -636,16 +640,18 @@ func (s *server) readIssueDetails(ctx context.Context, artifacts []*model.Artifa
 // comment in its thread — the same last_reply the inbox row carries — so the
 // issue header can show who spoke last beside the ask's waiting_on.
 type issueOpenAsk struct {
-	model.Ask
+	askRead
 	LastReply *model.AskLastReply `json:"last_reply"`
 }
 
 // issueOpenAsksOf pairs each ask with the newest reply in its thread, the shape the detail
-// response lists; an ask nobody has replied to carries a null last_reply.
-func issueOpenAsksOf(asks []model.Ask, replies map[string]model.AskLastReply) []issueOpenAsk {
+// response lists; an ask nobody has replied to carries a null last_reply. Each ask is read as
+// the dashboard reads one (newAskRead), carrying the trees of its texts when the caller asked
+// for them.
+func issueOpenAsksOf(asks []model.Ask, replies map[string]model.AskLastReply, trees bool) []issueOpenAsk {
 	openAsks := make([]issueOpenAsk, len(asks))
 	for index, ask := range asks {
-		openAsks[index] = issueOpenAsk{Ask: ask}
+		openAsks[index] = issueOpenAsk{askRead: newAskRead(ask, trees)}
 		if reply, ok := replies[ask.ID]; ok {
 			openAsks[index].LastReply = &reply
 		}

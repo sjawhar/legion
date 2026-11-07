@@ -8,7 +8,14 @@ import { MemoryRouter } from "react-router-dom";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { realClock, tick } from "../../__tests__/fake-clock";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
+import type {
+  Artifact,
+  AskSnooze,
+  DisplayTree,
+  InboxRow,
+  IssueDetails,
+  Version,
+} from "../../api/types";
 import { CHANGED_BLOCK_CLASS, changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
@@ -96,6 +103,9 @@ function seedDocument(
       authors: [{ id: "alice", kind: "user" }],
       created_at: "2026-10-02T00:00:00Z",
       markdown,
+      // The pane marks against the version's tree now, which the server sends beside its
+      // markdown; the page's own reading of the same text is the same document.
+      markdown_tree: loadedEngine()?.parse(markdown)?.toJSON(),
       named: false,
       number: Number(number),
       summary: null,
@@ -331,7 +341,10 @@ test("an approval draws the latest version marked against the version it follows
     // The latest version, which is the version Approve approves.
     expect(await screen.findByLabelText("Document version 4")).toBeDefined();
     await waitFor(() => expect(drawn).toHaveLength(1));
-    const marks = changeMarksAgainst(baseline, renderedDocument(latest));
+    const marks = changeMarksAgainst(
+      loadedEngine()?.parse(baseline)?.toJSON() as DisplayTree,
+      renderedDocument(latest)
+    );
     expect(marks.text.length).toBeGreaterThan(0);
     expect(drawn[0]).toEqual(marks);
   } finally {

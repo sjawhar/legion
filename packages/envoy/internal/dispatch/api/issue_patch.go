@@ -553,7 +553,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	// the commit itself: migration 20261101181500's trigger notifies, and each process closes its
 	// rooms of the issue's documents so their browsers reconnect with the scope the issue now
 	// allows.
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	if closing {
 		// The commit's notification closes the issue's rooms on every process; the sweep catches
 		// the ask blocks written since the close forked each document (sweepClosedIssueAsks).

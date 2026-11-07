@@ -454,28 +454,43 @@ func computeChildEqualityFactor(element *crdt.YXmlElement, node *Node) int {
 	return left + right
 }
 
+// updateYText writes want's text and marks into text: the characters by one diff of what the Y
+// text holds against what want says, and the marks of every run that differs by one delta of
+// retains, as y-prosemirror's own updateYText writes them.
+//
+// The write reads the delta twice, once before the text edit for the characters it holds and once
+// after for the marks, and walks the second reading once across the runs (textRunMarks). Building
+// the two texts by += copied each of them once per operation, reading the delta once per run
+// walked it from its first operation every time, and a format per run resolved its position in
+// the Y text from an index every time: a write of 20,000 one-character runs, each wanting a mark
+// the text does not hold, cost 72 seconds of that (A7).
 func updateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node) error {
 	operations, err := yTextDeltaInTransaction(text)
 	if err != nil {
 		return err
 	}
-	var current string
+	var current strings.Builder
 	for _, operation := range operations {
 		value, ok := operation.Insert.(string)
 		if !ok {
 			return fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
 		}
-		current += value
+		current.WriteString(value)
 	}
 
-	var desired string
+	size := 0
 	for _, node := range want {
 		if node.Type != "text" {
 			return fmt.Errorf("%w: Yjs text wants %q", ErrSchema, node.Type)
 		}
-		desired += node.Text
+		size += len(node.Text)
 	}
-	index, remove, insert := simpleDiff(current, desired)
+	var desired strings.Builder
+	desired.Grow(size)
+	for _, node := range want {
+		desired.WriteString(node.Text)
+	}
+	index, remove, insert := simpleDiff(current.String(), desired.String())
 	if remove > 0 {
 		text.Delete(txn, index, remove)
 	}
@@ -487,43 +502,114 @@ func updateYText(txn *crdt.Transaction, text *crdt.YXmlText, want []*Node) error
 	if err != nil {
 		return err
 	}
-	offset := 0
+	walk, err := newTextRunMarks(actual)
+	if err != nil {
+		return err
+	}
+	// The runs needing no format are retained together, each run needing one with the attributes
+	// a format of that run alone would have carried, so the delta says what the formats said.
+	var format []crdt.Delta
+	retain, offset := 0, 0
 	for _, node := range want {
 		length := len16(node.Text)
-		attributes, matches, err := textRangeMarks(actual, offset, length, node.Marks)
+		attributes, matches, err := walk.run(offset, length, node.Marks)
 		if err != nil {
 			return err
 		}
-		if !matches {
-			text.Format(txn, offset, length, formatAttributes(attributes, node.Marks))
+		if matches || length == 0 {
+			retain += length
+		} else {
+			if retain > 0 {
+				format = append(format, crdt.Delta{Op: crdt.DeltaOpRetain, Retain: retain})
+				retain = 0
+			}
+			format = append(format, crdt.Delta{
+				Op:         crdt.DeltaOpRetain,
+				Retain:     length,
+				Attributes: formatAttributes(attributes, node.Marks),
+			})
 		}
 		offset += length
+	}
+	if len(format) > 0 {
+		text.ApplyDelta(txn, format)
 	}
 	return nil
 }
 
-func textRangeMarks(operations []crdt.Delta, from, length int, marks []Mark) (crdt.Attributes, bool, error) {
+// textRunMarks is one walk over a Y text's delta, across the runs a write wants in the order it
+// writes them. For each run it answers the attributes to clear over the run, whether the marks
+// the text already holds over it are the run's own, and the "Yjs text is shorter than target"
+// error where the delta ends before the run does - but it reads each operation once over all the
+// runs rather than, as the walk it replaced did, once per run from the delta's first operation.
+//
+// The runs are written in ascending order and each one begins where the one before ended, so an
+// operation ending inside one run's span is reached by no later run: the walk stops on the first
+// operation reaching past the run just read, which is the first operation the next run can touch.
+type textRunMarks struct {
+	operations []crdt.Delta
+	index      int // the operation the walk stands on
+	offset     int // the UTF-16 position at which that operation begins
+	end        int // the UTF-16 position at which it ends, counted once as the walk reaches it
+}
+
+// newTextRunMarks is a walk over operations, standing at the first of them.
+func newTextRunMarks(operations []crdt.Delta) (*textRunMarks, error) {
+	walk := &textRunMarks{operations: operations}
+	return walk, walk.measure()
+}
+
+// measure is how far the operation the walk stands on reaches, read once for that operation. A
+// walk past the last operation ends where it begins.
+func (w *textRunMarks) measure() error {
+	if w.index >= len(w.operations) {
+		w.end = w.offset
+		return nil
+	}
+	value, ok := w.operations[w.index].Insert.(string)
+	if !ok {
+		return fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, w.operations[w.index].Insert)
+	}
+	w.end = w.offset + len16(value)
+	return nil
+}
+
+// next leaves the walk standing on the operation after the one it stands on.
+func (w *textRunMarks) next() error {
+	w.offset, w.index = w.end, w.index+1
+	return w.measure()
+}
+
+// run is the attributes to clear over the UTF-16 span from to from+length, which are the keys
+// every operation touching the span carries, and whether the marks those operations carry are
+// already marks. It reads the operations the span touches, leaves the walk on the first one
+// reaching past the span, and reports a text ending before the span does as an error, since a
+// write of a run the Y text has no room for is this package's own bug.
+func (w *textRunMarks) run(from, length int, marks []Mark) (crdt.Attributes, bool, error) {
 	to := from + length
-	offset := 0
 	matches := true
-	attributes := make(crdt.Attributes)
-	for _, operation := range operations {
-		value, ok := operation.Insert.(string)
-		if !ok {
-			return nil, false, fmt.Errorf("%w: unsupported Yjs text embed %T", ErrSchema, operation.Insert)
-		}
-		end := offset + len16(value)
-		if from < end && offset < to {
+	var attributes crdt.Attributes
+	for w.index < len(w.operations) && w.offset < to {
+		if w.end > from {
+			operation := w.operations[w.index]
 			if !equalYMarks(operation.Attributes, marks) {
 				matches = false
 			}
 			for key := range operation.Attributes {
+				if attributes == nil {
+					attributes = make(crdt.Attributes, len(operation.Attributes))
+				}
 				attributes[key] = nil
 			}
 		}
-		offset = end
+		if w.end > to {
+			return attributes, matches, nil
+		}
+		if err := w.next(); err != nil {
+			return nil, false, err
+		}
 	}
-	if offset != to && offset < to {
+	if w.index >= len(w.operations) && w.offset < to {
 		return nil, false, fmt.Errorf("%w: Yjs text is shorter than target", ErrSchema)
 	}
 	return attributes, matches, nil

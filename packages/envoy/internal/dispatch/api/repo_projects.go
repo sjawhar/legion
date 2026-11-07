@@ -197,7 +197,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	WriteJSON(w, http.StatusOK, mapping)
 }
 
@@ -251,7 +251,7 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	w.WriteHeader(http.StatusNoContent)
 }
 

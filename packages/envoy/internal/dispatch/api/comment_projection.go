@@ -68,7 +68,7 @@ type commentEventThread struct {
 // reply to an open ask whom that ask waits on now that the reply is its newest
 // (commentEventThread.AskWaitingOn, under the same name the comment's event carries it).
 type commentWriteResponse struct {
-	model.Comment
+	commentRead
 	AskWaitingOn string `json:"ask_waiting_on,omitempty"`
 }
 

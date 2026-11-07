@@ -537,8 +537,11 @@ func literalPathPunctuation(char rune) bool {
 	return char < utf8.RuneSelf && bytes.IndexByte([]byte(`!"&')*,.:;<?]_~`), byte(char)) >= 0
 }
 
-// literalEnd reports whether char ends a URL as whitespace: a line ending, a space or a tab, or
-// what JavaScript's `\s` matches, which micromark reads as Unicode whitespace.
+// literalEnd reports whether char is whitespace as JavaScript's `\s` is, which is what micromark
+// reads as Unicode whitespace: the ASCII blanks, the Unicode space separators, the line and
+// paragraph separators, and the byte-order mark. Go's unicode.IsSpace is not it - that one holds
+// U+0085 and not U+FEFF - and both readings here have to be the browser's, character for
+// character: it ends a literal URL (linkify) and separates words (fragment.go).
 func literalEnd(char rune) bool {
 	switch char {
 	case '\t', '\n', '\v', '\f', '\r', ' ', 0xa0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff:

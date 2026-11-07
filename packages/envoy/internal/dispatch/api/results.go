@@ -238,7 +238,7 @@ func (s *server) recordCheckResult(w http.ResponseWriter, r *http.Request) {
 	// result.recorded, and no later event refreshes it, so a tab that read the results before
 	// the pull request row landed would show this result older until something else happened.
 	s.readThroughPullRequests(r.Context(), check.IssueKey, result.CommitSHA, checkRepo)
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusCreated, map[string]any{
 		"result": result,
 		"line":   checkResultLine(check, result),

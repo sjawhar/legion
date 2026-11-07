@@ -56,7 +56,7 @@ allowlist=(
   packages/envoy/.changes/
   # The legacy Dispatch client comment: `SearchResult.issue` stays until no installed client built
   # before the owner-only shape remains, and the old package is one of those clients.
-  packages/contracts/src/dispatch-api.ts
+  packages/contracts/src/dispatch-api-search.ts
   packages/contracts/AGENTS.md
   packages/envoy/internal/dispatch/model/model.go
   # The live-view message names the plugin releases that do not stream ("before 5.8.0").

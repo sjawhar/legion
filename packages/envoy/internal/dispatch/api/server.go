@@ -346,6 +346,12 @@ type server struct {
 	// issue reads judge routes against and agents lists list (issue_route_status.go). Only
 	// register gives it non-zero TTLs.
 	rosters rosterCache
+	// listAnswers keeps what the comment list and the activity feed last answered, under the ETag
+	// each answers with, so a warm read of either writes bytes instead of making them again
+	// (list_answers.go). Every server register mounts has one; a server a test builds directly
+	// (directServer) has none, and every method of the cache takes a nil one, which keeps
+	// nothing.
+	listAnswers *listAnswerCache
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
 	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
@@ -592,7 +598,7 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	if lifetime == nil {
 		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every live socket (a test passes t.Context())")
 	}
-	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{
+	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, listAnswers: newListAnswerCache(), rosters: rosterCache{
 		ttl: cmp.Or(deps.RouteRosterTTL, routeRosterTTL), silenceTTL: routeRosterSilenceTTL,
 	}}
 	s.liveKinds = map[string]liveKind{
@@ -657,6 +663,13 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 			// early answer.
 			handler = s.gateRouteScopes(route.OAuthScopes, handler)
 		}
+		// One place for the whole table: every answer says its body depends on Dispatch-Trees
+		// (varyOnDisplayTrees), so no cache between a browser and Dispatch hands a reader with
+		// trees an answer written for a reader without them. It is outside the scope gate, so a
+		// refusal of the row's own scopes carries the header too. The answer's other Vary, on
+		// Accept-Encoding, is added by the same loop, where the encoding is chosen
+		// (compressAnswers).
+		handler = varyOnDisplayTrees(handler)
 		if route.Method != http.MethodGet {
 			// Every layer above may answer before the body is read; the answer waits for the body.
 			//
@@ -675,8 +688,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		// The access-log line is outermost, so it records what every layer answered - a keyed
 		// replay, a refused login, an early answer the drain held - and the caller the first of
-		// them resolved.
-		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.decideBrokerToken(trackTransactions(handler))))
+		// them resolved. Compression sits just inside it, so every one of those answers is
+		// compressed for a caller that takes gzip and the line counts the bytes that went on the
+		// wire. The two websockets below carry no compressed answer: the upgrade is not a body,
+		// and the frames after it are the socket's (compressAnswers).
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, compressAnswers(s.decideBrokerToken(trackTransactions(handler)))))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -1534,10 +1550,16 @@ func (s *server) appendEvent(ctx context.Context, tx pgx.Tx, event model.Event) 
 	return s.deps.Events.Append(ctx, tx, event)
 }
 
-func (s *server) publish(events ...model.Event) {
+// publish hands each event to the broker and then stores the display trees of the stored texts
+// their payloads carry (storeEventDisplayTrees). ctx is the caller's own: a route's request
+// context, which by here has committed and holds no connection of the pool, or a background
+// writer's. A caller that publishes while its transaction is still open stores nothing, and loses
+// no tree by it: such an event carries a text its own write already stored.
+func (s *server) publish(ctx context.Context, events ...model.Event) {
 	for _, event := range events {
 		s.deps.Events.Publish(event)
 	}
+	s.storeEventDisplayTrees(ctx, events)
 }
 
 func (s *server) begin(ctx context.Context) (pgx.Tx, error) {

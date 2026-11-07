@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -119,8 +120,8 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
-	WriteJSON(w, http.StatusOK, comment)
+	s.publish(r.Context(), event)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +141,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// An edit stores line feeds alone, as a comment's creation does (createCommentFor): the
+	// display read ends a line at a carriage return too, but a body that holds one draws
+	// differently in every other reader of the stored text. The carried offsets below are the
+	// dashboard editor's, and a ProseMirror document holds no carriage return, so no offset this
+	// normalisation shortens is one a caller sent.
+	input.Body = pmdoc.LineFeeds(input.Body)
 	if strings.TrimSpace(input.Body) == "" {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
@@ -242,8 +249,9 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
-	WriteJSON(w, http.StatusOK, comment)
+	s.publish(r.Context(), event)
+	s.storeDisplayTrees(r.Context(), comment.ID, input.Body)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -453,13 +461,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
 	if action == "accept" {
 		// The accepted text may have gone the way an edit's can: removed by a concurrent browser
 		// change after this write's version was rendered and before it reached the room, which is
 		// past undoing (LEGION-269). The accept stands and says so.
 		lost, known := ledger.LostOps(comment.Anchor.ArtifactID)
-		accepted := acceptedComment{Comment: comment}
+		accepted := acceptedComment{commentRead: newCommentRead(comment, wantsDisplayTrees(r))}
 		if known {
 			gone := len(lost) > 0
 			accepted.Lost = &gone
@@ -467,7 +475,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		WriteJSON(w, http.StatusOK, accepted)
 		return
 	}
-	WriteJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, newCommentRead(comment, wantsDisplayTrees(r)))
 }
 
 // acceptedComment is the accept route's response: the comment, plus whether the live document
@@ -475,6 +483,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 // publish failed and the room is reloading, or the room holds a tree too deep to read - which is
 // not the same statement as false, exactly as an edit's lost_ops distinguishes them.
 type acceptedComment struct {
-	model.Comment
+	commentRead
 	Lost *bool `json:"lost"`
 }

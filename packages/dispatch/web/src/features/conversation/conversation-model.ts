@@ -1,10 +1,10 @@
 import type {
-  Comment,
   CommentDelivery,
+  CommentWithTrees,
   HandoffSummary,
   IssueAskThreadRow,
-  Message,
   MessageRead,
+  MessageWithTrees,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import { conversationItemId } from "../issue/pins";
@@ -41,20 +41,20 @@ export type Conversation =
   | (ConversationBase & { readonly kind: "ask"; readonly ask: IssueAskThreadRow })
   | (ConversationBase & {
       readonly kind: "comment";
-      readonly root: Comment;
-      readonly replies: readonly Comment[];
+      readonly root: CommentWithTrees;
+      readonly replies: readonly CommentWithTrees[];
     })
   | (ConversationBase & {
       readonly kind: "message";
-      readonly root: Message;
-      readonly replies: readonly Message[];
+      readonly root: MessageWithTrees;
+      readonly replies: readonly MessageWithTrees[];
     })
   | (ConversationBase & {
       readonly kind: "targeted-message";
-      readonly root: Message;
-      readonly replies: readonly Message[];
+      readonly root: MessageWithTrees;
+      readonly replies: readonly MessageWithTrees[];
       /** The first reply a session sent: the card reads "Answered by" that session. */
-      readonly answer?: Message;
+      readonly answer?: MessageWithTrees;
     })
   | (ConversationBase & {
       readonly kind: "handoff";
@@ -68,7 +68,7 @@ export type MessageConversation = Extract<Conversation, { kind: "message" | "tar
 
 export interface ConversationInput {
   readonly asks: readonly IssueAskThreadRow[];
-  readonly comments: readonly Comment[];
+  readonly comments: readonly CommentWithTrees[];
   readonly messages: readonly MessageRead[];
   /** Every phase handoff of the issue, each version its own entry. */
   readonly handoffs: readonly HandoffSummary[];
@@ -84,7 +84,7 @@ export function commentDeliveries(
 }
 
 /** Whether a comment thread is done with: resolved, or its suggestion accepted or rejected. */
-function isClosedComment(comment: Comment): boolean {
+function isClosedComment(comment: CommentWithTrees): boolean {
   return comment.resolved || (comment.suggestion !== null && comment.suggestion.accepted !== null);
 }
 
@@ -102,7 +102,10 @@ function isUnread(at: string, unreadFrom: string | undefined): boolean {
 
 /** The comment at the top of `comment`'s reply chain: the first with no `reply_to`, or the last
  *  one present when a parent is missing. A cyclic chain stops at the first repeated comment. */
-export function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
+export function rootOf(
+  byId: ReadonlyMap<string, CommentWithTrees>,
+  comment: CommentWithTrees
+): CommentWithTrees {
   const visited = new Set<string>();
   let root = comment;
   while (root.reply_to !== null && !visited.has(root.id)) {
@@ -137,11 +140,11 @@ function askConversation(ask: IssueAskThreadRow, unreadFrom: string | undefined)
 /** One card per root comment, including a root nobody has replied to. A comment under an ask
  *  belongs to that ask's card, which renders the exchange itself. */
 function commentConversations(
-  comments: readonly Comment[],
+  comments: readonly CommentWithTrees[],
   unreadFrom: string | undefined
 ): Conversation[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
-  const threads = new Map<string, { replies: Comment[]; root: Comment }>();
+  const threads = new Map<string, { replies: CommentWithTrees[]; root: CommentWithTrees }>();
   for (const comment of comments) {
     if (comment.ask_id !== null) {
       continue;

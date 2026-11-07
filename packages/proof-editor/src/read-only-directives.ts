@@ -86,12 +86,13 @@ export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, s
  * itself, its lines joined, so a directive the block schema refuses is drawn as its lines and a
  * paragraph line that opens like a directive stays text, as in the read-only parse.
  *
- * Unlike the read-only parse it keeps every `server` attribute. The live editor parses a document
- * the server wrote, a past version's text through `setMarkdown` among them, and that text carries
- * an answered decision's `state`, `answered_by` and `selected`, which the version must show. A
- * paste keeps them too, as the live editor always did: settlement owns them and writes each
- * block's from its ask's row (`setAskServerAttributes`), so a pasted `state="answered"` is put
- * back to the row's state once the paste settles. It must be registered after the mark plugins,
+ * Unlike the read-only parse it keeps every `server` attribute. A paste carries a document the
+ * server wrote, and that text carries an answered decision's `state`, `answered_by` and
+ * `selected`, which the pasted block must keep showing, as the live editor always did:
+ * settlement owns them and writes each block's from its ask's row (`setAskServerAttributes`), so
+ * a pasted `state="answered"` is put back to the row's state once the paste settles. (A past
+ * version is drawn from the tree its server read, through `setDocumentJSON`, and parses here no
+ * longer.) It must be registered after the mark plugins,
  * so a block-level mark span is a mark node when the fit check reads it.
  */
 export function liveTypedBlocksRemarkPlugin(blockSchema: BlockSchema) {

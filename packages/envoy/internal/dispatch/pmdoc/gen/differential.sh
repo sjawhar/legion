@@ -5,10 +5,20 @@
 #   bash differential.sh --base <rev> [--head <rev>] [--corpus <file.jsonl|dir>]... [--out <dir>]
 #
 # --base and --head are git revisions of this repository (a jj commit id is one); --head defaults
-# to the working tree. The in-repo corpus (testdata/corpus/*.md) is always read; each --corpus adds
-# a JSONL file of {"id", "md"} lines, or every *.jsonl in a directory, ids prefixed with the file's
-# name. It prints the gate's counts - regressions, misreads, churn and panics, each on its own
-# line - and exits non-zero when any is above zero; every flagged document is in <out>/report.jsonl.
+# to the working tree. The in-repo corpus (testdata/corpus/*.md and testdata/corpus-display/*.md)
+# is always read; each --corpus adds a JSONL file of {"id", "md"} lines, or every *.jsonl in a
+# directory, ids prefixed with the file's name. It prints the gate's counts - regressions,
+# misreads, churn and panics, each on its own line - and exits non-zero when any is above zero;
+# every flagged document is in <out>/report.jsonl.
+#
+# Two of its gates are not base-against-head: the cross-reader gates, which hold Go's display read
+# (ReadForDisplay) against the browser's engines over the head alone. The display read does not
+# exist at every revision, and this script copies only differential_test.go into the base
+# revision, so the base has nothing to compare; and the question those two gates answer is not
+# whether the head moved but whether Go and the browser read one text the same way, which is what
+# the display read is for. The read-only engine reads what DisplayLatest must read
+# (engine-readonly.jsonl), and the editing engine what DisplayVersion must.
+#
 # Needs go, bun and jq, and `bun install` run in the repository.
 set -euo pipefail
 
@@ -30,11 +40,14 @@ done
 out=${out:-$(mktemp -d)}
 mkdir -p "$out"
 
-# The corpus: the in-repo documents, then each given file, every line with a unique id.
+# The corpus: the in-repo documents, the display read's own among them, then each given file,
+# every line with a unique id.
 corpus=$out/corpus.jsonl
 : > "$corpus"
-for file in "$pmdoc"/testdata/corpus/*.md; do
-  jq -Rsc --arg id "corpus:$(basename "$file" .md)" '{id: $id, md: .}' "$file" >> "$corpus"
+for directory in corpus corpus-display; do
+  for file in "$pmdoc/testdata/$directory"/*.md; do
+    jq -Rsc --arg id "$directory:$(basename "$file" .md)" '{id: $id, md: .}' "$file" >> "$corpus"
+  done
 done
 for path in "${corpora[@]}"; do
   if [ -d "$path" ]; then files=("$path"/*.jsonl); else files=("$path"); fi
@@ -84,6 +97,9 @@ engineRead() {
 }
 
 engineRead "$corpus" "$out/engine.jsonl" md
+# The third pass: the same corpus through the read-only engine, which is what a reader is shown
+# and what the head's display read is held to (the cross-reader gate, above).
+engineRead "$corpus" "$out/engine-readonly.jsonl" md --read-only
 pids=()
 for side in base head; do
   PMDOC_DIFF_CORPUS=$corpus PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_OUT=$out/$side.jsonl \
@@ -99,5 +115,6 @@ done
 waitAll "${pids[@]}"
 PMDOC_DIFF_ENGINE=$out/engine.jsonl PMDOC_DIFF_BASE=$out/base.jsonl PMDOC_DIFF_HEAD=$out/head.jsonl \
   PMDOC_DIFF_BASE_ENGINE=$out/base-engine.jsonl PMDOC_DIFF_HEAD_ENGINE=$out/head-engine.jsonl \
+  PMDOC_DIFF_ENGINE_READONLY=$out/engine-readonly.jsonl \
   PMDOC_DIFF_REPORT=$out/report.jsonl \
   "$out/head.test" -test.run '^TestDifferentialCompare$' -test.count=1 -test.timeout=0

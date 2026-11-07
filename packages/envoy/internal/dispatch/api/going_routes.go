@@ -221,7 +221,9 @@ func (s *server) startGoingRun(ctx context.Context, request goingRequest) {
 // search past what the caller asked of.
 func (s *server) goingSearch(project string) func(context.Context, string) ([]going.Hit, error) {
 	return func(ctx context.Context, q string) ([]going.Hit, error) {
-		found, err := s.runSearch(ctx, q, project, searchDefaultLimit, 0)
+		// No display tree: the answerer reads a hit's title and its href, never its markdown, so
+		// reading each hit for display would be work no reader of this answer ever sees.
+		found, err := s.runSearch(ctx, q, project, searchDefaultLimit, 0, false)
 		if err != nil {
 			return nil, err
 		}

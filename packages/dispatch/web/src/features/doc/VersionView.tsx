@@ -1,10 +1,12 @@
+import type { DocumentJSON } from "@legion/proof-editor";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Doc } from "yjs";
 
+import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
-import type { Ask, BlockSchema } from "../../api/types";
+import type { Ask, BlockSchema, DisplayTree } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
@@ -25,10 +27,12 @@ export interface VersionViewProps {
   /** The document's block-indexed asks, so a historical decision block still names its asker. */
   asks: readonly Ask[];
   blockSchema: BlockSchema | undefined;
-  /** The markdown of the version this one is marked against - the last approved one - with which
-   *  the view draws what changed since it: the words each changed block gained, and each block
-   *  removed since then where it stood. Without it nothing is marked. */
-  changeBaseline?: string;
+  /** The reading Go made, in its version mode, of the version this one is marked against - the
+   *  last approved one - with which the view draws what changed since it: the words each changed
+   *  block gained, and each block removed since then where it stood. The version mode keeps the
+   *  attributes the server wrote into that text, since a decision answered in a version is part
+   *  of what that version said. Without it nothing is marked. */
+  changeBaseline?: DisplayTree;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
   /** The project document shown, for block asks with no issue to be referenced under. */
@@ -60,10 +64,13 @@ export function VersionView({
   });
   const userQuery = useQuery(whoAmIQuery());
   const queryClient = useQueryClient();
-  const markdown =
-    versionQuery.data !== undefined && "markdown" in versionQuery.data
-      ? versionQuery.data.markdown
-      : undefined;
+  // The server's reading of this version's text, in its version mode: what the editor draws,
+  // with no parse of its own. `DisplayTree` is the same JSON `DocumentJSON` describes - one
+  // ProseMirror node - typed openly because a response carries whatever the server's schema
+  // wrote.
+  const tree = (isText(versionQuery.data) ? versionQuery.data.markdown_tree : undefined) as
+    | DocumentJSON
+    | undefined;
   // Where a `#id` in this version's text resolves: the document it is a version of, whose
   // latest version's question blocks declare the asks it names, as the server reads them.
   const textSource = useMemo(() => textSourceOf("artifact", artifactId), [artifactId]);
@@ -89,12 +96,7 @@ export function VersionView({
   useEffect(() => {
     const parent = root.current;
     const user = userQuery.data;
-    if (
-      parent === null ||
-      markdown === undefined ||
-      user === undefined ||
-      blockSchema === undefined
-    ) {
+    if (parent === null || tree === undefined || user === undefined || blockSchema === undefined) {
       return;
     }
 
@@ -125,9 +127,8 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      const embedded =
-        highlighted === undefined ? undefined : embedHighlight(markdown, highlighted);
-      editor.setMarkdown(embedded ?? markdown);
+      const embedded = highlighted === undefined ? undefined : embedHighlight(tree, highlighted);
+      editor.setDocumentJSON(embedded ?? tree);
       setHighlightMissing(highlighted !== undefined && embedded === undefined);
       // Once the version's text is in: its references are drawn over what it reads now.
       setEditorHandle(editor);
@@ -141,7 +142,7 @@ export function VersionView({
         );
       }
       if (changeBaseline === undefined) return;
-      // The baseline is parsed by the shared headless engine, which the shell warms after the
+      // The baseline is drawn by the shared headless engine, which the shell warms after the
       // first paint: awaiting that load marks a version opened straight by its own URL too,
       // rather than racing the warm-up and marking nothing.
       await warmMarkdownRenderer().catch(() => undefined);
@@ -149,8 +150,8 @@ export function VersionView({
       editor.setChangeDecorations(changeMarksAgainst(changeBaseline, editor.view.state.doc));
     };
     mount().catch((error: unknown) => {
-      // A version the parser refuses must say so; an empty read-only editor looks like an
-      // empty document.
+      // A version the editor cannot build the server's tree into must say so; an empty
+      // read-only editor looks like an empty document.
       handle?.destroy();
       handle = undefined;
       setEditorHandle(undefined);
@@ -166,20 +167,12 @@ export function VersionView({
       ydoc?.destroy();
       setEditorHandle(undefined);
     };
-  }, [
-    blockSchema,
-    changeBaseline,
-    createEditor,
-    highlighted,
-    markdown,
-    queryClient,
-    userQuery.data,
-  ]);
+  }, [blockSchema, changeBaseline, createEditor, highlighted, queryClient, tree, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;
   }
-  if (versionQuery.isError || markdown === undefined) {
+  if (versionQuery.isError || tree === undefined) {
     return <p>Could not load this document version.</p>;
   }
 

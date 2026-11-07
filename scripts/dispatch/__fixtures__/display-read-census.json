@@ -1,0 +1,829 @@
+{
+  "cases": [
+    {
+      "id": "a-heading-and-a-paragraph",
+      "group": "comment",
+      "markdown": "# Title\n\nA paragraph with *emphasis*.\n",
+      "from": "the readers",
+      "why": "ordinary markdown: both readers read the same tree",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "A paragraph with "
+              },
+              {
+                "type": "text",
+                "text": "emphasis",
+                "marks": [
+                  {
+                    "type": "emphasis",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1,
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000002"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "A paragraph with "
+              },
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "emphasis",
+                    "attrs": {
+                      "marker": "*"
+                    }
+                  }
+                ],
+                "text": "emphasis"
+              },
+              {
+                "type": "text",
+                "text": "."
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the two agree"
+    },
+    {
+      "id": "a-table-whose-body-row-is-short",
+      "group": "comment",
+      "markdown": "| a | b |\n| --- | --- |\n| one |\n",
+      "from": "the readers",
+      "why": "Parse pads the short row and the engine does not; the padding is why they still agree",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "content": [
+              {
+                "type": "table_header_row",
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "alignment": null,
+                      "colspan": 1,
+                      "colwidth": null,
+                      "rowspan": 1
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "alignment": null,
+                      "colspan": 1,
+                      "colwidth": null,
+                      "rowspan": 1
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "alignment": null,
+                      "colspan": 1,
+                      "colwidth": null,
+                      "rowspan": 1
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "one"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "alignment": null,
+                      "colspan": 1,
+                      "colwidth": null,
+                      "rowspan": 1
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "table_header_row",
+                "attrs": {
+                  "blockId": "b-000002"
+                },
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000003"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000004"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000005"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000006"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "attrs": {
+                  "blockId": "b-000007"
+                },
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000008"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000009"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "one"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the two agree"
+    },
+    {
+      "id": "an-answered-ask-read-as-a-version",
+      "group": "document-version",
+      "markdown": ":::ask{#b-1 urgency=\"med\" multiple=\"false\" state=\"answered\" selected=\"[&#x22;Approve&#x22;]\"}\nShip it?\n:::\n",
+      "from": "the readers",
+      "why": "the version mode against the editing engine, server-written attributes kept",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "ask",
+            "attrs": {
+              "multiple": false,
+              "selected": ["Approve"],
+              "state": "answered",
+              "urgency": "med"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ship it?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "ask",
+            "attrs": {
+              "urgency": "med",
+              "multiple": false,
+              "state": "answered",
+              "selected": ["Approve"],
+              "blockId": "b-1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000001"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Ship it?"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the two agree"
+    },
+    {
+      "id": "a-table-row-wider-than-its-header",
+      "group": "comment",
+      "markdown": "| a | b |\n| --- | --- |\n| one | two | three |\n",
+      "from": "the readers",
+      "why": "Parse refuses the table, so the display read draws the block's literal lines; the engine draws a table and shows fewer characters",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "| a | b |"
+              },
+              {
+                "type": "hardbreak",
+                "attrs": {
+                  "isInline": false
+                }
+              },
+              {
+                "type": "text",
+                "text": "| --- | --- |"
+              },
+              {
+                "type": "hardbreak",
+                "attrs": {
+                  "isInline": false
+                }
+              },
+              {
+                "type": "text",
+                "text": "| one | two | three |"
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "table",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "table_header_row",
+                "attrs": {
+                  "blockId": "b-000002"
+                },
+                "content": [
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000003"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000004"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "a"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_header",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000005"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000006"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "b"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "table_row",
+                "attrs": {
+                  "blockId": "b-000007"
+                },
+                "content": [
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000008"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000009"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "one"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": null,
+                      "blockId": "b-000010"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000011"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "two"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "table_cell",
+                    "attrs": {
+                      "colspan": 1,
+                      "rowspan": 1,
+                      "colwidth": null,
+                      "alignment": "left",
+                      "blockId": "b-000012"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000013"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "three"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the browser lost text"
+    },
+    {
+      "id": "a-used-link-reference-definition",
+      "group": "comment",
+      "markdown": "[a][b] text\n\n[b]: https://example.test\n",
+      "from": "the readers",
+      "why": "the display read keeps the definition line as text; the engine drops it",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.test",
+                      "title": null
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "text",
+                "text": " text"
+              }
+            ]
+          },
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "[b]: https://example.test"
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "marks": [
+                  {
+                    "type": "link",
+                    "attrs": {
+                      "href": "https://example.test",
+                      "title": null
+                    }
+                  }
+                ],
+                "text": "a"
+              },
+              {
+                "type": "text",
+                "text": " text"
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the browser lost text"
+    },
+    {
+      "id": "a-block-of-html",
+      "group": "comment",
+      "markdown": "<div>html body</div>\n",
+      "from": "the readers",
+      "why": "Proof's schema has no block html node, so the engine throws and the browser shows nothing",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "<div>html body</div>"
+              }
+            ]
+          }
+        ]
+      },
+      "browser": null,
+      "browserError": "MilkdownError: [Description]: \"Cannot create node for doc\".\n[Attributes]: null.\n[Content]: [\"html\"].",
+      "class": "the browser cannot read it"
+    },
+    {
+      "id": "an-ask-attribute-holding-an-escaped-quote",
+      "group": "comment",
+      "markdown": ":::ask{answer=\"\\\"A\\\"\"}\nq\n:::\n",
+      "from": "the readers",
+      "why": "Go reads the block and shows its body alone; the browser's tokenizer refuses the opener and shows the whole fence line, the recorded answer with it",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "ask",
+            "attrs": {
+              "multiple": false,
+              "state": "open",
+              "urgency": "med"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "q"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": ":::ask{answer=\"\"A\"\"} q :::"
+              }
+            ]
+          }
+        ]
+      },
+      "class": "Go loses text"
+    },
+    {
+      "id": "a-text-holding-a-nul",
+      "group": "comment",
+      "markdown": "a\u0000b\n",
+      "from": "the readers",
+      "why": "Go keeps U+0000 and the engine replaces it with U+FFFD, so each holds a character the other does not",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "a\u0000b"
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "a�b"
+              }
+            ]
+          }
+        ]
+      },
+      "class": "the text differs both ways"
+    },
+    {
+      "id": "one-text-drawn-as-two-blocks",
+      "group": "comment",
+      "markdown": "(written: no text of mine made either reader differ in format alone)",
+      "from": "written",
+      "why": "the same characters under a heading and under a paragraph: the class for a tree that differs where no character does",
+      "go": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "heading",
+            "attrs": {
+              "id": "",
+              "level": 1
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          }
+        ]
+      },
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Title"
+              }
+            ]
+          }
+        ]
+      },
+      "class": "format differs"
+    },
+    {
+      "id": "no-tree-from-the-display-read",
+      "group": "comment",
+      "markdown": "(written: ReadForDisplay refuses nothing, so no text of mine produced this)",
+      "from": "written",
+      "why": "the display read gave no tree Go's own schema would write; the class exists so such a text is counted rather than lost",
+      "go": null,
+      "browser": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000001"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "body"
+              }
+            ]
+          }
+        ]
+      },
+      "class": "Go cannot read it"
+    }
+  ],
+  "guard": {
+    "stored": [
+      {
+        "id": "comment/guard-1",
+        "group": "comment",
+        "markdown": "The census reads every stored text through Dispatch's own API, and the guard refuses a file of this repository that holds one of those paragraphs back again.\n\nShort.\n"
+      },
+      {
+        "id": "version/guard-2/1",
+        "group": "document-version",
+        "markdown": "A second stored paragraph, long enough that a file repeating it word for word can only have copied it out of what the census read from production.\n"
+      }
+    ],
+    "holds": "# A finding\n\nSomething went wrong, and the evidence is this: A second stored paragraph, long enough that a file repeating it word for word can only have copied it out of what the census read from production.\n\nThat is all.\n",
+    "clean": "# A finding\n\nSomething went wrong. The census read every stored text and put each in a class, and this file quotes none of them.\n"
+  }
+}

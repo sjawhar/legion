@@ -578,6 +578,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A comment's body and its suggestion are markdown a reader is shown, so both reach the store
+	// the way text written into a document reaches it (pmdoc.LineFeeds): the row, the event, the
+	// mention delivery and the tree the display read makes of the body all see one line ending.
+	input.Body = pmdoc.LineFeeds(input.Body)
 	if input.Suggestion != nil {
 		input.Suggestion.ReplaceWith = pmdoc.LineFeeds(input.Suggestion.ReplaceWith)
 	}
@@ -900,7 +904,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(r.Context(), events...)
+	s.storeDisplayTrees(r.Context(), comment.ID, input.Body)
 	// Each mention's send outlives the request's connection, keeping its values and dropping its
 	// cancellation, as createStoredMessage's does: attempt 1 is committed above, and a client that
 	// gives up on the comment, or retries it under its key, must not leave that attempt pending
@@ -945,5 +950,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		comment.Deliveries = append(comment.Deliveries, attempts[index])
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{commentRead: newCommentRead(comment, wantsDisplayTrees(r)), AskWaitingOn: waitingOn}, advice))
 }

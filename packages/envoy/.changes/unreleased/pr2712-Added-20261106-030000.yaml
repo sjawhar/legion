@@ -1,0 +1,9 @@
+kind: Added
+body: |-
+  An issue's comment list, a document's comment list and an issue's activity feed each answer an `ETag`, and `304 Not Modified` with no body to a request whose `If-None-Match` names it, so a reader that has the list already is sent none of it again.
+  Each one reads its validator, answers the 304 and looks up the answer it kept before it reads a single row, and the server keeps each list's whole encoded and compressed response under its `ETag` in a 64 MiB least-recently-used cache, one entry per content coding, so a second read of an unchanged list costs no query, no encode and no compression.
+  The feed's validator is the issue, its event sequence and the paging query; a comment list's is a counter per list that every write to its comments, their mentions and their delivery rows raises, because a delivery's claim and its resolution rewrite rows the answer shows without appending an event, and an answer over the event sequence alone would have told a reader nothing had changed.
+  The feed names the issue by the stamp of its creation rather than by its key, because the sequence is a counter of the issue row: a key a new issue takes from a deleted one stands at the sequences the old issue stood at, and a validator over the key and the sequence alone would hand the new issue's reader a 304, or the bytes the server kept for the old one.
+time: 2026-11-06T03:00:00.000000000Z
+custom:
+    Issue: pr2712

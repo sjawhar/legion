@@ -70,6 +70,12 @@ var keyedWriteGuardAllowed = map[string]string{
 	// marked). A failure is only logged, and a duplicate after a takeover adds only one more row of
 	// statistics.
 	"api.server.insertRelatedChecks": "records a check whether or not its write wrote; a takeover's duplicate only adds a statistics row",
+	// The display tree of a text a committed write stored, written after that write's transaction
+	// marked the key (api's storeDisplayTrees, docs' storeVersionTrees). It is the reading of a
+	// text, keyed by the text itself and inserted `on conflict do nothing`, so a repeat after a
+	// takeover writes nothing and a row never written costs a reader one markdown parse; a failure
+	// is only logged, and no write is undone for it.
+	"texttrees.Table.Store": "stores the reading of a text a committed write stored, idempotent and never undoing that write",
 	// The count of this process's queued conditional edits of one document, written again as the
 	// edit leaves the queue (docs.Service.releaseConditionalEdit): bookkeeping of the queue, never
 	// the request's own work, written without the queue lock on a detached context after the edit.

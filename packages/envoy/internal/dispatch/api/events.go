@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -24,6 +27,19 @@ const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(e.p
 	left join issues i on i.key = e.issue_key
 	left join artifacts ar on ar.id = e.artifact_id`
 
+// listIssueEvents answers an issue's activity feed under an ETag of metadata alone: every append
+// to this feed advances the issue's last_seq in the append's own transaction (events.Broker), so
+// the issue row this is the feed of, that column, the paging query that chooses the page and the
+// variant lines both lists' ETags carry are the whole of what decides the page. The feed's
+// validator is therefore read before the page is: a reader holding the ETag is answered 304 for
+// one short statement, and one that is not is answered from the kept bytes when the cache holds
+// them, having built, encoded and compressed nothing (list_answers.go).
+//
+// What the validator does not cover is the handful of fields an ask event's payload is given at
+// read time from rows elsewhere (attachAskEventFields): an inbound backlink counted on another
+// issue's write moves no sequence of this one, so a reader is answered 304 while that count has
+// moved. Those fields are an ask's own facts rather than the feed's, and the Inbox and the ask
+// read answer them fresh.
 func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -33,12 +49,84 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	lastSeq, createdAt, err := s.issueEventSequence(r.Context(), r.PathValue("key"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	trees := wantsDisplayTrees(r)
+	etag := eventFeedETag(lastSeq, createdAt, options, trees)
+	if answerNotModified(w, r, etag) {
+		return
+	}
+	key := listAnswerKeyFor(r, eventFeedRoute, r.PathValue("key"), etag)
+	if s.listAnswers.answer(w, key) {
+		return
+	}
 	events, err := s.readEvents(r.Context(), issueOwner(r.PathValue("key")), options)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, events)
+	var texts []string
+	if trees {
+		texts = eventDisplayTexts(nil, events...)
+	}
+	defer s.readDisplayTrees(r.Context(), trees, r.PathValue("key"), texts)()
+	attachEventTrees(events, trees)
+	encoded, err := encodeListAnswer(events)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.writeListAnswer(w, key, encoded)
+}
+
+// eventFeedETag hashes what one page of an issue's activity feed is made of: the issue whose feed
+// it is, that issue's newest event sequence and the query that pages it, closed with the lines
+// both lists' ETags carry (listETag). It is referencesETag's shape - one line per part, then the
+// hash of them - and it names no issue key: a validator is compared against the one URL that gave
+// it.
+//
+// The issue is named by its created_at rather than its key, because the key is the one part of it
+// that comes back. last_seq is a counter of the row, so a key taken by a new issue stands at
+// sequences the issue before it stood at, and nothing else in the hash would tell the two feeds
+// apart: a reader of the new issue would be answered 304, or written the bytes this server kept
+// for the old one. That is what the browser harness does between scenarios - it empties `issues`
+// and restarts each project's numbering, so every scenario's issues take the keys of the last
+// one's (packages/dispatch/e2e/seed.ts) - and it is the reading a restored database gives a
+// process that outlived the restore. The comment list is held to the same rule by a counter that
+// never comes back with the key (migration 20261106020619); the feed's column does come back, so
+// the row's birth stamp is hashed in beside it. It is the same fact, read the same way, that
+// tells the event relay an event log that was reset under its cursor from one that merely went
+// quiet (eventLogWasReset).
+func eventFeedETag(lastSeq int, createdAt time.Time, options eventListOptions, trees bool) string {
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "created=%d\nlast_seq=%d\nafter=%d\nbefore=%d\nhas_before=%t\ndescending=%t\nlimit=%d\n",
+		createdAt.UnixMicro(), lastSeq, options.after, options.before, options.hasBefore, options.descending, options.limit)
+	for _, id := range options.ids {
+		_, _ = fmt.Fprintf(hash, "id=%d\n", id)
+	}
+	return listETag(hash, trees)
+}
+
+// issueEventSequence is the newest event sequence of the issue key names and the created_at that
+// tells that issue from the next one to take its key, both zero for a key no issue holds, whose
+// feed is the empty page readEvents answers rather than a refusal. Every append to the issue
+// advances the column in the append's own transaction (events/broker.go), and nothing moves the
+// stamp, so this one statement is the whole of what the feed's validator reads.
+func (s *server) issueEventSequence(ctx context.Context, key string) (int, time.Time, error) {
+	var lastSeq int
+	var createdAt time.Time
+	err := s.deps.Store.Pool.QueryRow(ctx,
+		`select last_seq, created_at from issues where key = $1`, key).Scan(&lastSeq, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, time.Time{}, nil
+	}
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("read the issue's event sequence: %w", err)
+	}
+	return lastSeq, createdAt, nil
 }
 
 func parseEventListOptions(r *http.Request) (eventListOptions, error) {

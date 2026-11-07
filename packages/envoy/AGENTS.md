@@ -210,6 +210,42 @@ Each item below names a task and where its code is, then notes on it.
 
   render/parse/diff of Proof documents; fixtures from the fork's headless engine
 
+- **Stored display trees**: `internal/dispatch/texttrees/`, `api/display_trees.go`, `api/text_trees.go`, `api/event_trees.go`
+
+  A request that carries `Dispatch-Trees: 1` is answered with the ProseMirror tree of every stored text the answer holds, beside the markdown in a sibling field (`body` and `body_tree`), and an event carries its texts' trees in the envelope's own `trees` map, keyed by the payload path, so no payload gains a field.
+  The tree is `pmdoc.ReadForDisplay`'s reading, encoded by `pmdoc`'s display encoding, and the dashboard draws it rather than parsing the markdown again.
+
+  Those trees are stored, not read on the request.
+  One table, `text_trees` (migration `20261105121325`), holds one row per whole text, keyed by the text's SHA-256, the display mode and `pmdoc.DisplayTreeVersion` — a version of its own, because the display read, the wire encoding and the dashboard's schema each change a tree and none of them changes a rendering, which is what `RendererVersion` numbers.
+  Keying on the text means a quoted reply, a carried version and two identical option labels share one row.
+
+  Each write path stores its text's tree right after its own transaction commits, in the same request and before the answer (`api/text_trees.go`'s `storeDisplayTrees`, called from the comment, message, broadcast, ask, review and issue-spec writes, and `docs/ledger.go`'s `storeVersionTrees` for every document version, which is the one place every version write passes).
+  The publish path stores the trees of the texts an event's payload carries (`storeEventDisplayTrees`), an ask edit's replaced question and option labels among them, because no row holds those any more.
+  A tree that cannot be stored never fails the write: it is logged and the read makes the tree, exactly as it does for a text written before the table existed.
+  A write encodes through `pmdoc.DisplayTreeToStore`, which fills none of the cache of trees readers were served, so one writer's long document does not evict the bodies many readers are re-reading; it does take a tree that cache already holds, which evicts nothing and saves the read that found no stored tree the second parse of every text it just shaped.
+
+  A read collects its answer's texts, reads in one statement the trees of those this process does not already hold (`pmdoc.HoldsDisplayTree`), and puts what it read in `pmdoc`'s display cache (`primeDisplayTrees`), which is the first of two levels: the process's own trees in front of the table.
+  A held text is left out of that statement and out of the store that follows it, so the read after a write — which moves both lists' validators and leaves every body where it was — asks for the one text that is new; the cost is that a tree this process built and failed to store waits for the fill pass or a restart rather than being asked for again.
+  What the table did not hold is read for display as it always was and stored once the answer is written, on a connection of its own and outside the caller's transaction, because a document load and a compaction shape their answers inside read-only transactions.
+  The version mode is the one tree a read, not a write, first stores: no write produces it, so `getArtifactVersion` stores a past version's tree on its first read.
+  A search snippet, a cut tree, a headline's plain words and a live socket frame are built on the read and copy no stored bytes: a snippet is cut per query and belongs to no stored text.
+
+- **A list's ETag, its 304 and its kept answer**: `api/list_answers.go`
+
+  The comment list and the activity feed each answer an `ETag` and a `304 Not Modified` to a matching `If-None-Match`, and keep their whole encoded and compressed answer under that ETag in a 64 MiB least-recently-used cache, one entry per content coding.
+  Each list reads its validator first, answers the 304 and looks the kept answer up **before** it builds a body, so a warm read writes those bytes out having read none of its rows, encoded nothing and compressed nothing.
+  The feed's validator is the issue's `last_seq`, the paging query, the trees variant and the parser version, because every append advances `last_seq` in its own transaction.
+  The comment list's is `comment_watermarks.seq` beside `last_seq`: its body carries mentions and deliveries that the claim and the resolution rewrite in place with no event appended, so `last_seq` alone would serve a stale `304`, and a count with a newest timestamp would too, since `state`, `envelope_id`, `error` and `resolve_error` move no time of their own.
+  That counter is raised per list owner by a deferred constraint trigger on `comments`, `comment_mentions` and `comment_deliveries` (migration `20261106020619`), so every writer bumps it, whatever column it wrote and whoever adds the next writer.
+  It is deferred because an immediate trigger takes the counter row where the write happens and holds it to commit, which serialises every comment write of one issue behind the longest transaction touching it — measured, that hung the api suite for its whole 90-minute timeout on the test that holds a comment write open.
+  Deferred, the bump is still inside the writer's transaction, so a reader sees the new rows and the new counter together or neither, and two commits that overlap each add one, because the bump is an upsert that reads the row the commit it waited on left.
+
+- **Filling the display trees of older texts**: `internal/dispatch/texttreefill/`
+
+  The pass that fills the texts written before this build, or before a change of `pmdoc.DisplayTreeVersion`: leased (`text-tree-fill`), at most two workers, newest first, its cursor the `text_tree_rebuild` row of the version it fills, so a restart resumes rather than starting again.
+  It cuts each batch with one statement a kind, which answers the moments of that kind's newest thousand rows and nothing else, takes the batch itself with one statement over every kind at once, and reads the texts back by key, never projecting the markdown into a sort, which on this corpus would detoast gigabytes for every batch.
+  The table keeps the trees of the two newest parser versions: a rolling deploy runs two builds at once and a rollback runs the older one again, so deleting the older version's rows would strand those pods on misses, and each miss writes a row back; the hourly delete and the query of the two newest versions both name `version` alone, which the primary key cannot lead on, so the table carries an index on it.
+
 - **Delivery measures**: `internal/dispatch/delivery/measures/`
 
   pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype;
@@ -1769,8 +1805,13 @@ a replace's `with`, an insert's markdown whether it becomes blocks or table rows
 in a suggestion's `replace_with` when it is created and when it is accepted;
 in the attributes written onto a typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its ask block carries;
 and in a block ask's edited question and options.
+A message's body and a comment's body are written the same way where they are stored (`validateCreateMessage` in `api/messages.go`, `createCommentFor` in `api/comment_create.go`, `editComment` in `api/comment_actions.go`), so a body stored since sjawhar/legion#2712 holds no carriage return;
+the block ids an edit carries are the browser editor's own offsets, and a ProseMirror document holds no carriage return, so that normalisation shortens no offset a caller sent.
 The browser editor's own updates cannot carry a carriage return.
-No stored document holds one, and `pmdoc` handles line feeds alone.
+No stored document holds one.
+A body stored before that keeps the carriage returns it was sent with, and the display read draws it line by line: `pmdoc.ReadForDisplay` writes the text it is given with line feeds alone before it splits a line of it, since CR LF and a lone carriage return each end a line for the browser's reader (micromark's rule, proof-editor's `typed-block-drawing.ts`).
+A read that ended a line at the line feed alone showed those lines run together: goldmark left the stray carriage return on the line, which was enough for an unknown directive's opener to be refused, and left a lone carriage return inside a text node, which HTML draws as no break at all.
+So `pmdoc` handles line feeds alone, below every write above and below that read.
 Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below);
 a browser's update can put one in the live document, and text Dispatch takes from the tree carries it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`):
 the rendering a version stores and every read serves, a block's id among it, an anchor's quote (`FindMark`), an ask block's question and options and a heading's text (`pmdoc.TextContent`), and the text a quote is matched against, so a quote, a `# Title` quote or a `heading:` anchor copied from `GET /text` finds it.

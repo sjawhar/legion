@@ -704,10 +704,14 @@ test("API client sends inline artifacts as JSON", async () => {
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["POST", "/api/v1/issues/CORE-1/artifacts"],
   ]);
-  expect(stub.requests[0]?.init?.headers).toEqual({
-    "Content-Type": "application/json",
-    "Idempotency-Key": "upload-1",
-  });
+  // Every request the page makes carries `Dispatch-Trees: 1`, which is how the server is asked
+  // for the reading it made of each stored text in its answer (`api/display_trees.go`); the
+  // headers reach `fetch` as the pairs `answered` builds.
+  expect(stub.requests[0]?.init?.headers).toEqual([
+    ["Idempotency-Key", "upload-1"],
+    ["Content-Type", "application/json"],
+    ["Dispatch-Trees", "1"],
+  ]);
   expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({
     content: "# Draft",
     name: "spec.md",

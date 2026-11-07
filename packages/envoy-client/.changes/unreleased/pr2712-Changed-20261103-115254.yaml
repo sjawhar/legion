@@ -1,0 +1,5 @@
+kind: Changed
+body: The `dispatch` command line is one small entry and a handler module per command. `executeDispatchTool` checks the call, builds one context and calls the handler the command names in a table typed over every command the contract declares, so a command with no handler fails the type check. What each command sends and prints is unchanged, and a golden record of all 27 commands and the 30 refusals they give holds it so.
+time: 2026-11-03T11:52:54.879738537Z
+custom:
+    Issue: pr2712

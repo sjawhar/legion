@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
+import type { DisplayTree } from "../../api/types";
 import {
   borderDefault,
   cardHoverBorder,
@@ -29,10 +30,16 @@ interface GitHubIssue {
   title?: string;
 }
 
-/** The card's body: two rendered lines of what the target says, formatted, then cut. */
-function Body({ markdown }: { markdown: string }): ReactNode {
+/** The card's body: two rendered lines of what the target says, formatted, then cut. A GitHub
+ *  body is a text Dispatch does not store, so it carries no tree and is parsed here. */
+function Body({ markdown, tree }: { markdown: string; tree?: DisplayTree }): ReactNode {
   return (
-    <MarkdownPreview className={`mt-1 ${textSecondaryOnSurface}`} lines={2} markdown={markdown} />
+    <MarkdownPreview
+      className={`mt-1 ${textSecondaryOnSurface}`}
+      lines={2}
+      markdown={markdown}
+      tree={tree}
+    />
   );
 }
 
@@ -57,7 +64,7 @@ interface ReferenceCards {
 }
 
 function DispatchUnfurl({ card }: { card: DispatchCard }): ReactNode {
-  const { title, description } = useReferenceTarget(card.route, { text: true });
+  const { title, description, descriptionTree } = useReferenceTarget(card.route, { text: true });
   const path = useReferencePath(card.route);
 
   return (
@@ -66,7 +73,7 @@ function DispatchUnfurl({ card }: { card: DispatchCard }): ReactNode {
       href={path}
     >
       <span className={`block font-medium ${linkText}`}>{title ?? card.text}</span>
-      {description === undefined ? null : <Body markdown={description} />}
+      {description === undefined ? null : <Body markdown={description} tree={descriptionTree} />}
     </a>
   );
 }

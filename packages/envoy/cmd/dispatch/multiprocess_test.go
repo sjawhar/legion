@@ -2681,6 +2681,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 		{"edit-notices", "a woken loop whose passes take milliseconds here, so its boot passes meet by luck"},
 		{"settlement-resumption", "its period is SettlementResumeInterval (1 min), so the window holds several periods, each served once"},
 		{"server-processes", "its pass is one delete on server_processes, which every process's heartbeat writes, so holding it would hold the heartbeats too"},
+		{"text-tree-fill", "its first pass is at each process's start, and on a database whose stored texts already carry their trees it takes one candidate scan and ends done"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",

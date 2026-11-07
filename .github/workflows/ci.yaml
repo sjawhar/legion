@@ -267,6 +267,9 @@ jobs:
               - 'packages/envoy/internal/brokerclient/**'
               - 'packages/envoy/internal/bus/*'
               - 'packages/envoy/internal/contracts/*'
+              # pmdoc reads a stored text's display tree through this cache (pmdoc/display_json.go),
+              # so every build of the parser compiles it.
+              - 'packages/envoy/internal/dispatch/bytelru/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
@@ -318,6 +321,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/architecture/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/bytelru/*'
               - 'packages/envoy/internal/dispatch/cireconcile/*'
               - 'packages/envoy/internal/dispatch/config/*'
               - 'packages/envoy/internal/dispatch/dashboard/*'
@@ -349,6 +353,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/dispatch/texttreefill/*'
+              - 'packages/envoy/internal/dispatch/texttrees/*'
               - 'packages/envoy/internal/envconf/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/googleidentity/*'
@@ -865,6 +871,7 @@ jobs:
               # (packages/envoy/dispatchbody, and the parser and contracts under it).
               - 'packages/envoy/dispatchbody/*'
               - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/bytelru/*'
               - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
@@ -1052,6 +1059,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/auth/*'
               # docs/statement_timing_test.go measures this package's statements through it.
               - 'packages/envoy/internal/dispatch/benchtime/*'
+              - 'packages/envoy/internal/dispatch/bytelru/*'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
@@ -1075,6 +1083,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/storetest/*'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/dispatch/texttrees/*'
               - 'packages/envoy/internal/explaintest/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/logtest/*'
@@ -1131,6 +1140,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/architecture/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/bytelru/*'
               - 'packages/envoy/internal/dispatch/delivery/**'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
@@ -1157,6 +1167,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
+              - 'packages/envoy/internal/dispatch/texttrees/*'
               - 'packages/envoy/internal/fixtureenv/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
@@ -3138,6 +3149,12 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
+      # The fixture the web app's view tests draw (pmdoc/web_fixtures_test.go): a corpus text
+      # whose display reading changed and a fixture nobody regenerated fails here rather than
+      # leaving a view's test asserting against a stale tree.
+      - name: Check the web app's display-tree fixture is up to date
+        run: go test -count=1 -run TestWebDisplayFixture ./internal/dispatch/pmdoc/ -args --check
+        working-directory: packages/envoy
       # The server's version and the pgvector version it offers, read from the service itself, so
       # the run shows which Postgres the tests below ran on.
       - name: Postgres service version

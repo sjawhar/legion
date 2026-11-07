@@ -258,14 +258,36 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 // which the same render records, so a write that stores the rendering indexes its blocks and cuts
 // its mentions' excerpts (indexDocument) from it rather than rendering the tree again for them.
 func renderTreeWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
+	countDocumentRender()
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return "", nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return "", nil, err
+		return "", nil, renderTreeError(err)
 	}
 	return markdown, offsets, nil
+}
+
+// renderTreeWithLayout is renderTreeWithOffsets recording the rendering's pmdoc.Layout as well,
+// from the same render: for a write that hands the operation it writes through the rendering it
+// made of the tree it wrote, which a warm operation offers the room's update observer, whose
+// replica splices later updates into the layout beside the markdown (writtenRendering,
+// renderedReplica.keep).
+func renderTreeWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
+	countDocumentRender()
+	markdown, offsets, layout, err := pmdoc.RenderWithLayout(tree)
+	if err != nil {
+		return "", nil, nil, renderTreeError(err)
+	}
+	return markdown, offsets, layout, nil
+}
+
+// renderTreeError is what a render of a tree a write parsed answers for err: a tree the renderer
+// refuses is that write's own refusal (ErrDocSchema), where a tree read from a document is the
+// document's (documentSchemaError).
+func renderTreeError(err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return fmt.Errorf("%w: %v", ErrDocSchema, err)
+	}
+	return err
 }
 
 // documentMarkdown renders a tree treeOf read from a document, so a tree only the renderer refuses
@@ -278,6 +300,7 @@ func documentMarkdown(tree *pmdoc.Node) (string, error) {
 // documentMarkdownWithOffsets is documentMarkdown with each identified block's byte range, from the
 // same render.
 func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
+	countDocumentRender()
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	return markdown, offsets, documentSchemaError(err)
 }
@@ -286,6 +309,7 @@ func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 // pmdoc.Layout as well, from the same render, for a rendering the room's replica may keep and
 // splice a changed block into later (renderedReplica.updateChangesMarkdown).
 func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
+	countDocumentRender()
 	markdown, offsets, layout, err := pmdoc.RenderWithLayout(tree)
 	return markdown, offsets, layout, documentSchemaError(err)
 }
@@ -293,6 +317,7 @@ func documentRenderingWithLayout(tree *pmdoc.Node) (string, []pmdoc.BlockOffset,
 // documentRenderingValidWithLayout is documentRenderingWithLayout of a tree readForkTree already
 // validated, which the render then does not validate again (pmdoc.ValidDocument.RenderWithLayout).
 func documentRenderingValidWithLayout(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, *pmdoc.Layout, error) {
+	countDocumentRender()
 	markdown, offsets, layout, err := tree.RenderWithLayout()
 	return markdown, offsets, layout, documentSchemaError(err)
 }
@@ -306,6 +331,7 @@ func documentMarkdownValid(tree pmdoc.ValidDocument) (string, error) {
 
 // documentMarkdownValidWithOffsets is documentMarkdownWithOffsets of a validated tree.
 func documentMarkdownValidWithOffsets(tree pmdoc.ValidDocument) (string, []pmdoc.BlockOffset, error) {
+	countDocumentRender()
 	markdown, offsets, err := tree.RenderWithBlockOffsets()
 	return markdown, offsets, documentSchemaError(err)
 }

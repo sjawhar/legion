@@ -195,14 +195,22 @@ function CommentBody({
       )}
       {orphanNotice}
       {suggestion === null ? (
-        <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
+        <MarkdownBody
+          markdown={comment.body}
+          source={textSourceOf("comment", comment.id)}
+          tree={comment.body_tree}
+        />
       ) : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
           <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
-              <MarkdownBody markdown={comment.body} source={textSourceOf("comment", comment.id)} />
+              <MarkdownBody
+                markdown={comment.body}
+                source={textSourceOf("comment", comment.id)}
+                tree={comment.body_tree}
+              />
             </div>
           )}
         </div>
@@ -506,6 +514,7 @@ export function ThreadCard({
                       links="live"
                       markdown={root.body}
                       source={textSourceOf("comment", root.id)}
+                      tree={root.body_tree}
                     />
                   )}
                 </>
@@ -523,6 +532,7 @@ export function ThreadCard({
                     links="live"
                     markdown={root.body}
                     source={textSourceOf("comment", root.id)}
+                    tree={root.body_tree}
                   />
                   <Unfurl body={root.body} source={textSourceOf("comment", root.id)} />
                 </>

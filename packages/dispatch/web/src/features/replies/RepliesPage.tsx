@@ -66,6 +66,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         lines={2}
         markdown={row.reply.first_line}
         source={source}
+        tree={row.reply.first_line_tree}
       />
       <MarkdownPreview
         className={`mt-1 text-xs ${textMutedOnCanvas}`}
@@ -74,6 +75,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         lines={1}
         markdown={row.subject}
         source={source}
+        tree={row.subject_tree}
       />
       <div className="mt-2 flex flex-wrap items-center gap-4 text-sm">
         {/* The server's `ref` names the thread's root, never the reply: an anchored root redirects

@@ -558,7 +558,7 @@ func TestAnUploadClearsOnlyTheEditsItsForkHeld(t *testing.T) {
 	`, artifactID, number, uploaded, []model.Actor{uploader}); err != nil {
 		t.Fatalf("insert the upload's version: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}}, uploaded)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the upload: %v", err)
 	}
@@ -836,7 +836,7 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	`, artifactID, number, uploaded, []model.Actor{uploader}); err != nil {
 		t.Fatalf("insert the upload's version: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}}, uploaded)
 	if err := ledger.Commit(ctx); err == nil {
 		t.Fatal("the upload's commit succeeded, want the injected refusal")
 	}
@@ -888,7 +888,7 @@ func uploadOn(t *testing.T, service *Service, artifactID, markdown string, uploa
 	`, artifactID, number, markdown, []model.Actor{uploader}); err != nil {
 		t.Fatalf("insert the upload's version: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}})
+	ledger.WroteVersion(artifactID, model.Version{Number: number, Authors: []model.Actor{uploader}}, markdown)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the upload: %v", err)
 	}

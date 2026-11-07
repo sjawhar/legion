@@ -686,7 +686,7 @@ func TestAnUploadsFullReleaseClearsTheDurableRowOfAPendingAuthorItWasNeverCredit
 	`, artifactID, nextNumber, "First.\n\nSecond, uploaded.\n", []model.Actor{uploader}); err != nil {
 		t.Fatalf("insert the upload's version row: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}})
+	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}}, "First.\n\nSecond, uploaded.\n")
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the upload transaction: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestAnUploadsFullReleaseKeepsABrowserEditCreditedWhileItsTransactionWasOpen
 	`, artifactID, nextNumber, "First.\n\nSecond, uploaded.\n", []model.Actor{uploader}); err != nil {
 		t.Fatalf("insert the upload's version row: %v", err)
 	}
-	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}})
+	ledger.WroteVersion(artifactID, model.Version{Number: nextNumber, Authors: []model.Actor{uploader}}, "First.\n\nSecond, uploaded.\n")
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the upload transaction: %v", err)
 	}

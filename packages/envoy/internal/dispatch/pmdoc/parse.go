@@ -21,9 +21,11 @@ var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 // markdownReader is a goldmark configuration Dispatch reads markdown with. Its only way in is
 // parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
 // ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
-// (emptyItemGuard).
+// (emptyItemGuard). display marks the one reader whose parse is for display alone
+// (displayReader), which refuses nothing a reader must still be shown.
 type markdownReader struct {
-	md goldmark.Markdown
+	md      goldmark.Markdown
+	display bool
 }
 
 // blockReader is the configuration every document is read with, its delimiter runs read by
@@ -757,6 +759,10 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth in
 		return parseTypedDirective(current, source, footnotes, depth)
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
+	case *displayText:
+		// Only the display read makes one, where it shows a block as the markdown it is written
+		// as (drawDisplayBlocks).
+		return &Node{Type: "paragraph", Children: displayLiteral(current.text)}, nil
 	default:
 		// refuseBlocks refuses every block outside convertedBlocks before conversion starts.
 		panic(fmt.Sprintf("conversion reached a %s block, which refuseBlocks passed and parseBlock does not convert (convertedBlocks)", node.Kind()))
@@ -781,7 +787,10 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: directive.values, Children: emptyParagraphFirst(children, false)}, nil
+	// The display read marks a block whose content rule wants a paragraph before what the
+	// markdown wrote, as Milkdown's createAndFill puts one there (displayContentFit).
+	_, fill := directive.Attribute(displayFillAttr)
+	return &Node{Type: directive.Name, Attrs: directive.values, Children: emptyParagraphFirst(children, fill)}, nil
 }
 
 // parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it

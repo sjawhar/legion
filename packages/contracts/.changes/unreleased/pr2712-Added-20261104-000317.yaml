@@ -1,0 +1,5 @@
+kind: Added
+body: 'The read shapes a caller gets with `Dispatch-Trees: 1` carry the display tree of each stored text beside it: `AskWithTrees`, `AskOptionWithTrees`, `AskAnswerWithTrees`, `AskResolutionWithTrees`, `AskEditPreviousWithTrees`, `AskEditWithTrees`, `CommentWithTrees`, `MessageWithTrees` and `ReplyBlockWithTrees`, and a tree field on the search, inbox, answers, replies, document, review, approval and architecture read types. The event payload types gain nothing: an event trees ride in the envelope own `trees` map, keyed by the text path.'
+time: 2026-11-04T00:03:17.562396217Z
+custom:
+    Issue: pr2712

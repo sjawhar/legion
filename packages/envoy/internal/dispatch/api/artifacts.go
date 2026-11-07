@@ -62,6 +62,7 @@ func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	attachApprovalTrees(wantsDisplayTrees(r), artifacts)
 	WriteJSON(w, http.StatusOK, artifacts)
 }
 
@@ -372,19 +373,23 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 
 // writeDocumentVersion stores the document-version row uploads write directly, returning the same
 // decoded version the route returns to its caller. Uploads keep this separate from
-// docs.writeVersionTx because they own their artifact event and approval move.
-func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
+// docs.writeVersionTx because they own their artifact event and approval move. stamp is what the
+// markdown was rendered from (docs.Ledger.RenderStampOf), stored with the head this transaction's
+// own write left, so a text read of a document still standing there serves the stored markdown
+// rather than rendering the document again.
+func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, authors []model.Actor, summary *string, stamp docs.RenderStamp) (model.Version, error) {
 	encodedAuthors, err := json.Marshal(authors)
 	if err != nil {
 		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
 	}
 	var version model.Version
 	var authorsRaw []byte
-	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version)
-		values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
+	if err := tx.QueryRow(ctx, docs.RenderStampHead+`
+		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version, `+docs.RenderStampColumns+`)
+		values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0),
+			`+docs.RenderStampValues+`, $7, $8)
 		returning number, named, summary, authors, created_at, `+model.VersionSize+`
-	`, artifactID, number, markdown, encodedAuthors, summary != nil, summary).Scan(
+	`, artifactID, number, markdown, encodedAuthors, summary != nil, summary, stamp.Token, stamp.Renderer).Scan(
 		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt, &version.Size,
 	); err != nil {
 		return model.Version{}, fmt.Errorf("write document version: %w", err)
@@ -557,14 +562,16 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		version, err = writeDocumentVersion(r.Context(), tx, artifact.ID, nextNumber, documentMarkdown, []model.Actor{actor}, documentSummary)
+		version, err = writeDocumentVersion(r.Context(), tx, artifact.ID, nextNumber, documentMarkdown, []model.Actor{actor}, documentSummary, ledger.RenderStampOf(artifact.ID, documentMarkdown))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		// The version credits the uploader alone, and holds the upload's write to the document,
-		// which clears the credit of every edit that write read when it changed the document.
-		ledger.WroteVersion(artifact.ID, version)
+		// which clears the credit of every edit that write read when it changed the document. It
+		// carries the markdown it stored, whose display tree the commit stores
+		// (Ledger.storeVersionTrees), since this route writes the row itself.
+		ledger.WroteVersion(artifact.ID, version, documentMarkdown)
 		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
 		err = recordDocumentTaskProgress(r.Context(), tx, artifact.ID, documentReadBack, documentMarkdown)
@@ -683,7 +690,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	s.publish(r.Context(), published...)
 	var blocks *documentBlocks
 	if kind == "doc" {
 		blocks = documentBlocksFor(documentReadBack, documentMarkdown)
@@ -716,6 +723,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	// The artifact detail is the artifact. Its inbound edges are the graph's to read
 	// (`GET /api/v1/references?to=`, and `GET /api/v1/artifacts/{id}/references` for agents),
 	// so this read does not pay for them.
+	attachApprovalTrees(wantsDisplayTrees(r), []model.Artifact{artifact})
 	WriteJSON(w, http.StatusOK, artifact)
 }
 
@@ -746,7 +754,21 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": version, "token": token})
+	answer := map[string]any{"markdown": markdown, "version": version, "token": token}
+	// The tree is built only for a caller that asked for one: the command line and the agent
+	// clients read this route for its markdown, and a tree they discard would cost them the
+	// read and evict from the cache what a browser is reading.
+	//
+	// This markdown is a document version's own text, which the ledger stored the tree of behind
+	// the commit that wrote it (docs.Ledger.storeVersionTrees), so a browser opening a document
+	// this process has not served since it started copies those bytes.
+	if wantsDisplayTrees(r) {
+		defer s.readDisplayTrees(r.Context(), true, artifact.ID, []string{markdown})()
+		if tree := displayTree(markdown); tree != nil {
+			answer["markdown_tree"] = tree
+		}
+	}
+	WriteJSON(w, http.StatusOK, answer)
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -880,10 +902,24 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		hash := sha256.Sum256([]byte(markdown))
 		sha := hex.EncodeToString(hash[:])
 		version.SHA256 = &sha
-		WriteJSON(w, http.StatusOK, struct {
-			Markdown string `json:"markdown"`
+		// A past version's text is read in the version mode: the attributes the server wrote
+		// into that text are part of what that version said (pmdoc.DisplayVersion).
+		//
+		// No write stores that mode - every writer stores the latest one, and the two modes read
+		// one text into two different trees - so this read is where a version's tree first
+		// reaches the table: it primes from the table, and stores what the table did not hold
+		// once the answer is written. A version is read again far more often than it is written,
+		// which is what makes the first read's store worth its one statement.
+		defer s.readVersionDisplayTrees(r.Context(), wantsDisplayTrees(r), artifact.ID, []string{markdown})()
+		answer := struct {
+			Markdown     string          `json:"markdown"`
+			MarkdownTree json.RawMessage `json:"markdown_tree,omitempty"`
 			model.Version
-		}{Markdown: markdown, Version: version})
+		}{Markdown: markdown, Version: version}
+		if wantsDisplayTrees(r) {
+			answer.MarkdownTree = pmdoc.DisplayJSON(markdown, pmdoc.DisplayVersion)
+		}
+		WriteJSON(w, http.StatusOK, answer)
 		return
 	}
 	var content []byte
@@ -999,7 +1035,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(r.Context(), event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -1129,7 +1165,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	s.publish(r.Context(), published...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}

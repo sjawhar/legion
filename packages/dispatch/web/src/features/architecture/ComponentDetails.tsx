@@ -174,7 +174,7 @@ export function ComponentDetails({
         <p className={`mt-1 text-sm ${textMutedOnSurface}`}>No description in the model.</p>
       ) : (
         <div className={`mt-1 text-sm ${textSecondaryOnSurface}`}>
-          <MarkdownBody markdown={component.prose} />
+          <MarkdownBody markdown={component.prose} tree={component.prose_tree} />
         </div>
       )}
       <dl

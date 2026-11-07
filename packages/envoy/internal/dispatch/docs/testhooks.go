@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -239,4 +240,22 @@ func DocumentReadWeightForTest(markdown string) (int64, error) {
 		return 0, err
 	}
 	return read.weight, nil
+}
+
+// documentRenders is the counter a test installs over every rendering of a document tree this
+// package makes, in place of a hook field on Service: the renders are made by the package's
+// render helpers (countDocumentRender), which hold no service. A render loads it and, outside a
+// test, finds it nil and does nothing else, so no production path changes. One test at a time
+// holds it, as the hook fields on Service are held, and clears it in t.Cleanup.
+var documentRenders atomic.Pointer[atomic.Uint64]
+
+// countDocumentRender records one rendering of a document tree on the counter a test installed.
+// Every rendering of a whole document goes through one of its callers, so what a read or a write
+// costs in renderings is what it counts. A rendering of a tree derived from a document - the copy
+// without ask blocks an approval carry compares (renderWithoutAskBlocks), a single block
+// (renderBlock) - is not one of them.
+func countDocumentRender() {
+	if count := documentRenders.Load(); count != nil {
+		count.Add(1)
+	}
 }

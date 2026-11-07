@@ -436,6 +436,6 @@ func settleDeliveryAttempt[T any](
 	if err := tx.Commit(ctx); err != nil {
 		return zero, err
 	}
-	s.publish(event)
+	s.publish(ctx, event)
 	return attempt, nil
 }

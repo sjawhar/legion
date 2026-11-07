@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -18,8 +19,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/dispatch/texttrees"
 )
 
 // SourceDir is the fixed directory an architecture source's model is read
@@ -709,7 +712,33 @@ func (i *Importer) project(
 	if changed {
 		i.events.Publish(event)
 	}
+	i.storeComponentTrees(ctx, source.Project, parsed)
 	return updated, nil
+}
+
+// storeComponentTrees stores the display tree of every component's prose, now that the import's
+// own transaction has committed: a component's prose is a stored text a reader is shown
+// (api's component reads), so its tree is stored where it is written, as a comment's body is.
+// It runs after the commit rather than inside the import's transaction, because a tree that
+// cannot be stored must not fail an import, and because the import holds the project's source
+// rows locked until it commits: a connection taken for this while it held them would be a second
+// one of the pool taken under a lock (store.ErrNestedAcquire).
+//
+// A failure is logged with the project it was for and changes nothing: a read of a component
+// whose tree is missing reads its prose, as it did before there was a table. The store is
+// texttrees.StoreFor, the one policy every path that writes a stored text keeps, so an importer
+// whose caller still holds a pooled connection stores nothing rather than being refused one.
+func (i *Importer) storeComponentTrees(ctx context.Context, project string, parsed Model) {
+	if i.store == nil || len(parsed.Components) == 0 {
+		return
+	}
+	prose := make([]string, 0, len(parsed.Components))
+	for _, component := range parsed.Components {
+		prose = append(prose, component.Prose)
+	}
+	if err := texttrees.StoreFor(ctx, i.store, pmdoc.DisplayLatest, prose...); err != nil {
+		slog.Warn("dispatch: store architecture component display trees failed", "project", project, "error", err)
+	}
 }
 
 // recordComponentFacts records, in the import's transaction, when each component of parsed was

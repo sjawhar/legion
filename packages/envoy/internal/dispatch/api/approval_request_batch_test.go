@@ -122,11 +122,12 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 	return response
 }
 
-// One approval request on a document with no request open costs thirty-five round trips, counted
+// One approval request on a document with no request open costs thirty-seven round trips, counted
 // as the issue read's are (roundTrips): one for each statement it runs on its own and one for
 // each batch, whatever that batch holds. The first eight read the coverage the answer reports,
 // before the request's transaction opens (approvalCoverage); the twenty-seven after them are the
-// transaction itself. In the order it sends them:
+// transaction itself, and the last two store the display trees of the texts it wrote, after the
+// commit. In the order it sends them:
 //
 //  1. the artifact row the coverage is read for (loadArtifact);
 //  2. a batch of 3: that artifact's versions, its latest review and its open approval request
@@ -170,11 +171,16 @@ func countedApprovalRequest(t *testing.T, handler http.Handler, artifactID strin
 //  32. the references' source sequence (refs.Stamp);
 //  33. the source sequence of the links the ask's parts hold, none here (refs.Stamp's block arm);
 //  34. a batch of 2: the approval as the request leaves it (attachApproval again);
-//  35. commit.
+//  35. commit;
+//  36. the display trees of the texts the ask.opened event carries - its question and both option
+//     labels - stored in one statement by the publish path (storeEventDisplayTrees);
+//  37. the display tree of the question the request wrote, stored by the route itself, which the
+//     table already holds from the statement before it (`on conflict do nothing`): the route
+//     stores what it wrote whether or not the event it published carried the same text.
 //
 // The four batches hold ten statements between them, so a request that sent each statement on
 // its own would send forty round trips.
-func TestApprovalRequestsCostThirtyFiveRoundTrips(t *testing.T) {
+func TestApprovalRequestsCostThirtySevenRoundTrips(t *testing.T) {
 	database := storetest.Open(t)
 	counter := &roundTrips{}
 	traced := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
@@ -195,7 +201,7 @@ func TestApprovalRequestsCostThirtyFiveRoundTrips(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("request approval: status=%d body=%s", response.Code, response.Body.String())
 	}
-	const want = 35
+	const want = 37
 	if len(counted) != want {
 		t.Fatalf("the approval request made %d round trips, want %d:\n%s",
 			len(counted), want, strings.Join(roundTripLines(counted), "\n"))
