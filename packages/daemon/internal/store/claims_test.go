@@ -127,6 +127,55 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
+// The record of this task's sends that never reached a turn round-trips with the delivery: how
+// many failed, when the last of them failed and the error it failed with. A restart rebuilds
+// every claim from this table, so a record lost here is a claim that has waited days on a send
+// which never lands and says nothing of it after the next restart (INFRA-1480). The last
+// failure's time is compared as an instant: Postgres hands a timestamptz back in the session's
+// zone, not the one it was written in.
+func TestADeliverysFailedSendsRoundTripAndItsConfirmationClearsThem(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	failing := supervise.Delivery{
+		ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, Generation: 4, QueuedAt: at(1),
+		SendFailures: 4, LastSendFailureAt: at(5),
+		LastSendError: "worker-stream: legion-LEGION-209-implementer refused adopt-working-copy: " +
+			"the git lock /legion/workspaces/acme/widgets/legion-209/.git/index.lock was last written 31m ago",
+	}
+	if err := store.PutDelivery(ctx, c.Token, failing); err != nil {
+		t.Fatalf("put the failing delivery: %v", err)
+	}
+
+	got := onlyClaim(t, store).Pending
+	if got == nil {
+		t.Fatal("the restarted daemon read no pending delivery")
+	}
+	if got.SendFailures != failing.SendFailures || !got.LastSendFailureAt.Equal(failing.LastSendFailureAt) ||
+		got.LastSendError != failing.LastSendError {
+		t.Fatalf("delivery read back = %+v, want %d failed sends, the last at %v, with its error",
+			got, failing.SendFailures, failing.LastSendFailureAt)
+	}
+
+	// The send that reached a turn clears all three (supervise's confirm), through the same
+	// upsert: a delivery read back still counting failures an earlier turn got past would name a
+	// stall that is over.
+	confirmed := failing
+	confirmed.DeliveredAt, confirmed.MarkedBy, confirmed.ConfirmedAt = at(6), failing.ID, at(7)
+	confirmed.SendFailures, confirmed.LastSendFailureAt, confirmed.LastSendError = 0, time.Time{}, ""
+	if err := store.PutDelivery(ctx, c.Token, confirmed); err != nil {
+		t.Fatalf("put the confirmed delivery: %v", err)
+	}
+
+	if got := onlyClaim(t, store).Pending; got == nil || got.SendFailures != 0 ||
+		!got.LastSendFailureAt.IsZero() || got.LastSendError != "" {
+		t.Fatalf("delivery read back = %+v, want its failure record cleared", got)
+	}
+}
+
 // A task is queued uninterrupted, and a death marks it interrupted — and, when its pod ran out of
 // memory, marks that too — by writing the same delivery again: both marks only ever reach the
 // store through the upsert's update. They have to survive that write, or a restart re-sends the
