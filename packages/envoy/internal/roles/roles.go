@@ -25,6 +25,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/roleholder"
 )
 
 // ClaimStore is where a role's claim is read: store.Registry in the listener, Buckets in
@@ -73,17 +74,20 @@ func (w Windows) EntryState(entry session.SessionEntry) session.State {
 }
 
 // State is what a role's claim came to when its holder was resolved. The strings are what the
-// listener's answers carry: the 404's reason and the publish route's recorded outcome.
+// listener's answers carry: the 404's reason and the publish route's recorded outcome. The two
+// no-holder reasons are the shared ones the Legion daemon reads (roleholder), not package-local
+// spellings, so the listener's 404, its refusal exception, the daemon's notify.Publish and its
+// exception consumer all read one list.
 type State string
 
 const (
 	// Live: the role is claimed and its holder's record reads live.
 	Live State = "live"
 	// Unclaimed: the role has no claim.
-	Unclaimed State = "unclaimed"
+	Unclaimed State = roleholder.Unclaimed
 	// Lapsed: the claim's holder is not answering - unresponsive, or gone - and the claim stands
 	// untouched. Resolution.HolderState says which of the two it is.
-	Lapsed State = "holder_lapsed"
+	Lapsed State = roleholder.HolderLapsed
 )
 
 // Resolution is a resolved role holder. Nothing was taken from that holder to reach it.

@@ -555,9 +555,10 @@ type PullRequest struct {
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
-	// MergeSHA is the merge commit GitHub reported for the pull request (the production check
-	// looks for it in a build): empty until the merge, and for a pull request merged before the
-	// column existed, whose check's first compare fills it from GitHub.
+	// MergeSHA is the merge commit GitHub reported for the pull request, which the production
+	// check's agent looks for in production: empty until the merge, and for a pull request merged
+	// before the column existed. Nothing fills it later — no compare is left to — so the check's
+	// task says the commit is unknown and the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 }
 
@@ -730,45 +731,52 @@ const (
 	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
-// ProductionCheck is an issue's production check: the work after the close in which the
-// implementer drives the merged change in production and reports what it saw. There is one record
+// ProductionCheck is an issue's production check: the work after the close in which the role the
+// project's `production_check` named at the open, which Role records, drives the merged change in
+// production and reports what it saw. There is one record
 // per issue, opened at the merge; a later merge of the same issue — a rerun's, after a re-entry or
 // a reopen inside the linger closed the first — replaces it (workflow.openCheck) and counts its
 // looks from one again, so OpenedAt is the check instance's identity (ID): what tells the two
 // checks' looks apart in the events their rows and reports are recorded under. It copies the
 // repository, the pull request's number and the merge commit, and is fenced on itself (the issue,
 // the check and the look number) rather than on the tree generation, so a re-admission that
-// clears the tree's merged pull requests leaves it as it is. Looks counts the implementer's
+// clears the tree's merged pull requests leaves it as it is. Looks counts the checking role's
 // looks, each a wake of its session that ends with a report (pass, pending or fail) or at its
-// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke.
-// LastWakeKind and LastWakeDetail are what woke the latest look (the merge, a deploy event, a
-// build compare, the bound) and LastWakeAt when; PendingCauseKind and PendingCauseDetail hold a
-// wake that arrived while a look was open, which the next look starts with. Last marks the
-// bound's look, after which no look starts. A closed check has ClosedAt and its Outcome.
+// bound; LookOpen is whether the latest look is still running and LookWakeAt when it woke. Role
+// is the role that works the check, written once when the check opens (the project's
+// production_check setting) and never read from the configuration again, so a setting changed
+// mid-check leaves the open check with the role it started under. LastWakeKind and
+// LastWakeDetail are what woke the latest look (the merge, the bound, the agent's own wake) and
+// LastWakeAt when; WakeAt is when the check is next looked at — the time the checking agent
+// named on a pending report, or the retry of a look nobody reported — and is nil when neither
+// stands. Last marks the bound's look, after which no look starts. A closed check has ClosedAt
+// and its Outcome.
 type ProductionCheck struct {
 	Issue   string
 	Project string
 	Tree    string
 	Repo    string
 	Number  int
-	// MergeSHA is the merge commit the check looks for in a build, empty until the first compare
-	// fills it for a pull request merged before the daemon recorded merge commits.
+	// MergeSHA is the merge commit the check's agent looks for in production, copied from the
+	// pull request's record. It is empty for a pull request merged before the daemon recorded
+	// merge commits, and nothing fills it later: the look's task says the commit is unknown and
+	// the agent reads it from GitHub (workflow.checkTask).
 	MergeSHA string
 	OpenedAt time.Time
 	// BoundAt is when the whole check is bound: the check's last look starts then
 	// (config.Config.ProductionCheckBound after OpenedAt).
-	BoundAt            time.Time
-	Looks              int
-	LookOpen           bool
-	LookWakeAt         *time.Time
-	LastWakeKind       string
-	LastWakeDetail     string
-	LastWakeAt         *time.Time
-	PendingCauseKind   string
-	PendingCauseDetail string
-	Last               bool
-	ClosedAt           *time.Time
-	Outcome            CheckOutcome
+	BoundAt        time.Time
+	Role           claim.Role
+	Looks          int
+	LookOpen       bool
+	LookWakeAt     *time.Time
+	LastWakeKind   string
+	LastWakeDetail string
+	LastWakeAt     *time.Time
+	WakeAt         *time.Time
+	Last           bool
+	ClosedAt       *time.Time
+	Outcome        CheckOutcome
 }
 
 // Open says whether the check is still open: no look has closed it.
@@ -794,7 +802,7 @@ func (c ProductionCheck) NamedBy(openedAt time.Time) bool {
 type CheckOutcome string
 
 const (
-	// CheckRecorded is a look's pass: the implementer drove the change in production and
+	// CheckRecorded is a look's pass: the check's own role drove the change in production and
 	// recorded it on the pull request.
 	CheckRecorded CheckOutcome = "recorded"
 	// CheckDefect is a look's fail: the change misbehaved in production, asked about in a Dispatch ask.
@@ -1398,6 +1406,9 @@ type Store interface {
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest
 	// first: the notices a later one of the tree must not overtake for the architect they share.
+	// Each row comes whole, its next_at among it, so the holder can wait for the moment the row it
+	// waits behind is due rather than climb a backoff to it (the daemon's deliverNotice, whose
+	// fence waits with wait.Until for a catch-up the wake pacing holds).
 	EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error)
 	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
 	// with token.

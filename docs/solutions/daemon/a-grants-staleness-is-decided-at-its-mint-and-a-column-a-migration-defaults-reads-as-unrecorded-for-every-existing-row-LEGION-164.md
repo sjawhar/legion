@@ -30,7 +30,7 @@ related_issues:
   record read as "unrecorded" until its next registration, and a gate that treats 0 as stale refuses
   callers that worked the day before — the operator's own commands included. Decide what 0 means
   (none recorded) and which callers may be refused on it before the migration ships.
-- Run `skill://ce-simplify-code` before the tester: its reuse reviewer is the pass that found this
+- Run `skill://simplify-settled-diff` before the tester: its reuse reviewer is the pass that found this
   one here, reading the grant route's two mint paths against the redeem.
 
 ## Evidence

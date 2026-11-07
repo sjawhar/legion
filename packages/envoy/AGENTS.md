@@ -90,7 +90,7 @@ Each item below names a task and where its code is, then notes on it.
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
 
 - **Stream and bucket copies, stream byte limit**:
-  `internal/bus/settings.go` (`ParseNATSReplicas`, `ParseStreamMaxBytes`, `MaxReplicas`), `internal/bus/nats.go` (`ErrStreamFull`, `ErrNotStored`), `internal/config/config.go`, `cmd/dispatch/settings.go`, `internal/bus/kv.go` (`EnsureKeyValue`), `internal/bus/keeper.go`
+  `internal/bus/settings.go` (`ParseNATSReplicas`, `ParseStreamMaxBytes`, `MaxReplicas`), `internal/bus/nats.go` (`ErrStreamFull`), `internal/config/config.go`, `cmd/dispatch/settings.go`, `internal/bus/kv.go` (`EnsureKeyValue`), `internal/bus/keeper.go`
 
   `ENVOY_NATS_REPLICAS`, the deployment's replica count:
   a whole number from 1 to 5 (`bus.MaxReplicas`, which aws:WebhookListener's rendering also refuses above), default 1;
@@ -220,7 +220,8 @@ Each item below names a task and where its code is, then notes on it.
 - **`issue.deployed`: a merged pull request reached production**: `internal/dispatch/delivery/deployed.go`
 
   The delivery timeline writes one `issue.deployed` event on a pull request's issue the moment it first knows which production run shipped it, by intake (`intake.go`) or by the reconcile (`reconcile.go`), once per pull request, as the system actor `delivery-timeline`;
-  the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`), where the Legion daemon consumes it to wake the production check the issue's close opened.
+  the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`).
+  No Legion daemon consumes it: a production check is woken only by the `wake_at` its own agent — the role the project's `production_check` names — gave on a `pending` report, by the retry of a look nobody reported, or by the check's own bound.
   Payload shape: `IssueDeployedEventPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **The server fleet's build on the bus**: `internal/dispatch/startup/`
@@ -229,8 +230,9 @@ Each item below names a task and where its code is, then notes on it.
   Any process that finds the fleet agreeing on a commit the latest row of `server_build_announcements` does not name inserts a row, under an advisory lock;
   any process whose bus is connected publishes each unpublished row, directly through the bus client rather than the outbox, with event id `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the announcement.
   A restart on the announced commit announces nothing; a rollback announces again.
-  `/healthz` reports the latest announcement's commit as `fleet_commit`, which the Legion daemon's boot reads;
-  the daemon compares the commit against the merges of its open production checks in `cybermonklabs/legion`.
+  `/healthz` reports the latest announcement's commit as `fleet_commit`.
+  Neither the announcement nor `fleet_commit` wakes anything in Legion: the daemon reads no deployment's production workflows, and a production check's next look is the one its own agent named with `wake_at`.
+  The durable consumer of `notifications.dispatch.server.started` the daemon once held stays on the stream until an operator removes it with `nats consumer rm`, since the daemon's NATS user holds no `CONSUMER.DELETE` grant and that consumer sets no inactivity threshold.
   Subject and payload: `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayload` in `packages/contracts/src/dispatch-api.ts`
 
 - **Registry of live server processes**: `internal/dispatch/processes/`
@@ -456,8 +458,8 @@ It returns before any read-back, so a table-row insert is not read back, and it 
 a row inserted under an aligned column is stored without alignment and reads back with the column's, and a row whose cells the upload path refuses for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans unwritten:
 it runs once for each insert of a batch, and an insert, written between document-level blocks, changes no table, so each span reads back the same on both.
-The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
-write whose markdown reads back otherwise`).
+The reading rules refuse every shape they know first, so this refusal names one none of them reads, and each is logged:
+`pmdoc: refused a write whose markdown reads back otherwise` where the rendering reads back as another document (`pmdoc.ErrMisreadRendering`), and `pmdoc: refused a write whose markdown cannot be read back` where no reader reads the rendering at all, which answers that reader's own refusal and the shape it names (`pmdoc.ErrRenderingRefused`).
 Wherever a check reads a write back - here, and in an accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
 any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`.
 A tree a browser edit makes is not checked, so its rendering can still fail to read back when it is uploaded again.
@@ -708,6 +710,19 @@ the `docs` package's is `envoy-go-race-docs` and the `api` package's is `envoy-g
 Each race job runs only when a file its own filter in `.github/workflows/ci.yaml` names changes
 — `envoy_go_race_docs`, the closure of the `docs` package alone, whose job gives it a 60-minute deadline, and `envoy_go_race_api` for the API;
 see Critical conventions for what keeps those filters current.
+
+A cleanup this package registers captures nothing that reaches the document it is attached to.
+`runtime.AddCleanup` says what that costs: "If ptr is reachable from cleanup or arg, ptr will never be collected and the cleanup will never run."
+The runtime keeps a cleanup's closure alive for as long as the document, and the service and each of its listings reaches every resident document through ygo's room table, so a closure holding either of them strongly made a dropped service and every room still loaded in it immortal, which is what took `envoy-go-race-docs` over its runner's memory (dispatch://INFRA-1085): each test binary builds many services.
+A running Dispatch process keeps one service for its whole life, so there the cycle pinned a service that was alive anyway, and an evicted room's document was still freed.
+`keepInstance` (`docs/roomcursor.go`) and `listResident` (`docs/tree.go`) therefore hold their owner through `weak.Make` and do nothing when its `Value()` is nil;
+a pointer to a field of the service, such as a listing, counts as the service, and dies with that one allocation.
+The rule covers the cleanup's argument alike, so an argument reaching the document is the same cycle:
+`keepInstance` once passed its `*roomLoad`, which reaches a document by two routes through `roomInstance.unstored`: each `queuedClass`'s `UpdateCredit` carries the `service`, and it carries the `state` whose `roomState.reservedFor` is a `*crdt.Doc`, so it holds the load weakly too and passes an empty struct.
+`envoy-go-docs-finalizers` runs `GODEBUG=checkfinalizers=1 go test -v -count=1 -timeout 29m ./internal/dispatch/docs/` on the same `envoy_go_race_docs` filter, and fails on `is reachable from cleanup or cleanup argument` and then `fatal error: detected possible issues with cleanups and/or finalizers`;
+its `-v` also carries this package's leak line, `docs: <built> services built, <alive> still alive after <duration>`, which names each test that built a service and never shut it down, so a test that builds a `*Service` gives it a `t.Cleanup` that shuts it down.
+This package is the only one of the repository that registers a cleanup today, and one added in another package comes with a detector job of its own, in the same pull request;
+`docs/testing.md` states the rule in full.
 
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
@@ -1129,8 +1144,9 @@ every operation of an edit batch, table-row fragments included;
 or an accepted suggestion's replacement together with the tables its splice cuts, as a reject's cut tables (`pmdoc.PadTables`).
 A larger write is refused before its cells are allocated (`pmdoc.ErrTablePadding`:
 `400 INVALID_MARKDOWN` for a document or an accepted suggestion's own replacement, `INVALID_OP` on an edit's `markdown`, on an accept's `replace_with` for the tables its splice cuts, or on a reject's `anchor`), naming the table, the cells it writes, the cells padding its rows to the table's width would make, and the limit.
-Every table goldmark reads is charged, however it is written, a header narrower than its delimiter row among them, which goldmark pads with the rest:
-`findTableRows` reads a paragraph's lines as goldmark's table transformer does, and `TestFindTableRowsReadsWhatGoldmarkReads` holds the two together.
+Every table goldmark reads is charged, however it is written, the body rows narrower than the delimiter row that goldmark pads with the rest among them.
+A header of other than the delimiter row's width is no table at all, in GFM as in the browser editor's parser, and goldmark's padding of a narrower one never runs:
+`findTableRows` reads a paragraph's lines as that parser reads them and nothing else reaches goldmark's table transformer, and `TestFindTableRowsReadsWhatGoldmarkReads` holds the two together.
 A conditional batch runs its operations to check its anchors and preconditions as well as to apply them, each run on a budget of its own, so its padding is charged once.
 A read-back, a check that parses the rendering a write would store, pads the tree's own short rows, as a rendering leaves them where spans go unwritten, on a budget of its own for each parse:
 100,000 cells (`maxSpanCells`, as many as one render lets spans add), which a table the browser editor has padded reaches only when its spans pass what the renderer writes.
@@ -1339,9 +1355,7 @@ the listener publishes the envelope before it answers, so an answer that misses 
 The stream's duplicate window equals its age by construction (both are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.
 The stream's byte limit (`ENVOY_STREAM_MAX_BYTES`) does not shorten the window:
 a full stream refuses a new message (`DiscardNew`, `bus.ErrStreamFull`, which the send and publish routes answer `503` with `Retry-After: 1` under `streamFullPrefix`, recorded as `stream_full`) rather than drop a stored one, so every message it took stays, and is recognised as a repeat, for the whole window.
-A copy sent without its `Nats-Msg-Id` is the exception:
-the stream recognises no repeat without that id, so it stores that copy as a message of its own:
-the send again after an `ErrNotStored` acknowledgement, on the send and publish routes' own path (`publishJetStream`, `internal/bus/nats.go`) and in the outbox window (`sendJetStream`, `internal/bus/async.go`).
+Every copy the stream stores carries its `Nats-Msg-Id`, so the stream recognises a repeat of it for the whole window.
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what the dashboard's retry row says:
 its **Retry** re-sends the attempt's own mode, and the two mode-change actions say "instead".
 A mode change never rides on a stranded attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
@@ -1771,8 +1785,9 @@ in the attributes written onto a typed block (`SetBlockAttributes`, `pmdoc.LineF
 and in a block ask's edited question and options.
 The browser editor's own updates cannot carry a carriage return.
 No stored document holds one, and `pmdoc` handles line feeds alone.
-Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below);
-a browser's update can put one in the live document, and text Dispatch takes from the tree carries it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`):
+Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below), and every reader of a caller's markdown reads one as U+FFFD where it takes the bytes in (`parseMarkdown`, `readInline`), as CommonMark and the browser editor's parser read it, since goldmark keeps the character while the rendering writes it as U+FFFD, which left a write holding one accepted into a tree the markdown it is stored as did not carry (PR #2507).
+The replacement is three bytes where the character was one, so `ParseWithSourceStarts` maps each block's start back to the byte of the caller's own markdown it stands at (`startsInMarkdown`), which is where `itemblocks.Split` cuts a body.
+A browser's update can put one in the live document, and text Dispatch takes from the tree carries it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`):
 the rendering a version stores and every read serves, a block's id among it, an anchor's quote (`FindMark`), an ask block's question and options and a heading's text (`pmdoc.TextContent`), and the text a quote is matched against, so a quote, a `# Title` quote or a `heading:` anchor copied from `GET /text` finds it.
 A typed block's other attributes are written quoted, U+0000 as the escape `\x00` that its parser unquotes back.
 Marks are read as that parser reads them, as a set, where goldmark nests them:
@@ -1810,17 +1825,24 @@ A code span keeps the whitespace that starts each of its later lines past the pr
 goldmark's paragraph trims it (`lineRecordingParagraph`, `multilineCodeSpanText`).
 A space or a line feed is the padding such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the writer pads a span whose text starts and ends with one.
 The columns left of a tab a container's marker took part of are text to that parser, not spaces, so they stand between, and a span ending in them sheds nothing.
-The writer writes a span's later line as it is, without the containers' prefix, except where a list item or footnote definition would take columns off the whitespace it opens with, and there behind the prefix (`takesCodeLineIndent`).
+The writer writes a span's later line as it is, without the containers' prefix, except where a list item or footnote definition would take columns off the whitespace it opens with, and there behind the prefix (`takesCodeLineIndent`), and except a line holding one complete HTML tag and nothing else, which is written behind the prefix too (`codeLineOpensHTML`):
+CommonMark lets no block of HTML of kind 7 interrupt a paragraph, and goldmark and the browser editor's copy of the construct both obey that, so either reader reads such a line as the paragraph's and the code's with the prefix or without it, while a reader that opens one there - upstream micromark, and the browser's engine before PR #2507 - ends the paragraph, the containers around it and the code with them;
+the prefix makes the stored bytes read the same in that reader too, and the containers take it off the code's text again.
 The spaces and tabs a line of text ends with are dropped, as that parser drops them, and are a hard break only where they are two spaces or more and no tab (`trimLineSuffixes`);
 goldmark kept all but the last and broke at any two spaces.
 A backslash ending the line keeps what stands before it.
-A lazy continuation line - one that continues a paragraph in a list item, a quote or a footnote definition without the container's prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one would be a body row of is refused (`markLazyRows`):
+A lazy continuation line - one that continues a paragraph in a list item, a quote or a footnote definition without the container's prefix, whichever of the containers around it the line leaves (`lazyLinesAttr`) - is never a table's delimiter row (`lazyTableRows`), as in GFM, whose tokenizer refuses a delimiter row there (`micromark-extension-gfm-table`, `headDelimiterStart`), although a header row on such a line opens a table as it does in the browser editor's parser, which reads the delimiter row's line alone for laziness;
+and a table a lazy line would be a body row of is refused (`markLazyRows`):
 goldmark continues the paragraph the table is made of with the line, where the browser editor's parser ends the table, and every container the line does not continue, before it.
 So is a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, whatever its marker, or indented code (`markBlockRows`):
 goldmark's table is a paragraph, which such a line continues, where that parser's table is no paragraph and ends there, reading the line as that block.
 So is a table a body row of which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both fixes (a pipe inside a cell written `\|`, or header and delimiter rows as wide as the row):
 goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at every `|` not written `\|`, inside code and links too, and at a `|` after an even run of backslashes (`\\|`), which `splitAtEvenEscapedPipes` splits where goldmark's cell runs on, so a code span holding a bare `|` in a row that fills its table lost the rest of the row's text when it was stored.
 A row whose cells past the width are blank loses nothing and is read at the table's width.
+A table forms only where its header row holds as many cells as its delimiter row has columns (`headerCells`, GFM's rule, the cells counted as the browser editor's parser counts them, so `a||` is two), where goldmark padded a narrower header out to the delimiter row's width and read a table there.
+Neither of those two rows may stand four columns or more past its container:
+a header row there is indented code to that parser, which a paragraph's line only continues, and goldmark reads a delimiter row there because the close it makes for a setext underline trims a paragraph's lines before its transformer reads them, so pmdoc reads them as they were written (`lineRecordingParagraph`, `tableLines`).
+That parser tries a header and a delimiter row at every line, where goldmark's transformer gives the table up at the first pair that fails, so the lines of the pairs it refused are left a paragraph before the table it reads further on (`textBeforeTable`).
 A bare-row insert (`InsertTableRows`) decides in three steps.
 First, its fragment, less its blank lines at either end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens or more, `tableDelimiterRow`).
 Each line is trimmed there as goldmark trims a row (`rowSpace`: space, tab, line feed, carriage return), so `|` then U+00A0 is a row whose cell holds it.
@@ -1844,11 +1866,23 @@ A fenced code block whose language - the info string's first word - holds a back
 that parser decodes both, and goldmark keeps them as written.
 What it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which both drop.
 A whitespace-only line inside fenced code whose opening fence stands past its container's content is an empty line of the code when it holds fewer columns past that content than the fence does:
-that parser takes up to the fence's indentation from each line, and goldmark kept the whole line, so `  ~~~\n \nx` holds the code `\nx`;
-a last line of the document with no line feed holding nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`, as a quote takes such a line in place of the code's last (`fenceClosure`, `fencedCodeText`).
+that parser takes up to the fence's indentation from each line, and goldmark kept the whole line, so `  ~~~\n \nx` holds the code `\nx`.
+Goldmark read such a line by its first non-space position, which a line of whitespace has none of, less the padding left of a tab a container's marker took part of, so it started the line that many bytes before its text, inside the markers: `>    ``` ` over `>` and a tab read `>\t` as the code.
+A last line of the document with no line feed holding nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`, as a quote takes such a line in place of the code's last (`fenceClosure`, `fencedCodeText`).
 The document's last line with no line feed is read as that parser reads it whatever block it ends:
 the columns its containers leave of a tab they took part of are the line's, where goldmark read no line past the source's end and dropped them, so `> ```\n> x\n>\t` holds the code `x\n  `, and a container inside them or an item takes its own columns from them (`lastLineColumns`);
 a typed block indented in its container takes its indentation from that line too (`typedDirectiveParser`).
+A line the browser editor's parser opens a block of HTML on is refused, since the Proof schema holds no block of HTML and that parser drops the one it reads with the container around it (`ErrBlockHTML`).
+Goldmark opens a block of HTML on most such lines itself and refuses it there, a declaration opening with a lower-case letter (`<!x>`) among them since PR #2518 (`declarationBlockParser`);
+the rest are the ones its patterns (`parser/html_block.go`) miss, which are recorded per paragraph line, with the kind of block they open, as the lines are taken (`htmlFlowKind`, a port of micromark's own html-flow tokenizer and the one this package's writer asks as well through `htmlBlockStart`, with `recordHTMLFlowLine`) and refuse the paragraph, text block or setext heading holding one (`htmlFlowRefusal`):
+that parser takes a tab where those patterns take only a space, in the line's indentation, inside the tag and after it, so `> </a\t>` and `> a` over `> \t<div>` are refused, and it reads a closing tag of a raw text name (`</script>`) as a block as well.
+A node holding such a line alone is read, not refused, where the two parsers read it alike:
+a block of kind 7, one complete tag and nothing else, runs to the first blank line, and the editor draws it as a paragraph of inline HTML, which is goldmark's own reading of the line, so `ParseForWrite("> </a\t>\n")` is stored where `"> </a\t>\n> text\n"` is refused.
+The exemption asks the kind.
+A block of kinds 1 to 5 runs to an end marker of its own (`</script>`, `-->`, `>`, `?>`, `]]>`) and swallows every line up to it, and where such a marker ends it on its own line, which both parsers do read alike, goldmark refuses the same block written without the tab, so the tab form is refused the same way.
+A block of kind 6 runs to the first blank line as kind 7 does and is not exempt, since a tag of a block-level name opens kind 6 however unfinished it is: in `- a\n\n  \t<div x\n` the editor draws the inline HTML `<div x` where this reader reads the text `<div x` and stores `\<div x`, and the exemption cannot tell that tag from a whole one.
+A block of kind 7, one complete tag and nothing else, interrupts a paragraph in neither parser, so a lone tag continuing one, lazily or not, is read as inline HTML and refused nowhere;
+the refusal is a document's, so a textblock's inline markdown, which lands inside a paragraph the document already holds, keeps such a line (`dropHTMLFlowLines`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as the browser editor's parser reads it (`taskList`):
 followed by a space or a tab and then more text on the line, or by a line ending the paragraph continues past, and it takes only the one character after it.
 Goldmark's took the marker with anything after it, so it read a link opening a list item (`- [x](https://…)`) as a checked task.
@@ -1910,41 +1944,36 @@ An empty list item that would interrupt a paragraph is not opened, as that parse
 after `- a`, the line `  - -` is an item holding the text `-`.
 Nor is an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`):
 goldmark takes the number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one paragraph.
-Neither is opened on a line after indented code, blank lines between or not, whatever containers the line opens first, since that parser holds the code open to that line and decides once per line whether it interrupts - except code right after a list, which that parser ends on its own line (`interruptsOpenBlock`):
-`    code\n> 2. b` is a quote holding the paragraph `2. b`, and `1.\n\n    code\n2. b` is two lists with the code between.
+Neither is opened on a line after indented code, blank lines between or not, where the containers the line opens first open on that line, since that parser holds the code open to it and decides once per line whether it interrupts - except code right after a list, which that parser ends on its own line (`interruptsOpenBlock`):
+`    code\n> 2. b` is a quote holding the paragraph `2. b`, `    code\n> -` and `    code\n\n> -` are quotes holding the paragraph `-`, and `1.\n\n    code\n2. b` is two lists with the code between.
+A line carrying a container's markers between the code and the item is a line that container opened on, and in its flow the code has ended and nothing is open, so `    code\n>\n> -` is a quote holding a list with one empty item and `    code\n>\n> 2. b` a quote holding an ordered list;
+inside a container that held the code itself, lines of markers and whitespace leave it open, so `>     code\n>  \n> -` is a quoted paragraph.
 A table is no paragraph to that parser, so after one such an item opens in a container the line opens first (`| a |\n| - |\n* -` is a list item holding an empty one).
 An item whose marker line holds nothing takes its content from the next line when that line reaches its content column with no blank line between, a list marker there included (`emptyItemGuard.Continue`):
 goldmark closed the list for a marker that cannot continue it, so `-\n  1.` read as two lists.
 
-Every document's lists are spaced as that parser reads them (`browserListSpacing`):
-outside quotes and footnote definitions a blank line between two items spreads the list, and one between an item's blocks spreads the item;
-in a footnote definition a list is never spread, and an item is spread by a blank line between its blocks or after it, before the next item or a quote or list the definition goes on with;
-in a quote a blank line after an item spreads the list, and so do blank lines after its last item, one before a quote or a list (or anything, in a typed block inside the quote) and two before anything else, or at a typed block's fence - where no fence of its own closes a typed block, the fence of the typed block it stands in (`fenceEnding`) - three at the quote's end where no fence ends the typed block, but for a container opening on the line right after them, and one more of each after an item ending in a quote in the typed block (`quotedListSpread`, `blanksEndingQuotedList`), and where a typed block inside the list's quote stands in a quote that goes on past them, the blank lines of the quotes around the list's after one of its own count among them (`blanksThroughOuterQuotes`).
-A typed block's content is a document of its own to that parser, ending where its fence or the block around it ends it, so where quotes and typed blocks nest around a list more than once a blank line in its quote at or after it, outside the code it holds, is refused (`quoteTypedAlternations`);
-blank lines after an item that ends in a quote or a list are that block's, and in a quote those after a footnote definition an item holds are the definition's - one spreads the item only before a quote, a list or a definition, and two before anything (`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the quote's end count as anything, and none spreads the list (`definitionEndSpreadsItem`, `blanksAfterDefinitionItem`), an empty definition's own line being one of them (`emptyDefinition`, so `> - [^m]:\n>` is a spread item);
-and a quote and a footnote definition together mix the two (`footnotedQuoteListSpread`).
-A blank line after a fenced code block no fence closed is the code's and spreads nothing, even where the code's text drops it, unless a quote between ends at it (`keepsBlankLinesAfter`).
-The code's text drops that line where it ends a list item or a footnote definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a table), or a quote no container opens right after, and keeps it before a quote, a list item or a definition, as that parser reads it (`blankTaker`).
-Indented code keeps the whitespace-only lines after it that hold four or more columns past where its container's content starts (a list item measured from its content, a footnote definition from its own start), and the shorter blank lines between them, as that parser reads it, so they are its text, less one final line ending (a last line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`).
-The two refusals the lines alone do not decide, of a typed block holding a blank line inside a list item (`blankInside`) and of a blank line in a quote at or after a list that quotes and typed blocks nest around more than once (`nestedQuotedListBlank`), still read those lines, and a last line `lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so they refuse what they refused before.
-A list item decides by what follows its list only inside its own quote or typed block;
-past one, that container's rule decides, so a typed block's fence keeps the line and a quote's end judges it by what opens right after.
+Every document's lists are spaced as that parser reads them (`browserListSpacing`), by a port of that parser's own two steps rather than by rules of this reader's own (`prepare_list.go`, `line_cursor.go`).
+The first step is micromark's container machine: a line machine holds the open containers of each line and asks each one whether the line continues it, stripping its prefix as micromark strips it - a quote marker and one column of the space or tab after it, an item's own columns, a footnote definition's four - and what is left decides whether the line is blank at that container's level (`micromark-core-commonmark`'s `tokenizeListContinuation`, `tokenizeIndent`, `tokenizeListItemPrefixWhitespace` and `tokenizeBlockQuoteContinuation`, with `micromark`'s `preprocess.js` and `create-tokenizer.js` for how a tab is split by column, and `packages/proof-editor`'s directive container for the typed block, which has no upstream).
+The second is `mdast-util-from-markdown`'s `prepareList`, ported as it stands: an item is spread by a blank line recorded inside it, at container balance zero and not at its own marker, that stands before the item's end, and the list is spread by the blank lines that end an item, the tail walk turning the last of them back into a line ending.
+Each step of the port names the function it ports in its own comment, so what a shape reads as is that parser's own answer rather than a rule of this reader's.
+No list is left to goldmark's looseness and no spacing is refused.
+The blank lines indented code keeps past where goldmark ends it are that code's and space nothing (`heldCodeLines`).
+
 The renderer writes each spacing so that it reads back (`blanksAfterList`, `writesBlankAfterItem`):
 no blank line before a block that opens on the line after a list where one would spread what it follows, none inside a list item after a list ending in an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote definition ending in a list no line continues, where the reader refuses one (`endsInClosedList`);
-a footnote definition a tight list item holds writes its blocks with the item's tight lines, since that parser reads them as the item's (`itemBlocks`).
-Where the lines alone do not decide the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or typed blocks stand between - or where this reader does not read them - the blank lines that would spread a quoted list item ending in a footnote definition whose typed block holds a fence no fence closed, which that parser reads as the code's (`quotedDefinitionFenceBlank`) - a document holding one of those shapes, or a footnote definition that ends in a block other than a paragraph, is refused, and so it is where goldmark reads its blocks otherwise:
-an empty list item and a blank line before a block an item around it holds, however far out, since goldmark ends every item around the empty one there (`emptyItemEndsOuterItem`), an item's content starting one column past its marker where its marker line holds nothing more or indented code (`itemContentColumn`).
-Every other document keeps goldmark's looseness there - a loose list's items holding more than one block are spread, the list when none is - which is how the documents Dispatch stores were read;
-but a blank line at or after a list in a typed block in a footnote definition is refused there too, unless goldmark spreads every item a blank line follows (`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
+a footnote definition a tight list item holds writes its blocks with the item's tight lines, and so does a typed block one holds, since that parser reads the lines of both as the item's (`itemBlocks`, `inTightItemBelowQuotes`): a blank line between two of them would be a blank line of the item, which that parser reads as spacing it.
+One shape is refused rather than spaced, and it is goldmark's tree rather than the spacing: an empty list item and a blank line before a block an item around it holds, however far out, since goldmark ends that outer item there and the browser editor's parser does not (`emptyItemEndsOuterItem`).
+Nothing else of this class is refused.
+The counterpart rule the renderer writes is `blanksEndingQuotedList` (`render_list_spacing.go`).
 
 A footnote definition is read where it is written, as that parser keeps it:
 inside another block, ahead of other blocks, in any order, and whether or not anything refers to it.
 One inside another footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text.
 One inside a typed block is read like one inside a quote: that parser reads a typed block as a container, so a reference anywhere in the document reaches it.
 One inside a typed block with a list item around it, inside the typed block or outside it, is refused, since that parser counts the definition's lines and the blank lines next to it otherwise when it decides whether the item is spread:
-it reads the first line of a definition opening on a later line, or of an empty one, as a blank line of the typed block, and a blank line inside the typed block as spacing the item.
-So is one inside a typed block that holds any block but paragraphs (a list, a quote, code):
-that parser reads a list there spread where this one stores it tight, so only a definition of paragraphs is read alike by both.
+it reads the first line of a definition opening on a later line, or of an empty one, as a blank line of the typed block, and a blank line inside the typed block as spacing the item (`typedDefinitionInItem`).
+So is one inside a typed block that holds a block other than a paragraph, which is what the reader checks:
+the browser editor reads a list there with other spacing, and the definition's other blocks (a quote, code) are refused with it until they are shown to read alike (`typedDefinitionHoldingBlock`, `typedDefinitionRefusal`).
 A definition whose label holds whitespace is refused, which that parser reads as a paragraph.
 A label is stored as that parser reads it, its escapes and character references decoded (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the label as written;
 the writer escapes a bracket, a pipe, a backslash before punctuation or at the end, an ampersand opening a character reference, and white space as a numeric one, so each label reads back and one that needs none is written as it is (`escapeFootnoteLabel`).
@@ -3069,8 +3098,16 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A refusal of a session whose own consumer holds the message records nothing, since this path handed that session nothing ("Session consumers"), so a second stored copy of the event -- the same dedupe key on another of the session's topics -- is judged and reported again rather than left under a record that would hold the session's copy for five minutes.
   The same holds for a refusal whose resolution of the recipient failed, a session whose entry is gone (`session.ErrNoSessionRecord`) among them.
   The cost is that session's exception dedupe: a session on consumer delivery is sent one `delivery_failed` per stored copy of the event and per redelivery of each, up to the durable's `consumerMaxDeliver` (20), where a recorded refusal gives one per dedupe key per attempt window.
-  A role or ad-hoc topic sent through `/v1/messages/publish` raises no exception:
-  the route answers its sender instead, with 202 for a role message it kept, with the unheld role's 404 when it kept nothing, and with 403 or 504 for a recipient that did not take it (the Listener API).
+  A role send through `/v1/messages/publish` answers its sender instead, with 202 for a role message it kept, with the unheld role's 404 when it kept nothing, and with 403 or 504 for a recipient that did not take it (the Listener API);
+  an ad-hoc topic raises none at all.
+  The one bus signal the route adds is the role send's own refusal: a 404 whose reason is a shared no-holder reason (`roleholder`: `unclaimed`, no recipient; or `holder_lapsed`, the lapsed holder as `recipient_session`) also raises one role-lane exception, in the delivery path's own envelope (`deliveryExceptionEnvelope`), over core NATS (`publishRefusalException`, `cmd/listener/role_lane_refusal.go`).
+  It is raised only where the 404 is written, so a message the route kept raises nothing, and only for a reason `roleholder.IsNoHolderReason` lists, so a new listener state cannot become a reason a consumer calls malformed.
+  Its payload is bounded: a refused publish's machine payload is carried only up to `refusalExceptionBound` (64 KiB) and left out above it, since a refusal must not turn a message nothing was wrong with into a publish failure the deployed alarm matches; every other field is carried whatever the payload's size, where a delivery's exception carries the payload whole as it always has.
+  It is published on a goroutine of its own, after the 404 has been written, rather than in line: net/http holds a handler's answer until the handler returns, so publishing in line would delay the 404 by as long as the publish takes, past this route's own budget and past the Envoy client's per-attempt deadline, whose retry would refuse a second time and raise a second exception.
+  Nothing waits for it, nothing retries it, and a failure is logged (`listener exception publish failed`) and nothing more.
+  It adds the bus signal only: no Legion consumer acts on a peer's refusal.
+  The daemon's consumer handles only its own architect notices, and it treats those two reasons as a never-re-hold (`roleholder.IsNoHolderReason`, the list the listener and `notify.Publish` both read): the refused row is still held and retries on its own backoff, so a copy would send the notice twice.
+  Upgrade every Legion daemon before this listener: an older daemon sends `unclaimed` and `holder_lapsed` to its malformed-exception branch and logs `ERROR role-lane exception not re-held` once for each refused attempt to publish its own notice.
 
 - An exception the stream stores (the failed-delivery lane of an agent subject), raised by the durable path for a stored message, carries `Nats-Msg-Id` `exception.<reason>.<origin>`, the origin being the message's own `Nats-Msg-Id`, else its stream sequence (`exceptionOrigin`, `bus.Client.PublishStoredAs`), so the stream keeps one copy however many listeners raise it from their own durables:
   an agent delivery's `no_holder` at give-up, and its `delivery_failed`.
@@ -3085,7 +3122,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 - Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-api` (`envoy_go_race_api`), `envoy-go-race-docs` and `envoy-go-docs-finalizers`, which share `envoy_go_race_docs`, and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
@@ -3631,13 +3668,9 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   Dispatch's outbox backs the event off and retries it with no attempt limit;
   the CI store releases its claim and settles again on a later tick;
   `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
-  A clustered nats-server up to the v2.11 line (v2.10.29, the Go tests' server before v2.15.1, among them) records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message (`server/jetstream_cluster.go:7993-7996`, "For now we stage with zero") and keeps that record on the stream's leader for the 72-hour window, a purge notwithstanding, when the full stream refuses it, so a retry under the id is acknowledged `{"seq":0,"duplicate":true}` though nothing was stored (`bus.ErrNotStored`, `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`; `notStored`).
-  v2.15.1, the server the Go tests run and the hub runs, never stages a zero: it records an id only with the sequence the message was stored at (`server/jetstream_cluster.go:13962`, `server/stream.go:7279`) and answers a duplicate only for a non-zero sequence (`server/jetstream_cluster.go:13192`, `server/stream.go:7030`), so that acknowledgement does not arise on it, and the branch below is dead code a pull request of its own removes.
-  `publishJetStream` and a window's send (`sendJetStream`) answer that acknowledgement by sending the same envelope once more without its `Nats-Msg-Id`, which no record matches:
-  stored, the publish succeeds, so a refused message is stored as soon as the stream has room, with no leader step-down;
-  refused, the publish fails with an error wrapping `bus.ErrNotStored` and the send's own error (`..., and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), never a success, and every publisher retries it as it does `bus.ErrStreamFull` (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
-  The stream drops no repeat of a copy sent without the id:
-  a retry of a message still being stored, acknowledged the same way, stores a second copy, and once a refused message is stored without its id, every later publish under the id stores another while the leader keeps the record.
+  nats-server v2.15.1, the server the Go tests run and the hub runs, records a message id only with the sequence the message was stored at (`server/jetstream_cluster.go:13962`, `server/stream.go:7279`) and answers a duplicate only for a non-zero sequence (`server/jetstream_cluster.go:13192`, `server/stream.go:7030`), so a publish the full stream refused leaves no record of its id:
+  the retry under that id is refused the same way while the stream is full, and stored once the stream has room, under its own id and exactly once (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
+  A clustered nats-server up to the v2.11 line, which these tests ran before v2.15.1, staged the id at sequence 0 before the store (`server/jetstream_cluster.go:7993-7996`, "For now we stage with zero") and kept that record when the store refused the message, so every later publish under the id was acknowledged `{"seq":0,"duplicate":true}` though nothing was stored; the bus answered that with a send without the id, a branch this build no longer carries.
   A copy from the same publish carries the same `event_id`;
   a GitHub redelivery's copy carries a new `event_id` (the webhook mints one per request) under the same `dedupe_key`.
   A core-NATS publish to a subject the stream captures (a receipt-backed forward to an agent subject, or a topic only a newer build's stream subject captures) still reaches its live subscribers but is not stored.
@@ -4685,11 +4718,11 @@ a token the issuer never signed, one naming a key id the issuer publishes nothin
   The listener subscribes to no ad-hoc topic of its own, so it takes none off the bus;
   its grant publishes all of `notifications.>`.
 
-- A failed control delivery publishes `notifications.envoy.exceptions.<original-topic>`.
+- A failed control delivery publishes `notifications.envoy.exceptions.<original-topic>`, and so does a role send the publish route refused 404 because no live session holds the role (`publishRefusalException`).
 
 ## Secrets broker
 
-The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting the lifetime its request signed, else 12 hours (`requests.DefaultGrantLifetime`), else, when every requested secret is tagged `default-grant=session` (`policy.TagDefaultGrant`, any other value refused `default-grant-malformed`), until its session ends, and key-bound launcher credentials to enrolled agent sessions and pods;
+The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting the lifetime its request signed, else 15 minutes when any requested secret is human tier (`requests.DefaultHumanGrantLifetime`, so the card a person approves covers about the one action its reason named), else 12 hours (`requests.DefaultGrantLifetime`), else, when every requested secret is tagged `default-grant=session` (`policy.TagDefaultGrant`, any other value refused `default-grant-malformed`), until its session ends, and key-bound launcher credentials to enrolled agent sessions and pods;
 `cmd/agent-secrets` is its client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a runtime, requests grants, polls a pending decision to completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into its environment.
 Every line it prints about a secret names the store it answered from (`cmd/agent-secrets/source.go`):
 the broker `AGENT_SECRETS_URL` names, and the kind of that broker's own store, read once from the public `GET /v1/settings` (`AWS Secrets Manager`, `GCP
@@ -5680,7 +5713,7 @@ a name the policy does not serve aborts the whole call with `policy.ErrUnknownSe
 a name needing approval that names a *different* approver than an already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`;
 the grant lasts the request object's `lifetime_seconds` (`record.ValidLifetime`:
 1 to the int32 the column holds; refused on a machine login;
-a secret with `max-grant` refuses a missing or longer lifetime as `400 GRANT_REQUIRES_LIFETIME` before anything is written), or, when it names none, 12 hours (`defaultLifetime`, computed after the miss-path reread and recorded on the request and record as if signed), or until its session ends when every name carries `default-grant=session` (`grants.expires_at` null, migration 0013;
+a secret with `max-grant` refuses a missing or longer lifetime as `400 GRANT_REQUIRES_LIFETIME` before anything is written), or, when it names none, 15 minutes for a request naming any human-tier secret and 12 hours otherwise (`defaultLifetime`, computed after the miss-path reread and recorded on the request and record as if signed), or until its session ends when every name carries `default-grant=session` (`grants.expires_at` null, migration 0013;
 `requests.grantUnexpired` is the one liveness test).
 Reuse matches the lifetime, except that a no-lifetime request takes the live grant of a request written before migration 0013 was applied (`requests.writtenBeforeMigration13`:
 lifetime 43200 and `created_at` before migration 13's `applied_at`), keeping its expiry.

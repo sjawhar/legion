@@ -7,10 +7,9 @@ description: Use when you are about to ask a human a question about a pattern, c
 
 If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
 
-## When to research instead of asking
-
-- Research when the answer is a fact a file, command or document can show (a pattern, convention, solved problem or technical approach), because `docs/solutions/` records what past work learned and a human should not answer it twice.
-- Ask the human directly when the answer is a choice between options that each work (a preference, requirement, scope decision or judgment call), because no file can choose. Quote any earlier decision a file records (`file:line`), so the human can confirm it in one word.
+Which questions to research and which to put to a person, and what your answer must say about
+what you searched: `skill://dispatch-first`, "Research before you ask". The steps below are how
+you research in a Legion repository.
 
 ## Research steps
 
@@ -43,6 +42,5 @@ Before you rely on a step 1 hit, `grep` `docs/solutions/` for its path. If anoth
 
 ## Output
 
-- Found: the answer with its source (`file:line` or a URL), so the reader can check it.
-- Partly found: each part found with its source, then each part not found.
-- Not found: "Checked docs/solutions/ (queries: ...) and codebase (scout query: ...) - no file answers this", so the reader knows what was searched. Then ask the human the part no step answered.
+Report as `skill://dispatch-first` says, and name `docs/solutions/` and the codebase queries you
+ran, so the reader knows what was searched.

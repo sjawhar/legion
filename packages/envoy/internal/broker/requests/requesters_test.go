@@ -506,10 +506,11 @@ func TestServiceRequesterAwaitsOwner(t *testing.T) {
 // TestUncappedListedLoginAwaitsOwner holds the case the rule INFRA-1417 deleted made impossible: a
 // secret that merely lists its requesters is made to cap nothing, so a human-tier google-login
 // secret can carry a list and no max-grant at all. Its owner's own request names no lifetime and
-// so asks for the twelve-hour default (DefaultGrantLifetime), longer than the hour every listed
-// secret once had to allow, and it is left for the owner to approve rather than refused
+// so takes the default a human-tier name takes (DefaultHumanGrantLifetime), the secret bounding
+// nothing of its own, and it is left for the owner to approve rather than refused
 // ErrGrantRequiresLifetime before the policy decides it: a list says who may ask, never for how
-// long.
+// long. Under the deleted rule the secret could not exist at all, since a listed one had to
+// carry a max-grant of an hour or less.
 func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 	ctx := context.Background()
 	m, enr, key, _ := newFixture(t)
@@ -527,8 +528,8 @@ func TestUncappedListedLoginAwaitsOwner(t *testing.T) {
 	if err != nil || req.State != "pending" || req.RecordID == nil || req.Detail != nil || req.GrantID != nil {
 		t.Fatalf("Create(UNCAPPED_LOGIN_KEY) naming no lifetime = %+v, %v; want it pending on its owner, neither denied nor granted", req, err)
 	}
-	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != int(DefaultGrantLifetime/time.Second) {
-		t.Fatalf("the pending request asks for %v seconds, want the %s default a request naming no lifetime takes", req.LifetimeSeconds, DefaultGrantLifetime)
+	if req.LifetimeSeconds == nil || *req.LifetimeSeconds != int(DefaultHumanGrantLifetime/time.Second) {
+		t.Fatalf("the pending request asks for %v seconds, want the %s default a request naming no lifetime takes for a human-tier name", req.LifetimeSeconds, DefaultHumanGrantLifetime)
 	}
 	waiting, err := m.PendingForApprover(ctx, fixtureOperator)
 	if err != nil || len(waiting) != 1 || waiting[0].RecordID != *req.RecordID {

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/roleholder"
 	"github.com/sjawhar/envoy/sessiontiming"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -101,6 +102,12 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // report about another daemon's publish, another project, a role that is not an architect, or
 // anything but a notice changes nothing. The exception lane has no redelivery, so a report that
 // cannot be read is logged by the caller and dropped.
+//
+// The listener also reports a publish it refused before forwarding anything, because no live
+// session held the role (`unclaimed`, `holder_lapsed`), and the executor's own notice publishes
+// are among those. Such a report queues nothing and logs nothing above debug: the publish was
+// answered 404, so its row is still held and retries on its own backoff, and a copy would send
+// the notice twice. Any reason other than these five is refused as malformed.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -122,6 +129,21 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}
 	reported, ok := r.exceptionNotice(exception)
 	if !ok {
+		return nil
+	}
+	if roleholder.IsNoHolderReason(exception.Reason) {
+		// The listener refused this publish itself, before forwarding anything, because no live
+		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
+		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
+		// the architect will not hold its role again, so a copy queued here would send the notice
+		// twice. These reasons are never a re-hold, and they are not malformed: a positive match on
+		// the shared list the listener and notify.Publish both read (roleholder), so the switch below
+		// still refuses every other reason. It logs at debug alone: at hundreds of unheld roles,
+		// anything louder is a line every few hundred milliseconds about a state the executor
+		// already handles.
+		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
+			"issue", reported.issue, "kind", reported.notice.Kind, "topic", exception.OriginalTopic,
+			"key", exception.DedupeKey, "reason", exception.Reason)
 		return nil
 	}
 	switch exception.Reason {
@@ -166,9 +188,15 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
-		// The architect has the catch-up, so the decisions it named and this row claims are told:
-		// the telling is recorded under the key it went out on, before anything forgets them, and
-		// the settle after this run forgets them (toldKept, settleTold).
+		// The architect has the catch-up and reads its whole context from it, so this attempt is
+		// the wake the pacing held the row for, and the line it writes is written here: once for
+		// the row, whatever the attempts before it met (wakeRan).
+		if !payload.PacedAt.IsZero() {
+			r.wakeRan(row, payload)
+		}
+		// The decisions the catch-up named and this row claims are told: the telling is recorded
+		// under the key it went out on, before anything forgets them, and the settle after this
+		// run forgets them (toldKept, settleTold).
 		if payload.CatchUp != nil && payload.CatchUp.Kept != nil {
 			return r.toldKept(ctx, tree.root.Key, key)
 		}
@@ -177,6 +205,14 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
 		// The copy takes over this row's claims on the decisions it names (claims).
 		source := cmp.Or(payload.ResendOf, row.ID)
+		// Nothing woke the architect here — its session never took the notice — so the wake this
+		// row is waits for the copy, and the copy carries the moments the pacing gave this row to
+		// write that one line with (record.Notice.PacedFrom). The publish strips them again
+		// (Notice.Published), and the copy's own next_at stays the re-send delay: the reservation
+		// is spent, and what is carried over is the account of it the line reports. Without this
+		// the copy publishes and no "supervise: wake ran" is written at all, so the operator's
+		// own check neither counts that wake nor builds its window (scripts/wake-windows.py).
+		notice.PacedAt, notice.PacedFrom = payload.PacedAt, payload.PacedFrom
 		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect, claims: row.ID}
 		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
 			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
@@ -222,6 +258,10 @@ func (r *outbox) noticeAnswered(ctx context.Context, row record.OutboxRow, paylo
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
+// A copy of a catch-up the pacing held carries that row's reserved moments, so that the publish
+// which does reach the architect writes the one wake line (noticeAnswered); a copy an earlier
+// listener's report queues carries none, and is owed none, because that publish was answered and
+// wrote the line already.
 // A copy is due at once when copyDueAtOnce says so, and otherwise after the next of
 // noticeReholdDelays. It is queued again once per delay; the failure of its last copy is logged
 // and queues nothing. Each published copy of a row is queued again once, marked processed under
@@ -449,6 +489,15 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, b
 // ahead of the ones behind them. The waiting notices and their trees are one repeatable read, each
 // tree read once; the fence is not read, since a release only makes a notice due and its send
 // still passes the fence.
+//
+// A catch-up the wake pacing still holds to its turn is left where it stands: its wait is not the
+// architect being away — the architect is running, which is why a start wrote a catch-up instead
+// of launching one — but the turn the operator's rate gave this wake, and a ready that pulled it
+// forward would let a whole restart's worth of catch-ups out in the minute the first architect
+// reported ready, which is the wave the pacing exists to spread. What is held back is the row
+// whose reserved moment is still ahead of now (record.Notice.PacedAt), not every row the pacing
+// ever marked: a catch-up whose turn came and whose attempt then failed waits on a backoff of its
+// own, and that wait is one a ready releases like any other, since the pacing has had its say.
 func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) error {
 	now := r.now()
 	released := []record.OutboxRow{}
@@ -464,7 +513,7 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 				return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
 			}
 			notice, ok := payload.(record.Notice)
-			if !ok {
+			if !ok || notice.PacedAt.After(now) {
 				continue
 			}
 			issue, route, err := r.readNoticeRoute(ctx, tx, row.Issue, routes)
