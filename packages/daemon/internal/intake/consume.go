@@ -642,6 +642,16 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		logMessage(spec.Logger, slog.LevelWarn, "unreadable field taken as absent", message, "event_id", decoded.EventID, "field", field)
 	}
 
+	// A message that decodes to no fact is acknowledged here rather than inside the work, for the
+	// reason a poison message is terminated above it: it does nothing, and the keeper, its ticker
+	// and the deadline would be the whole of its cost. Every consumer hears more of these than of
+	// anything else — the Dispatch durable takes every project's issue events, and decodeMessage
+	// answers with no fact for another project's key and for every event type the workflow does
+	// not read.
+	if decoded.Fact == nil {
+		return ackMessage(spec.Logger, message)
+	}
+
 	work, cancel := context.WithTimeout(ctx, spec.HandlerLimit)
 	defer cancel()
 	stop := keepInProgress(work, message, spec.AckWait/3, spec.Logger)
@@ -650,43 +660,48 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	took := time.Since(started)
 	stop()
 
-	var consumer string
-	var delivered uint64
-	if metadata, metadataErr := message.Metadata(); metadataErr == nil {
-		consumer, delivered = metadata.Consumer, metadata.NumDelivered
-	}
 	// A fact outliving its acknowledgement window is what the progress signal makes harmless, so
 	// the daemon says when one did: this is the only line that reports how long a fact took,
 	// nothing else times one, and the consumer-lag warning (lagWatch) speaks only five minutes
 	// late.
-	if !outcome.nak && took > spec.AckWait {
-		logMessage(spec.Logger, slog.LevelInfo, "an intake fact outlived its acknowledgement window and was held in progress while it ran", message,
-			"consumer", consumer, "event_id", decoded.EventID, "delivered", delivered, "took", took)
-	}
+	outlived := !outcome.nak && took > spec.AckWait
 	// A handler the limit cut is silent otherwise: held in progress, it shows neither as repeated
 	// preparation work nor as a rising delivery count, so this line is all an operator has of it.
 	// A live parent context is what tells the limit from the daemon shutting its consumers down.
-	if ctx.Err() == nil && errors.Is(work.Err(), context.DeadlineExceeded) {
-		logMessage(spec.Logger, slog.LevelWarn, "an intake handler outran its limit and was cut", message,
-			"consumer", consumer, "event_id", decoded.EventID, "fact", fmt.Sprintf("%T", decoded.Fact), "limit", spec.HandlerLimit)
+	cut := ctx.Err() == nil && errors.Is(work.Err(), context.DeadlineExceeded)
+	if outlived || cut {
+		// Metadata is parsed, never read: it tokenizes the acknowledgement subject and allocates.
+		// Neither line is the ordinary message's, so neither is that work.
+		var consumer string
+		var delivered uint64
+		if metadata, metadataErr := message.Metadata(); metadataErr == nil {
+			consumer, delivered = metadata.Consumer, metadata.NumDelivered
+		}
+		if outlived {
+			logMessage(spec.Logger, slog.LevelInfo, "an intake fact outlived its acknowledgement window and was held in progress while it ran", message,
+				"consumer", consumer, "event_id", decoded.EventID, "delivered", delivered, "took", took)
+		}
+		if cut {
+			logMessage(spec.Logger, slog.LevelWarn, "an intake handler outran its limit and was cut", message,
+				"consumer", consumer, "event_id", decoded.EventID, "fact", fmt.Sprintf("%T", decoded.Fact), "limit", spec.HandlerLimit)
+		}
 	}
 
 	if outcome.nak {
-		nakResolve(spec, message, outcome.eventID, outcome.what, outcome.nakWhat, outcome.err)
+		nakResolve(spec, message, decoded.EventID, outcome.what, outcome.nakWhat, outcome.err)
 		return false
 	}
 	return ackMessage(spec.Logger, message)
 }
 
 // messageOutcome is what one message's handling asks of JetStream, with nothing of it taken yet:
-// acknowledge the message, or nak it with the four values nakResolve names it by. handleMessage
+// acknowledge the message, or nak it with what nakResolve names the failure by. handleMessage
 // returns one rather than ending the message itself, so its caller can stop the progress keeper
 // before the one terminal call.
 type messageOutcome struct {
 	nak     bool
 	what    string
 	nakWhat string
-	eventID string
 	err     error
 }
 
@@ -694,10 +709,10 @@ type messageOutcome struct {
 func ackOutcome() messageOutcome { return messageOutcome{} }
 
 // nakOutcome asks for the nak nakResolve makes: what failed, which it logs at warn, nakWhat, which
-// it logs at error if the nak itself fails, the event both name, and the failure, whose RetryLater
-// can widen the delay.
-func nakOutcome(what, nakWhat, eventID string, err error) messageOutcome {
-	return messageOutcome{nak: true, what: what, nakWhat: nakWhat, eventID: eventID, err: err}
+// it logs at error if the nak itself fails, and the failure, whose RetryLater can widen the delay.
+// The event both lines name is the caller's own, which holds the decoded message.
+func nakOutcome(what, nakWhat string, err error) messageOutcome {
+	return messageOutcome{nak: true, what: what, nakWhat: nakWhat, err: err}
 }
 
 // handleMessage does one decoded message's work — the reads its fact needs, then the fact's
@@ -706,18 +721,17 @@ func nakOutcome(what, nakWhat, eventID string, err error) messageOutcome {
 // own AckWait bound, nested under work, so one dependency that is slow to answer is cut while the
 // handling as a whole runs to HandlerLimit.
 func handleMessage(work context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, decoded decodedMessage, handlers []Handler) messageOutcome {
-	if decoded.Fact == nil {
-		return ackOutcome()
-	}
+	// decoded.Fact is never nil here: consumeMessage acknowledges a message that decodes to none
+	// before it starts the keeper this work runs under.
 	if _, ok := decoded.Fact.(RepoMappingChanged); ok {
 		if err := readMapping(work, spec); err != nil {
-			return nakOutcome("read the project's repository mapping again", "nak the mapping read", decoded.EventID, err)
+			return nakOutcome("read the project's repository mapping again", "nak the mapping read", err)
 		}
 		return ackOutcome()
 	}
 	recorded, err := recordedPullRequest(work, spec, pool, decoded.Fact)
 	if err != nil {
-		return nakOutcome("read whether the pull request is recorded", "nak the pull request read", decoded.EventID, err)
+		return nakOutcome("read whether the pull request is recorded", "nak the pull request read", err)
 	}
 	if !recorded {
 		logMessage(spec.Logger, slog.LevelDebug, "a GitHub event of a pull request the daemon does not record is acknowledged without a transaction", message,
@@ -726,27 +740,27 @@ func handleMessage(work context.Context, message jetstream.Msg, spec ConsumerSpe
 	}
 	prepared, err := prepareRepository(work, spec, decoded.Fact)
 	if err != nil {
-		return nakOutcome("prepare the issue's repository", "nak the repository preparation", decoded.EventID, err)
+		return nakOutcome("prepare the issue's repository", "nak the repository preparation", err)
 	}
 	decoded.Fact = prepared
 	prepared, err = prepareArtifact(work, spec, decoded.Fact)
 	if err != nil {
-		return nakOutcome("prepare the review's issue", "nak the review's issue preparation", decoded.EventID, err)
+		return nakOutcome("prepare the review's issue", "nak the review's issue preparation", err)
 	}
 	decoded.Fact = prepared
 	withBody, err := resolveReviewBody(work, spec, decoded.Fact)
 	if err != nil {
-		return nakOutcome("restore the review's truncated body", "nak the review body restore", decoded.EventID, err)
+		return nakOutcome("restore the review's truncated body", "nak the review body restore", err)
 	}
 	fact, err := resolveReviewPermission(work, spec, withBody)
 	if err != nil {
-		return nakOutcome("read the reviewer's repository permission", "nak the reviewer's permission read", decoded.EventID, err)
+		return nakOutcome("read the reviewer's repository permission", "nak the reviewer's permission read", err)
 	}
 	decoded.Fact = fact
 
 	result, err := ApplyFact(withStreamPosition(work, message), pool, decoded.Source, decoded.EventID, decoded.Fact, handlers...)
 	if err != nil {
-		return nakOutcome("retryable intake processing failure", "nak intake processing failure", decoded.EventID, err)
+		return nakOutcome("retryable intake processing failure", "nak intake processing failure", err)
 	}
 	if result.Refusal != nil {
 		logMessage(spec.Logger, slog.LevelWarn, "committed refusal", message,

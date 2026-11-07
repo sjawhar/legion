@@ -80,9 +80,9 @@ func keepInProgress(ctx context.Context, message jetstream.Msg, every time.Durat
 			}
 		}
 	}()
-	var once sync.Once
+	stopTicking := sync.OnceFunc(func() { close(stopped) })
 	return func() {
-		once.Do(func() { close(stopped) })
+		stopTicking()
 		<-ended
 	}
 }

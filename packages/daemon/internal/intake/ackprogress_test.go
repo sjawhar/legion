@@ -109,6 +109,23 @@ func publishIssueEvent(t *testing.T, js jetstream.JetStream, key string, id int)
 			`"payload":{"key":%q,"status":"backlog","title":"a held event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, id, key, key)))
 }
 
+// issueConsumer is a durable of the row's own on the subject the Dispatch events above are
+// published to: the two rows that work a message outside the daemon's own consumers need one, and
+// they differ only in their name and the window they give a delivery.
+func issueConsumer(t *testing.T, stream jetstream.Stream, durable string, ackWait time.Duration) jetstream.Consumer {
+	t.Helper()
+	consumer, err := stream.CreateOrUpdateConsumer(context.Background(), jetstream.ConsumerConfig{
+		Durable:       durable,
+		FilterSubject: "notifications.dispatch.issue.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       ackWait,
+	})
+	if err != nil {
+		t.Fatalf("create the %s consumer: %v", durable, err)
+	}
+	return consumer
+}
+
 // The fix: the first fact of a backlog is held for three acknowledgement windows, and JetStream
 // still delivers every event of that backlog once and has every one of them prepared once.
 func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredOnceAndPreparedOnce(t *testing.T) {
@@ -181,15 +198,7 @@ func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredTwiceWithNoProgressSign
 	const ackWait = 200 * time.Millisecond
 	publishHeldBacklog(t, js)
 
-	consumer, err := stream.CreateOrUpdateConsumer(context.Background(), jetstream.ConsumerConfig{
-		Durable:       "held-control",
-		FilterSubject: "notifications.dispatch.issue.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       ackWait,
-	})
-	if err != nil {
-		t.Fatalf("create the control consumer: %v", err)
-	}
+	consumer := issueConsumer(t, stream, "held-control", ackWait)
 
 	held := newHeldOnce()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -287,17 +296,9 @@ func (c *countedProgress) reported() int {
 func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
 	js, stream := testJetStream(t)
 	publishIssueEvent(t, js, "CAPTURE-310", 1)
-	consumer, err := stream.CreateOrUpdateConsumer(context.Background(), jetstream.ConsumerConfig{
-		Durable:       "progress-stop",
-		FilterSubject: "notifications.dispatch.issue.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		// Far longer than the row runs: a redelivery would hand the row a second message and say
-		// nothing about the keeper.
-		AckWait: time.Minute,
-	})
-	if err != nil {
-		t.Fatalf("create the row's consumer: %v", err)
-	}
+	// A window far longer than the row runs: a redelivery would hand the row a second message and
+	// say nothing about the keeper.
+	consumer := issueConsumer(t, stream, "progress-stop", time.Minute)
 	message, err := consumer.Next()
 	if err != nil {
 		t.Fatalf("fetch the row's message: %v", err)
@@ -536,7 +537,7 @@ func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
 		t.Errorf("the held fact was delivered again %s after its first delivery, want about its %s handler limit: a redelivery at its %s acknowledgement window is the progress signal missing, and none at all is a handler held for good",
 			cut, spec.HandlerLimit, spec.AckWait)
 	}
-	line := cutLine(logs.String())
+	line := logLine(logs.String(), "an intake handler outran its limit and was cut")
 	if line == "" {
 		t.Fatalf("no line says an intake handler outran its limit and was cut, in:\n%s", logs.String())
 	}
@@ -545,14 +546,4 @@ func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
 			t.Errorf("the cut handler's line carries no %s, which is what names the cut: %s", attribute, line)
 		}
 	}
-}
-
-// cutLine is the line of logs that says a handler outran its limit, empty when there is none.
-func cutLine(logs string) string {
-	for _, line := range strings.Split(logs, "\n") {
-		if strings.Contains(line, "an intake handler outran its limit and was cut") {
-			return line
-		}
-	}
-	return ""
 }
