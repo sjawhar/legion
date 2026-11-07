@@ -118,6 +118,24 @@ architect's last message on the root issue. When you find none, or it is gone, r
 fresh budgets). When it stays, park the tree (`set_status` the root to `backlog`) and say why on
 the issue, because a relaunch would fail the same way.
 
+## `worker-stalled on <KEY>` (`{kind: "worker-stalled", role: "architect", reason}`)
+
+The daemon's stall backstop ended a turn of the tree's architect: its agent had not stepped for
+longer than the `worker_stall_backstop_hours` the deployment gives that role, so the daemon ended
+the turn and brought the same session back on a new process. You get a copy only for a tree's own
+architect, because every other notice of the tree goes to that architect and nobody inside the
+tree is left to read this one; the architect is told on its issue as well. The `reason` is the
+record the daemon read: when the agent last stepped and how long ago that was, the bound it
+passed, when the turn began, and the last call the daemon saw, with its tool, its call id, when it
+started and whether it ended — never a call's arguments, whose text the daemon keeps in no column.
+
+Nothing failed and nothing was charged to the claim: the task that architect was serving is still
+owed to it and is sent to it again, no issue was held, and no status moved. Do nothing to the
+tree — park nothing, re-admit nothing, set no status — and start nothing. One copy comes per
+stall, so an architect that stalls again and again sends one each time: that is a finding to put
+to a person ([Findings](skill://legion-controller/SKILL.md#findings-and-the-issues-you-file)),
+with the records you were sent in it.
+
 ## `update-stalled on <KEY>` (`{kind: "update-stalled", reason, update}`)
 
 An update round over the issue's pod, or over one claim's own process, is not finishing. Handle
