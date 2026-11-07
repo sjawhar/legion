@@ -46,6 +46,7 @@ const issue: IssueDetails = {
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  decisions_artifact_id: "",
   plan_artifact_id: "",
   primary_artifact_id: "artifact-1",
   verification_artifact_id: "",
@@ -109,6 +110,7 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
       route_status_reason: null,
       key: issue.key,
       open_asks: 0,
+      gated_steps: [],
       progress: { tasks: null, children: null },
       last_seq: 0,
       labels: [],
@@ -131,7 +133,13 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
   api.getIssue = async () => issue;
   api.getInbox = async () => inbox;
   api.listProjects = async () => [
-    { created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+    {
+      created_at: "2026-09-10T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
   ];
   api.listIssueAsks = async () => [];
   api.listComments = async () => [];

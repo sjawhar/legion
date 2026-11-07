@@ -90,7 +90,13 @@ test("human users manage repository project mappings from the settings route", a
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+    {
+      created_at: "2026-09-01T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
   ]);
   const putRepoProject = spyOn(api, "putRepoProject").mockImplementation(async (repo, input) =>
     server.put(repo, input)
@@ -215,7 +221,13 @@ test("a delayed mapping response does not undo a newer default the page has read
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+    {
+      created_at: "2026-09-01T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
   ]);
   // The server saves the pick at once; its answer reaches the page only when the test says.
   let answer: (() => void) | undefined;
@@ -287,7 +299,13 @@ test("repository settings retries a failed mapping query", async () => {
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 },
+    {
+      created_at: "2026-09-01T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
   ]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -328,12 +346,14 @@ test("a human creates a project from Settings and it appears in the mappings sel
     key: "CORE",
     name: "Core",
     open_asks: 0,
+    gated_steps: [],
   };
   const created: Project = {
     created_at: "2026-09-10T00:00:00Z",
     key: "QA",
     name: "Quality",
     open_asks: 0,
+    gated_steps: [],
   };
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
     event_head: "0",
@@ -405,6 +425,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     key: "CORE",
     name: "Core",
     open_asks: 0,
+    gated_steps: [],
   };
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
     event_head: "0",
@@ -520,6 +541,7 @@ function renderSettings(projects: string[]): {
         key,
         name: key,
         open_asks: 0,
+        gated_steps: [],
       }))
     ),
   ];

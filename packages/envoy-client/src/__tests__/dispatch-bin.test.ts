@@ -20,6 +20,7 @@ const server = Bun.serve({
           key: `P${index}`,
           name: `Project number ${index}`,
           open_asks: 0,
+          gated_steps: [],
           created_at: "2026-09-01T00:00:00Z",
         }))
       );

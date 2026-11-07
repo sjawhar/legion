@@ -113,7 +113,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, DesignGate: config.DesignGateOff}, quietLogger())
+			engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateOff.Steps()}, quietLogger())
 			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 			conn, err := nats.Connect(workflowNATS(t))
 			if err != nil {
@@ -210,7 +210,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
 		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, Steps: config.DesignGateOff.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
 		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
@@ -272,7 +272,7 @@ func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) 
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
 	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
 		defaultBranches: newDefaultBranches(roleTokens{}, repos, github.url, defaultBranchTTL, time.Now)}
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, Steps: config.DesignGateOff.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
 	// The first apply fails, as a database error would, while the person withdraws the issue; each
 	// apply's fact is kept.

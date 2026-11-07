@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -29,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -113,7 +115,7 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	seedDrainProject(t, direct)
 
 	counter := &transactions{}
-	delayed, err := pgxpool.ParseConfig(testpg.Delayed(t, dsn, drainRoundTrip))
+	delayed, err := pgxpool.ParseConfig(testdb.Delayed(t, dsn, drainRoundTrip))
 	if err != nil {
 		t.Fatalf("parse the delayed database URL: %v", err)
 	}
@@ -130,7 +132,7 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	repository := ghrepo.MustParse(drainRepo)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}}, log)
+	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, drainRunning, drainProject, log)
 	// GitHub answers that the approver can write to the repository; the count is every review the
 	// consumer asked GitHub about.
@@ -438,7 +440,7 @@ func assertDrainedPullRequests(t *testing.T, pool *pgxpool.Pool, records record.
 
 // drainPool is the database at dsn — a clone of the package's migrated template — reached
 // directly: the seed and the assertions do not pay the delay the consumer does. It takes the URL
-// rather than making one, since the caller also needs it for testpg.Delayed.
+// rather than making one, since the caller also needs it for testdb.Delayed.
 func drainPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), dsn)

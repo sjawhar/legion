@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -331,7 +332,7 @@ func TestReleaseLeavesTheHoldIntactWhenItsOwnTransactionFails(t *testing.T) {
 	pool := migratedPool(t)
 	real := record.NewStore()
 	failing := &failingSlotsStore{Store: real}
-	engine := workflow.New(real, workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(real, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), Clock: func() time.Time { return fixedNow }}, nil)
 	admission := New(failing, engine, 1, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission.now = func() time.Time { return fixedNow }
 	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})

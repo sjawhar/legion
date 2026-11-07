@@ -32,11 +32,12 @@ type projectionStore struct {
 	// of the keys asked for and of what they wait on, as the real store does.
 	mirror []record.DispatchIssueRow
 	// lifecycles names the trees whose lifecycle stands open under the workflow, which is what
-	// says a tree runs (record.TreeLive); gates is the design gate of each root that has one;
-	// owed is the start each issue owes a worker of it, which is a returning issue's place in
-	// the waiting line. The three are what record.ReadLineFacts reads for the line.
+	// says a tree runs (record.TreeLive); gates is each issue's design gates by step, as
+	// record.Store.GatesOf and record.Store.Gates answer them; owed is the start each issue owes
+	// a worker of it, which is a returning issue's place in the waiting line. The three are what
+	// record.ReadLineFacts reads for the line.
 	lifecycles []string
-	gates      map[string]record.DesignGate
+	gates      map[string]map[record.DesignStep]record.DesignGate
 	owed       []record.OwedStart
 }
 
@@ -50,11 +51,11 @@ func (s projectionStore) TreeLifecycles(_ context.Context, _ pgx.Tx, project str
 	return open, nil
 }
 
-func (s projectionStore) Gates(_ context.Context, _ pgx.Tx, trees []string) (map[string]record.DesignGate, error) {
-	gates := make(map[string]record.DesignGate, len(s.gates))
+func (s projectionStore) Gates(_ context.Context, _ pgx.Tx, trees []string) (map[string]map[record.DesignStep]record.DesignGate, error) {
+	gates := make(map[string]map[record.DesignStep]record.DesignGate, len(s.gates))
 	for _, tree := range trees {
-		if gate, held := s.gates[tree]; held {
-			gates[tree] = gate
+		if rows, held := s.gates[tree]; held {
+			gates[tree] = rows
 		}
 	}
 	return gates, nil
@@ -80,8 +81,8 @@ func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]re
 func (s projectionStore) PullRequest(_ context.Context, _ pgx.Tx, issue string) (*record.PullRequest, error) {
 	return s.pullRequests[issue], nil
 }
-func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate, error) {
-	return nil, nil
+func (s projectionStore) GatesOf(_ context.Context, _ pgx.Tx, issue string) (map[record.DesignStep]record.DesignGate, error) {
+	return s.gates[issue], nil
 }
 func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
 	return s.checks, nil
@@ -150,7 +151,7 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestProjectShowsWhatAnAwaitingRootWaitsOn(t *testing.T) {
 		},
 	}}
 
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	const issue = "S2-1"
 	architect := claim.Token("legion-s2-1-architect")
 	implementer := claim.Token("legion-s2-1-implementer")
-	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
 	}, nil, projectedAt)
@@ -252,7 +253,7 @@ func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
 	const issue = "S2-2"
 	architect := claim.Token("legion-s2-2-architect")
 	implementer := claim.Token("legion-s2-2-implementer")
-	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1", PluginContract: 24},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
 	}, nil, projectedAt)
@@ -276,7 +277,7 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{{
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{{
 		Token: token, Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateLaunchUncertain,
 	}}, nil, projectedAt)
 	if err != nil {
@@ -305,7 +306,7 @@ func TestProjectShowsTheHandoffRecordAWorkerNamed(t *testing.T) {
 			{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: reviewer, LastHandoff: "review-record"},
 		}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{
 		{Token: implementer, Issue: "LEGION-208", Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "ses_implementer"},
 		{Token: tester, Issue: "LEGION-208", Role: claim.RoleTester, State: supervise.StateIdle, Session: "ses_tester"},
 		{Token: reviewer, Issue: "LEGION-208", Role: claim.RoleReviewer, State: supervise.StateIdle, Session: "ses_reviewer"},
@@ -344,7 +345,7 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 			"LEGION-209": {Issue: "LEGION-209", Number: 43, HeadSHA: "head"},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -381,7 +382,7 @@ func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
 			{Issue: "LEGION-209", Repo: "acme/widgets", Number: 43, OpenedAt: opened, BoundAt: bound, Role: claim.RoleImplementer},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, []supervise.Claim{}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -418,7 +419,7 @@ func TestProjectShowsACapabilityReportOnlyOnTheClaimThatSentOne(t *testing.T) {
 		},
 	}
 	report.Locator.Incarnation = "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/1"
-	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateWorking, Session: "session-2"},
 	}, map[claim.Token]capabilities.Report{implementer: report}, projectedAt)
@@ -452,7 +453,7 @@ func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
 		issues: []record.Issue{{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing}},
 		held:   []record.HeldRow{{OutboxRow: start, WaitsOn: 801}, {OutboxRow: removal, WaitsOn: 803}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -463,7 +464,7 @@ func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
 	if !reflect.DeepEqual(got.HeldOutboxRows, want) {
 		t.Fatalf("heldOutboxRows = %#v, want %#v", got.HeldOutboxRows, want)
 	}
-	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, projectedAt)
+	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project with nothing held: %v", err)
 	}
@@ -497,7 +498,7 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 			{Key: "LEGION-301", Project: "LEGION", Status: "in_progress"},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -513,7 +514,7 @@ func TestProjectNamesWhatEveryBlockedRootAndChildWaitsOn(t *testing.T) {
 		t.Fatalf("waiting = %#v, want the roots' waiting line unchanged", got.Admission.Waiting)
 	}
 
-	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, projectedAt)
+	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project with nothing blocked: %v", err)
 	}
@@ -554,13 +555,13 @@ func TestProjectShowsTheWaitingLineInTheLinesOwnOrder(t *testing.T) {
 			lineIssue("LEGION-50", "LEGION-50", "todo", phase.Accepting, "B"),
 		},
 		lifecycles: []string{"LEGION-10", "LEGION-50"},
-		gates: map[string]record.DesignGate{
-			"LEGION-10": {Issue: "LEGION-10", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 7, At: opened}, EverOpened: true},
-			"LEGION-50": {Issue: "LEGION-50", LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 8, At: opened}, EverOpened: true},
+		gates: map[string]map[record.DesignStep]record.DesignGate{
+			"LEGION-10": {record.DesignStepSpec: {Issue: "LEGION-10", Step: record.DesignStepSpec, LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 7, At: opened}, EverOpened: true}},
+			"LEGION-50": {record.DesignStepSpec: {Issue: "LEGION-50", Step: record.DesignStepSpec, LatestVersion: 1, ApprovedVersion: &approved, ApprovedMark: record.EventMark{Seq: 8, At: opened}, EverOpened: true}},
 		},
 		owed: []record.OwedStart{{Issue: "LEGION-12", ID: 42, CreatedAt: projectedAt.Add(-time.Hour)}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -572,10 +573,10 @@ func TestProjectShowsTheWaitingLineInTheLinesOwnOrder(t *testing.T) {
 
 	// The gate opened before the child's start came back, so the root goes first; an approval
 	// that lands after it puts the root behind the child, which is the one axis the two share.
-	gate := store.gates["LEGION-10"]
+	gate := store.gates["LEGION-10"][record.DesignStepSpec]
 	gate.ApprovedMark.At = projectedAt
-	store.gates["LEGION-10"] = gate
-	got, err = Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	store.gates["LEGION-10"] = map[record.DesignStep]record.DesignGate{record.DesignStepSpec: gate}
+	got, err = Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project with the gate opened last: %v", err)
 	}
@@ -608,7 +609,7 @@ func TestProjectJudgesAdmissionOverThisProjectsRecordsAlone(t *testing.T) {
 		},
 	}
 
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -659,7 +660,7 @@ func TestProjectShowsEveryIssueItsTreeRootsMemoryDraw(t *testing.T) {
 		},
 	}}
 
-	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -674,5 +675,46 @@ func TestProjectShowsEveryIssueItsTreeRootsMemoryDraw(t *testing.T) {
 	if view := got.Issues["LEGION-211"]; view.MemoryGroup != "" || view.MemoryDrawMode != "" || view.MemoryDrawnAt != nil {
 		t.Errorf("the undrawn tree's root = group %q drawn as %q at %v, want none of the three",
 			view.MemoryGroup, view.MemoryDrawMode, view.MemoryDrawnAt)
+	}
+}
+
+// Every root answers the deployment's gated steps as its own rows stand, a step it holds no row
+// for included, and a child answers none: the gate is the root's, and its tree's work is held at
+// its steps. A row of a step the deployment no longer gates is kept in the record and is in no
+// entry, while the spec row still fills `designGate` beside the list.
+func TestProjectAnswersEveryRootsGatedStepsAndNoChildsOwn(t *testing.T) {
+	approved := 3
+	store := projectionStore{
+		issues: []record.Issue{
+			{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+				Phase: phase.Implementing, Status: "in_progress", Rank: "A", HandedOver: true},
+			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208",
+				Phase: phase.Admitted, Status: "in_progress", Rank: "B", HandedOver: true},
+		},
+		gates: map[string]map[record.DesignStep]record.DesignGate{
+			"LEGION-208": {
+				record.DesignStepDecisions: {Issue: "LEGION-208", Step: record.DesignStepDecisions, ArtifactID: "decisions-doc", LatestVersion: 1},
+				record.DesignStepSpec: {Issue: "LEGION-208", Step: record.DesignStepSpec, ArtifactID: "spec-doc",
+					LatestVersion: 3, ApprovedVersion: &approved},
+			},
+		},
+	}
+
+	got, err := Project(context.Background(), nil, store, "LEGION",
+		[]record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec}, nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	want := []api.GatedStepView{
+		{Step: record.DesignStepCriteria, Status: api.GatedStepUnregistered},
+		{Step: record.DesignStepSpec, ArtifactID: "spec-doc", CurrentVersion: 3, ApprovedVersion: &approved, Status: api.GatedStepApproved},
+	}
+	if root := got.Issues["LEGION-208"]; !reflect.DeepEqual(root.GatedSteps, want) {
+		t.Errorf("the root's gatedSteps = %+v, want %+v: the two steps the deployment gates, and not its decisions row", root.GatedSteps, want)
+	} else if root.DesignGate == nil || root.DesignGate.ArtifactID != "spec-doc" || root.DesignGate.CurrentVersion != 3 {
+		t.Errorf("the root's designGate = %+v, want the spec row beside the list", root.DesignGate)
+	}
+	if child := got.Issues["LEGION-209"]; len(child.GatedSteps) != 0 {
+		t.Errorf("the child's gatedSteps = %+v, want none: its tree is held at its root's steps", child.GatedSteps)
 	}
 }

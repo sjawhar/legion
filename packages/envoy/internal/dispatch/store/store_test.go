@@ -17,10 +17,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
+	"github.com/sjawhar/envoy/internal/testpg"
 	"github.com/sjawhar/envoy/migrationid"
 )
 
@@ -52,26 +52,7 @@ func openEmptyTestStore(t *testing.T) *Store {
 	}
 	adminURL := *baseURL
 	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	databaseName := "dispatch_test_" + randomDatabaseSuffix(t)
-	// A copy of template1's files, as storetest makes every database (its package comment says why).
-	if _, err := admin.Exec(ctx, "create database "+databaseName+" strategy file_copy"); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	store, err := Open(ctx, testURL.String())
+	store, err := Open(ctx, testpg.DatabaseOn(t, adminURL.String(), "dispatch_test"))
 	if err != nil {
 		t.Fatalf("open isolated database: %v", err)
 	}

@@ -22,7 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -44,7 +44,7 @@ type claudeRig struct {
 
 func newClaudeRig(t *testing.T, cfg Config) *claudeRig {
 	t.Helper()
-	_, dsnFile := testpg.DSNFile(t, "legion_launcher_claude_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_launcher_claude_test")
 	return claudeRigOn(t, newSessionRig(t, cfg), dsnFile)
 }
 
@@ -381,7 +381,7 @@ func TestAClaudeFinalSaveAtTheFloorGraceLandsOrKeepsTheLastPeriodicSave(t *testi
 // Under a session database of the pod's own the launcher keeps the session through its
 // generation's proxy socket, the one the child's URL file names in the agent's spelling.
 func TestAClaudeSaveReachesTheTableThroughTheGenerationsProxy(t *testing.T) {
-	dsn := testpg.Database(t, "legion_launcher_claude_proxy_test")
+	dsn := testdb.Database(t, "legion_launcher_claude_proxy_test")
 	database, dialer := sessionDatabaseAt(t, dsn)
 	g := newSessionRig(t, Config{SessionDatabase: database, SessionDialer: dialer.build})
 	file := filepath.Join(t.TempDir(), "OMP_SESSION_SQL_DSN")
@@ -461,7 +461,7 @@ func processRig(t *testing.T) (g *rig, kill func()) {
 // committed, a prefix of the transcript ending at a newline. A resume in the pod that replaces it,
 // on a disk that holds nothing of the session, restores exactly that.
 func TestAClaudeResumeAfterASIGKILLRestoresExactlyTheSavedPrefix(t *testing.T) {
-	_, dsnFile := testpg.DSNFile(t, "legion_launcher_claude_kill_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_launcher_claude_kill_test")
 	killed, kill := processRig(t)
 	c := claudeRigOn(t, killed, dsnFile)
 	pidFile := filepath.Join(t.TempDir(), "pid")
@@ -635,7 +635,7 @@ func local(t *testing.T, path string) string {
 // writer moved to the length a failed save would have left, with bytes of its own, is not one of
 // the keeper's, and the keeper stops saving that file rather than overwrite it.
 func TestAClaudeSaveTakesEverySaveThatMayHaveLandedAsSavedWhenTheRowMovedToIt(t *testing.T) {
-	_, dsnFile := testpg.DSNFile(t, "legion_launcher_keeper_test")
+	_, dsnFile := testdb.DSNFile(t, "legion_launcher_keeper_test")
 
 	t.Run("an appended transcript", func(t *testing.T) {
 		c := newKeeperRig(t, dsnFile)

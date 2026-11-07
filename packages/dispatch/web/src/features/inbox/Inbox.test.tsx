@@ -99,6 +99,7 @@ function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
     parent: null,
     blocked_by: [],
     plan_artifact_id: "artifact-plan",
+    decisions_artifact_id: "",
     primary_artifact_id: "artifact-3",
     priority: null,
     project: "CORE",

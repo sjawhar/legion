@@ -70,8 +70,10 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
-	// DesignGate is the project's `gates.design`, which the controller secret route answers.
-	DesignGate config.DesignGate
+	// Steps are the design-gate steps the deployment gates (config.Gates.Steps), in the order it
+	// named them: what register_gate resolves a registration's step against, and what the
+	// controller secret route answers `legion controller start`. The empty list gates no step.
+	Steps []record.DesignStep
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
 	// daemon`): one controller runs per project, so the controller secret route refuses the operator
 	// and a registration registers the controller only from a launch of the controller's claim.
@@ -246,7 +248,8 @@ type server struct {
 	operatorSet     bool
 	operatorHash    [sha256.Size]byte
 	controller      ControllerStore
-	designGate      config.DesignGate
+	// steps is Options.Steps, resolved: the deployment's design-gate steps, nil never.
+	steps []record.DesignStep
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable, noPluginInstall Options.NoPluginInstall.
@@ -324,7 +327,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		project:            opts.Project,
 		dispatchProject:    opts.DispatchProject,
 		controller:         opts.Controller,
-		designGate:         opts.DesignGate,
+		steps:              opts.Steps,
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		noPluginInstall:    opts.NoPluginInstall,
@@ -535,7 +538,7 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback(r.Context()) }()
 
-	state, err := s.state.State(r.Context(), tx)
+	state, claims, err := s.state.State(r.Context(), tx)
 	if err != nil {
 		s.log.Error("api: state source failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
@@ -551,37 +554,43 @@ func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
 	if s.consumerLag != nil {
 		state.Consumers = ConsumerLagViewsOf(s.consumerLag(r.Context()))
 	}
-	writeJSON(w, http.StatusOK, s.stateFor(r, state))
+	writeJSON(w, http.StatusOK, s.stateFor(r, state, claims))
 }
 
-// stateFor is state as the plugin that asked for it reads it. The route authenticates nobody, so
-// the caller is known by its address alone: a pod of the project (Options.CallerPod), whose claims
-// record the plugin contract each registration declared. A plugin older than INFRA-1048 — which is
-// who this function is kept for — reads the state with a strict schema and refuses the whole body
-// for one key it does not know, where today's plugin strips one; and an update round serves a
-// claim of the contract before it until its pod is replaced (version.go's 46). So a caller in a pod
-// whose claims record a contract below supervise.PodUpdateContract, the contract that added
+// stateFor is state as the plugin that asked for it reads it, decided from claims, the project's
+// claims the state's own snapshot holds. The route authenticates nobody, so the caller is known
+// by its address alone: a pod of the project (Options.CallerPod), whose claims record the plugin
+// contract each registration declared. A plugin older than INFRA-1048 — which is who this
+// function is kept for — reads the state with a strict schema and refuses the whole body for one
+// key it does not know, where today's plugin strips one; and an update round serves a claim of
+// the contract before it until its pod is replaced (version.go's 46). So a caller in a pod whose
+// claims record a contract below supervise.PodUpdateContract, the contract that added
 // `updateRound` and `updateHead` to the claim views, is served the state without them
 // (withoutUpdateRounds), which is the body that contract's schema describes; a caller below
 // memoryContract, the contract that added the issues' memory group, is served it without those
 // three fields (withoutMemory); a caller below treeContract, the contract that named the live
 // trees beside the issues holding a slot, is served it without `admission.trees` and without the
-// issues' `tree` (withoutTrees); and a caller below wakesWaitingContract, the contract that added
-// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting). The four
-// compose: each is applied when the state carries something of its own, so a caller below all of
-// them — a pod below supervise.PodUpdateContract — is served a body carrying none of the eight
-// keys, each of them absent rather than empty, since a strict reader before the contract that
-// added a key refuses it whether or not it names anything. Every later reader takes all eight as
-// optional — `packages/contracts/src/legion-api.ts` marks `admission.trees` and `wakesWaiting`
-// optional for exactly these bodies — so the body this serves a pod whose claims cannot be read,
-// which may be a pod at this contract, is the one every reader from 45 on takes. Any other caller
-// — a pod at this contract whose claims were read, the operator's `legion state`, a tmux pane —
-// is served the state as this contract writes it.
-func (s *server) stateFor(r *http.Request, state State) State {
+// issues' `tree` (withoutTrees); a caller below wakesWaitingContract, the contract that added
+// the wakes the pacing holds, is served it without `wakesWaiting` (withoutWakesWaiting); and a
+// caller below gatedStepsContract, the contract that added the issues' gated steps, is served it
+// without that field (withoutGatedSteps). The five compose: each is applied when the state
+// carries something of its own, so a caller below all of them — a pod below
+// supervise.PodUpdateContract — is served a body carrying none of the nine keys, each of them
+// absent rather than empty, since a strict reader before the contract that added a key refuses
+// it whether or not it names anything. Every later reader takes all nine as optional —
+// `packages/contracts/src/legion-api.ts` marks `admission.trees`, `wakesWaiting` and the issues'
+// `gatedSteps` optional for exactly these bodies. Any other caller — a pod at this contract, the
+// operator's `legion state`, a tmux pane — is served the state as this contract writes it.
+//
+// The claims are the snapshot's own because the body is: a claim and the state it was projected
+// into cannot come from two moments (store.ClaimsTx). A state whose claims the source could not
+// read is no state at all - its claim views are built from them - so the route refuses it before
+// this runs, and no readable state is left whose caller's contract is unknown.
+func (s *server) stateFor(r *http.Request, state State, claims []supervise.Claim) State {
 	// A daemon that does not know its callers' pods serves every caller the state as it is, and
 	// scans nothing for it: under runtime tmux that is every request of every pane and of
 	// `legion state`.
-	if s.callerPod == nil || s.supervisor == nil {
+	if s.callerPod == nil {
 		return state
 	}
 	caller, err := netip.ParseAddrPort(r.RemoteAddr)
@@ -593,18 +602,12 @@ func (s *server) stateFor(r *http.Request, state State) State {
 		return state
 	}
 	// Before treeContract, a state with no update round on any claim view and no memory group on
-	// any issue was the body every contract reads, and was served with no read of the claims at
-	// all. There is no such body since: the admission block writes `trees` on every one of them
-	// (carriesTrees), so a caller in a pod has its claims read for every state request. What a
-	// downgrade would strip is looked for only once the contract that needs it is known, so a
-	// caller at this contract — every caller, outside the window in which a pod of the contract
-	// before it is still being replaced — costs no scan of the issues.
-	claims, err := s.supervisor.Claims(r.Context())
-	if err != nil {
-		s.log.Warn("api: the claims of the pod that asked for the state could not be read; it is served the state without the update round, memory, tree and waiting-wake fields, which every plugin contract since 45 reads",
-			"pod", pod, "error", err)
-		return withoutWakesWaiting(withoutTrees(withoutMemory(withoutUpdateRounds(state))))
-	}
+	// any issue was the body every contract reads, and was served without looking at the claims
+	// at all. There is no such body since: the admission block writes `trees` on every one of
+	// them (carriesTrees), so a caller in a pod has its contract read for every state request.
+	// What a downgrade would strip is looked for only once the contract that needs it is known,
+	// so a caller at this contract — every caller, outside the window in which a pod of the
+	// contract before it is still being replaced — costs no scan of the issues.
 	contract := podContract(claims, pod)
 	if contract == 0 {
 		return state
@@ -620,6 +623,9 @@ func (s *server) stateFor(r *http.Request, state State) State {
 	}
 	if contract < wakesWaitingContract && carriesWakesWaiting(state) {
 		state = withoutWakesWaiting(state)
+	}
+	if contract < gatedStepsContract && carriesGatedSteps(state) {
+		state = withoutGatedSteps(state)
 	}
 	return state
 }
@@ -639,6 +645,11 @@ const treeContract = 51
 // 53): a plugin before it reads the state with a strict schema that knows no such key and refuses
 // the whole body for it.
 const wakesWaitingContract = 53
+
+// gatedStepsContract is the daemon contract that added the issues' gated steps to the state
+// (version.go's 55): a plugin before it reads the state with a strict schema that knows no
+// `gatedSteps` and refuses the whole body for it.
+const gatedStepsContract = 55
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {
@@ -670,19 +681,44 @@ func carriesMemory(state State) bool {
 // issue's `tree`. It carries `admission.trees` whatever the daemon holds, since the admission
 // block writes that key on every body, empty rather than null (Admission.MarshalJSON), and the
 // strict reader before the contract refuses the empty key as surely as one naming a tree. So this
-// is true of every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory
-// and carriesWakesWaiting all the same, because stateFor puts the same question to the four and
-// because a later contract that stops writing `trees` on every body answers it here.
+// is true of every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory,
+// carriesWakesWaiting and carriesGatedSteps all the same, because stateFor puts the same question
+// to the five and because a later contract that stops writing `trees` on every body answers it
+// here.
 func carriesTrees(State) bool { return true }
 
 // carriesWakesWaiting is whether state carries the key wakesWaitingContract added: `wakesWaiting`,
 // the wakes the pacing holds. It carries that key whatever the daemon holds, since the state
 // writes it on every body, empty rather than null (State.MarshalJSON), and the strict reader
 // before the contract refuses the empty key as surely as one naming a wake. So this is true of
-// every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory and
-// carriesTrees all the same, because stateFor puts the same question to the four and because a
-// later contract that stops writing `wakesWaiting` on every body answers it here.
+// every state the route writes; it is asked beside carriesUpdateRounds, carriesMemory,
+// carriesTrees and carriesGatedSteps all the same, because stateFor puts the same question to
+// the five and because a later contract that stops writing `wakesWaiting` on every body answers
+// it here.
 func carriesWakesWaiting(State) bool { return true }
+
+// carriesGatedSteps is whether any issue of state carries the deployment's gated steps.
+func carriesGatedSteps(state State) bool {
+	for _, issue := range state.Issues {
+		if len(issue.GatedSteps) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutGatedSteps is state with no issue carrying `gatedSteps`, the field gatedStepsContract
+// added to the state; nothing else of that contract is on the route. The issue map is copied, so
+// the state the source answered is left as it was.
+func withoutGatedSteps(state State) State {
+	issues := make(map[string]Issue, len(state.Issues))
+	for key, issue := range state.Issues {
+		issue.GatedSteps = nil
+		issues[key] = issue
+	}
+	state.Issues = issues
+	return state
+}
 
 // podContract is the lowest plugin contract a claim whose process runs in pod records, and 0 when
 // none records one: every role of a pod is served by the plugin that pod runs, and the body the

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -104,7 +105,7 @@ func TestARootOnARepositoryLegionDoesNotServeIsNotAdmittedAndSaysWhy(t *testing.
 func TestARecordedRootKeepsItsRepositoryAcrossAnEditAndAReadmission(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Steps: config.DesignGateRootIssues.Steps(), Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
 	until := fixedNow.Add(time.Hour)
 	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Repo: "acme/tools", DefaultBranch: "release/v7.1", GitHubRepo: "acme/tools", Project: testProject, Title: "lingering", Tree: "LEGION-LINGER",
 		Phase: phase.Done, Generation: 3, Status: "done", DispatchStatus: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true})

@@ -65,7 +65,8 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 //
 // A live pod a round covers (roundCovers) that has merely drifted from the configuration — a
 // container on another image, the kind's reservation, an operator volume or mount, the disk size,
-// the role's overlays, the secrets broker's enrollment or the session store (PodDrift) — is kept,
+// the ServiceAccount it runs as, the role's overlays, the secrets broker's enrollment, the session
+// store or the GitHub owners its gh volume projects a directory for (PodDrift) — is kept,
 // and this role is started in it.
 // Such a pod is replaced by an update round, which first tasks every worker in it to push its work
 // and answer, and then ends the pod (ReplacePod): replacing it at a launch would end every role's
@@ -83,18 +84,22 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // A live pod no round covers is replaced here for every kind of drift instead, as every launch did
 // before the round existed: no round is ever opened over such a pod, so a launch that kept it
 // would leave its role in a pod the configuration has left behind for ever (movedInPod,
-// roundCovers). Its three facets reach this launch as moved addresses, and the shape its template
-// was built from is read here (shapeDrift, the one reading PodDrift takes of a covered pod's
-// shape). A launch installing a stale-plugin pair into such a pod keeps it, as it always did
+// roundCovers). Every facet of the pod itself but the account reaches this launch as a moved
+// address — the two whose worker cannot be reached at all and the four driftedInPod reads, which
+// in a covered pod are a round's — and the shape its template was built from is read here
+// (shapeDrift, the one reading PodDrift takes of a covered pod's shape). A launch installing a
+// stale-plugin pair into such a pod keeps it, as it always did
 // (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
 // that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
 // still is.
 //
-// A ServiceAccount other than the configured one (accountDrift) is the one kind of drift no round
-// and no install answers, so a pod carrying it is replaced here whatever kind of pod it is and
-// whatever the launch is installing: the account is fixed for the pod's life, and until the pod is
-// created afresh its agents go on holding the identity the old account grants, so the old account
-// can be deleted only once every such pod has gone.
+// A ServiceAccount other than the configured one (accountDrift) is answered by whoever answers
+// the pod's other drift. A launch into a pod a round covers keeps it for the account as for every
+// other drift, and leaves it to that pod's round, which has every worker in it push its work
+// before the pod is ended. A launch into a pod no round covers replaces it for the account
+// whatever it is installing, since no round will ever come for such a pod: the account is fixed
+// for the pod's life, and until the pod is created afresh its agents go on holding the identity
+// the old account grants, so an old account can be deleted only once every pod of it has gone.
 //
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
@@ -158,19 +163,22 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
-	// A live pod no round covers is this launch's to replace for every kind of drift: its three
-	// facets come through movedInPod, and the shape its template was built from is read here,
-	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
+	covered := roundCovers(l.kind)
+	// A live pod no round covers is this launch's to replace for every kind of drift: every facet
+	// of the pod itself but the account comes through movedInPod, the account is read here as
+	// accountDrifted, and the shape its template was built from is read here too, unless this
+	// launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
 	//
-	// A pod running as a ServiceAccount other than the configured one is replaced here whatever
-	// kind of pod it is and whatever the launch is installing (accountDrift): the account is
-	// fixed for the pod's life, so no install can move it and no update round can either — the
-	// round's own replacement is what a covered pod's other drift waits for, and this one cannot
-	// wait, since until the pod is created afresh its agents go on holding the identity the old
-	// account grants.
-	replace := !live || accountDrifted || migrate ||
+	// A pod running as a ServiceAccount other than the configured one is this launch's to
+	// replace only where no round covers that pod (accountDrift, roundCovers), and then whatever
+	// the launch is installing: no round will ever come for such a pod, the account is fixed for
+	// the pod's life, and until the pod is created afresh its agents go on holding the identity
+	// the old account grants. A pod a round covers is kept for the account as for its other
+	// drift, and that round, which has every worker in it push its work first, is what replaces
+	// it.
+	replace := !live || (accountDrifted && !covered) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
-		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
+		(!installing && !covered && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {

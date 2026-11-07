@@ -206,6 +206,7 @@ const patched: Issue = {
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   plan_artifact_id: "",
+  decisions_artifact_id: "",
   primary_artifact_id: "artifact-1",
   verification_artifact_id: "",
   priority: null,

@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -58,11 +57,13 @@ func TestAMemoryGroupIsDrawnOnceAndCarriedVerbatim(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
-	// The words a draw records are config.MemoryMode's, which the setter takes as a plain string.
+	// The words a draw records are config.MemoryMode's, which the setter takes as a plain
+	// string. They are written out here rather than imported: internal/config reads this
+	// package's design-gate steps, so a test of this package cannot import it back.
 	const (
-		on     = string(config.MemoryOn)
-		off    = string(config.MemoryOff)
-		random = string(config.MemoryRandom)
+		on     = "on"
+		off    = "off"
+		random = "random"
 	)
 	drawnAt := time.Date(2026, 11, 4, 7, 31, 48, 123456000, time.UTC)
 	later := drawnAt.Add(time.Hour)
@@ -204,7 +205,9 @@ func TestTheHandOverSettlesTheMemoryOfARootOutOfAnOpenedTree(t *testing.T) {
 	drawnAt := time.Date(2026, 11, 4, 13, 0, 0, 0, time.UTC)
 	at := time.Date(2026, 11, 4, 14, 30, 0, 0, time.UTC)
 	none := drawnAs(Issue{})
-	ownDraw := drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: string(config.MemoryOn), MemoryDrawnAt: &at})
+	// The words below are config.MemoryMode's, written out because internal/config reads this
+	// package and a test of it cannot import config back.
+	ownDraw := drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: "on", MemoryDrawnAt: &at})
 	inTx(t, st, func(tx pgx.Tx) {
 		// The trees the roots below left: LEGION-11 was opened and drawn, LEGION-12 opened with no
 		// draw, LEGION-13 opened with no issue record of its own, LEGION-14 never opened, and
@@ -228,7 +231,7 @@ func TestTheHandOverSettlesTheMemoryOfARootOutOfAnOpenedTree(t *testing.T) {
 				}
 			}
 			if old.has {
-				drew, err := records.DrawMemory(ctx, tx, old.key, "memory", string(config.MemoryRandom), drawnAt)
+				drew, err := records.DrawMemory(ctx, tx, old.key, "memory", "random", drawnAt)
 				must(t, err)
 				if !drew {
 					t.Fatalf("the draw of the old tree %s wrote no row", old.key)
@@ -244,7 +247,7 @@ func TestTheHandOverSettlesTheMemoryOfARootOutOfAnOpenedTree(t *testing.T) {
 			want    string
 		}{
 			{name: "out of a tree opened and drawn", root: "LEGION-1", left: "LEGION-11", settled: true,
-				want: drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: string(config.MemoryRandom), MemoryDrawnAt: &drawnAt})},
+				want: drawnAs(Issue{MemoryGroup: "memory", MemoryDrawMode: "random", MemoryDrawnAt: &drawnAt})},
 			{name: "out of a tree opened with no draw", root: "LEGION-2", left: "LEGION-12", settled: true, want: none},
 			{name: "out of an operator's tree, with no issue record", root: "LEGION-3", left: "LEGION-13", settled: true, want: none},
 			{name: "out of a tree nothing ever opened", root: "LEGION-4", left: "LEGION-14", want: ownDraw},
@@ -256,7 +259,7 @@ func TestTheHandOverSettlesTheMemoryOfARootOutOfAnOpenedTree(t *testing.T) {
 			if settled != tc.settled {
 				t.Errorf("%s: the hand-over of %s reported %t, want %t", tc.name, tc.root, settled, tc.settled)
 			}
-			drew, err := records.DrawMemory(ctx, tx, tc.root, "memory", string(config.MemoryOn), at)
+			drew, err := records.DrawMemory(ctx, tx, tc.root, "memory", "on", at)
 			must(t, err)
 			if want := !tc.settled; drew != want {
 				t.Errorf("%s: the first open of %s drew %t, want %t: the draw is what the hand-over left open",

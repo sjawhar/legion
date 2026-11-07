@@ -43,6 +43,7 @@ function project(overrides: Partial<Project> = {}): Project {
     key: "CORE",
     name: "Core",
     open_asks: 3,
+    gated_steps: [],
     ...overrides,
   };
 }

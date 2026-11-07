@@ -1191,7 +1191,13 @@ test("maps an ask resolution to the authenticated API", async () => {
 });
 
 test("createProject posts the key, name and actor and answers the created project", async () => {
-  const project = { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" };
+  const project = {
+    key: "CORE",
+    name: "Core",
+    open_asks: 0,
+    created_at: "2026-10-11T00:00:00Z",
+    gated_steps: [],
+  };
   const { fetchImpl, requests } = fakeFetch([jsonResponse(project, 201)]);
   const client = new DispatchClient("http://dispatch.test", bearerCredential("secret"), fetchImpl);
 

@@ -49,6 +49,7 @@ import type {
   WriteAdvice,
 } from "./dispatch-api.generated";
 import type { ASK_URGENCIES, ISSUE_COMPONENTS_MODES, ISSUE_ROUTE_STATUSES } from "./dispatch-tools";
+import type { GATED_STEPS } from "./legion-roles";
 
 export * from "./dispatch-api.generated";
 
@@ -172,8 +173,14 @@ export const MAX_ISSUE_PAGE_LIMIT = 250;
  */
 export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
 
-/** The part an issue's document plays beside its spec. */
-export type DocumentRole = "verification" | "plan";
+/** The part an issue's document plays beside its spec. `decisions` is absent from a Dispatch
+ *  older than the design gate's steps. */
+export type DocumentRole = "verification" | "plan" | "decisions";
+
+/** A design-gate step a Legion deployment gates, as Dispatch stores it: `decisions` names the
+ *  root issue's decisions document, `criteria` its Verification document, `spec` its primary
+ *  document. */
+export type GatedStep = (typeof GATED_STEPS)[number];
 
 /** Who gave a review: `person` for one a person gave, `plan_review` for a plan review's approval
  *  of a plan version. A review Dispatch carried forward to a later version keeps the kind of the

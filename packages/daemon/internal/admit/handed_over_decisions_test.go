@@ -27,7 +27,7 @@ func keepParkedDecision(t *testing.T, pool *pgxpool.Pool, root, issue, ref strin
 			t.Fatalf("read the root %s: %v", root, err)
 		}
 		outcome, err := record.RelayParkedDecision(ctx, tx, records, issue, *stored, true,
-			record.ParkedDecision{Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: fixedNow}, 0, "")
+			record.ParkedDecision{Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: fixedNow}, 0, "", nil)
 		if err != nil {
 			t.Fatalf("keep the decision %s: %v", ref, err)
 		}

@@ -1854,6 +1854,9 @@ func artifactSlug(name string) string {
 var roleSlugs = map[string]string{
 	model.ArtifactRoleVerification: "verification-md",
 	model.ArtifactRolePlan:         "plan-md",
+	// The Decisions view already spells the decisions document's slug, which a reference to it
+	// names, so the role takes that constant rather than a second copy of the same word.
+	model.ArtifactRoleDecisions: decisionsDocumentSlug,
 }
 
 // documentRole is the role a document takes when its row is created: an issue's markdown
@@ -1908,11 +1911,12 @@ func documentRolePredicate(alias, role string) string {
 // that names no alias, since the queries that hold a row to it are written as string literals.
 var verificationRolePredicate = documentRolePredicate("", model.ArtifactRoleVerification)
 
-// aliasedVerificationRole and aliasedPlanRole are the same two predicates for a query whose
-// artifacts table is aliased `a`: the issue read, the coverage read and the check resolver all
-// join it that way.
+// aliasedVerificationRole, aliasedPlanRole and aliasedDecisionsRole are the same predicate for a
+// query whose artifacts table is aliased `a`: the issue read, the coverage read and the check
+// resolver all join it that way.
 var aliasedVerificationRole = documentRolePredicate("a", model.ArtifactRoleVerification)
 var aliasedPlanRole = documentRolePredicate("a", model.ArtifactRolePlan)
+var aliasedDecisionsRole = documentRolePredicate("a", model.ArtifactRoleDecisions)
 
 // artifactKindMismatch is the 400 refusing an upload under name, of kind, as the next version of
 // artifact, the one the name or slug finds, whose kind is another.

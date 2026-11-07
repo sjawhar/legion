@@ -2322,6 +2322,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/projects/{key}/gated-steps": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** @description Publish the design-gate steps the Legion deployment that serves this project gates {steps}: a list of decisions, criteria and spec, in the order it gates them, or [] for a deployment that gates none. The deployment's daemon writes it at every boot; a publish of the list the row already holds changes nothing and appends no event. A body without steps, or one naming anything else, is 400 INVALID_PROJECT, and an unknown project 404 PROJECT_NOT_FOUND. It declares no personal scope: the credential the deployment configured writes it, as it does the issue PATCH. */
+    put: operations["putApiV1ProjectsByKeyGatedSteps"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/projects/{key}/related": {
     parameters: {
       query?: never;
@@ -3244,6 +3261,7 @@ export interface components {
       /** Format: date-time */
       created_at: string;
       created_by: components["schemas"]["Actor"] | null;
+      decisions_artifact_id: string;
       external_links: components["schemas"]["ExternalLink"][] | null;
       key: string;
       labels: string[] | null;
@@ -4182,6 +4200,7 @@ export interface components {
       /** Format: date-time */
       created_at: string;
       created_by: components["schemas"]["Actor"] | null;
+      decisions_artifact_id: string;
       external_links: components["schemas"]["ExternalLink"][] | null;
       key: string;
       labels: string[] | null;
@@ -4294,6 +4313,7 @@ export interface components {
       /** Format: date-time */
       created_at: string;
       created_by: components["schemas"]["Actor"] | null;
+      decisions_artifact_id: string;
       external_links: components["schemas"]["ExternalLink"][] | null;
       holder_state: null | string;
       key: string;
@@ -4673,6 +4693,7 @@ export interface components {
     Project: {
       /** Format: date-time */
       created_at: string;
+      gated_steps: string[] | null;
       key: string;
       name: string;
       open_asks: number;
@@ -4683,6 +4704,15 @@ export interface components {
     };
     ProjectDefaultAssigneeInput: {
       assignee: string | null;
+    };
+    ProjectGatedSteps: {
+      project: string;
+      steps: string[] | null;
+    };
+    ProjectGatedStepsInput: {
+      actor?: components["schemas"]["Actor"] | null;
+      /** @enum {null|array} */
+      steps: "decisions" | "criteria" | "spec" | null;
     };
     PutArchitectureSourceInput: {
       actor?: components["schemas"]["Actor"] | null;
@@ -11076,6 +11106,44 @@ export interface operations {
       };
     };
   };
+  putApiV1ProjectsByKeyGatedSteps: {
+    parameters: {
+      query?: {
+        /** @description the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH) */
+        session?: string;
+      };
+      header?: never;
+      path: {
+        key: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ProjectGatedStepsInput"];
+      };
+    };
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProjectGatedSteps"];
+        };
+      };
+      /** @description A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError). */
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
   getApiV1ProjectsByKeyRelated: {
     parameters: {
       query?: {
@@ -12011,6 +12079,8 @@ export type ProgressCount = components["schemas"]["ProgressCount"];
 export type Project = components["schemas"]["Project"];
 export type ProjectDefaultAssignee = components["schemas"]["ProjectDefaultAssignee"];
 export type ProjectDefaultAssigneeInput = components["schemas"]["ProjectDefaultAssigneeInput"];
+export type ProjectGatedSteps = components["schemas"]["ProjectGatedSteps"];
+export type ProjectGatedStepsInput = components["schemas"]["ProjectGatedStepsInput"];
 export type PutArchitectureSourceInput = components["schemas"]["PutArchitectureSourceInput"];
 export type PutRepoProjectInput = components["schemas"]["PutRepoProjectInput"];
 export type RebuildArtifactInput = components["schemas"]["RebuildArtifactInput"];

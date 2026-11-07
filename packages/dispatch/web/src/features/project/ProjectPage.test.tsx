@@ -70,7 +70,15 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
  *  that never settles. */
 function renderPage(
   path: string,
-  projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
+  projects = [
+    {
+      created_at: "2026-09-10T00:00:00Z",
+      key: "CORE",
+      name: "Core",
+      open_asks: 0,
+      gated_steps: [],
+    },
+  ],
   login: string | null = "alice",
   inboxRows: InboxRow[] = [],
   sources: ArchitectureSource[] | ApiError | "pending" = []

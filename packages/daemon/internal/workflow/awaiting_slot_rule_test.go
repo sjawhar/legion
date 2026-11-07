@@ -30,9 +30,10 @@ func TestARootWhoseGateHasOpenedEntersNoWaitOnAPerson(t *testing.T) {
 	root := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", HandedOver: true, DeclaredSeq: 9}
 	approved := 1
-	opened := &record.DesignGate{Issue: root.Key, ArtifactID: "spec", LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true}
+	opened := record.DesignGate{Issue: root.Key, Step: record.DesignStepSpec, ArtifactID: "spec", LatestVersion: 1, ApprovedVersion: &approved, EverOpened: true}
+	rows := map[record.DesignStep]record.DesignGate{record.DesignStepSpec: opened}
 
-	decision := decideAwait(awaitView{Root: root, Slotted: true, Gate: opened, Armed: true})
+	decision := decideAwait(awaitView{Root: root, Slotted: true, Gates: rows})
 	if decision.Act != actStay {
 		t.Fatalf("the decision for a root whose gate has opened = %+v, want it left where it stands: it holds no slot to hand back, and its children are waiting for theirs", decision)
 	}
@@ -40,9 +41,9 @@ func TestARootWhoseGateHasOpenedEntersNoWaitOnAPerson(t *testing.T) {
 	// The control: the same root before its gate ever opened, where the architect is writing the
 	// spec and does hold the slot, is not stopped by this rule — whatever the rest of the rules
 	// then decide, rule 0 is not what answers it.
-	writing := *opened
+	writing := opened
 	writing.ApprovedVersion, writing.EverOpened = nil, false
-	if decision := decideAwait(awaitView{Root: root, Slotted: true, Gate: &writing, Armed: true}); decision.Why == noSlotOfItsOwn {
+	if decision := decideAwait(awaitView{Root: root, Slotted: true, Gates: map[record.DesignStep]record.DesignGate{record.DesignStepSpec: writing}}); decision.Why == noSlotOfItsOwn {
 		t.Fatalf("a root whose gate has never opened and holds the slot is stopped by the slot rule: that root is the one the wait is for")
 	}
 }

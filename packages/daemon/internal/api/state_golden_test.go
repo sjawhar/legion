@@ -196,7 +196,7 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 // rather than Stage 1's empty record.
 func populatedState(t *testing.T) State {
 	t.Helper()
-	approvedVersion := 6
+	approvedVersion, mergedApproval := 6, 4
 	waitedSince := time.Date(2026, 9, 22, 8, 5, 0, 0, time.UTC)
 	answeredAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	state := State{
@@ -308,6 +308,16 @@ func populatedState(t *testing.T) State {
 					CurrentVersion:  7,
 					ApprovedVersion: &approvedVersion,
 				},
+				// The fixture's deployment gates `root-issues`, which resolves to the one step
+				// spec, so each root carries one entry: this one's document stands a version above
+				// the version its person approved, which is the `waiting` status.
+				GatedSteps: []GatedStepView{{
+					Step:            record.DesignStepSpec,
+					ArtifactID:      "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+					CurrentVersion:  7,
+					ApprovedVersion: &approvedVersion,
+					Status:          GatedStepWaiting,
+				}},
 				Slot: &SlotView{
 					Index:      0,
 					AdmittedAt: time.Date(2026, 9, 21, 18, 42, 11, 0, time.UTC),
@@ -325,6 +335,9 @@ func populatedState(t *testing.T) State {
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
+				// Nobody has registered this root's spec, so its one gated step carries no
+				// document, no version and no approval, and holds the tree's work.
+				GatedSteps: []GatedStepView{{Step: record.DesignStepSpec, Status: GatedStepUnregistered}},
 			},
 			// LEGION-212's architect asked a person a question and handed the turn back, which gave
 			// its slot up; the person has answered the question.
@@ -344,6 +357,15 @@ func populatedState(t *testing.T) State {
 					AnsweredAt: &answeredAt,
 					AnsweredBy: record.AnsweredByAsk,
 				},
+				// Its spec's reviewer asked for changes at the version Dispatch holds, which the
+				// architect was told of: the one status that carries the reviewer's reason.
+				GatedSteps: []GatedStepView{{
+					Step:           record.DesignStepSpec,
+					ArtifactID:     "b71f0a94-6c3e-4d28-85af-19c7d0e3b462",
+					CurrentVersion: 2,
+					Status:         GatedStepChangesRequested,
+					ChangesReason:  "name the rollback path for the schema change",
+				}},
 			},
 			// LEGION-207 merged and closed; its production check opened before this release, so the
 			// migration left the implementer on it (20261105231916_production_check_role_and_wake),
@@ -382,6 +404,15 @@ func populatedState(t *testing.T) State {
 					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
 					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
 				},
+				// A root whose spec a person approved at the version Dispatch holds: the status
+				// that lets the tree's work past the step.
+				GatedSteps: []GatedStepView{{
+					Step:            record.DesignStepSpec,
+					ArtifactID:      "0c7e5a31-9d84-4b26-a0f3-5e81c2d47b90",
+					CurrentVersion:  4,
+					ApprovedVersion: &mergedApproval,
+					Status:          GatedStepApproved,
+				}},
 			},
 		},
 		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
@@ -776,9 +807,13 @@ func TestControllerRegisterResponseGolden(t *testing.T) {
 	})
 }
 
-// What `legion controller start` fetches with the operator's bearer.
+// What `legion controller start` fetches with the operator's bearer: the capability and the
+// design-gate steps the deployment gates, in the order it gates them.
 func TestControllerSecretResponseGolden(t *testing.T) {
-	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
+	golden(t, "controller-secret.json", ControllerSecretResponse{
+		Secret:          "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI",
+		DesignGateSteps: []record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec},
+	})
 }
 
 // What `legion controller start` fetches for the review App's read-only tokens, one per owner,

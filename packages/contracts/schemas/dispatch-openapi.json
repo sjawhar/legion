@@ -9373,6 +9373,64 @@
         "x-write-scope": "project"
       }
     },
+    "/api/v1/projects/{key}/gated-steps": {
+      "put": {
+        "description": "Publish the design-gate steps the Legion deployment that serves this project gates {steps}: a list of decisions, criteria and spec, in the order it gates them, or [] for a deployment that gates none. The deployment's daemon writes it at every boot; a publish of the list the row already holds changes nothing and appends no event. A body without steps, or one naming anything else, is 400 INVALID_PROJECT, and an unknown project 404 PROJECT_NOT_FOUND. It declares no personal scope: the credential the deployment configured writes it, as it does the issue PATCH.",
+        "operationId": "putApiV1ProjectsByKeyGatedSteps",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session",
+            "in": "query",
+            "description": "the session the caller's credential acts for, where that credential proved none; a credential that proved a session is refused a parameter naming another (403 ACTOR_SESSION_MISMATCH)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectGatedStepsInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "default": {
+            "description": "A refusal: its code and its message, which every refusal this route does not give a richer body writes (writeError).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectGatedSteps"
+                }
+              }
+            }
+          }
+        },
+        "x-auth": "any",
+        "x-write-scope": "project"
+      }
+    },
     "/api/v1/projects/{key}/related": {
       "get": {
         "description": "Run the related-item check an issue create runs, over ?title= and ?text= (checked as the title, a newline and the text; either alone is enough), without writing anything: no issue, ask, suggestion or related_checks record. ?exclude_issue= leaves that issue of the project and everything it holds out of the results and out of the word statistics (400 EXCLUDE_ISSUE_INPUT when it is not an issue of the project); ?keywords_only=true skips meaning search. It waits at most 5 seconds and answers the create's advice.suggestions shape: outcome found, none or not_made (a blank text is 200 not_made, the reason in missing), search, search_note, search_query, related and decision. Title and text over 1000 characters together are 400 CAP_EXCEEDED; POST takes a longer text. An unknown project is 404 PROJECT_NOT_FOUND.",
@@ -13253,6 +13311,9 @@
               }
             ]
           },
+          "decisions_artifact_id": {
+            "type": "string"
+          },
           "external_links": {
             "items": {
               "$ref": "#/components/schemas/ExternalLink"
@@ -13364,6 +13425,7 @@
           "primary_artifact_id",
           "verification_artifact_id",
           "plan_artifact_id",
+          "decisions_artifact_id",
           "last_seq"
         ],
         "type": "object"
@@ -17647,6 +17709,9 @@
               }
             ]
           },
+          "decisions_artifact_id": {
+            "type": "string"
+          },
           "external_links": {
             "items": {
               "$ref": "#/components/schemas/ExternalLink"
@@ -17755,6 +17820,7 @@
           "primary_artifact_id",
           "verification_artifact_id",
           "plan_artifact_id",
+          "decisions_artifact_id",
           "last_seq"
         ],
         "type": "object"
@@ -18231,6 +18297,9 @@
               }
             ]
           },
+          "decisions_artifact_id": {
+            "type": "string"
+          },
           "external_links": {
             "items": {
               "$ref": "#/components/schemas/ExternalLink"
@@ -18392,6 +18461,7 @@
           "primary_artifact_id",
           "verification_artifact_id",
           "plan_artifact_id",
+          "decisions_artifact_id",
           "last_seq",
           "route_status",
           "route_holder",
@@ -19943,6 +20013,15 @@
             "format": "date-time",
             "type": "string"
           },
+          "gated_steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "key": {
             "type": "string"
           },
@@ -19957,6 +20036,7 @@
           "key",
           "name",
           "open_asks",
+          "gated_steps",
           "created_at"
         ],
         "type": "object"
@@ -19996,6 +20076,59 @@
         },
         "required": [
           "assignee"
+        ],
+        "type": "object"
+      },
+      "ProjectGatedSteps": {
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "ProjectGatedStepsInput": {
+        "properties": {
+          "actor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "enum": [
+              "decisions",
+              "criteria",
+              "spec"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "null",
+              "array"
+            ]
+          }
+        },
+        "required": [
+          "steps"
         ],
         "type": "object"
       },

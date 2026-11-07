@@ -2672,6 +2672,7 @@ describe("executeDispatchTool", () => {
             updated_at: "2026-09-13T00:00:00Z",
             last_seq: 4,
             open_asks: 2,
+            gated_steps: [],
             progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
             claim: {
               actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
@@ -2745,6 +2746,7 @@ describe("executeDispatchTool", () => {
           },
           labels: ["bug"],
           open_asks: 2,
+          gated_steps: [],
           route: "role:sre",
           route_status: "no_holder",
           route_holder: null,
@@ -2787,6 +2789,7 @@ describe("executeDispatchTool", () => {
             updated_at: "2026-09-24T06:00:00Z",
             last_seq: 1,
             open_asks: 0,
+            gated_steps: [],
             progress: { tasks: null, children: null },
             claim: {
               actor: { kind: "session", id: "s1", origin: { session_title: "Stamped" } },
@@ -2808,6 +2811,7 @@ describe("executeDispatchTool", () => {
             updated_at: "2026-09-24T06:00:00Z",
             last_seq: 1,
             open_asks: 0,
+            gated_steps: [],
             progress: { tasks: null, children: null },
             claim: {
               actor: { kind: "session", id: "s2", origin: { session_title: "Stamped" } },
@@ -2858,6 +2862,7 @@ describe("executeDispatchTool", () => {
       updated_at: "2026-09-13T00:00:00Z",
       last_seq: 1,
       open_asks: 0,
+      gated_steps: [],
       progress: { tasks: null, children: null },
       claim: null,
       route: "role:sre",
@@ -3256,6 +3261,7 @@ describe("executeDispatchTool", () => {
       updated_at: "2026-09-13T00:00:00Z",
       last_seq: 1,
       open_asks: 0,
+      gated_steps: [],
     }));
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       requests.push(new URL(String(url)));
@@ -3295,6 +3301,7 @@ describe("executeDispatchTool", () => {
       updated_at: "2026-09-13T00:00:00Z",
       last_seq: 1,
       open_asks: 0,
+      gated_steps: [],
     }));
     const served: Array<{ limit: string | null; offset: string | null }> = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -3363,6 +3370,7 @@ describe("executeDispatchTool", () => {
       updated_at: "2026-09-13T00:00:00Z",
       last_seq: 1,
       open_asks: 0,
+      gated_steps: [],
     }));
     const served: Array<{ limit: string | null; offset: string | null; status: string | null }> =
       [];

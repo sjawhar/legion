@@ -1143,7 +1143,7 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: &holderPublisher{},
 				supervisor: sup, project: "legion", now: time.Now}
 			notice := record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "generation 1",
-				CatchUp: &record.CatchUp{Generation: 1, Launch: 2, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+				CatchUp: &record.CatchUp{Generation: 1, Launch: 2, Gates: []record.CatchUpGate{{Step: record.DesignStepSpec, Gated: true, Unregistered: true}}, Issues: []record.CatchUpIssue{}}}
 			report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "catch-up on LEGION-1", notice, "legion-outbox:7", "ses_stopped"}
 
 			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
@@ -1176,7 +1176,7 @@ func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
 	}
 	catchUp := func(launch uint64, resends int, resendOf int64) record.Notice {
 		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("launch %d", launch), Resends: resends, ResendOf: resendOf,
-			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gates: []record.CatchUpGate{{Step: record.DesignStepSpec, Gated: true, Unregistered: true}}, Issues: []record.CatchUpIssue{}}}
 	}
 	clock := time.Now()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(3, 0, 0), clock))

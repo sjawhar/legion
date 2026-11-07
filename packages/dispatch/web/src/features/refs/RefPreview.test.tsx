@@ -45,6 +45,7 @@ function issue(key: string, title: string): IssueDetails {
     claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     plan_artifact_id: "plan",
+    decisions_artifact_id: "",
     primary_artifact_id: "spec",
     priority: 1,
     project: "CORE",

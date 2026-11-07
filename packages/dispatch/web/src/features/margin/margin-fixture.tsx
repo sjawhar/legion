@@ -47,6 +47,7 @@ export const issue: IssueDetails = {
   project: "CORE",
   referenced_by_count: 0,
   plan_artifact_id: "",
+  decisions_artifact_id: "",
   verification_artifact_id: "",
   route: null,
   repo: null,

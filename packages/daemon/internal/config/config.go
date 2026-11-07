@@ -160,8 +160,11 @@ type Config struct {
 	GitHubApps        GitHubApps
 	// Linger is how long a finished tree keeps its workspace before it closes (`linger_hours`).
 	Linger time.Duration
-	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
-	// after the close before its last look (`production_check_hours`, 14 days by default).
+	// ProductionCheckBound is how long a closed issue's production check stays open after the
+	// close before its last look (`production_check_hours`, 14 days by default): the check's
+	// bound_at is its open plus this, and the look that starts there is the last one, told that
+	// the bound is up. Nothing waits on a deploy: a look is due at the moment the checking agent
+	// named for itself, at the retry of a look nobody reported, or at this bound.
 	ProductionCheckBound time.Duration
 	// PodUpdateRetask is how long an open update round waits after it sent a worker the task
 	// before it asks that worker again (`pod_update_retask_hours`, an hour by default), and
@@ -943,7 +946,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		AdmissionCap:         defaultAdmissionCap,
 		WorkerWakesPerMinute: defaultWorkerWakesPerMinute,
 		EnvoyURL:             defaultEnvoyURL,
-		Gates:                Gates{Design: DesignGateRootIssues},
+		Gates:                Gates{Design: DesignGateRootIssues.Steps()},
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
 		PodUpdateRetask:      time.Hour,

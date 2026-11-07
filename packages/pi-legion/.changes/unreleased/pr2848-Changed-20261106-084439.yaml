@@ -1,0 +1,5 @@
+kind: Changed
+body: The `legion` tool's `register_gate` takes the design-gate `step` it registers (`decisions`, `criteria` or `spec`), and the daemon refuses a step the deployment does not gate, a call that names none where it gates more than one, and a document that is not that step's document of the issue. The architect skills name the steps the deployment gates and the document each one records.
+time: 2026-11-06T08:44:39.240782904Z
+custom:
+    Issue: pr2848
