@@ -1246,25 +1246,19 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	// process was already in. Every other start is one this daemon read (Machine.unseenTurn).
 	m.unseenTurn = own && start.DeliveryID == "" && m.send == nil && !awaiting
 	m.takeBackSignal(own && !m.unseenTurn)
-	persist := m.persist
+	// The write is the confirmation where this start is the pending delivery's turn, and the
+	// claim alone where it is a foreign one; the delivery is named in the start's line for the
+	// same reason, so both are decided in the one place that asks the question.
+	persist, task := m.persist, ""
 	if own {
-		persist = m.confirm
+		persist, task = m.confirm, p.ID
 	}
 	// The start is logged before the write, never after it: the decision this line exists for is
 	// a turn start whose claim write failed, and a line written after the write would leave
 	// exactly that decision silent again. The delivery is named only where this start is that
 	// delivery's turn; a foreign turn is no task's and carries none.
-	task := ""
-	if own {
-		task = p.ID
-	}
 	m.startTurn(task)
-	if err := persist(ctx); err != nil {
-		m.oweDurableState(StateWorking)
-		return err
-	}
-	m.durableState(StateWorking)
-	return nil
+	return m.durableWrite(ctx, StateWorking, persist)
 }
 
 // takeBackSignal takes back this claim's answer to its open round when the turn starting is not
@@ -1673,11 +1667,9 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 // finishReady persists the current claim before publishing ready or delivering work. reready may
 // reach it while the claim is idle or working, so it must not rewrite the state to ready.
 func finishReady(m *Machine, ctx context.Context) error {
-	if err := m.persist(ctx); err != nil {
-		m.oweDurableState(StateReady)
+	if err := m.durableWrite(ctx, StateReady, m.persist); err != nil {
 		return err
 	}
-	m.durableState(StateReady)
 	return m.sendPending(ctx)
 }
 

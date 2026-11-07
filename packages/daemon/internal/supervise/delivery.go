@@ -539,15 +539,28 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 //
 // A refusal that says the claim holds no such delivery (ErrNoSuchDelivery) is read as the
 // retirement the store has already made rather than as a failure. The store runs the claim write
-// and the fenced delete in one transaction, so a delete that removed no row is a retirement some
-// earlier call committed — this one, whose answer a broken connection lost. Memory moves to match
-// the store, because the delivery is gone there: a machine that went on holding it would call
-// this function again at the head of every decision (settle) and be refused the same way every
-// time, and each refusal drops that claim's event for good (supervisor.decisionFailed in
-// internal/daemon), which is the opposite of what the owed write exists to do. The claim write is
-// marked owed all the same, because the same transaction rolled it back with the delete, so what
-// the store holds of the claim is older than what this retirement wrote; the repair at the
-// claim's next decision is what records it.
+// and the fenced delete in one transaction, so a delete that removed no row with nothing stored
+// under the claim at all is a retirement some earlier call committed — this one, whose answer a
+// broken connection lost. Memory moves to match the store, because the delivery is gone there: a
+// machine that went on holding it would call this function again at the head of every decision
+// (settle) and be refused the same way every time, and each refusal drops that claim's event for
+// good (supervisor.decisionFailed in internal/daemon), which is the opposite of what the owed
+// write exists to do. The claim write is marked owed all the same, because the same transaction
+// rolled it back with the delete, so what the store holds of the claim is older than what this
+// retirement wrote; the repair at the claim's next decision is what records it.
+//
+// The store's other refusal of a delete that removed no row — the claim's row holding a delivery
+// under another id (ErrOtherDelivery) — is no retirement already made, and is returned as the
+// failure it is. The row holds a delivery this machine is not retiring: a write that rotated the
+// id (interrupted, takeBackPending) had its answer cut off by the claim-write bound and
+// committed all the same, so the store holds the new delivery while memory holds the old. Read
+// as a retirement already made, it would drop the delivery memory holds and leave the stored one
+// behind, pending, unconfirmed and never retired, with the decisions it keeps never released.
+// Failing the decision leaves both deliveries where they are, and the claim's owed write and the
+// next restart's read of the row are what bring the two back together.
+//
+// A retirement that landed is the repair of any claim write the machine owed: the store wrote
+// the claim beside the delete, so the row is no longer behind memory (settleOwedWrite).
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
@@ -557,17 +570,20 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0
-	if err := m.write(ctx, func(ctx context.Context) error {
+	err := m.write(ctx, func(ctx context.Context) error {
 		return m.deps.Store.RetireDelivery(ctx, retired, p.ID)
-	}); err != nil {
-		if !errors.Is(err, ErrNoSuchDelivery) {
-			return err
-		}
+	})
+	if err != nil && !errors.Is(err, ErrNoSuchDelivery) {
+		return err
+	}
+	m.claim, m.unsaved = retired, false
+	if err != nil {
 		m.log.Warn("supervise: the store holds no such delivery; the refusal is of a retirement it has already made",
 			"delivery", p.ID, "error", err)
 		m.oweWrite("RetireDelivery", err)
+		return nil
 	}
-	m.claim, m.unsaved = retired, false
+	m.settleOwedWrite("RetireDelivery")
 	return nil
 }
 

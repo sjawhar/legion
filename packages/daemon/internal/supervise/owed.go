@@ -3,7 +3,6 @@ package supervise
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -16,16 +15,17 @@ import (
 // and the method of each failure is in that failure's own log line. What is left is the durable
 // reports those failed decisions never made.
 type owedClaimWrite struct {
-	// reports are the durable reports the failed decisions owed, oldest first, made by the repair
-	// once the write they waited on has landed (makeOwedReports). There is one per decision that
-	// owed a report rather than one per mark: a second failing decision while the first is still
-	// owed adds its report here instead of replacing it, since the two name different transitions
-	// and the daemon acts on each.
+	// reports are the durable reports the failed decisions owed, oldest first, made when the
+	// write they waited on lands — at a repair, or at any claim write of a later decision that
+	// lands first, which is the repair too (settleOwedWrite, makeOwedReports). There is one per
+	// decision that owed a report rather than one per mark: a second failing decision while the
+	// first is still owed adds its report here instead of replacing it, since the two name
+	// different transitions and the daemon acts on each.
 	reports []owedReport
 }
 
-// owedReport is one report a decision would have made had its write landed, kept until the repair
-// makes it. The reports are the daemon's own record of what a claim durably became: it stamps a
+// owedReport is one report a decision would have made had its write landed, kept until the write
+// lands. The reports are the daemon's own record of what a claim durably became: it stamps a
 // woken pod's first turn on working, and ends the workflow's phase on ready and on failed
 // (workflowRuntime.claimDurableState in internal/daemon). One skipped by a failed write is a fact
 // no later report makes good, because the fact is keyed on the claim's generation, so it is kept
@@ -38,9 +38,6 @@ type owedReport struct {
 	// role and the failure from it and keys the workflow fact on its generation, where the
 	// repair's write uses the claim as the machine holds it then.
 	claim Claim
-	// made is the value of Machine.reportsMade when this report was owed, which is how a report
-	// the claim has since superseded is told from one that still stands.
-	made uint64
 }
 
 // owedWriteLine is the one message a write left owed is logged under, at Warn, both where the
@@ -87,20 +84,21 @@ func (m *Machine) owes(method string, err error) error {
 	return err
 }
 
-// oweDurableState keeps the report a decision owed when its own write was left owed, for the
-// repair to make once that write has landed (makeOwedReports). Every report is made after the
-// write of the transition it reports, so a write that failed skips the report with it, and the
-// daemon never learns a claim fact its memory already holds — the working report of a turn that
-// started is the one the measured incident lost.
+// oweDurableState keeps the report a decision owed when its own write was left owed, made once
+// that write lands, by the repair or by whatever claim write lands first (settleOwedWrite,
+// makeOwedReports). Every report is made after the write of the transition it reports, so a
+// write that failed skips the report with it, and the daemon never learns a claim fact its
+// memory already holds — the working report of a turn that started is the one the measured
+// incident lost.
 //
 // A claim that owes no write owes no report either: the write the server refused will be refused
-// again, so no repair is coming to make the report, and a report of a transition the row will
-// never hold would tell the daemon more than the store can say.
+// again, so no write of this claim is coming to make the report, and a report of a transition
+// the row will never hold would tell the daemon more than the store can say.
 func (m *Machine) oweDurableState(state ClaimState) {
 	if m.owedWrite == nil {
 		return
 	}
-	m.owedWrite.reports = append(m.owedWrite.reports, owedReport{state: state, claim: copyClaim(m.claim), made: m.reportsMade})
+	m.owedWrite.reports = append(m.owedWrite.reports, owedReport{state: state, claim: copyClaim(m.claim)})
 }
 
 // repair makes the claim write the machine owes, at the head of the decision, before anything
@@ -120,9 +118,15 @@ func (m *Machine) oweDurableState(state ClaimState) {
 // writes nothing — where two writes would leave the row in between, and the second would have to
 // be owed in its turn.
 //
-// It makes the reports those failed decisions skipped, after the write and after the line that
-// says the write landed (makeOwedReports): the daemon is told what the row now says, in the
-// order the decisions said it, and never before the store holds it.
+// It goes through the machine's own write helpers (putClaim, putClaimAndDelivery), so the write
+// it makes is the write every other decision makes, under the same deadline and normalized the
+// same way. What follows a write that landed is theirs too — the mark dropped, the line that
+// says the write was made, and the reports those failed decisions skipped (settleOwedWrite) —
+// because a claim write that lands is the repair whoever made it, and this function would
+// otherwise be a second place that knows what landing means. What is left here is the
+// head-of-decision entry point and the handling of a repair that failed; method names the call
+// for those failure lines alone, since the line of a write that landed is written where it
+// landed.
 //
 // It returns nothing. A repair that fails must not drop the event behind it: the error would
 // reach supervisor.decisionFailed in internal/daemon, which logs it and drops the event, and an
@@ -138,28 +142,55 @@ func (m *Machine) repair(ctx context.Context) {
 		return
 	}
 	method, pending := "PutClaim", m.claim.Pending
+	var err error
 	if pending != nil {
 		method = "PutClaimAndDelivery"
+		err = m.putClaimAndDelivery(ctx, m.stored(), *pending)
+	} else {
+		err = m.putClaim(ctx)
 	}
-	c := m.stored()
-	err := m.write(ctx, func(ctx context.Context) error {
-		if pending != nil {
-			return m.deps.Store.PutClaimAndDelivery(ctx, c, *pending)
-		}
-		return m.deps.Store.PutClaim(ctx, c)
-	})
-	if err != nil {
-		if writeOwed(err) {
-			m.oweWrite(method, err)
-			return
-		}
-		m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", false)
-		m.owedWrite = nil
+	// A write that landed settled the mark inside the helper that made it, reports and all.
+	if err == nil {
+		return
+	}
+	if writeOwed(err) {
+		m.oweWrite(method, err)
+		return
+	}
+	m.log.Warn(owedWriteLine, "store", method, "error", err, "owed", false)
+	m.owedWrite = nil
+}
+
+// settleOwedWrite settles the write the machine owes, now that a claim write has landed, and
+// returns at once when nothing is owed. A claim write that lands while a write is owed is the
+// repair, whichever decision made it: every claim write this package makes writes the claim as
+// the machine holds it — putClaim and putClaimAndDelivery from m.stored(), and a retirement its
+// own claim write, written in the same transaction as the delete — which is exactly what the
+// repair would have written. The row is no longer behind memory, so there is nothing left for a
+// later repair to do, and nothing of the order to get wrong.
+//
+// That order is why the owed reports are made here rather than left to the next repair. They are
+// made before the landing decision's own report, which follows its own write, so the daemon is
+// told what the claim durably became in the order the decisions made it: the working of a turn
+// whose write failed, then the ready of the decision whose write settled it. Left to a later
+// repair, the landing decision's own report would come first and the owed ones after it, which
+// is the order nothing lived.
+//
+// It settles the claim write and nothing else. The pending delivery's own mark (unsaved) is left
+// where it is, because a claim write that lands says nothing about the delivery row: a landing
+// putClaim wrote the claim alone, and clearing the delivery's mark there would drop a delivery
+// write that was never made. The writes that do cover both rows clear it themselves, where it is
+// true of what they wrote (putClaimAndDelivery, retirePending).
+//
+// method is the store call that landed, for the line that closes the story (repairedWriteLine):
+// an operator counts the pair of lines, and the one that ends it names the write that made good.
+func (m *Machine) settleOwedWrite(method string) {
+	if m.owedWrite == nil {
 		return
 	}
 	// The reports are taken before the mark goes, since the mark is what holds them.
 	reports := m.owedWrite.reports
-	m.owedWrite, m.unsaved = nil, false
+	m.owedWrite = nil
 	m.log.Info(repairedWriteLine, "store", method)
 	m.makeOwedReports(reports)
 }
@@ -169,53 +200,82 @@ func (m *Machine) repair(ctx context.Context) {
 // handed it (report), so what the daemon learns from a claim whose database was away is what it
 // would have learnt had every write been taken, only later.
 //
-// Two kinds of owed report are dropped instead, because what each would tell the daemon is no
-// longer true. A report the claim has reported past is the first: a later report has already
-// said where the claim is, and the older one speaks of a state the claim has left — a working
-// owed by a turn that started, made after the failure that ended the claim, would tell the
-// workflow a failed claim is at work. A report of a generation the claim has left is the second:
-// the daemon keys the workflow fact on the claim's generation (applyTerminal in internal/daemon),
-// so the report names a fact of a run that is over, which no report of the generation now
-// running stands in for and which nothing running wants to hear.
+// One kind of owed report is dropped instead, because what it would tell the daemon is no longer
+// true: a report of a generation the claim has left. The daemon keys the workflow fact on the
+// claim's generation (applyTerminal in internal/daemon), so such a report names a fact of a run
+// that is over, which no report of the generation now running stands in for and which nothing
+// running wants to hear.
 //
-// Reports owed with no successful report between them all stand, however many of them there are:
-// they were owed against the same count, so none of them is the report that supersedes another,
-// and the working of a turn that started is still true when the ready of the turn that ended is
-// reported after it. That is why the count is read once, before any of them is made: read afresh
-// for each, the first report made here would raise the count and drop every report behind it.
+// No report made here can be one the claim has reported past, so none is dropped as superseded.
+// Every report follows a claim write that landed, and a claim write that lands while a write is
+// owed makes the owed reports first (settleOwedWrite): between the write that failed and the
+// next one that lands, the claim reports nothing at all, and when one lands the reports it owed
+// go before the report of the decision that made it. So the oldest owed report is still the
+// oldest fact the daemon has not been told, and the whole of what is owed is told in the order
+// the decisions made it.
 func (m *Machine) makeOwedReports(reports []owedReport) {
-	// Read once, before any of them is made: the reports below raise the count themselves, and
-	// each is judged against the claim as it stood when the repair began.
-	made := m.reportsMade
 	for _, r := range reports {
-		switch {
-		case r.made < made:
-			m.log.Info("supervise: an owed report is dropped; the claim has reported since it was owed",
-				"state", r.state, "generation", r.claim.Generation)
-		case r.claim.Generation != m.claim.Generation:
+		if r.claim.Generation != m.claim.Generation {
 			m.log.Info("supervise: an owed report is dropped; the claim has left the generation it was owed at",
 				"state", r.state, "generation", r.claim.Generation)
-		default:
-			m.report(r.claim, r.state)
+			continue
 		}
+		m.report(r.claim, r.state)
 	}
 }
 
 // writeOwed is the rule for a claim write the store refused: a write is owed unless the server
-// answered and refused the statement. A server that answered has read the statement and decided
-// against it — a constraint it breaks, a column it has not got, a fence it does not pass — and it
-// would decide the same way again, so making that write a second time only buys the same refusal.
-// Every other failure leaves the write unmade, or its fate unknown: the connection never came up,
-// or it died with the statement in flight, or a deadline ended the wait before any answer. Those
-// are owed, because dropping one loses a claim fact the daemon's memory already holds and the row
-// does not, and the write is the only thing that would ever put it there. A nil error is no
-// refusal and owes nothing.
+// judged the statement. A server that judged it read the statement and decided against it — a
+// constraint it breaks, a column it has not got, a fence it does not pass — and it would decide
+// the same way again, so that refusal is reported once and never repeated, and the write is not
+// made a second time. Every other failure leaves the write unmade, or its fate unknown, and is
+// owed: dropping one loses a claim fact the daemon's memory already holds and the row does not,
+// and the write is the only thing that would ever put it there. A nil error is no refusal and
+// owes nothing.
 //
-// Two SQLSTATEs the server does answer with are not decisions about the statement, and are owed
-// with the rest: class 08, the connection exception, where the connection itself is what failed,
-// and 57P01, the backend terminated under the statement — the shutdown a managed restart of the
-// database sends. Judging those two by their class and code is what keeps the rule to one
-// question about the server's answer.
+// The rule reads the error in two steps, and their order is the substance of it rather than a
+// style of writing.
+//
+// The wrapper comes first: an error that unwraps to a *pgconn.ConnectError is owed whatever it
+// carries. The connection never opened, so no statement of this write ever reached a server, and
+// nothing in such an error can be a judgement of it. That covers the dial that was refused, which
+// carries no SQLSTATE at all, and equally a connection PostgreSQL itself refused, which pgx
+// answers as the server's own *pgconn.PgError inside that wrapper (newPerDialConnectError in
+// pgconn/pgconn.go, whose Unwrap keeps the chain open) and which can carry any SQLSTATE
+// whatever — a restart's 57P03, and a rotated password's 28P01, whose class the second step
+// would not owe at all.
+//
+// The SQLSTATE comes second, and only then is it the server's answer about a statement it was
+// given: an error that unwraps to a *pgconn.PgError is owed when that code's class, its first two
+// characters, is one of the six a server answers with about something other than the statement:
+//
+//   - 08, connection exception: the connection itself is what failed, and the statement went down
+//     with it.
+//   - 40, transaction rollback: the server rolled its own transaction back — a serialization
+//     failure, a deadlock it broke — so the statement was abandoned rather than judged.
+//   - 53, insufficient resources: the memory, the disk or the connection slots the server had not
+//     got for this statement, and will have again.
+//   - 55, object not in prerequisite state: an object another session holds, a lock not available
+//     chief among them, rather than a statement the server read and refused.
+//   - 57, operator intervention: a backend terminated, a query cancelled, a database shutting down
+//     or starting up — the platform's doing or an operator's, not the statement's.
+//   - 58, system error: a file or an input/output error of the server's own, which says nothing
+//     about what was asked of it.
+//
+// Any other class is the server judging the statement, and is not owed. A code shorter than two
+// characters has no class to read and judges nothing, so it is owed with the rest rather than
+// taken for a decision about the statement. An error that unwraps to neither type is owed too:
+// the network cut, and a write the claim-write deadline cut short before any answer (R5).
+//
+// Read the other way round — the SQLSTATE first, the wrapper after — the rule refuses every
+// connection the server itself refused, because such an error does carry a PgError and its class
+// is whatever the refusal was: a rotated password's 28P01 would read as a statement judged, and
+// the write of a claim fact only memory holds would be dropped for a statement no server ever
+// read. That is this issue's own fault, reached through the rule written to end it. The same
+// order, for the same reason, is how the outbox tells a statement Postgres refused from a
+// connection it refused (refusedStatement in packages/envoy's
+// internal/dispatch/outbox/lookups.go); it is another module, so the rule is kept consistent with
+// it by hand rather than imported.
 //
 // The identities below are what pgx v5.11.0 returns, measured in this pod on 2026-11-07, and they
 // are the only evidence this rule rests on:
@@ -225,22 +285,41 @@ func (m *Machine) makeOwedReports(reports []owedReport) {
 // |a pool at 127.0.0.1:1, then Exec|failed to connect to `user=… database=…`: … dial error: … connection refused|*pgconn.ConnectError|none|false|
 // |Exec under a one second context against a listener that accepts and never answers|context deadline exceeded|context.deadlineExceededError|none|false|
 // |pg_terminate_backend of the pool's one backend, then Exec|FATAL: terminating connection due to administrator command (SQLSTATE 57P01)|*pgconn.PgError|57P01|false|
+// |a listener answering the startup message with an ErrorResponse, as a restarting managed instance answers a new connection|failed to connect to `user=… database=…`: … server error: FATAL: the database system is starting up (SQLSTATE 57P03)|*pgconn.PgError inside a *pgconn.ConnectError|57P03|false|
+// |the same listener answering the startup message with the refusal a rotated password draws|failed to connect to `user=… database=…`: … server error: FATAL: password authentication failed for user "…" (SQLSTATE 28P01)|*pgconn.PgError inside a *pgconn.ConnectError|28P01|false|
 //
-// Those rows are why the rule cannot be written as a list of error types. The first is a pgx
-// type, the second one the standard library returns through a path that reaches no pgx type at
-// all, and the third is neither; what they share is not a type but the absence of an answer about
-// the statement, which no list can be kept in step with. They are also why the rule cannot be
-// pgconn.SafeToRetry: it is false for all three — it reports whether pgx knows the statement
-// never reached the server, not whether the server decided against it — so a rule built on it
-// would drop the dial failure and the cut-short write, the two that are most plainly owed. Only
-// asking whether the server answered covers every row.
+// The last two rows are the ones the order is for. Both are owed by the first step, because
+// neither connection opened. Read the SQLSTATE first and the 57P03 row is owed only by the
+// accident of its class being one of the six, while the 28P01 row is refused outright: the
+// write is dropped, and the claim fact only memory holds is lost, for a statement no server
+// ever read.
+//
+// The rows are also why the rule cannot be a list of error types. The first is a pgx type, the
+// second one the standard library returns through a path that reaches no pgx type at all, the
+// third is neither, and the last two are both at once; what the owed ones share is not a type but
+// the absence of a judgement of the statement, which no list can be kept in step with. They are
+// also why the rule cannot be pgconn.SafeToRetry: it is false for all five — it reports whether
+// pgx knows the statement never reached the server, not whether the server decided against it —
+// so a rule built on it would drop the dial failure and the cut-short write, the two that are
+// most plainly owed. Only asking whether the server judged the statement covers every row.
 func writeOwed(err error) bool {
 	if err == nil {
 		return false
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return strings.HasPrefix(pgErr.Code, "08") || pgErr.Code == "57P01"
+	// The wrapper first: a connection that never opened judged no statement, whatever the server
+	// said in refusing the connection itself.
+	var connErr *pgconn.ConnectError
+	if errors.As(err, &connErr) {
+		return true
 	}
-	return true
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || len(pgErr.Code) < 2 {
+		return true
+	}
+	switch pgErr.Code[:2] {
+	case "08", "40", "53", "55", "57", "58":
+		return true
+	default:
+		return false
+	}
 }

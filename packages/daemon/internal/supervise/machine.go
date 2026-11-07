@@ -404,7 +404,10 @@ type Store interface {
 	// the delivery its turn started, and half of that is a task nothing sends again.
 	PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error
 	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
-	// transaction: the run a claim serves is set by the retiring of the task that ran.
+	// transaction: the run a claim serves is set by the retiring of the task that ran. A delete
+	// that removes no row is refused two ways, because the table is keyed on the claim and not
+	// on the delivery: ErrNoSuchDelivery where the row holds no delivery at all, and
+	// ErrOtherDelivery where it holds one under another id.
 	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
 }
 
@@ -700,6 +703,23 @@ var ErrHeldByOperator = wait.New("the suspension holds until the operator resume
 // which is the difference between a claim that is settled and one whose write is still owed.
 var ErrNoSuchDelivery = errors.New("the claim holds no such delivery")
 
+// ErrOtherDelivery is the store's refusal of a retirement whose claim row holds a delivery under
+// another id than the one being retired. Because pending_task_deliveries is keyed on the claim,
+// a delete that removes no row says one of two things, and they call for opposite answers: the
+// row holds nothing, which is the retirement this daemon already made (ErrNoSuchDelivery), or it
+// holds another delivery, which is a write that rotated the id — an interruption, a take-back —
+// whose answer the claim-write bound cut off and which committed all the same, so the store
+// holds B where memory holds A.
+//
+// The two are told apart because reading the second as a retirement already made would drop A
+// from memory and leave B stored: a delivery no machine holds, unconfirmed and never retired,
+// whose kept decisions nothing releases. So it is a failure of the write like any other, and it
+// is a sentinel of its own that does not wrap ErrNoSuchDelivery, so that a caller asking
+// errors.Is for the retirement already made never catches this instead. It is named in this
+// package for the reason ErrNoSuchDelivery is: internal/store imports this package and so
+// cannot be imported back.
+var ErrOtherDelivery = errors.New("the claim's row holds another delivery")
+
 // Machine is one claim's decision owner.
 type Machine struct {
 	mu             sync.Mutex
@@ -730,11 +750,6 @@ type Machine struct {
 	// failed write left unchanged — which is the same claim a crash between a decision and its
 	// write has always left behind.
 	owedWrite *owedClaimWrite
-	// reportsMade counts the durable reports this machine has made (report), which is what tells
-	// a report an owed one has been superseded by from one that still stands (makeOwedReports).
-	// It is memory only, as the mark is: a daemon that stops owing a write loses the reports it
-	// owed with it, and nothing of the count outlives the machine.
-	reportsMade uint64
 	// sentThrough is the registration sequence of the newest connection a prompt was sent through
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
@@ -1266,23 +1281,43 @@ func (m *Machine) OnDurableState(callback func(Claim, ClaimState)) {
 	m.onDurableState = callback
 }
 
-// durableState reports the transition the decision has just written, and counts it. Its callers
-// are the three decisions that write a transition the daemon acts on, each of which calls it
-// after its own write has landed and owes the report instead where that write did not
-// (oweDurableState).
+// durableState reports the transition the decision has just written. Its callers are the three
+// decisions that write a transition the daemon acts on, each of which reaches it through
+// durableWrite: after its own write has landed, and never where that write did not land, which
+// owes the report instead (oweDurableState).
 func (m *Machine) durableState(state ClaimState) {
 	m.report(copyClaim(m.claim), state)
 }
 
-// report hands the daemon one durable transition and counts it. The count is what a report owed
-// by a failed write is judged against when the repair comes to make it (makeOwedReports), so
-// every report goes through here, the repair's owed ones included: a report made outside the
-// count would leave an owed report standing that the claim has since reported past.
+// report hands the daemon one durable transition, with the claim copy that transition is of: the
+// claim of the decision reporting now (durableState), or the copy an owed report kept from the
+// decision that owed it (makeOwedReports). Both go through here so that what a report is — a
+// state and the claim it is true of — is spelled in one place, and so is the daemon that may
+// have installed no callback at all.
 func (m *Machine) report(c Claim, state ClaimState) {
-	m.reportsMade++
 	if m.onDurableState != nil {
 		m.onDurableState(c, state)
 	}
+}
+
+// durableWrite makes a decision's own write and reports the durable transition it wrote, in that
+// one order: the report follows the write, and a write the store did not take reports nothing
+// and owes the report instead, for whatever claim write lands next to make (oweDurableState,
+// settleOwedWrite). Every decision that reports a durable transition goes through here — the
+// turn that starts, the claim that is ready, the claim that failed — because the order is the
+// point and the owing works only on the error of the write it belongs to: a fourth caller that
+// wrote the three steps out itself and left the owing off would lose its report in silence,
+// which is the fault the mark exists to end.
+//
+// write is the decision's own claim write: persist for most of them, and confirm for a turn
+// start that confirms the delivery whose turn it is.
+func (m *Machine) durableWrite(ctx context.Context, state ClaimState, write func(context.Context) error) error {
+	if err := write(ctx); err != nil {
+		m.oweDurableState(state)
+		return err
+	}
+	m.durableState(state)
+	return nil
 }
 
 // turnStartedLine is the message a turn's start is logged under, at Info, on each of the three
@@ -1779,12 +1814,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
 		"promptRetires", m.claim.Budgets.PromptRetires)
-	if err := m.persist(ctx); err != nil {
-		m.oweDurableState(StateFailed)
-		return err
-	}
-	m.durableState(StateFailed)
-	return nil
+	return m.durableWrite(ctx, StateFailed, m.persist)
 }
 
 // release asks the runtime to let go of everything it holds for the claim — the process, when one
@@ -2017,19 +2047,27 @@ func (m *Machine) write(ctx context.Context, call func(context.Context) error) e
 	return call(writing)
 }
 
-// putClaim writes the claim alone, under the claim-write deadline, and marks nothing: a caller
-// that rolls its own field back when the write fails must not leave a write owed for a state the
-// machine has just put back, since the repair would then write a decision this machine has
-// already taken back. Every write first normalizes state that is valid only while the claim
+// putClaim writes the claim alone, under the claim-write deadline, and marks nothing owed: a
+// caller that rolls its own field back when the write fails must not leave a write owed for a
+// state the machine has just put back, since the repair would then write a decision this machine
+// has already taken back. Every write first normalizes state that is valid only while the claim
 // records a running process: a capability belongs to a registered agent, a suspension source
 // belongs to a suspended claim, and an enrollment belongs to the process it names. A confirmation
 // and a retire write the claim together with the delivery they change, each in one transaction.
+//
+// A write that lands settles a write the machine owed (settleOwedWrite): it wrote the claim as
+// the machine holds it, which is exactly what the repair would have written, so this write is
+// the repair, whichever decision made it.
 func (m *Machine) putClaim(ctx context.Context) error {
 	c := m.stored()
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
-	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaim(ctx, c) })
+	if err := m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaim(ctx, c) }); err != nil {
+		return err
+	}
+	m.settleOwedWrite("PutClaim")
+	return nil
 }
 
 // putDelivery writes one delivery of this claim under the claim-write deadline, as putClaim
@@ -2040,10 +2078,19 @@ func (m *Machine) putDelivery(ctx context.Context, d Delivery) error {
 }
 
 // putClaimAndDelivery writes the claim and one delivery in the store's one transaction, under the
-// same deadline, and marks nothing either: the caller that owes its claim write says so itself
-// (confirm, repair), and the rest write memory only once the store has taken both rows.
+// same deadline, and marks nothing owed either: the callers that owe their claim write say so
+// themselves (confirm, repair), and the rest write memory only once the store has taken both
+// rows. A write that lands settles a write the machine owed, as putClaim's does and for the same
+// reason (settleOwedWrite) — which is the whole of repair's success path, since the repair it
+// makes is the one this call settles — and it leaves nothing of the delivery unsaved either,
+// because the delivery row it took is the one memory holds (saved, settle).
 func (m *Machine) putClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
-	return m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) })
+	if err := m.write(ctx, func(ctx context.Context) error { return m.deps.Store.PutClaimAndDelivery(ctx, c, d) }); err != nil {
+		return err
+	}
+	m.unsaved = false
+	m.settleOwedWrite("PutClaimAndDelivery")
+	return nil
 }
 
 // persist is putClaim with the mark, and is what every caller that leaves its decision standing

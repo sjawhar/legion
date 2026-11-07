@@ -219,9 +219,18 @@ func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID strin
 		return err
 	}
 	held, ok := s.deliveries[c.Token]
-	if !ok || held.ID != deliveryID {
+	switch {
+	// The real store tells the two refusals of a delete that removed no row apart, because its
+	// table is keyed on the claim: nothing stored under the claim is the retirement it has
+	// already made, and a delivery stored under another id is a write that rotated the id and
+	// committed after its answer was lost.
+	case !ok:
 		s.mu.Unlock()
 		return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, ErrNoSuchDelivery)
+	case held.ID != deliveryID:
+		s.mu.Unlock()
+		return fmt.Errorf("retire delivery %s on %s: the row holds delivery %s: %w",
+			deliveryID, c.Token, held.ID, ErrOtherDelivery)
 	}
 	s.mu.Unlock()
 	// The store writes the claim and the delete together; a failure injected on either leaves
