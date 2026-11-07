@@ -44,6 +44,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "Workflow table", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "U",
 	})
+	seedTreeLifecycle(t, pool, "LEGION-208")
 
 	engine := New(store, Config{
 		Project:        "LEGION",
@@ -58,6 +59,9 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}
+	// The registration opens the gate and releases the root; the waiting line starts its first
+	// phase, at the slot that phase needs.
+	startUnblockedChildren(t, pool, engine)
 
 	var gotPhase string
 	if err := pool.QueryRow(ctx, "select phase from issues where key = $1", "LEGION-208").Scan(&gotPhase); err != nil {
@@ -76,7 +80,12 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		t.Fatalf("gate = latest %d approved %v, want version 4 open", latest, approved)
 	}
 
-	rows, err := pool.Query(ctx, "select kind, payload from outbox order by id")
+	// The relaunch half of the planner's start is left out, as every other assertion of the
+	// outbox's shape leaves it out (assertOutboxKinds): a start is two rows now, and this is
+	// about the one that carries the task.
+	rows, err := pool.Query(ctx, `select kind, payload from outbox
+		where not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')
+		order by id`)
 	if err != nil {
 		t.Fatalf("read outbox: %v", err)
 	}
@@ -98,10 +107,11 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	}
 }
 
-// A child entering an open gate is recorded and its planning started in one fact, its planner's
-// start queued behind the row creating the child's branch, which the start waits for, and the
-// in_progress of the phase it enters written over the todo Dispatch shows.
-func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing.T) {
+// A child entering an open gate is recorded by its own fact and starts planning when the waiting
+// line reaches it, its planner's start queued behind the row creating the child's branch, which
+// the start waits for, and the in_progress of the phase it enters written over the todo Dispatch
+// shows.
+func TestRegisteredOpenGateRecordsChildAndStartsPlanningAtItsSlot(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 4, Status: "in_progress", Rank: "U"})
@@ -114,6 +124,7 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}
+	startUnblockedChildren(t, pool, engine)
 
 	var tree, gotPhase string
 	if err := pool.QueryRow(ctx, "select tree, phase from issues where key = $1", "LEGION-209").Scan(&tree, &gotPhase); err != nil {
@@ -122,7 +133,9 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice"})
+	// The second notice is the architect's: every child the line starts tells it so
+	// (ChildStartedNotice).
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 	var branchIssue string
 	var generation int
 	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {
@@ -637,10 +650,14 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	}
 }
 
-// superviseRequests counts the enqueued supervise requests of one operation by issue/role.
+// superviseRequests counts the enqueued supervise requests of one operation by issue/role, with
+// the relaunch half of a phase-worker start left out: a start is two rows (StartOrOwe), and the
+// one these counts are about is the row that carries the task.
 func superviseRequests(t *testing.T, pool *pgxpool.Pool, op string) map[string]int {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select issue, payload->>'role' from outbox where kind = 'supervise' and payload->>'op' = $1", op)
+	rows, err := pool.Query(t.Context(), `select issue, payload->>'role' from outbox
+		where kind = 'supervise' and payload->>'op' = $1
+			and not (payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')`, op)
 	if err != nil {
 		t.Fatalf("read %s requests: %v", op, err)
 	}
@@ -673,10 +690,14 @@ func sameCounts(got, want map[string]int) bool {
 	return true
 }
 
+// assertOutboxCount counts the rows of one kind, with the relaunch half of a phase-worker start
+// left out: a start is two rows (StartOrOwe) and the one these counts are about is the row that
+// carries the task.
 func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) {
 	t.Helper()
 	var got int
-	if err := pool.QueryRow(t.Context(), "select count(*) from outbox where kind = $1", kind).Scan(&got); err != nil {
+	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = $1
+		and not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')`, kind).Scan(&got); err != nil {
 		t.Fatalf("count %s rows: %v", kind, err)
 	}
 	if got != want {
@@ -792,7 +813,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 // resumed implementer which one it is in.
 func assertStartTasksNamePhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'")
+	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') <> ''")
 	if err != nil {
 		t.Fatalf("read start requests: %v", err)
 	}
@@ -917,9 +938,14 @@ func seedGate(t *testing.T, pool *pgxpool.Pool, gate record.DesignGate) {
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutGate(t.Context(), tx, gate) })
 }
 
+// seedSlot grants the slot and opens the tree lifecycle of the issue holding it under the
+// workflow's authority, as promotion's own admission does in one transaction. The lifecycle, not
+// the slot row, is what says a tree runs (record.TreeLive), so a fixture that granted a slot and
+// nothing else would describe a tree the daemon reads as never opened.
 func seedSlot(t *testing.T, pool *pgxpool.Pool, slot record.Slot) {
 	t.Helper()
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutSlot(t.Context(), tx, slot) })
+	seedTreeLifecycle(t, pool, slot.Issue)
 }
 
 func seedPhase(t *testing.T, pool *pgxpool.Pool, row record.PhaseRow) {
@@ -962,9 +988,16 @@ func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	}, log)
 }
 
+// assertOutboxKinds is every row the transition left, by kind and in the order it wrote them,
+// with the relaunch half of each phase-worker start left out: a start is two rows now
+// (StartOrOwe), one that brings the role's session back carrying no task and one that carries
+// the task and waits for the issue's slot, and it is the second that every one of these
+// assertions is about. A test that is about the relaunch row itself reads it by name.
 func assertOutboxKinds(t *testing.T, pool *pgxpool.Pool, want []string) {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), "select kind from outbox order by id")
+	rows, err := pool.Query(t.Context(), `select kind from outbox
+		where not (kind = 'supervise' and payload->>'op' = 'start' and coalesce(payload->>'task', '') = '')
+		order by id`)
 	if err != nil {
 		t.Fatalf("read outbox: %v", err)
 	}

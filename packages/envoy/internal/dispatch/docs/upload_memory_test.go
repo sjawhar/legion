@@ -1,3 +1,9 @@
+//go:build !race
+
+// This file holds the room-memory tests, which the race build must not compile: the detector's
+// shadow memory and instrumented allocations change what the Go heap holds, so the measurement
+// says nothing about the room, and these tests exercise no concurrency for the detector to catch.
+
 package docs
 
 import (
@@ -23,7 +29,6 @@ const roomAllowance = 2 << 20
 // adds to the store and no faster: an upload of the 25 KB spec that changes one token retains
 // about what it stores, not a copy of every block's attributes.
 func TestUploadsToARoomInUseKeepMemoryWithinTheBound(t *testing.T) {
-	skipUnderRace(t)
 	const uploads = 200
 	agent, start := newLoadAgent(t)
 	for range 2 {
@@ -42,7 +47,6 @@ func TestUploadsToARoomInUseKeepMemoryWithinTheBound(t *testing.T) {
 // what an upload stores; what the room retains stays within what the store holds, at a hundred
 // open anchors in table cells and prose as at none.
 func TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound(t *testing.T) {
-	skipUnderRace(t)
 	const bare, anchored, anchors = 50, 100, 100
 	agent, start := newLoadAgent(t)
 	for range 2 {
@@ -76,7 +80,6 @@ func TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound(t *testing.T) {
 // replies on anchored threads, token edits and token uploads, the plain comments and the replies
 // on plain roots writing no document. What it retains stays within what those writes store.
 func TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound(t *testing.T) {
-	skipUnderRace(t)
 	const writes = 400
 	agent, start := newLoadAgent(t)
 	for seed := range 4 {
@@ -142,35 +145,6 @@ type loadAgent struct {
 type loadThread struct {
 	id, body, at string
 	replies      []MarkReply
-}
-
-// skipUnderRace skips a measurement of the heap, or of the allocations a path makes, in a -race
-// build: the race detector distorts both figures (its shadow memory, its instrumented allocations
-// and the escapes its instrumentation forces are not the measured path's), and these tests
-// exercise no concurrency for it to catch, so under -race they cost minutes of the package's time
-// budget and prove nothing. The normal build runs them.
-func skipUnderRace(t *testing.T) {
-	t.Helper()
-	if raceEnabled {
-		t.Skip("the race detector distorts the heap and the allocations this test measures, and the test checks no concurrency")
-	}
-}
-
-// skipAtTheBoundsUnderRace skips, in a -race build, a test whose fixture has to stand at one of
-// the document's bounds: the 1,048,576 structs ygo decodes in one update (maxUpdateItems), or the
-// markdown's byte and element bounds rewritten until the cap refuses a write. Such a fixture is
-// built by about a million ygo writes, each of which the race detector instruments and whose
-// items it shadows: measured on two processors, the tests this and skipUnderRace leave out took
-// 50 of the 121 minutes a -race run of every test in the package took, and the decode-cap ones
-// among them carried its resident memory from 0.8 GB to 9.5 GB. Each drives one goroutine over
-// its fixture and then checks a figure or a refusal, so what the detector could catch in it - the
-// room's settlement, its sweep, its sockets - the tests beside it drive over a small document in
-// seconds. The normal build runs them.
-func skipAtTheBoundsUnderRace(t *testing.T) {
-	t.Helper()
-	if raceEnabled {
-		t.Skip("the fixture this test stands at the document's bounds costs the race detector minutes and gigabytes, and the test drives one goroutine over it")
-	}
 }
 
 func newLoadAgent(t *testing.T) (*loadAgent, time.Time) {

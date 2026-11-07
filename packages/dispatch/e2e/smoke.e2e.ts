@@ -7,19 +7,13 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("an authenticated user sees their empty inbox @phone", async ({ browser }, testInfo) => {
+test("an authenticated user sees their empty inbox", async ({ browser }, testInfo) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
 
   await page.goto("/");
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  }
 
   await expect(page.getByText("Signed in as alice")).toBeVisible();
-  if (testInfo.project.name === "iphone") {
-    await page.getByRole("button", { name: "Close navigation" }).click();
-  }
   await expect(page.getByText("Nothing needs you")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("empty-inbox.png"), fullPage: true });
 

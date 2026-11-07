@@ -33,12 +33,23 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testMainEnv) == "1" {
 		main()
 	}
+	// environment_test.go reads these variables again once every test before it has run, so the
+	// snapshot is taken here, ahead of Guard, the first thing that changes this binary's own
+	// environment.
+	snapshotStartupEnvironment()
 	// The tests run real git and jj, in-process and as children (fixtureenv.Guard). LEGION_GH_PATH
 	// is kept: it names the real gh a capture test runs, a binary and no credential.
 	if err := fixtureenv.Guard("LEGION_GH_PATH"); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
+	os.Exit(runWithoutTheOperatorsJJConfig(m))
+}
+
+// runWithoutTheOperatorsJJConfig runs the package's tests with a jj configuration directory of
+// their own and removes it afterwards. The removal is deferred, so it also runs when the setup
+// below panics. A run killed by a signal still keeps the directory, which nothing here can help.
+func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 	// Every test below starts isolated from the operator's own jj configuration — in particular
 	// fsmonitor.backend = "watchman" on this devbox: JJ_CONFIG names a file that does not exist,
 	// so jj falls back to its built-in defaults instead of reading ~/.jjconfig.toml, and no
@@ -50,15 +61,14 @@ func TestMain(m *testing.M) {
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
+	defer os.RemoveAll(configDir)
 	if err := os.Setenv("JJ_CONFIG", filepath.Join(configDir, "no-user-config.toml")); err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		return 1
 	}
-	code := m.Run()
-	os.RemoveAll(configDir)
-	os.Exit(code)
+	return m.Run()
 }
 
 // TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
@@ -455,7 +465,7 @@ func TestHelpListsEveryCommand(t *testing.T) {
 // LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
 // --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
-	unsetenv(t, "LEGION_GH_PATH")
+	fixtureenv.Unset(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -846,7 +856,7 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			unsetenv(t, "LEGION_GH_PATH")
+			fixtureenv.Unset(t, "LEGION_GH_PATH")
 			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
 		},
 			func(dir string) string {
