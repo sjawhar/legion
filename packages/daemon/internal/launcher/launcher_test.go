@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
@@ -299,18 +300,24 @@ type observed struct {
 // verbatim. The stand-in child and the namespace tests' shell scripts both write such markers.
 func published(t *testing.T, marker string) (int, string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if body, err := os.ReadFile(marker); err == nil {
-			pid, rest, _ := strings.Cut(string(body), " ")
-			if n, err := strconv.Atoi(pid); err == nil {
-				return n, rest
-			}
+	var pid int
+	var rest string
+	if !testwait.Holds(10*time.Second, testwait.Poll, func() bool {
+		body, err := os.ReadFile(marker)
+		if err != nil {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
+		head, tail, _ := strings.Cut(string(body), " ")
+		n, err := strconv.Atoi(head)
+		if err != nil {
+			return false
+		}
+		pid, rest = n, tail
+		return true
+	}) {
+		t.Fatal("the child never published its marker")
 	}
-	t.Fatal("the child never published its marker")
-	return 0, ""
+	return pid, rest
 }
 
 // publishedAll waits for the stand-in child's `<pid> <socket> <credential>` marker and reports
@@ -327,17 +334,9 @@ func publishedAll(t *testing.T, marker string) observed {
 // PID 1 is the test's own stand-in rather than a reaping init — the probe pod runs `sleep` —
 // every ended descendant the launcher killed is a zombie until the container exits.
 func gone(pid int) bool {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return true
-		}
-		if zombie(pid) {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
+	return testwait.Holds(5*time.Second, testwait.Poll, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) || zombie(pid)
+	})
 }
 
 // zombie says whether pid has ended and is only waiting to be reaped: the third field of
@@ -523,17 +522,19 @@ func (g *rig) toldRecreated(generation uint64, env []string, resume string) stri
 	if got := g.start(command); !got.OK {
 		g.t.Fatalf("start of generation %d = %#v", generation, got)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if body, err := os.ReadFile(told); err == nil {
-			g.stop(generation)
-			return string(body)
+	var said string
+	if !testwait.Holds(10*time.Second, testwait.Poll, func() bool {
+		body, err := os.ReadFile(told)
+		if err != nil {
+			return false
 		}
-		if time.Now().After(deadline) {
-			g.t.Fatalf("generation %d's child never said what it was told", generation)
-		}
-		time.Sleep(10 * time.Millisecond)
+		said = string(body)
+		return true
+	}) {
+		g.t.Fatalf("generation %d's child never said what it was told", generation)
 	}
+	g.stop(generation)
+	return said
 }
 
 // newWorkspace is a directory shaped as a workspace for the creation record (workspace.Created).
@@ -661,15 +662,18 @@ func (g *roleConn) awaitExit(generation uint64) shimwire.LauncherExit {
 // role's output, role-init's refusals among it — when it never does.
 func (f *fleet) waitForRoleFile(path string) string {
 	f.t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if body, err := os.ReadFile(path); err == nil && len(body) > 0 {
-			return string(body)
+	var said string
+	if !testwait.Holds(30*time.Second, testwait.Poll, func() bool {
+		body, err := os.ReadFile(path)
+		if err != nil || len(body) == 0 {
+			return false
 		}
-		time.Sleep(10 * time.Millisecond)
+		said = string(body)
+		return true
+	}) {
+		f.t.Fatalf("%s was never written; the launcher's log: %s", path, f.stderr.String())
 	}
-	f.t.Fatalf("%s was never written; the launcher's log: %s", path, f.stderr.String())
-	return ""
+	return said
 }
 
 // An issue pod's one container holds one authenticated connection per resident role, each with

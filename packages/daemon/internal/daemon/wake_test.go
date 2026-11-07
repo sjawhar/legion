@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/pods"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -277,19 +278,14 @@ func TestTheDaemonsOneDurableStateCallbackCarriesTheFactsAndTheResumeStamps(t *t
 // machine's goroutine, so the callback returns before the write lands.
 func awaitResume(t *testing.T, pool *pgxpool.Pool, id int64, column string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	if !testwait.Holds(10*time.Second, testwait.Poll, func() bool {
 		var stamped bool
 		if err := pool.QueryRow(context.Background(),
 			`select `+column+` is not null from pod_resumes where id = $1`, id).Scan(&stamped); err != nil {
 			t.Fatalf("read the resume's %s: %v", column, err)
 		}
-		if stamped {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the resume's %s was never stamped", column)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return stamped
+	}) {
+		t.Fatalf("the resume's %s was never stamped", column)
 	}
 }

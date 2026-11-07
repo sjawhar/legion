@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // The three re-entrant helpers this test runs as processes of its own: the stage, which builds a
@@ -522,12 +524,12 @@ func runGeneration(plan stagePlan, layout agentPlan, generation uint64, label st
 // detachedProcess says whether any process of the machine still runs the detached command the
 // role started, once the role's init has exited.
 func detachedProcess(marker string) string {
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		found := false
+	var unreadable string
+	gone := testwait.Holds(10*time.Second, 50*time.Millisecond, func() bool {
 		entries, err := os.ReadDir("/proc")
 		if err != nil {
-			return "unreadable: " + err.Error()
+			unreadable = "unreadable: " + err.Error()
+			return true
 		}
 		for _, entry := range entries {
 			if _, err := strconv.Atoi(entry.Name()); err != nil {
@@ -535,18 +537,18 @@ func detachedProcess(marker string) string {
 			}
 			body, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
 			if err == nil && strings.Contains(string(body), marker) {
-				found = true
-				break
+				return false
 			}
 		}
-		if !found {
-			return "gone"
-		}
-		if time.Now().After(deadline) {
-			return "running"
-		}
-		time.Sleep(50 * time.Millisecond)
+		return true
+	})
+	if unreadable != "" {
+		return unreadable
 	}
+	if gone {
+		return "gone"
+	}
+	return "running"
 }
 
 // TestRoleInitAgentHelper is the worker shim's stand-in: the process role-init starts inside the

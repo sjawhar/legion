@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testlog"
 	"github.com/sjawhar/legion/daemon/internal/testtmp"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // The fake OMP child is this test binary, re-executed with fakeOMPEnv set: a Go program that
@@ -287,21 +288,16 @@ func (b *syncBuffer) await(t *testing.T, substr string, n int) {
 // awaitLine waits for n log lines that are exactly line: the pane's one-line frame summaries.
 func (b *syncBuffer) awaitLine(t *testing.T, line string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(waitLimit)
-	for {
+	if !testwait.Holds(waitLimit, 5*time.Millisecond, func() bool {
 		got := 0
 		for l := range strings.Lines(b.String()) {
 			if strings.TrimSpace(l) == line {
 				got++
 			}
 		}
-		if got >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shim never logged the line %q %d time(s); log:\n%s", line, n, b)
-		}
-		time.Sleep(5 * time.Millisecond)
+		return got >= n
+	}) {
+		t.Fatalf("the shim never logged the line %q %d time(s); log:\n%s", line, n, b)
 	}
 }
 

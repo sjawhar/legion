@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // gitHubStandIn serves the GitHub App endpoints a boot's token mint calls, for the owner acme:
@@ -145,26 +146,33 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 			t.Error("daemon did not stop")
 		}
 	})
-	deadline := time.Now().Add(within)
-	for time.Now().Before(deadline) {
+	var exited error
+	var stopping bool
+	answered := testwait.Holds(within, 20*time.Millisecond, func() bool {
 		select {
 		case err := <-done:
-			stopped = true
-			if err == nil {
-				t.Fatal("run returned nil before the daemon answered /healthz")
-			}
-			return err
+			exited, stopping = err, true
+			return true
 		default:
 		}
 		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz"); err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return nil
+				return true
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	})
+	if stopping {
+		stopped = true
+		if exited == nil {
+			t.Fatal("run returned nil before the daemon answered /healthz")
+		}
+		return exited
 	}
-	t.Fatalf("the daemon neither answered /healthz nor exited within %s", within)
+	if !answered {
+		t.Fatalf("the daemon neither answered /healthz nor exited within %s", within)
+	}
 	return nil
 }
 

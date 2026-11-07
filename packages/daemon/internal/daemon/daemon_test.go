@@ -728,26 +728,34 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
 	// daemon serves, the held listener queues the connection unanswered.
 	poll := &http.Client{Transport: transport, Timeout: time.Second}
-	deadline := time.Now().Add(within)
-	for {
-		response, err := poll.Get(d.base + "/healthz")
+	var err error
+	var exited error
+	var gone bool
+	answered := testwait.Holds(within, 20*time.Millisecond, func() bool {
+		var response *http.Response
+		response, err = poll.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return d
+				return true
 			}
 		}
 		select {
-		case err := <-d.done:
-			d.stopped = true
-			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
+		case exited = <-d.done:
+			gone = true
+			return true
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
-		}
-		time.Sleep(20 * time.Millisecond)
+		return false
+	})
+	if gone {
+		d.stopped = true
+		t.Fatalf("the daemon exited before it answered /healthz: %v", exited)
 	}
+	if !answered {
+		t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
+	}
+	return d
 }
 
 // repositoriesGitHub is GitHub's REST API answering a read of any repository,

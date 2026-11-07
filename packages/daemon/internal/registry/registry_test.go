@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 func registryFile(t *testing.T) string {
@@ -332,17 +334,13 @@ func startProbe(t *testing.T, path string) int {
 		_, _ = probe.Process.Wait()
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	if !testwait.Holds(5*time.Second, testwait.Poll, func() bool {
 		cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(probe.Process.Pid) + "/cmdline")
-		if err == nil && len(cmdline) > 0 {
-			return probe.Process.Pid
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the probe at %s never exec'd", path)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return err == nil && len(cmdline) > 0
+	}) {
+		t.Fatalf("the probe at %s never exec'd", path)
 	}
+	return probe.Process.Pid
 }
 
 // The claim is one critical section or it is nothing. Two starts released together both read an

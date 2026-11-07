@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -115,16 +116,13 @@ func (c *claudeRig) row(path string) (string, bool) {
 // awaitRow waits, past a few saves, for the table to hold want at path.
 func (c *claudeRig) awaitRow(path, want string) {
 	c.t.Helper()
-	deadline := time.Now().Add(4 * saveInterval)
-	for {
-		got, ok := c.row(path)
-		if ok && got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			c.t.Fatalf("the table holds %q (row %t) at %s, want %q", got, ok, path, want)
-		}
-		time.Sleep(20 * time.Millisecond)
+	var got string
+	var ok bool
+	if !testwait.Holds(4*saveInterval, 20*time.Millisecond, func() bool {
+		got, ok = c.row(path)
+		return ok && got == want
+	}) {
+		c.t.Fatalf("the table holds %q (row %t) at %s, want %q", got, ok, path, want)
 	}
 }
 

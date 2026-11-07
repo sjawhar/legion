@@ -633,18 +633,21 @@ func probe(t *testing.T, rt *Runtime, loc runtime.Locator) runtime.Observation {
 // exiting under the probe's own list-panes. Both converge on Gone.
 func awaitGone(t *testing.T, rt *Runtime, loc runtime.Locator, after string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		obs := probe(t, rt, loc)
-		switch {
-		case obs.Kind == runtime.Gone:
-			return
-		case obs.Kind == runtime.Alive:
-			t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
-		case time.Now().After(deadline):
-			t.Fatalf("Probe after %s = %+v, want gone within 10s", after, obs)
+	var obs runtime.Observation
+	var alive bool
+	gone := testwait.Holds(10*time.Second, 20*time.Millisecond, func() bool {
+		obs = probe(t, rt, loc)
+		if obs.Kind == runtime.Alive {
+			alive = true
+			return true
 		}
-		time.Sleep(20 * time.Millisecond)
+		return obs.Kind == runtime.Gone
+	})
+	if alive {
+		t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
+	}
+	if !gone {
+		t.Fatalf("Probe after %s = %+v, want gone within 10s", after, obs)
 	}
 }
 
