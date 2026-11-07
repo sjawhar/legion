@@ -15,9 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/nats-io/nats.go"
-	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // RenewRoleClaims stamps the moment clientInstanceID's process last answered on every claim
@@ -102,45 +99,44 @@ func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanc
 // renewal is dropped and logged, never read again and retried: the record is now another
 // claimant's, and a renewal retried into it would stamp this process's heartbeat on a claim it
 // does not hold. The next registration renews the claim that stands, if it is still this
-// session's.
+// session's. That is what this write says by allowing one attempt of writeRoleClaim, the loop
+// the release's delete and the hand-back's mark send their writes through, where each of those
+// reads a lost race as a record to weigh again.
 func (r *Registry) renewRoleClaim(ctx context.Context, role, sessionID, clientInstanceID string) error {
 	claim, err := r.RoleClaim(ctx, role)
 	if err != nil {
 		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
 	}
-	if claim.Revision == 0 || claim.HolderSessionID != sessionID || claim.HandedBack {
-		return nil
-	}
-	if claim.ClientInstanceID != "" && !claim.HeldByProcess(clientInstanceID) {
-		return nil
-	}
-	renewed := claim
-	renewed.ClientInstanceID = clientInstanceID
-	renewed.RenewedAt = r.now().UnixMilli()
-	data, err := json.Marshal(renewed)
-	if err != nil {
-		return err
-	}
-	epoch := r.roleViewEpoch()
-	roles := r.roles()
-	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) {
-		return roles.Update(role, data, claim.Revision)
+	outcome, _, err := r.writeRoleClaim(ctx, claim, roleClaimWrite{
+		role:     role,
+		attempts: 1,
+		writes: func(claim RoleClaim) bool {
+			return claim.HolderSessionID == sessionID && !claim.HandedBack &&
+				(claim.ClientInstanceID == "" || claim.HeldByProcess(clientInstanceID))
+		},
+		send: func(claim RoleClaim) (uint64, error) {
+			renewed := claim
+			renewed.ClientInstanceID = clientInstanceID
+			renewed.RenewedAt = r.now().UnixMilli()
+			data, err := json.Marshal(renewed)
+			if err != nil {
+				return 0, err
+			}
+			return r.roles().Update(role, data, claim.Revision)
+		},
+		landed: func(_ RoleClaim, revision, epoch uint64) { r.setOwnRoleHolder(role, sessionID, revision, epoch) },
 	})
 	switch {
-	case !answered:
+	case err != nil:
 		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
-	case errors.Is(err, nats.ErrKeyExists), errors.Is(err, nats.ErrKeyNotFound):
+	case outcome == roleClaimWriteRaced, outcome == roleClaimWriteMissing:
 		r.logger().Info("registry dropped a role claim renewal a claim landed under",
 			slog.String("role", role),
 			slog.String("session_id", sessionID),
 			slog.String("client_instance_id", clientInstanceID),
 			slog.Uint64("read_revision", claim.Revision),
 		)
-		return nil
-	case err != nil:
-		return fmt.Errorf("renew role %s's claim held by %s: %w", role, sessionID, err)
 	}
-	r.setOwnRoleHolder(role, sessionID, revision, epoch)
 	return nil
 }
 

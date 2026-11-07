@@ -315,6 +315,99 @@ func (r *Registry) roleViewEpoch() uint64 {
 	return epoch
 }
 
+// roleClaimWrite is one conditional write of one role's claim, as its caller means it: which
+// records the write may be made over, the write itself, and what the view owes a write that
+// landed. Three callers make such a write - the release's delete (releaseReadRoleClaim), the
+// hand-back's mark (markRoleClaimHandedBack) and the renewal (renewRoleClaim) - and what they
+// share is the protocol, not the meaning: the bounded call, the bucket's answers read one way,
+// the bounded re-read, and the bound on attempts. writeRoleClaim runs that, each caller states
+// the rest here, and nothing is flattened: a lost race means something different to each of
+// them, which each says by what it does with the outcome.
+type roleClaimWrite struct {
+	// role is the claim's key: what the write is sent against and what a re-read reads.
+	role string
+	// attempts is how many conditional writes may be sent in all, counting the first. One is a
+	// write that is never retried, which is what a lost race means to the renewal: the record
+	// is another claimant's now, and a renewal written into it would stamp this process's
+	// heartbeat on a claim it does not hold.
+	attempts int
+	// writes reports whether this write may be made over claim, the record as it was last
+	// read. It is asked before every attempt, so a retry is made only over a record its caller
+	// still means to write, and a caller comparing the re-read against the claim it first read
+	// closes over that one.
+	writes func(claim RoleClaim) bool
+	// send sends the write itself, conditional on the revision claim was read at, and answers
+	// the revision the record stands at after it, as the bucket's writes do; a delete answers
+	// none and its caller reads the revision it deleted off claim.
+	send func(claim RoleClaim) (uint64, error)
+	// landed moves this registry's own copy of the role's holder to what the write left
+	// (setOwnRoleHolder, forgetRoleHolder), over the claim the write was made at, the revision
+	// it answered and the epoch of the handle it was sent through, read before the write.
+	landed func(claim RoleClaim, revision, epoch uint64)
+}
+
+// roleClaimWriteOutcome is what one run of writeRoleClaim did to the role's record, for the
+// callers that answer for each of them differently. A failure is the zero value and comes with
+// the error that caused it; every other outcome carries none.
+type roleClaimWriteOutcome uint8
+
+const (
+	// roleClaimWriteFailed is a bucket call that did not answer, a re-read that failed, or an
+	// answer that is neither a landed write nor a lost race. Nothing was written.
+	roleClaimWriteFailed roleClaimWriteOutcome = iota
+	// roleClaimWriteLanded is the conditional write the bucket took; landed has been called.
+	roleClaimWriteLanded
+	// roleClaimWriteStood is a record this write may not be made over: the caller's own test
+	// refused it, or no record claims the role at all (a zero revision), which no conditional
+	// write can be made over either. The claim writeRoleClaim answers beside it is the record
+	// it stopped at, which is the caller's to read.
+	roleClaimWriteStood
+	// roleClaimWriteMissing is a write the bucket answered nats.ErrKeyNotFound: the record was
+	// gone when it arrived.
+	roleClaimWriteMissing
+	// roleClaimWriteRaced is every attempt lost to a write that landed since the read it was
+	// conditional on (nats.ErrKeyExists), the last of them at the attempt bound.
+	roleClaimWriteRaced
+)
+
+// writeRoleClaim sends w over claim, the record its caller read, conditional on the revision
+// that read returned, and sends it again over a re-read of the record while the write loses
+// that condition and w allows another attempt. Each bucket call waits no longer than ctx
+// (bus.Bounded); a call ctx abandoned may still land after this answer, and it is conditional on
+// the revision it was sent at, so it touches no record written since - each caller says what
+// that costs it.
+//
+// It answers what became of the record (roleClaimWriteOutcome), the claim it stopped at, and the
+// error of a call that failed. The claim is the caller's own when nothing was re-read, and the
+// re-read's record otherwise, so a caller that must weigh the record it left reads it here
+// rather than reading the bucket again.
+func (r *Registry) writeRoleClaim(ctx context.Context, claim RoleClaim, w roleClaimWrite) (roleClaimWriteOutcome, RoleClaim, error) {
+	for attempt := 1; ; attempt++ {
+		if claim.Revision == 0 || !w.writes(claim) {
+			return roleClaimWriteStood, claim, nil
+		}
+		at := claim
+		epoch := r.roleViewEpoch()
+		revision, answered, err := bus.Bounded(ctx, func() (uint64, error) { return w.send(at) })
+		switch {
+		case !answered:
+			return roleClaimWriteFailed, claim, err
+		case err == nil:
+			w.landed(at, revision, epoch)
+			return roleClaimWriteLanded, at, nil
+		case errors.Is(err, nats.ErrKeyNotFound):
+			return roleClaimWriteMissing, claim, nil
+		case !errors.Is(err, nats.ErrKeyExists):
+			return roleClaimWriteFailed, claim, err
+		case attempt == w.attempts:
+			return roleClaimWriteRaced, claim, nil
+		}
+		if claim, err = r.RoleClaim(ctx, w.role); err != nil {
+			return roleClaimWriteFailed, claim, err
+		}
+	}
+}
+
 // ErrRoleViewNotReady is RolesHeldBy's answer when its view of the role claims cannot be served,
 // so it cannot say which roles a session holds: the watcher has not completed a read of the bucket,
 // its copy has not followed the bucket for longer than the stale bound
@@ -633,16 +726,31 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, req RoleClaimRequest
 		// name. A winner naming the claimant itself is no exception here, where it is one for
 		// an unconditional claim just below: the revision the caller sequenced its decision on
 		// is gone either way, and the claim that stands is not the one it made.
-		heldByClaimant := holderErr == nil && holder == req.SessionID
+		//
+		// The claim that stands is this claimant's own concurrent success only where it names
+		// the claimant's session and the very process the claimant stated
+		// (RoleClaim.HeldByProcess): a session id names no process, so a second process that
+		// resumed this id could be the one holding that claim, and answering success over it
+		// tells this claimant it holds a role another process holds - which is how two
+		// processes of one session id came to answer for one role. A claimant that states no
+		// process is told success by no claim at all: an absent instance names no process and
+		// matches nothing, here as everywhere else a claim is weighed against a process, and a
+		// claim naming none is the one record any process of that session id could have
+		// written. Such a claimant is answered the failure its write met, and the role stays
+		// with whatever claim stands.
+		heldBySession := holderErr == nil && holder == req.SessionID
+		heldByClaimant := heldBySession && current.HeldByProcess(req.ClientInstanceID)
 		conditionalLoss := req.IfClaimRevision != nil && holderErr == nil && errors.Is(err, nats.ErrKeyExists)
 		if heldByClaimant && !conditionalLoss {
 			return item, nil
 		}
-		// The topic goes back only where the role did not end up with this session. A
-		// conditional claim refused because the claim that won named the claimant itself
-		// leaves that record alone: it carries the lane topic of the role that session now
-		// holds, and taking it out would stop the fan-out to the holder.
-		if !heldByClaimant {
+		// The topic goes back only where the role did not end up with this session, which is
+		// the session's and not the process's: one interest record serves every process
+		// running under one session id, so a claim refused because the claim that won names
+		// this session - the claimant's own process's, another process's, or a claim that
+		// names none - leaves that record alone. It carries the lane topic of the role that
+		// session now holds, and taking it out would stop the fan-out to the holder.
+		if !heldBySession {
 			if rollbackErr := r.removeInterestTopics(ctx, req.SessionID, []string{roleTopic}); rollbackErr != nil {
 				return Interest{}, errors.Join(err, holderErr, rollbackErr)
 			}

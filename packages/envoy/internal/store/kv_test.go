@@ -2548,10 +2548,17 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-// A soft claim's create is conditional, and the claim that beat it to the key was this session's
-// own concurrent claim: the role is held by the session that asked for it, so the call is the
-// success it would have been had it won, not *ErrRoleHeld against itself and not a failure.
-func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
+// A soft claim's create is conditional, and the claim that beat it to the key was this very
+// process's own concurrent claim: the role is held by the process that asked for it, so the
+// call is the success it would have been had it won, not *ErrRoleHeld against itself and not a
+// failure.
+//
+// Both claims name one process, because the claim that stands is read as the claimant's own
+// concurrent success only where it names the claimant's process as well as its session
+// (RoleClaim.HeldByProcess, SetRoleWithPrevious): a session id names no process, and the rows
+// for the other two shapes - a second process of that session id, and a claimant that states
+// none - are TestAClaimWhoseWriteFailedIsSuccessOnlyForTheClaimantsOwnProcess.
+func TestSetRoleSoftTreatsSameProcessCASConflictAsConcurrentSuccess(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
@@ -2561,15 +2568,16 @@ func TestSetRoleSoftTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T
 		role      = "legion-controller"
 		roleTopic = "notifications.role.legion-controller"
 	)
+	claim := RoleClaimRequest{SessionID: sessionID, MachineID: "example-host", ClientInstanceID: roleClaimInstance, Role: role, Soft: true}
 	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV.Legacy()}
 	reg.roleKV = bus.NewKeyValue(racingKV, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	var concurrent Interest
 	var concurrentErr error
 	racingKV.beforeFirstCreate = func() {
-		concurrent, concurrentErr = reg.SetRole(sessionID, "example-host", role, true)
+		concurrent, concurrentErr = reg.SetRoleWithPrevious(context.Background(), claim)
 	}
-	first, firstErr := reg.SetRole(sessionID, "example-host", role, true)
+	first, firstErr := reg.SetRoleWithPrevious(context.Background(), claim)
 
 	if concurrentErr != nil {
 		t.Fatalf("concurrent SetRole: %v", concurrentErr)

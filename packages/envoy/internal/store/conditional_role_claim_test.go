@@ -102,9 +102,10 @@ func TestAConditionalClaimThatLosesTheConditionalWriteIsAMismatchNotAStoreFailur
 	}
 }
 
-// The same race whose winner names the claimant itself. An unconditional claim reads that as the
-// concurrent success it is (TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess); a
-// conditional one is still refused, because the revision its caller sequenced on is gone. The
+// The same race whose winner names the claimant's own session. A claim with no precondition
+// reads that as its own concurrent success where the winner names its process too
+// (TestSetRoleSoftTreatsSameProcessCASConflictAsConcurrentSuccess); a conditional one is still
+// refused, whichever process won, because the revision its caller sequenced on is gone. The
 // session now holds the role, so its record keeps the role's topic.
 func TestAConditionalClaimLostToAClaimOfItsOwnSessionIsStillAMismatch(t *testing.T) {
 	const (
