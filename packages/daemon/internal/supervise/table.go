@@ -169,6 +169,25 @@ type StalePlugin struct {
 	Trigger string
 }
 
+// StallBackstop is the daemon's stall backstop reaching this claim: the orphan sweep found it in
+// a turn whose recorded last step (StepRecord) is older than its role's backstop bound, and the
+// daemon ends that turn itself (internal/daemon's backstopStalledTurns, INFRA-1274's R5). The
+// sweep posts it at every tick that finds the claim still stalled, so a stop the runtime refuses
+// is tried again without a timer of its own, exactly as StalePlugin is re-posted.
+//
+// Bound is the role's bound (config.Config.StallBackstopFor), which the machine measures the
+// claim's own record against before it acts: the sweep read the claims before this decision is
+// taken, and a claim whose record moved in between is one whose agent is moving. Deadline is the
+// moment the daemon decided it would wait no longer — that record's last step plus Bound — which
+// is already past when the sweep posts. The request carries it rather than waiting for the turn
+// to end, as a suspension held for a turn does (holdSuspension): the turn this exists for is one
+// that never ends.
+type StallBackstop struct {
+	Claim    claim.Token
+	Bound    time.Duration
+	Deadline time.Time
+}
+
 // PodUpdateOpen opens, or keeps open, an update round over this claim: the process holding it is
 // about to be replaced, and the worker is asked to push its work and answer ready_for_update
 // first. Round is the round's identity and kind in one string (Claim.UpdateRound), Reasons what
@@ -462,6 +481,7 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (StalePlugin) isEvent()          {}
+func (StallBackstop) isEvent()        {}
 func (PodUpdateOpen) isEvent()        {}
 func (PodUpdateEnded) isEvent()       {}
 func (PodUpdateSignalled) isEvent()   {}
@@ -520,7 +540,8 @@ const (
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
-	onStalePlugin eventKind = "stale_plugin"
+	onStalePlugin   eventKind = "stale_plugin"
+	onStallBackstop eventKind = "stall_backstop"
 
 	onPodUpdateOpen      eventKind = "pod_update_open"
 	onPodUpdateEnded     eventKind = "pod_update_ended"
@@ -556,6 +577,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case StalePlugin:
 		return onStalePlugin
+	case StallBackstop:
+		return onStallBackstop
 	case PodUpdateOpen:
 		return onPodUpdateOpen
 	case PodUpdateEnded:
@@ -791,6 +814,17 @@ func fillTable(t *builder) {
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
+
+	// The daemon's stall backstop over a claim whose agent stopped stepping mid-turn. It is a
+	// row of the one state a turn runs in; the machine re-reads the claim's record before it
+	// acts, so a record that moved since the sweep read it leaves the turn alone
+	// (backstopStalledTurn). A held suspension ends in a suspension rather than a relaunch
+	// (replaceProcess, endHeld), which is why suspended is among the destinations.
+	t.row(onStallBackstop, "the agent stopped stepping mid-turn: end the turn, keep the task owed, and bring the session back", backstopStall,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateWorking)
+	t.ignore(onStallBackstop, "the claim is in no turn, so its record names no turn to end",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateIdle)
+	t.ignore(onStallBackstop, noProcess, gone...)
 
 	// The update round over the process holding this claim: opened and kept open by the daemon's
 	// sweep, and ended once the replacement it waited for has been made. inRound is every state a

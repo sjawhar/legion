@@ -740,6 +740,15 @@ type Machine struct {
 	// memory only: a call open across a restart is recorded by its end alone, with no arguments
 	// measured, which is what the daemon then knows of it.
 	openCalls map[string]openCall
+	// steppedAt is the last step this machine itself read of its claim — a tool frame that moved
+	// the record's time, or a turn's own start — which the claim it holds does not carry: the
+	// record is written through the store's narrow call and never read back into a machine's
+	// claim (putStep). The stall backstop reads it beside the claim's own record, which is the
+	// record as the store held it when this machine was built, and acts on the later of the two
+	// (backstopStalledTurn). It is memory only, and it is what makes the fence exact: a frame
+	// that arrived after the sweep read the claims is already in this machine's inbox, ahead of
+	// the backstop's own event, so a turn whose agent moved in that window is left alone.
+	steppedAt time.Time
 	// awaitingResult is the id of the pending delivery whose prompt Oh My Pi acknowledged and has
 	// not yet reported the end of (shimwire.PromptResult). While it is set, a turn that ends is
 	// not known to be that prompt's — with background work on, a role's own background result
@@ -1871,9 +1880,16 @@ func (m *Machine) persist(ctx context.Context) error {
 // of the machine's state — a claim write carries whatever the machine's in-memory claim holds,
 // and that claim never carries the steps read since it was loaded.
 //
+// The one thing it keeps in memory is when this machine last read a step that moved the record's
+// time (Machine.steppedAt), which the stall backstop's fence reads: a frame that fence cannot
+// see is a frame whose turn the backstop would end for standing still.
+//
 // A store that no longer holds the claim is said once rather than returned: the frame is a fact
 // about an agent, and the claim being gone is no failure of the write.
 func (m *Machine) putStep(ctx context.Context, step StepRecord) error {
+	if stepped := step.LastStep(); stepped.After(m.steppedAt) {
+		m.steppedAt = stepped
+	}
 	known, err := m.deps.Store.PutClaimStep(ctx, m.claim.Token, step)
 	if err != nil {
 		return err
@@ -2019,6 +2035,8 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case StalePlugin:
+		return ev.Claim
+	case StallBackstop:
 		return ev.Claim
 	case PodUpdateOpen:
 		return ev.Claim
