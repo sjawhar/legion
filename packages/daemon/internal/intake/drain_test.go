@@ -22,12 +22,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
@@ -110,7 +108,7 @@ func (w *warnings) String() string {
 // drain must also take under a minute from the first publish; the time is logged either way.
 func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.T) {
 	ctx := context.Background()
-	dsn := testpg.Database(t, "legion_intake_drain_test")
+	dsn := testpg.Clone(t, "legion_intake_drain_test")
 	direct := drainPool(t, dsn)
 	seedDrainProject(t, direct)
 
@@ -131,15 +129,14 @@ func TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent(t *testing.
 	logs := &warnings{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	repository := ghrepo.MustParse(drainRepo)
-	deploys := []config.Deploy{{Repo: repository, Workflow: ".github/workflows/deploy.yaml", Step: "Apply"}}
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}, Deploys: deploys}, log)
+	engine := workflow.New(records, workflow.Config{Project: drainProject, Repositories: drainRepositories{}}, log)
 	admission := admit.New(records, engine, drainRunning, drainProject, log)
 	// GitHub answers that the approver can write to the repository; the count is every review the
 	// consumer asked GitHub about.
 	var asked atomic.Int64
 	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{
-		Project: drainProject, Repositories: []ghrepo.Repository{repository}, Deploys: deploys,
+		Project: drainProject, Repositories: []ghrepo.Repository{repository},
 		AckWait: 30 * time.Second, NakDelay: time.Second, Logger: log,
 		ReviewPermission: func(context.Context, intake.PullRequestReview) (bool, error) {
 			asked.Add(1)
@@ -439,19 +436,11 @@ func assertDrainedPullRequests(t *testing.T, pool *pgxpool.Pool, records record.
 	}
 }
 
-// drainPool is the migrated database at dsn, reached directly: the seed and the assertions do not
-// pay the delay the consumer does.
+// drainPool is the database at dsn — a clone of the package's migrated template — reached
+// directly: the seed and the assertions do not pay the delay the consumer does. It takes the URL
+// rather than making one, since the caller also needs it for testpg.Delayed.
 func drainPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate store: %v", err)
-	}
-	st.Close()
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("open test pool: %v", err)

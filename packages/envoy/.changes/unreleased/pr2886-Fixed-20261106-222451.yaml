@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  Dispatch's block index retires an item's old whole-text embedding without reading the whole of anything.
+  It walks the owners of the kind's windows in index order, a bounded slice of at most 500 owners of each kind a pass with a cursor between passes, and deletes the row behind each owner whose window is current by its primary key. It deletes the rows it deleted before, and still locks only those.
+  Each pass of the statement it replaces grew with the table. Driving it from the whole-text rows read every row of the kind: on the deployment this was found on, which then held 482,073 comments no window had replaced yet, one pass took about 25 minutes. Driving it from the window rows read every current window of the kind: on a database seeded with 400,000 current comment windows and 2,000 whole-text comment rows that could not retire, one pass took 999 ms and wrote 35 MB of temp files, and such rows always remain, so that cost would have come back on every pass for ever. On that same database a pass now costs 3.3 ms and writes none.
+time: 2026-11-06T22:24:51.637124719Z
+custom:
+    Issue: pr2886

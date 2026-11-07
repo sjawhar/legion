@@ -220,6 +220,9 @@ postgres_dsn: $LEGION_E2E_PG_DSN
 state_dir: $work/state
 operator_token_file: $work/operator-token
 max_fix_attempts: 5
+# The wake pacing off (INFRA-976): this proof's waits are bounded, and at the default of 8 wakes a
+# minute every wake after the first would spend those waits queueing for its turn.
+worker_wakes_per_minute: 0
 envoy_url: http://legion:fixture-envoy-password@127.0.0.1:9020
 projects:
   FIXTURE: {}

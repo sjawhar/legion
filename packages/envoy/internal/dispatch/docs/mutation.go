@@ -626,7 +626,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			if err := s.refuseDroppedAskBlocks(ctx, artifactID, target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
-		} else if err := refuseChangedAsks(current, target, readAskBlockStrictly, newAskMarkdown()); err != nil {
+		} else if err := refuseChangedAsks(current, target, readWrittenAskBlockStrictly, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if canonical, err = renderTree(target); err != nil {

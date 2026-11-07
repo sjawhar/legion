@@ -1,0 +1,5 @@
+kind: Changed
+body: 'Daemon API contract 54: the state''s `check` object carries `role`, the role that works the production check, and its `nextWakeAt` is when the next look is due — the time the checking agent named, the retry of a look nobody reported, or the check''s bound where neither stands. `handoff_complete` takes `wakeAt`, and `release-records`'' `since` now reads the same instant schema: a session sends both, and the daemon''s RFC 3339 decode refuses a time with no seconds. The settings body no longer reports a project''s `deploys`.'
+time: 2026-11-06T05:35:12.368290516Z
+custom:
+    Issue: pr2855
