@@ -2,9 +2,8 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-legion`: the Legion entry (`extensions/legion.ts`),
 the Legion lifecycle modules (`src/`), the task agents Legion's prompts dispatch (`agents/`), and
-the nine Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
-`legion-worker`, `leading-a-work-stream`, `ce-simplify-code`, `thermonuclear-code-quality`,
-`thermonuclear-deep-review`),
+the seven Legion skills (`legion-architect`, `legion-controller`, `legion-oracle`, `legion-retro`,
+`legion-worker`, `leading-a-work-stream`, `simplify-settled-diff`),
 staged into `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. It is installed
 beside `@sjawhar/pi-envoy` (`packages/pi-envoy`), which every session loads for Envoy messaging and
 the Dispatch tools; the Legion daemon installs both into its Oh My Pi profile and a worker image
@@ -72,10 +71,10 @@ shapes that client parses, and the pane's environment — the identity variables
 workspace, the pane's cwd; read by `claim-session.ts`, which resolves it and scopes the overlay's
 `Dispatch:` line to it), `LEGION_GENERATION` (set by the daemon, read by
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
-variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner;
-`GH_CONFIG_DIR`, its issue's owner's directory; `LEGION_GH_PATH`, the real gh the pane's `gh`
-wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty: read by the pane's `gh` and
-`git`, by nothing here), the Envoy
+variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner and one
+per other repository its issue's owner serves; `GH_CONFIG_DIR`, its issue's owner's directory;
+`LEGION_GH_PATH`, the real gh the pane's `gh` wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` set empty: read by the pane's `gh` and `git`, by nothing here), the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
@@ -92,7 +91,20 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 52's pane issue key
+number is the one `DaemonAPIVersion` declares, last bumped by this release's production check
+(INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
+default, decides whether a merge that closes an issue opens a check and who works it; the
+`check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
+opened, and its `nextWakeAt` is when the next look is due — the time the checking agent named
+for itself, the retry of a look nobody reported, or the check's own bound where neither stands;
+`handoff_complete` gains `wakeAt`, which a `pending` report on a look that is not the check's
+last must carry and no other report may), after contract 53's wake pacing
+(`GET /legion/v1/state` carries `wakesWaiting`, the wakes the daemon's pacing holds until their
+turn, an array that is never null and is empty at every moment outside a restart, a re-admission
+wave or a plugin wave; a strict reader before 53 refuses a state carrying the key, empty as surely
+as naming a wake, so a caller from a pod below 53 is served the state without the key, as is a
+caller from a pod whose claims the daemon cannot read, which may be a pod at 53 — which is why the
+schema declares it optional), after contract 52's pane issue key
 (`LEGION_ISSUE_TRAILER`, the issue the pane stamps into its commits when
 `projects.<KEY>.commit_issue_trailer_repos` names the repository it works; each runtime sets the
 name itself and owns it, and this entry's claim boot reads that variable and never `LEGION_ISSUE`),
@@ -152,7 +164,7 @@ controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/
 per-role directory), after contract 33's acceptance before the
 merge (LEGION-781: the phase `accepting` in place of `production_check`, each closed issue's open
 production check as `check` on `GET /legion/v1/state`, `handoff_complete`'s optional `commit` and
-`pending` verdict for the implementer's report on a look of that check, and the architect's
+`pending` verdict for the checking role's report on a look of that check, and the architect's
 `request_backward_move` naming its `issue`), after contract 32's repository cache
 (sjawhar/legion#1986: `workspace-init cache`, the issue pods' `LEGION_REPOSITORY_CACHE_URL` and
 `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's `repositories[].cache` and `caches`), after
@@ -218,8 +230,9 @@ Contract 5 added `LEGION_GRANT_FILE` to the pane's environment (LEGION-262), the
 hook minted a grant into before a bash command that invoked `legion`; contract 19 removes it with
 that hook. Nothing in a pane runs `legion` from bash: the `legion` tool mints each operation's grant
 in-process and posts it with the request, and `gh` and `git` read the role's GitHub App tokens from
-the gh bundle under the pane's `LEGION_GH_OWNERS_DIR` (one directory per owner, each a `hosts.yml`
-and `config.yml` rendered and refreshed by the daemon: `/var/run/legion/gh` in a pod,
+the gh bundle under the pane's `LEGION_GH_OWNERS_DIR` (one directory per owner and one per other
+repository the issue's owner serves, each a `hosts.yml` and `config.yml` rendered and refreshed by
+the daemon: `/var/run/legion/gh` in a pod,
 `<state_dir>/secrets/<claim>-gh` on tmux; `GH_CONFIG_DIR` names the issue owner's), with
 `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty so no token in the daemon's environment outranks
 the files.
@@ -503,13 +516,21 @@ the commit `legion/<issue>@origin` names, refused while `@-` is not on that bran
 complete again); retro, the merger's READY and every other phase report the commit the workspace
 stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, and `handoffId`,
-`handoffVersion` and `commit` where they apply). The implementer's
-report on a look of its closed issue's production check is the one call that finds neither: the
-operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
+`handoffVersion`, `commit` and `wakeAt` where they apply). A
+report on a look of a closed issue's production check is the one call that finds neither: the
+operation reads the daemon's state first, and a call on an issue in `done` whose
 `check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
-there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
-the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
-(`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
+there; `pending` is refused on a phase completion), its `summary` and, on a `pending` that is not
+the check's last look, `wakeAt` — no handoff and no `commit`. The plugin refuses, posting nothing,
+a session whose role is not the check's `role`, a `pending` with no `wake_at` while `check.last`
+is false, and a `wake_at` on a `pass`, a `fail` or the last look's `pending`; the daemon refuses
+the same three (`CHECK_ROLE_MISMATCH`, `CHECK_WAKE_REQUIRED`, `CHECK_WAKE_UNEXPECTED`, which it
+also answers a phase completion carrying a `wake_at`) beside
+`CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` and `CHECK_VERDICT_REQUIRED`. Which of the two a call is,
+is the daemon's to say, from the caller's own live assignment: a session working a look reports
+on that look, and every other session's completion is its phase's, which it refuses on a `done`
+issue, whose phases are over, with `CHECK_LOOK_NOT_SERVED` — report when the look's own task
+reaches the session (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
 and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
 record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
 (`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),

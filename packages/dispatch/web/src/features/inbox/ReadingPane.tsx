@@ -1,4 +1,4 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
@@ -11,28 +11,23 @@ import {
 
 import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
-import { issueQuery, whoAmIQuery } from "../../api/queries";
+import { whoAmIQuery } from "../../api/queries";
 import type { AskApproval, InboxRow } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
-import { borderDefault, focusVisibleRing, quoteAccentBorder } from "../../theme/classes";
+import { borderDefault } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
-import { liveTextQueryOptions, ProofDocument } from "../doc/ProofDocument";
 import { DocumentRuntime } from "../doc/runtime";
 import { loadBlockSchema } from "../doc/schema";
-import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop, scrollElementToTop } from "../doc/scroll-block";
+import { scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { AskCard } from "./AskCard";
 import { isDecisionAsk } from "./ask-decision";
+import type { InboxListRow } from "./list-row";
+import { artifactQueryOptions, DocumentPane, PaneFrame, useSettled } from "./PaneDocument";
 import { ReadingPaneHead } from "./ReadingPaneHead";
-
-/**
- * How long the column waits after the last change of the selected question before it opens
- * another document. Each document mount opens a websocket, a Y.Doc and an editor, so a reader
- * holding `j` down a list of thirty questions opens one room, not thirty.
- */
-const DOCUMENT_SETTLE_MS = 200;
+import { ThreadPane } from "./ThreadPane";
 
 /** What the selected question is, which is what the column shows. */
 type PaneSubject =
@@ -53,90 +48,15 @@ function subjectOf(ask: InboxRow): PaneSubject {
   return { kind: "card" };
 }
 
-/** The document the column shows, under the document page's own key. */
-const artifactQueryOptions = (artifactId: string) =>
-  queryOptions({
-    queryFn: () => api.getArtifact(artifactId),
-    queryKey: ["artifact", artifactId],
-  });
-
-/** Where the section bar stands in the column's own scrolled content, in pixels. */
-interface SectionBar {
-  height: number;
-  top: number;
-}
-
-function blockElement(root: ParentNode, blockId: string): HTMLElement | null {
-  return root.querySelector<HTMLElement>(`[${BLOCK_ID_ATTRIBUTE}="${CSS.escape(blockId)}"]`);
-}
-
-/**
- * The heading the question's section starts at: the nearest heading of any level before the
- * question's block. The plan reads it off the loaded ProseMirror document; a pane holds no
- * editor handle, so it reads the blocks the editor drew, which stand in the same order. A block
- * before any heading has no section, and the column then scrolls to the top and draws no bar.
- */
-function sectionHeadingId(content: HTMLElement, blockId: string): string | undefined {
-  const blocks = [...content.querySelectorAll<HTMLElement>(`[${BLOCK_ID_ATTRIBUTE}]`)];
-  const at = blocks.findIndex((block) => block.dataset.blockId === blockId);
-  for (let index = at - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (/^H[1-6]$/.test(block.tagName)) {
-      return block.dataset.blockId;
-    }
-  }
-  return undefined;
-}
-
-/** The bar that marks the section down to the decision block: where the section's heading
- *  stands in the column's own scrolled content, and from there to the foot of that block. Both
- *  are read as single rects - the margin's `blockOffsets` measures every block in the document,
- *  and this runs on every batch of mutations a live document makes. */
-function sectionBarOf(
-  content: HTMLElement,
-  headingId: string | undefined,
-  block: HTMLElement
-): SectionBar | undefined {
-  if (headingId === undefined) {
-    return undefined;
-  }
-  const heading = blockElement(content, headingId);
-  if (heading === null) {
-    return undefined;
-  }
-  const contentTop = content.getBoundingClientRect().top;
-  const top = heading.getBoundingClientRect().top - contentTop;
-  const blockRect = block.getBoundingClientRect();
-  return { height: blockRect.top - contentTop - top + blockRect.height, top };
-}
-
-function sameBar(left: SectionBar | undefined, right: SectionBar | undefined): boolean {
-  return left?.height === right?.height && left?.top === right?.top;
-}
-
-/** Whether the column has settled on this document: it follows the selection only once the
- *  selection has stood still for `DOCUMENT_SETTLE_MS`, and two questions in one document never
- *  change it. */
-function useSettled(artifactId: string): boolean {
-  const [settled, setSettled] = useState<string | undefined>(undefined);
-  useEffect(() => {
-    if (settled === artifactId) {
-      return;
-    }
-    const timer = window.setTimeout(() => setSettled(artifactId), DOCUMENT_SETTLE_MS);
-    return () => window.clearTimeout(timer);
-  }, [artifactId, settled]);
-  return settled === artifactId;
-}
-
 export interface ReadingPaneProps {
-  ask: InboxRow;
   /** The reader's own answer landed; the list selects the next row. */
   onAnswered: (askId: string) => void;
   /** The head's Snooze write is in flight or refused, or has stopped being either: the Inbox
    *  keeps a live row listed, which is what keeps this column on it long enough for a refusal
    *  to be read. */
   onSnoozeLive: (askId: string, live: boolean) => void;
+  /** The selected row: an open ask, or a thread of the reader's own. */
+  row: InboxListRow;
   viewer: string | undefined;
 }
 
@@ -146,63 +66,6 @@ interface PaneFlowProps {
   onAnswered: (askId: string) => void;
   onSnoozeLive: (askId: string, live: boolean) => void;
   viewer: string | undefined;
-}
-
-/** The column's frame: the head above the one scroller every flow draws in, with the section
- *  bar beside the drawn content. The refs are the flow's, which measures and scrolls what it
- *  drew; the card flow measures nothing and passes none. */
-function PaneFrame({
-  children,
-  content,
-  head,
-  scroller,
-  sectionBar,
-}: {
-  children: ReactNode;
-  content?: RefObject<HTMLDivElement | null>;
-  head: ReactNode;
-  scroller?: RefObject<HTMLElement | null>;
-  sectionBar?: SectionBar;
-}): ReactNode {
-  return (
-    <section
-      aria-label="Selected question"
-      className="flex h-full min-h-0 flex-col gap-3"
-      data-testid="inbox-pane"
-    >
-      {head}
-      {/* The one scroller every flow draws in is a focus stop of its own, so a reader who has
-          read the head can hand the keyboard to the document. Nothing here scrolls it: the
-          browser scrolls whichever focusable element holds the focus on the arrow keys, Page
-          Up, Page Down, Space, Home and End, so this writes no scrolling code. A labelled
-          `<section>` is `role="region"`, and its name is neither a superset nor a subset of
-          the enclosing section's "Selected question", since Playwright matches an accessible
-          name by substring: each of the two names matches only itself. */}
-      <section
-        aria-label="Question body"
-        className={`min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-2 ${focusVisibleRing}`}
-        data-testid="inbox-pane-scroller"
-        ref={scroller}
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: A region is not interactive, and this one is deliberately in the tab order: it is the column's one focus stop, and the keyboard reaches the document through it.
-        tabIndex={0}
-      >
-        {/* The bar is drawn beside the editor rather than inside it: a class Dispatch writes into
-            editor DOM is read back as a document edit. */}
-        <div className="relative">
-          {sectionBar === undefined ? null : (
-            <div
-              className={`pointer-events-none absolute left-0 border-l-2 ${quoteAccentBorder}`}
-              data-testid="pane-section-bar"
-              style={{ height: `${sectionBar.height}px`, top: `${sectionBar.top}px` }}
-            />
-          )}
-          <div className="pl-3" ref={content}>
-            {children}
-          </div>
-        </div>
-      </section>
-    </section>
-  );
 }
 
 /** The question's own card, which the column draws for a question in no document and for one
@@ -429,160 +292,51 @@ function DecisionBody({
   onSnoozeLive,
   viewer,
 }: PaneFlowProps & { artifactId: string; blockId: string }): ReactNode {
-  const scroller = useRef<HTMLElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  const [sectionBar, setSectionBar] = useState<SectionBar | undefined>(undefined);
-  const [sectionBlockId, setSectionBlockId] = useState<string | undefined>(undefined);
-  const settled = useSettled(artifactId);
-
-  const user = useQuery(whoAmIQuery()).data;
-  const issue = useQuery({
-    ...issueQuery(ask.issue_key ?? undefined),
-    enabled: ask.issue_key !== null,
-  });
-  const artifactQuery = useQuery({ ...artifactQueryOptions(artifactId), enabled: settled });
-  // The read the document page's own editor is admitted by: the server answers it `409
-  // DOC_SCHEMA` for a tree outside the Proof schema, and the page offers a repair or a rebuild
-  // for what it says. A column beside a list offers neither, so it reads the text itself, under
-  // the page's own key, and falls back to the card rather than mounting a document that cannot
-  // open.
-  const textQuery = useQuery({ ...liveTextQueryOptions(artifactId), enabled: settled });
-
-  const artifact = artifactQuery.data;
-  // A document whose own admission failed after this column's read succeeded falls back to the
-  // card too: the page answers that with a repair or a rebuild prompt, which a column beside a
-  // list never shows, so the document reports it here instead (`onUnavailable`) and the card
-  // takes its place. The report names the document it is about, so selecting another question
-  // is not answered with the last one's failure.
-  const [unavailable, setUnavailable] = useState<string | undefined>(undefined);
-  const failed = artifactQuery.isError || textQuery.isError || unavailable === artifactId;
-  const showsDocument = !failed && artifact !== undefined;
-
-  // The editor draws its blocks after the socket syncs, and a diagram or a picture moves them
-  // again afterwards, so the placement runs on every change of the drawn document: the scroll
-  // once, when the question's block is first there, and the bar whenever the blocks move.
-  useEffect(() => {
-    setSectionBar(undefined);
-    setSectionBlockId(undefined);
-    const column = scroller.current;
-    const drawn = content.current;
-    if (column === null || drawn === null || !showsDocument) {
-      return;
-    }
-    // The column is placed once, when the question's block is first drawn; the bar follows the
-    // blocks for as long as they move.
-    let placed = false;
-    const place = () => {
-      const block = blockElement(drawn, blockId);
-      if (block === null) {
-        return;
-      }
-      const headingId = sectionHeadingId(drawn, blockId);
-      if (!placed) {
-        if (headingId === undefined) {
-          column.scrollTop = 0;
-          placed = true;
-        } else {
-          placed = scrollBlockToTop(headingId, column);
-        }
-        if (placed) {
-          setSectionBlockId(headingId);
-        }
-      }
-      const bar = sectionBarOf(drawn, headingId, block);
-      setSectionBar((current) => (sameBar(current, bar) ? current : bar));
-    };
-    place();
-    const drawing = new MutationObserver(place);
-    drawing.observe(drawn, { childList: true, subtree: true });
-    const resizing = new ResizeObserver(place);
-    resizing.observe(drawn);
-    return () => {
-      drawing.disconnect();
-      resizing.disconnect();
-    };
-  }, [blockId, showsDocument]);
-
-  const skipToAnswer = useCallback(() => {
-    const column = scroller.current;
-    if (column !== null) {
-      scrollBlockToTop(blockId, column);
-    }
-  }, [blockId]);
-
-  const body = (): ReactNode => {
-    if (failed) {
-      return <QuestionCard ask={ask} onAnswered={onAnswered} />;
-    }
-    const name = ask.approval?.name ?? ask.document?.name ?? "the document";
-    const skeleton = <LoadingSkeleton label={`Opening ${name}`} />;
-    if (!settled || artifact === undefined || user === undefined || textQuery.data === undefined) {
-      return skeleton;
-    }
-    return (
-      <ProofDocument
-        artifact={artifact}
-        highlight={undefined}
-        isClosed={issue.data !== undefined && issue.data.closed_at !== null}
-        key={artifact.id}
-        onAskAnswered={onAnswered}
-        onUnavailable={() => setUnavailable(artifact.id)}
-        onVersionChange={noVersionChange}
-        owner={
-          artifact.issue_key === null
-            ? {
-                artifactId: artifact.id,
-                kind: "document",
-                project: artifact.project,
-                slug: artifact.slug,
-              }
-            : { kind: "issue", key: artifact.issue_key }
-        }
-        showDiff={false}
-        surface="pane"
-        user={user}
-      />
-    );
-  };
-
   return (
-    <PaneFrame
-      content={content}
-      head={
+    <DocumentPane
+      anchoredThread={undefined}
+      artifactId={artifactId}
+      blockId={blockId}
+      fallback={<QuestionCard ask={ask} onAnswered={onAnswered} />}
+      head={(document) => (
         <ReadingPaneHead
-          artifact={artifact}
+          artifact={document.artifact}
           ask={ask}
           onAnswered={onAnswered}
           onNextChange={undefined}
-          onSkipToAnswer={showsDocument ? skipToAnswer : undefined}
+          onSkipToAnswer={document.showsDocument ? document.skipToBlock : undefined}
           onSnoozeLive={onSnoozeLive}
-          sectionBlockId={sectionBlockId}
+          sectionBlockId={document.sectionBlockId}
           viewer={viewer}
         />
-      }
-      scroller={scroller}
-      sectionBar={sectionBar}
-    >
-      {body()}
-    </PaneFrame>
+      )}
+      issueKey={ask.issue_key}
+      loadingName={ask.approval?.name ?? ask.document?.name ?? "the document"}
+      onAskAnswered={onAnswered}
+    />
   );
 }
 
 /**
- * The Inbox's reading column: the selected question's own document, where the answer is given.
+ * The Inbox's reading column: what the selected row is, where it is answered.
  *
- * One of three flows, by what the selected question is, each with only its own reads and its own
- * effects under the one head: a question written as a decision block (`DecisionBody`), an
- * approval request (`ApprovalBody`), and a question in no document (`CardBody`), which is what a
- * question whose document could not be opened falls back to as well — the column never shows the
- * document page's rebuild or repair prompts.
+ * A question is one of three flows, each with only its own reads and its own effects under the
+ * one head: a question written as a decision block (`DecisionBody`), an approval request
+ * (`ApprovalBody`), and a question in no document (`CardBody`), which is what a question whose
+ * document could not be opened falls back to as well — the column never shows the document
+ * page's rebuild or repair prompts. A Reply or an Agent row is one of four thread bodies
+ * (`ThreadPane.tsx`), which fall back the same way.
  */
 export function ReadingPane({
-  ask,
   onAnswered,
   onSnoozeLive,
+  row,
   viewer,
 }: ReadingPaneProps): ReactNode {
+  if (row.kind === "thread") {
+    return <ThreadPane thread={row.thread} />;
+  }
+  const ask = row.ask;
   const subject = subjectOf(ask);
   const flow = { ask, onAnswered, onSnoozeLive, viewer };
   if (subject.kind === "approval") {
@@ -593,7 +347,3 @@ export function ReadingPane({
   }
   return <CardBody {...flow} />;
 }
-
-/** The column carries no version picker: which version it shows is the question's, never the
- *  reader's. */
-function noVersionChange(): void {}

@@ -338,7 +338,7 @@ func TestGrantLogLogsEveryDecisionAndEveryGrantEndAndNothingElse(t *testing.T) {
 	// A max-grant below the approved grant's own lifetime ends that grant at its next release,
 	// which is the broker's own grant end (endGrant).
 	capped := policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "shared-v1")
-	capped.Tags[policy.TagMaxGrant] = "1h"
+	capped.Tags[policy.TagMaxGrant] = "1m"
 	retag(t, m, capped)
 	if _, _, err := m.Values(ctx, decision.GrantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values under a max-grant below the grant's own lifetime = %v, want ErrGrantNotLive", err)

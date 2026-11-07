@@ -489,6 +489,28 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 ## A tree does not move after a restart
 
+A restart's wakes go out at the pace the operator set (`worker_wakes_per_minute`, 8 a minute by
+default, with `worker_wake_burst` 1), so a tree whose process has not come back yet may simply be
+waiting its turn. One wake has its session read its whole context again, which the provider charges
+as uncached input — a mean of 576,083 tokens, a median of 493,636 and a ninetieth percentile of
+1,327,888 — and the pacing is what spreads that over the minutes after a restart. A wave sustains
+about two thirds of the rate, about 5 a minute at the default, so a hundred claims take about
+twenty minutes. Read what the pacing still holds before you act on anything below:
+
+```sh
+legion state --config legion.yaml --json | jq '.wakesWaiting'
+```
+
+`legion state` prints the same as a `wakes waiting:` line, and prints no such line when nothing
+waits. Each entry names the `claim`, its `issue` and `role`, the `kind` of wake (`launch`, a role
+process about to start; `plugin-task`, the update task a stale-plugin round queues to a session
+that already runs; `catch-up`, the notice a start writes to an architect that is already running)
+and `dueAt`, the moment the pacing gave it, which is when it runs. An empty array says the wave has
+gone out; the last `dueAt` in it says when the last of the wave goes. A claim on that list needs
+nothing from you: its wake is reserved and it runs at the moment named. Your own requests are what
+drop it — a resume, a retry or a task you send that claim is run at once, taking the reserved wake
+back, so nothing you ask for waits for a turn.
+
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's
 architect by its admission; a notice to an architect with no process waits for it rather than
@@ -861,7 +883,7 @@ it, then look at what the row `waitsOn` names is doing.
 
 A pull request's opened, push, review or CI settlement, or a Dispatch status change, reaches the
 daemon as a message on the `ENVOY_NOTIFICATIONS` stream and waits there until the daemon's durable
-consumer for it gets to it. `legion state` shows how far behind each of the three consumers is on
+consumer for it gets to it. `legion state` shows how far behind each consumer is on
 its `consumer` lines ([Running Legion](/legion/legion/running-legion/#observe)), and `--json`
 under `consumers`:
 
@@ -885,10 +907,14 @@ legion state --config legion.yaml --json | jq '.consumers[] | {name, waiting, ol
   The daemon is handling none of them: each delivery fails and is put back to retry (the database
   out of reach, say), or the message in hand does not finish. Search the daemon's log for
   `retryable intake processing failure` and the other warnings naming a `subject` of that
-  consumer, whose `error` says what fails. A consumer that stops is not a stall: it stops the
-  daemon (`workflow intake stopped: …`).
+  consumer, whose `error` says what fails. A handler that does not finish writes none of those
+  while it holds: intake reports its message in progress, and the stall is all that shows until
+  the handler passes its ten-minute limit and the daemon writes `an intake handler outran its
+  limit and was cut`, so search for that line too
+  ([GitHub, NATS and the Secrets Broker](#github-nats-and-the-secrets-broker)). A consumer that
+  stops is not a stall: it stops the daemon (`workflow intake stopped: …`).
 - **`unavailable`** names what NATS did not answer in time, or refused; the rest of the state is
-  served all the same. The three consumers are read at the same time, each within two seconds,
+  served all the same. Every consumer is read at the same time, each within two seconds,
   so one consumer's read that does not answer leaves the others' as they are. `read the consumer's
   info: …` leaves `waiting` 0 and `stalled` false, since neither is known: check that the daemon
   reaches NATS and that the consumer exists (`nats consumer info ENVOY_NOTIFICATIONS <name>`).
@@ -945,6 +971,40 @@ notice comes once per handoff commit, from whichever pass finds it first.
   still records each open pull request GitHub lists, applies a lost close, merge or push, settles a
   head's CI from its check runs and tells an architect `pull-request-missing`, so none of those
   waits for the backlog to drain.
+- **`an intake handler outran its limit and was cut`** (a warning with `consumer`, `event_id`,
+  `fact` and `limit`). One message's handling ran past `limit`, ten minutes, which no setting
+  changes, so the daemon cut it and naked the message: nothing of that event was applied, and
+  JetStream delivers it again. While a handler runs, intake reports its message in progress, so a
+  handler that hangs shows neither as the preparation work of a redelivery nor as a rising
+  `delivered` count, and this warning is the one line that names the cut. The warning written
+  right after it with the same `event_id` names the step that was running, with the error
+  `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
+  acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
+  database. One Postgres advisory lock is what it most often waits on,
+  `pg_advisory_xact_lock(hashtext('legion.apply_fact'))`, which every fact takes for the length of
+  its transaction and the daemon's other lifecycle writes take too, so the holder is as often one
+  of those as another fact. Ask the daemon's database who holds it rather than guessing:
+
+  ```sql
+  select a.pid, a.state, a.xact_start, a.query
+    from pg_locks l
+    join pg_stat_activity a on a.pid = l.pid
+   where l.locktype = 'advisory'
+     and l.classid = (hashtext('legion.apply_fact')::bigint >> 32 & 4294967295)::oid
+     and l.objid = (hashtext('legion.apply_fact')::bigint & 4294967295)::oid
+     and l.objsubid = 1
+   order by l.granted desc, a.xact_start;
+  ```
+
+  The first row is the holder, the rest are waiting on it, and `xact_start` says how long it has
+  held. The next delivery of the same event takes the same path and is cut the same way.
+- **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
+  (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
+  than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
+  delivery for `took` rather than let JetStream deliver the event a second time. The fact was
+  applied: this is a fact that is slow, not one that failed, and this is the only line that says
+  how long a fact took. One of them asks nothing of an operator; a `took` creeping towards the
+  ten-minute limit, or many at once, names where to look for the slow read behind them.
 - **`webhook App missing on <repo>: <reason>`** in `legion state` (`repositories.withoutWebhookApp`
   in `--json`). Dispatch's GitHub App, the Envoy App whose webhook carries GitHub's events, is not
   known to be installed on a repository the daemon serves. With `Dispatch's GitHub App is not

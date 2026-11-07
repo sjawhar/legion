@@ -3,16 +3,11 @@ package pmdoc
 // The pmdoc differential (gen/differential.sh) reads one corpus at two revisions. Each revision
 // reads every document, renders what it read and what the browser editor's engine read, and reads
 // each rendering back; the engine reads the same renderings; then the head judges the base against
-// itself. Both tests skip unless the driver sets their inputs. The driver copies this file into the
-// base revision, so it uses only what every revision since the write-path read-back check has.
-//
-// Among what TestDifferentialCompare counts: a document the head reads as the engine but its
-// writer refuses, because its rendering reads back otherwise, is reported ("refused by the
-// writer") and gates where the base stores it ("newly refused by the writer"); any other document
-// the base stores and the head does not is reported ("newly refused"). A document the engine
-// itself threw on is reported ("engine cannot read"), the throw being the engine's own; one whose
-// reading Go's schema refuses gates ("engine reading Go's schema refuses"), since no other gate
-// can judge a document Go cannot hold.
+// itself. This file is the reading, which both revisions run: the driver copies it into the base
+// revision, so it uses only what every revision since the write-path read-back check has. The
+// judgment, which runs in the head's binary alone and asks this revision's own errors, is
+// differential_gate_test.go, which the driver does not copy. Both tests skip unless the driver
+// sets their inputs.
 
 import (
 	"bufio"
@@ -20,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -31,7 +25,10 @@ type diffDump struct {
 	// Tree is what Parse reads the document as, block ids dropped; Parse is its refusal.
 	Tree  json.RawMessage `json:"tree,omitempty"`
 	Parse string          `json:"parse,omitempty"`
-	// Write is ParseForWrite's refusal: what an upload of the document is answered.
+	// Write is ParseForWrite's refusal: what an upload of the document is answered. Whether that
+	// refusal is of the rendering the document would be stored as is read from the error itself,
+	// by the head's own binary at the comparison (refusesItsRendering), since the dump is written
+	// by each revision's binary and a refusal's sentence is no contract.
 	Write string `json:"write,omitempty"`
 	// Render is Tree's rendering, the markdown the document is stored as, and ReadsBack whether
 	// Parse reads it back as Tree.
@@ -229,207 +226,4 @@ func diffRender(dump *diffDump, name string, tree *Node) (*string, string, bool)
 		return &markdown, "", false
 	}
 	return &markdown, "", StripAnchorMarks(tree).Equal(back)
-}
-
-// diffSide is what one revision does with one document.
-type diffSide struct {
-	dump diffDump
-	// stores: the write is taken and the tree renders, with nothing panicking.
-	stores bool
-	// correct: it stores the document as the engine reads it, in markdown both readers read back
-	// as that tree.
-	correct bool
-	// renders: the engine's tree renders into markdown both readers read back as that tree.
-	renders bool
-	// engineOnly: it stores a tree Go reads back as written and the engine reads otherwise.
-	engineOnly bool
-	// Why correct fails: the tree differs from the engine's reading, or the engine reads the
-	// rendering back otherwise (Go's read-back is in dump).
-	ReadsAsEngine, EngineReadsBack bool
-}
-
-// diffRenderings is the engine's reading of one revision's two renderings of a document.
-type diffRenderings struct {
-	ID           string       `json:"id"`
-	Render       *diffReading `json:"render"`
-	EngineRender *diffReading `json:"engine_render"`
-}
-
-func judge(dump diffDump, source *Node, reading diffRenderings) diffSide {
-	side := diffSide{dump: dump}
-	var tree *Node
-	if dump.Tree != nil {
-		tree, _ = FromJSON(dump.Tree)
-	}
-	side.stores = dump.Write == "" && tree != nil && dump.Render != nil && len(dump.Panics) == 0
-	engineBack := diffTree(reading.Render)
-	side.EngineReadsBack = tree != nil && engineBack != nil && StripAnchorMarks(tree).Equal(engineBack)
-	side.ReadsAsEngine = tree != nil && source != nil && tree.Equal(source)
-	side.correct = side.stores && side.ReadsAsEngine && dump.ReadsBack && side.EngineReadsBack
-	side.engineOnly = side.stores && dump.ReadsBack && !side.EngineReadsBack
-	engineRenderBack := diffTree(reading.EngineRender)
-	side.renders = source != nil && dump.EngineRender != nil && dump.EngineReadsBack && engineRenderBack != nil && source.Equal(engineRenderBack) && len(dump.Panics) == 0
-	return side
-}
-
-// differs reports whether two renderings differ, one missing counting as a difference.
-func differs(base, head *string) bool {
-	return base == nil || head == nil || *base != *head
-}
-
-func TestDifferentialCompare(t *testing.T) {
-	if os.Getenv("PMDOC_DIFF_BASE") == "" {
-		t.Skip("PMDOC_DIFF_BASE unset; gen/differential.sh runs this")
-	}
-	engine := openDiffLines(t, "PMDOC_DIFF_ENGINE")
-	dumps := [2]*diffLines{openDiffLines(t, "PMDOC_DIFF_BASE"), openDiffLines(t, "PMDOC_DIFF_HEAD")}
-	readings := [2]*diffLines{openDiffLines(t, "PMDOC_DIFF_BASE_ENGINE"), openDiffLines(t, "PMDOC_DIFF_HEAD_ENGINE")}
-	report, err := os.Create(os.Getenv("PMDOC_DIFF_REPORT"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer report.Close()
-	writer := bufio.NewWriter(report)
-	defer writer.Flush()
-
-	counts := map[string]int{}
-	flag := func(class string, sides [2]diffSide) {
-		counts[class]++
-		line, _ := json.Marshal(map[string]any{
-			"class": class, "id": sides[1].dump.ID,
-			"base": sides[0].dump, "head": sides[1].dump,
-			"base_reads_as_engine": sides[0].ReadsAsEngine, "base_engine_reads_back": sides[0].EngineReadsBack,
-			"head_reads_as_engine": sides[1].ReadsAsEngine, "head_engine_reads_back": sides[1].EngineReadsBack,
-		})
-		writer.Write(append(line, '\n'))
-	}
-	documents := 0
-	for {
-		var read struct {
-			ID string       `json:"id"`
-			MD *diffReading `json:"md"`
-		}
-		if !engine.next(t, &read) {
-			break
-		}
-		documents++
-		// A reading the engine threw on is the engine's own refusal, and only reported; one Go's
-		// schema refuses leaves the document out of every gate below, so it gates itself.
-		source, refused := diffRead(read.MD)
-		switch {
-		case refused:
-			counts["engine reading Go's schema refuses"]++
-		case source == nil:
-			counts["engine cannot read"]++
-		}
-		var sides [2]diffSide
-		for index := range sides {
-			var dump diffDump
-			var reading diffRenderings
-			if !dumps[index].next(t, &dump) || !readings[index].next(t, &reading) || dump.ID != read.ID || reading.ID != read.ID {
-				t.Fatalf("the runs do not follow the corpus at %q", read.ID)
-			}
-			sides[index] = judge(dump, source, reading)
-		}
-		base, head := sides[0], sides[1]
-		for index, name := range []string{"base", "head"} {
-			side := sides[index]
-			if side.correct {
-				counts[name+" stores correctly"]++
-			}
-			if side.renders {
-				counts[name+" renders the engine's tree correctly"]++
-			}
-			if side.engineOnly {
-				counts[name+" engine-only read-back"]++
-			}
-			if len(side.dump.Panics) > 0 {
-				counts[name+" panics"]++
-			}
-		}
-		switch {
-		case base.correct && !head.correct:
-			flag("regression", sides)
-		case !base.stores && head.stores && !head.correct:
-			flag("misread", sides)
-		case !base.correct && head.correct:
-			flag("fixed", sides)
-		}
-		// A fixed point base kept of a document it read otherwise than the editor is a misread kept
-		// stable; it is counted apart, and only one of a document base read as the editor gates.
-		switch lost := base.dump.FixedPoint && !head.dump.FixedPoint; {
-		case lost && base.ReadsAsEngine:
-			flag("lost fixed point", sides)
-		case lost:
-			flag("lost fixed point of a misread", sides)
-		}
-		if base.correct && differs(base.dump.Render, head.dump.Render) {
-			flag("churn", sides)
-		}
-		if base.renders && !head.renders {
-			flag("engine-tree regression", sides)
-		}
-		if base.renders && differs(base.dump.EngineRender, head.dump.EngineRender) {
-			flag("engine-tree churn", sides)
-		}
-		if !base.renders && head.renders {
-			flag("engine-tree fixed", sides)
-		}
-		if len(head.dump.Panics) > 0 {
-			flag("head panic", sides)
-		}
-		if !base.engineOnly && head.engineOnly {
-			flag("new engine-only read-back", sides)
-		}
-		// The writer refuses a document the head reads as the engine because its rendering reads
-		// back otherwise; one the base stores is newly refused by the writer, and gates.
-		writerRefuses := head.dump.Parse == "" && strings.Contains(head.dump.Write, "reads back otherwise") && head.ReadsAsEngine
-		if writerRefuses {
-			flag("refused by the writer", sides)
-		}
-		switch {
-		case writerRefuses && base.stores:
-			flag("newly refused by the writer", sides)
-		case base.stores && !head.stores:
-			flag("newly refused", sides)
-		}
-	}
-
-	var summary strings.Builder
-	fmt.Fprintf(&summary, "documents: %d (the engine cannot read %d)\n", documents, counts["engine cannot read"])
-	// gates is each count that is summarized and that fails the test, in the order both read them.
-	gates := []struct{ label, key string }{
-		{"regressions (base stores correctly, head does not)", "regression"},
-		{"misreads (base refuses, head stores what reads back otherwise)", "misread"},
-		{"churn (base stores correctly, head's bytes differ)", "churn"},
-		{"engine-tree regressions (base renders the engine's tree correctly, head does not)", "engine-tree regression"},
-		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
-		{"head panics (recovered or not)", "head panic"},
-		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
-		{"newly refused by the writer (base stores, head's rendering reads back otherwise)", "newly refused by the writer"},
-		{"engine readings Go's schema refuses (FromJSON cannot hold what the engine read)", "engine reading Go's schema refuses"},
-	}
-	for _, line := range gates {
-		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
-	}
-	for _, line := range []struct{ label, key string }{
-		{"refused by the writer (head reads it as the engine, its rendering reads back otherwise)", "refused by the writer"},
-		{"newly refused (base stores, head does not, other than newly refused by the writer)", "newly refused"},
-	} {
-		fmt.Fprintf(&summary, "REPORTED %-82s %d\n", line.label, counts[line.key])
-	}
-	keys := make([]string, 0, len(counts))
-	for key := range counts {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
-	}
-	fmt.Print(summary.String())
-	for _, gate := range gates {
-		if counts[gate.key] > 0 {
-			t.Errorf("%d %s; see %s", counts[gate.key], gate.key, os.Getenv("PMDOC_DIFF_REPORT"))
-		}
-	}
 }

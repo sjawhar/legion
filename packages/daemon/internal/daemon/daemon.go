@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
@@ -52,6 +53,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/wakepace"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -191,17 +193,6 @@ type overrides struct {
 	checkLaunch func(context.Context, supervise.Claim) error
 }
 
-// Build is what the binary knows of its own build: Revision, the commit it was built from, and
-// Repository, the repository that commit is in — both set only by a release build (cmd/legion's
-// ldflags-stamped revision beside its builtFromRepository constant) and empty in every other. The
-// boot compares a release build, and the build Dispatch reports on its /healthz, against the open
-// production checks of that repository (intake.DaemonBooted, workflow.Config.BuiltFrom); a zero
-// Build compares nothing.
-type Build struct {
-	Revision   string
-	Repository string
-}
-
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
 // configuration first, then, under tmux, the plugin gate, which holds the Oh My Pi plugin every
 // pane will load to this daemon's contract — then opens the store (refusing by the host it could
@@ -224,15 +215,12 @@ type Build struct {
 // mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
 // nothing.
 //
-// build is the binary's own build (Build), which the boot compares against the open production
-// checks of the repository it is built from.
-//
 // listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
 // and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
 // Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
 // listener is taken leaves it to the caller to close.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
-	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+func Run(ctx context.Context, cfg config.Config, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, log, overrides{listen: handed(listener)})
 }
 
 // handed is the listen of a daemon handed listener: it takes listener, whatever address it is
@@ -244,7 +232,7 @@ func handed(listener net.Listener) func(network, address string) (net.Listener, 
 	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
-func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
+func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -299,11 +287,25 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
+	// One limiter for the whole daemon, built before either lane that reserves from it: every
+	// wake the daemon causes — the role processes supervision launches, the update task a
+	// stale-plugin round queues, and the catch-up the workflow engine writes in place of a launch
+	// — draws from the same rate, because what the organization's cap counts is the uncached
+	// input of the minute after the wake, whichever lane caused it. Its jitter is a draw from
+	// [0, interval), the limiter's own interval: without one, two daemons restarted together
+	// would let their wakes out on the same instants, and the organization they share would see
+	// both bursts in one minute. A rate of zero is the pacing off, and each lane is handed no
+	// Reserve at all rather than one that paces nothing, which is how both read the pacing off
+	// (workflow.Config.Reserve, supervise.WakePace.Reserve).
+	var reserveWake func(time.Time) time.Time
+	if cfg.WorkerWakesPerMinute > 0 {
+		reserveWake = wakepace.New(cfg.WorkerWakesPerMinute, cfg.WorkerWakeBurst, rand.N[time.Duration]).Reserve
+	}
 	// The mapping read waits out an unreachable Dispatch without limit, and the App mint waits out
 	// GitHub's transient failures within appMintRetry; a repository whose installation read fails
 	// is left out and read again, never a refused boot. The boot budget bounds none of them, as it
 	// does not bound the plugin gate or the image probe: the work after them has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, reserveWake)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -368,7 +370,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if workflow != nil {
 		apps = workflow.tokens
 	}
-	s, err := openSupervision(boot, cfg, log, plan, st, apps)
+	s, err := openSupervision(boot, cfg, log, plan, st, apps, reserveWake)
 	if err != nil {
 		listener.Close()
 		workflow.stop()
@@ -832,7 +834,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Accepted, log)
 	}
 	return nil
 }
@@ -924,20 +926,30 @@ func treeMemoryGroup(st *store.Store) func(ctx context.Context, tree string) (bo
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
-// for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
-// the one each pane's `legion gh` runs, and the owner of the repository each claim's issue works
-// (claimRepositoryOwner over the workflow's repository), which a pane adopted after a restart holds
-// its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh
-// files. The private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential) and the
+// controller pane's own (appauth.ControllerCredential), which its refresh asks by the default
+// owner its launch recorded, both built over
+// repos (the project's mapping's served repositories), with gh, the real gh boot resolved
+// (daemonTools), the one each pane's `legion gh` runs, and the repository each claim's issue
+// works (claimRepository over the workflow's repository), which a pane adopted after a restart
+// holds its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes
+// hold no gh files. The private server's environment is scrubbed before anything is launched on
+// it.
+func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile, gh string, repos func() []ghrepo.Repository, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens,
 		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners, cfg.RepositoryRenames), gh
-			opts.RepositoryOwner = claimRepositoryOwner(st.ClaimIssue, repository)
+			// The one record of what the mints found GitHub refuses, shared by both credentials
+			// as the Kubernetes runtime's three share one (appauth.LeftOut, kubernetes.go's
+			// sandboxRuntime): a pane projects nothing, so nothing reads it here, and a
+			// directory left out of one pane's bundle is left out of the next pane's by the
+			// mint, not by this record.
+			left := appauth.NewLeftOut()
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, repos, cfg.RepositoryRenames, left, log), gh
+			opts.ControllerCredential = appauth.ControllerCredential(tokens, repos, cfg.RepositoryRenames, left, log)
+			opts.ClaimRepository = claimRepository(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -954,24 +966,24 @@ func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backen
 	}
 }
 
-// claimRepositoryOwner is the owner of the repository a claim's issue works: the claim's issue
-// (issueOf, the daemon's own claims; a token spells its issue lowercased), then the repository it
-// works (repository, the workflow's issueRepository: its record's, or the project's default for
-// an issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
-// write token for (tmux.Options.RepositoryOwner), the owner its launch was minted for, read from
-// the daemon's own state and nothing a pane can write.
-func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, error),
-	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (string, error) {
-	return func(ctx context.Context, token claim.Token) (string, error) {
+// claimRepository is the repository a claim's issue works: the claim's issue (issueOf, the
+// daemon's own claims; a token spells its issue lowercased), then the repository it works
+// (repository, the workflow's issueRepository: its record's, or the project's default for an
+// issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
+// write token for (tmux.Options.ClaimRepository), the repository its launch was minted for, read
+// from the daemon's own state and nothing a pane can write.
+func claimRepository(issueOf func(context.Context, claim.Token) (string, error),
+	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (ghrepo.Repository, error) {
+	return func(ctx context.Context, token claim.Token) (ghrepo.Repository, error) {
 		issue, err := issueOf(ctx, token)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
 		repo, _, err := repository(ctx, issue)
 		if err != nil {
-			return "", err
+			return ghrepo.Repository{}, err
 		}
-		return repo.Owner(), nil
+		return repo, nil
 	}
 }
 
@@ -1161,11 +1173,80 @@ func shimAddress(bound, advertiseHost string) (string, error) {
 	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
+// waitingWakes is every wake this daemon's machines hold, as each machine last published itself,
+// which the state names beside the catch-ups waiting on their rows (api.WakesWaitingOf,
+// source.wakes): the published view rather than the claim, so the read never waits on a decision
+// in flight — a Sandbox relaunch holds its machine for as long as the runtime waits out its pods,
+// and with many claims one is nearly always relaunching — exactly as the operator's claim listing
+// and the capability report read their claims. Only the wakes are taken, and nothing is allocated
+// while none waits, which is every moment outside a wave (supervise.Machine.WaitingWake). It reads
+// memory alone, which is where a machine's wake lives: no store holds one, and a restart raises
+// the wave again through its own paths.
+func (s *supervision) waitingWakes() []supervise.WaitingWake {
+	if s.supervisor == nil {
+		return nil
+	}
+	var waiting []supervise.WaitingWake
+	for _, m := range s.supervisor.supervised() {
+		if wake := m.WaitingWake(); wake != nil {
+			waiting = append(waiting, *wake)
+		}
+	}
+	return waiting
+}
+
+// pacedCatchUps is every catch-up the wake pacing is still holding, as the state names them beside
+// the machines' own wakes (api.State.WakesWaiting): the notice a start writes to an architect
+// already running in place of a launch waits on its row's next_at rather than in a machine
+// (workflow's claimReady, record.Notice.PacedAt), so this lane of the wave is read from the store —
+// in the state's own snapshot, with everything else the state reads, rather than from a second
+// transaction that could see another instant.
+//
+// The rows are the ones a ready would otherwise release and the pacing holds back (the outbox's
+// releaseWaiting reads the same set through the same WaitingNotices and leaves behind exactly the
+// rows whose reserved moment is still ahead of now): a row whose moment has come is a wake that
+// is running or about to, or one whose attempt failed and is waiting on a backoff of its own, and
+// neither is a wake the pacing holds. Each goes to the root architect of its issue, whose token
+// it is composed for exactly as the line that wake writes composes it (the outbox's wakeRan),
+// since the row names the issue and the kind alone. A project whose outbox holds no such row
+// allocates nothing.
+func pacedCatchUps(ctx context.Context, tx pgx.Tx, records record.Store, project, dispatchProject string, now time.Time) ([]api.WakeWaiting, error) {
+	waiting, err := records.WaitingNotices(ctx, tx, dispatchProject, now)
+	if err != nil {
+		return nil, err
+	}
+	var wakes []api.WakeWaiting
+	for _, row := range waiting {
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			return nil, fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
+		}
+		notice, ok := payload.(record.Notice)
+		if !ok || !notice.PacedAt.After(now) {
+			continue
+		}
+		architect, err := claim.NewToken(project, row.Issue, claim.RoleArchitect)
+		if err != nil {
+			return nil, fmt.Errorf("the architect of the catch-up on row %d: %w", row.ID, err)
+		}
+		wakes = append(wakes, api.WakeWaiting{
+			Claim: architect, Issue: row.Issue, Role: claim.RoleArchitect, Kind: supervise.WakeCatchUp, DueAt: row.NextAt.UTC(),
+		})
+	}
+	return wakes, nil
+}
+
 // openSupervision reads the claims the store holds and their sessions' capability reports, takes
 // the worker stream, and builds the runtime over it, for supervision's lifetime and with the
 // workflow's App tokens (nil without a workflow): every step of supervision that can refuse, so a
 // daemon that cannot supervise refuses before its boot is recorded.
-func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
+//
+// reserve is the daemon's one wake limiter as the machines reach it (run builds it, before the
+// workflow, which reserves from the same one): the moment each launch may run, and nil while the
+// operator paces nothing, which is the gate's reading of the pacing off (supervise's
+// reserveWake). The rate and the burst go with it for the line every wake writes, never for that
+// decision (supervise.WakePace).
+func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens, reserve func(time.Time) time.Time) (*supervision, error) {
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
@@ -1235,6 +1316,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 			LaunchBackoff:         launchBackoffFirst,
+		},
+		WakePace: supervise.WakePace{
+			Reserve: reserve,
+			Rate:    cfg.WorkerWakesPerMinute,
+			Burst:   cfg.WorkerWakeBurst,
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
@@ -1764,6 +1850,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
+			wakes:        s.waitingWakes,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
 			settings:     api.SettingsOf(cfg),
@@ -1795,8 +1882,9 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwners:       p.repositories.Owners,
+		GitHubRepositories: p.repositories.Accepted,
 		RepositoryRenames:  cfg.RepositoryRenames,
+		Serving:            p.repositories.serving,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
@@ -1894,6 +1982,9 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
+	// wakes is every wake the daemon's machines hold, as each machine last published it
+	// (supervision.waitingWakes); nil for a daemon that supervises nothing.
+	wakes func() []supervise.WaitingWake
 	// repositories is the project's repository mapping as the workflow serves it, empty for a
 	// daemon with no workflow, whose state serves no repository.
 	repositories *repositories
@@ -2035,11 +2126,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
+	now := time.Now().UTC()
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), now)
 	if err != nil {
 		return api.State{}, err
 	}
-	now := time.Now().UTC()
 	resumes, err := strandedReleaseWakes(ctx, s.store, s.projectToken, claims, now)
 	if err != nil {
 		return api.State{}, err
@@ -2049,6 +2140,19 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		return api.State{}, err
 	}
 	state.StrandedClaims = api.StrandedClaimsOf(stranded)
+	// A wake waits in one of two places, and the state names both as one list (api.WakesWaitingOf):
+	// a launch or a plugin task waits in its claim's machine, in memory alone, since no store holds
+	// one and a restart raises the wave again through its own paths; a paced catch-up waits on its
+	// outbox row, read here in the snapshot every other durable fact of this state is read from.
+	paced, err := pacedCatchUps(ctx, tx, records, s.projectToken, s.project, now)
+	if err != nil {
+		return api.State{}, err
+	}
+	var held []supervise.WaitingWake
+	if s.wakes != nil {
+		held = s.wakes()
+	}
+	state.WakesWaiting = api.WakesWaitingOf(held, paced)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,

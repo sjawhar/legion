@@ -1,5 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import type { Server, ServerWebSocket } from "bun";
+import type { ServerWebSocket } from "bun";
+
+import {
+  type FakeDispatchServer,
+  startFakeDispatch,
+} from "../../../packages/envoy-client/test/fake-dispatch";
 
 import { readAgentReplay } from "./agent-replay";
 
@@ -15,10 +20,10 @@ import { readAgentReplay } from "./agent-replay";
 
 const SESSION = "01a0e0c1-0000-7000-8000-00000000beef";
 const SUB = "dispatch-user-turns";
-const servers: Server<undefined>[] = [];
+const servers: FakeDispatchServer<unknown>[] = [];
 
 afterEach(() => {
-  for (const server of servers.splice(0)) server.stop(true);
+  for (const server of servers.splice(0)) server.stop();
 });
 
 const responder = (responding: boolean) =>
@@ -27,29 +32,12 @@ const replay = { frames: [{ kind: "message", seq: 1, v: 1 }], session_id: SESSIO
 const replayFrame = JSON.stringify({ data: replay, event: "replay", sub: SUB, type: "agent" });
 
 /** A Dispatch whose live socket answers each subscribe with `answer`, recording every frame. */
-function fakeDispatch(answer: (socket: ServerWebSocket<undefined>) => void): {
-  readonly url: string;
-  readonly received: unknown[];
-} {
-  const received: unknown[] = [];
-  const server = Bun.serve({
-    fetch(request, srv) {
-      if (new URL(request.url).pathname !== "/ws/live") {
-        return new Response("not found", { status: 404 });
-      }
-      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
-    },
-    hostname: "127.0.0.1",
-    port: 0,
-    websocket: {
-      message(socket, raw) {
-        received.push(JSON.parse(String(raw)));
-        answer(socket);
-      },
-    },
-  });
-  servers.push(server);
-  return { received, url: `ws://127.0.0.1:${server.port}/ws/live` };
+function dispatchAnswering(
+  answer: (socket: ServerWebSocket<undefined>) => void
+): FakeDispatchServer<unknown> {
+  const dispatch = startFakeDispatch({ live: answer });
+  servers.push(dispatch);
+  return dispatch;
 }
 
 /** How long `promise` takes to settle, and its value or its error's message. */
@@ -79,19 +67,19 @@ const read = (url: string, timeoutMs = 10_000) =>
   inPage({ emptyAfterMs: 300, sessionId: SESSION, timeoutMs, url });
 
 test("a responding session's replay is the answer", async () => {
-  const dispatch = fakeDispatch((socket) => {
+  const dispatch = dispatchAnswering((socket) => {
     socket.send(responder(true));
     socket.send(replayFrame);
   });
-  expect(await read(dispatch.url)).toEqual(replay);
+  expect(await read(dispatch.wsUrl)).toEqual(replay);
   expect(dispatch.received).toEqual([
     { sub: SUB, type: "subscribe", view: { kind: "agent", session_id: SESSION } },
   ]);
 });
 
 test("a responding session with no replay ends at once, saying its replay is empty", async () => {
-  const dispatch = fakeDispatch((socket) => socket.send(responder(true)));
-  const result = await timed(read(dispatch.url));
+  const dispatch = dispatchAnswering((socket) => socket.send(responder(true)));
+  const result = await timed(read(dispatch.wsUrl));
   expect(result.error).toBe(
     "the session's replay is empty: Dispatch said the session is responding and sent no replay"
   );
@@ -99,7 +87,7 @@ test("a responding session with no replay ends at once, saying its replay is emp
 });
 
 test("a refused agent view ends at once, naming Dispatch's refusal", async () => {
-  const dispatch = fakeDispatch((socket) =>
+  const dispatch = dispatchAnswering((socket) =>
     socket.send(
       JSON.stringify({
         code: "OAUTH_SCOPE_REQUIRED",
@@ -110,7 +98,7 @@ test("a refused agent view ends at once, naming Dispatch's refusal", async () =>
       })
     )
   );
-  const result = await timed(read(dispatch.url));
+  const result = await timed(read(dispatch.wsUrl));
   expect(result.error).toBe(
     "Dispatch refused the agent view: OAUTH_SCOPE_REQUIRED: this socket's credential does not hold the person scope, which watching an agent's conversation requires"
   );
@@ -118,35 +106,35 @@ test("a refused agent view ends at once, naming Dispatch's refusal", async () =>
 });
 
 test("a view Dispatch ends before its replay says so", async () => {
-  const dispatch = fakeDispatch((socket) =>
+  const dispatch = dispatchAnswering((socket) =>
     socket.send(JSON.stringify({ reason: "dropped", sub: SUB, type: "ended" }))
   );
-  const result = await timed(read(dispatch.url));
+  const result = await timed(read(dispatch.wsUrl));
   expect(result.error).toBe("Dispatch ended the agent view before its replay (dropped)");
   expect(result.ms).toBeLessThan(5_000);
 });
 
 test("a session that answers a re-arm after not responding still gives its replay", async () => {
-  const dispatch = fakeDispatch((socket) => {
+  const dispatch = dispatchAnswering((socket) => {
     socket.send(responder(false));
     // Dispatch re-arms the session and asks again; this one answers the second time.
     socket.send(responder(true));
     socket.send(replayFrame);
   });
-  expect(await read(dispatch.url)).toEqual(replay);
+  expect(await read(dispatch.wsUrl)).toEqual(replay);
 });
 
 test("a session that never answers ends at the timeout, saying it is not responding", async () => {
-  const dispatch = fakeDispatch((socket) => socket.send(responder(false)));
-  const result = await timed(read(dispatch.url, 1_000));
+  const dispatch = dispatchAnswering((socket) => socket.send(responder(false)));
+  const result = await timed(read(dispatch.wsUrl, 1_000));
   expect(result.error).toBe(
     "the session did not answer Dispatch's replay request within 1s (responding: false), so the agent view has no replay"
   );
 });
 
 test("a socket closed before the replay says so", async () => {
-  const dispatch = fakeDispatch((socket) => socket.close(1011, "internal error"));
-  const result = await timed(read(dispatch.url));
+  const dispatch = dispatchAnswering((socket) => socket.close(1011, "internal error"));
+  const result = await timed(read(dispatch.wsUrl));
   expect(result.error).toBe(
     "the live socket closed before the session's replay (1011 internal error)"
   );

@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -22,18 +24,27 @@ import (
 var transferredLegion = ghrepo.MustRenames(ghrepo.MustRename("sjawhar/legion", "cybermonklabs/legion"))
 
 // newTransferHandoffHarness is newHandoffHarness for a deployment that configures renames and
-// serves repositories of owners: the two the server's serving rule reads (Options.GitHubOwners
-// and Options.RepositoryRenames), which the harnesses above leave empty.
-func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghrepo.Renames, owners []string) (*harness, *factRecorder) {
+// serves repos: the serving rule the daemon hands the server (Options.Serving), built here from
+// what the daemon's own is built from — the repositories it serves and the configured renames
+// (ghrepo.Renames.Serving over the owners of those repositories, which is internal/daemon's
+// repositories.serving) — where the harnesses above hand none and a recorded repository is
+// served under its own name.
+func newTransferHandoffHarness(t *testing.T, github *handoffGitHub, renames ghrepo.Renames, repos []ghrepo.Repository) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
 	facts := &factRecorder{}
+	serving := func(recorded ghrepo.Repository) ghrepo.Repository {
+		return renames.Serving(recorded, func(owner string) bool {
+			return slices.ContainsFunc(repos, func(r ghrepo.Repository) bool { return strings.EqualFold(r.Owner(), owner) })
+		})
+	}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
-		GitHubOwners: func() []string { return owners }, RepositoryRenames: renames,
+		GitHubRepositories: func() []ghrepo.Repository { return repos }, RepositoryRenames: renames,
+		Serving:    serving,
 		MergeRules: func(string) config.MergeRules { return config.MergeRules{} },
 	}).Handler
 	return h, facts
@@ -61,7 +72,7 @@ func TestHandoffCompleteReadyOfATreeRecordedBeforeItsTransferReadsTheRepositoryG
 			github := newHandoffGitHub(t)
 			github.set(func(g *handoffGitHub) { g.repo = tc.served })
 			owner := ghrepo.MustParse(tc.served).Owner()
-			h, facts := newTransferHandoffHarness(t, github, tc.renames, []string{owner})
+			h, facts := newTransferHandoffHarness(t, github, tc.renames, []ghrepo.Repository{ghrepo.MustParse(owner + "/legion")})
 			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 				records := record.NewStore()
 				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main",

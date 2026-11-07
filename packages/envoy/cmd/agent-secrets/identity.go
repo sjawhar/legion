@@ -36,6 +36,12 @@ const (
 	// writes, and the enrollment id enroll (or the pod's launcher) writes beside it.
 	keyFile        = "key.pem"
 	enrollmentFile = "enrollment"
+	// enrollmentErrorFile is what whoever wrote the key records a refused enrollment in, beside
+	// it: key.pem with no enrollment is the one state selectSigner cannot read on its own, since
+	// it takes the key dir's branch on the key alone and then finds no id. Its content is the
+	// refusal, which selectSigner appends to what it answers, so a later call says what the
+	// broker said rather than naming a missing file.
+	enrollmentErrorFile = "enrollment.error"
 	// machineSessionMarker says this key dir's key and enrollment are a session this command
 	// registered for a machine that proves an identity of its own, which is what makes the
 	// enrollment one this command may register again when the broker says it is not live. A

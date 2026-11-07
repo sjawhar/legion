@@ -114,8 +114,11 @@ func (r *repositories) set(accepted []mappedRepository, refused []refusedReposit
 	return added, removed
 }
 
-// Owners is every served repository's owner, lowercased, sorted and once each: the owners a role's
-// GitHub credential holds a directory for.
+// Owners is every served repository's owner, lowercased, sorted and once each: what the daemon's
+// state reports of the mapping (view, api.RepositoriesView.Owners). No gh credential reads it. A
+// role's bundle is built from the served repositories themselves (Accepted, which
+// appauth.GitHubCredential and appauth.GitHubDirs read), since a directory of that bundle names
+// either an owner or one repository of it, and the lease in it names the repositories it reaches.
 func (r *repositories) Owners() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -788,8 +791,11 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 // mappingChange is Dispatch's consumer's RepositoryMapping: the project's
 // settings.repo_project.updated asks refreshOnMappingChange to read the mapping again
 // (requestMappingRead), and its event is acknowledged at once. A read takes Dispatch and GitHub
-// and can take longer than the event's acknowledgement window (AckWait), and one run inside that
-// window would be cut off and its event delivered again, never finishing.
+// and can take longer than the event's acknowledgement window (AckWait), the bound intake puts on
+// the mapping read a handler makes inline (readMapping), so a refresh run there would be cut off
+// part way and never finish. The event's delivery is not what is at risk — intake reports a
+// message in progress for as long as its handler runs — the refresh itself is, which is why it
+// runs on its own.
 func (w *workflowRuntime) mappingChange(context.Context) error {
 	w.requestMappingRead()
 	return nil

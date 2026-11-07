@@ -58,6 +58,9 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 		"BROKER_K8S_OIDC_ISSUER=" + issuer.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
 		"BROKER_SERVICE_LOGINS=legion-daemon=" + daemonAccount,
+		// The account the pods below run as, bound to the service the daemon logs in as: what
+		// lets that login enrol them (enroll.Service.podUnderTokenLogin).
+		"BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker",
 		"BROKER_API_ACCOUNTS=dispatch=" + dispatchAccount,
 	}})
 	base := "http://" + broker.Addr

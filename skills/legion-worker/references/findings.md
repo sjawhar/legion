@@ -1,7 +1,8 @@
 # A finding outside your issue
 
 Read this when you find a problem the issue you work does not cover: a defect in another
-component, repository or tool, a gap in Legion itself, or a production check's `fail`. It holds for
+component, repository or tool, a gap in Legion itself, or a `fail` on a look of the production
+check the project's `production_check` setting gives the tester. It holds for
 every Legion role (each phase worker, each architect, the controller) and for each of their
 subagents, and it replaces the filing step of `skill://dispatch-first` and `skill://dispatch`. The
 controller fixes nothing itself: it hands a finding to the tree that owns the code, as
@@ -68,7 +69,8 @@ The controller hands it to the running tree whose code it is, and files a Legion
 tree owns that code. Either way it replies under your evidence comment with where the work went.
 You file nothing, and you wait for nothing. When the report issue is missing or closed, put the
 evidence in the message itself. A production check's recorded result then names the defect as
-sent to the controller.
+sent to the controller, and the `fail` that records it closes the check, so that look names no
+next look of its own.
 
 ### When no controller takes it
 
@@ -120,7 +122,9 @@ of these that holds, so a person sees it and the controller finds it when it ret
    - Then post the evidence there and ask there, as [What the ask says](#what-the-ask-says)
      spells it. Say in your summary that you reopened or created it, so the controller knows.
 
-Name the ask in your summary, and in the result a production check records.
+Name the ask in your summary, and in the result a production check records. A look that must wait
+for the answer reports `pending` with a `wake_at` of its own, the time you want to look again:
+nothing else starts the next look.
 
 ## Where it goes
 

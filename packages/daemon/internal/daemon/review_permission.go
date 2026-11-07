@@ -175,15 +175,15 @@ const tokenRefusedWait = 5 * time.Second
 // other reason is returned as is.
 func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, appauth.Lease, ghrepo.Repository, error) {
 	serving := w.repositories.serving(repository)
-	lease, err := w.tokens.Token(ctx, appauth.Review, serving.Owner())
+	lease, err := w.tokens.Token(ctx, appauth.Review, serving)
 	if err != nil {
 		var transient *appauth.TransientError
 		if errors.As(err, &transient) {
 			w.holdRateLimit(time.Minute)
 			return githubrest.Client{}, appauth.Lease{}, serving, &intake.RetryLater{After: time.Minute,
-				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", serving.Owner(), time.Minute, err)}
+				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", serving, time.Minute, err)}
 		}
-		return githubrest.Client{}, appauth.Lease{}, serving, fmt.Errorf("mint the review App token for %s: %w", serving.Owner(), err)
+		return githubrest.Client{}, appauth.Lease{}, serving, fmt.Errorf("mint the review App token for %s: %w", serving, err)
 	}
 	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(w.githubAPI, serving)}, lease, serving, nil
 }

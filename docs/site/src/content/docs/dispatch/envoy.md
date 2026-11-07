@@ -362,11 +362,12 @@ read from its row:
 
 ## The NATS grant a Legion daemon needs
 
-Legion's daemon reads Dispatch and GitHub events from the stream through three durable consumers
-per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>` and the
-project's repository-mapping subject), `legion-go-<project>-dispatch-server` (filtering
-Dispatch's own start, `notifications.dispatch.server.started`) and `legion-go-<project>-github`
-(filtering each of the project's repositories). It sends its own notices to roles and to the
+Legion's daemon reads Dispatch, GitHub and listener events from the stream through a durable
+consumer per project for each: `legion-go-<project>-dispatch` (filtering
+`notifications.dispatch.issue.>` and the project's repository-mapping subject),
+`legion-go-<project>-github` (filtering each of the project's repositories) and
+`legion-go-<project>-wake` (filtering `notifications.legion.wake`, the listener's own wake).
+It sends its own notices to roles and to the
 controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:
@@ -404,10 +405,10 @@ included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
-The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same three
+The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same
 consumers written against another client library ask for different ones. So a grant is proven by
 running the daemon's consumers under exactly that grant, against a real server, and watching for a
-refusal: create the three consumers, restart onto them, have Dispatch and GitHub events
+refusal: create them all, restart onto them, have Dispatch and GitHub events
 acknowledged, and read their lag as `legion state` does. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
 subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that

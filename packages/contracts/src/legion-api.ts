@@ -20,6 +20,20 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
 const timestamp = z.iso.datetime({ offset: true });
 
+/** The RFC 3339 instant a session sends: seconds required, the fraction optional, `Z` or an
+ * offset required, as Go's `time.Time` decode requires them. It is the stricter of the two: it
+ * refuses a few strings that decode takes (`+24:00`, a comma before the fraction). `timestamp`
+ * above takes `2026-11-06T10:00Z`, which that decode rejects, so a plugin that validated a request
+ * field against it would send a body the daemon answers with its generic invalid-body error rather
+ * than the field's own guidance. The plugin reads this same schema for both fields a session
+ * sends — `wake_at` and `read_release_records`' `since`
+ * (`packages/pi-shared/src/legion-phase-ops.ts`). Only a field a session sends reads it: every
+ * other field here is the daemon's own output, which Go always writes with seconds. */
+export const LegionInstant = timestamp.regex(
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
+  { error: "an RFC 3339 time with seconds, as 2026-11-02T09:00:00Z is" }
+);
+
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
  * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
  * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
@@ -198,29 +212,36 @@ const legionSlotView = z.object({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
- * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
- * attempt, job and step success, or the build's commit), `at` when. */
+ * (`merge` for the look the close opens, `check wake` for one the checking agent's own `wake_at`
+ * or the retry of a look nobody reported starts, and `bound` for the last look; a check whose
+ * look was woken before the daemon stopped reading production can hold one of the causes that
+ * are gone), `detail` the cause's own detail — for `check wake`, the summary the agent's report
+ * gave or the retry's own words — `at` when. */
 const legionCheckWakeView = z.object({
   kind: nonEmptyString,
   detail: z.string(),
   at: timestamp,
 });
 
-/** `api.CheckView` — an issue's open production check, the implementer's work after the merge
- * closed the issue (contract 33): the repository, pull request and merge commit the check looks
- * for in production (`mergeCommit` is empty until the first build compare fills it for a pull
- * request merged before the daemon recorded merge commits), when it opened, how many looks the
- * implementer has taken and whether the latest is still open, what woke the latest look
- * (`lastWake`, absent before the first look wakes), the check's bound (`nextWakeAt`: when its last
- * look starts, the one wake the record promises; the deploy and build wakes before it are events,
- * not timers), and whether the last look has started. Present on the issue record only while the
- * check is open; absent once it closed or while none was opened. */
+/** `api.CheckView` — an issue's open production check, the work the project's `production_check`
+ * role takes after the merge closed the issue (contract 33, contract 54): the repository, pull
+ * request and merge commit the check looks for in production (`mergeCommit` is empty for a pull
+ * request merged before the daemon recorded merge commits), when it opened, the role the check
+ * records as the one that works it (`role`), how many looks that role has taken and whether the
+ * latest is still open, what woke the latest look (`lastWake`, absent before the first look
+ * wakes), when the next look is due (`nextWakeAt`), and whether the last look has started.
+ * `nextWakeAt` is whichever names that look: the moment the checking agent named for itself on a
+ * pending report, the retry of a look nobody reported, or the check's own bound — the moment its
+ * last look starts — where neither stands. The bound has no field of its own: `nextWakeAt` is the
+ * bound whenever no agent's time is set, `openedAt` is here, and `production_check_hours` is in
+ * the settings. Present on the issue record only while the check is open; absent once it closed
+ * or while none was opened. */
 const legionCheckView = z.object({
   repo: nonEmptyString,
   pullRequest: z.number().int().positive(),
   mergeCommit: z.string(),
   openedAt: timestamp,
+  role: nonEmptyString,
   looks: z.number().int().nonnegative(),
   lookOpen: z.boolean(),
   lastWake: legionCheckWakeView.optional(),
@@ -314,6 +335,22 @@ const legionHeldOutboxRow = z.object({
   issue: nonEmptyString,
   waitedSeconds: z.number().int().nonnegative(),
   waitsOn: z.number().int().positive(),
+});
+
+/** `api.WakeWaiting` — one wake the daemon's pacing is holding until its turn
+ * (`worker_wakes_per_minute`, `worker_wake_burst`, contract 53): the claim it will wake, that
+ * claim's issue and role, what kind of wake it is, and `dueAt`, the moment the pacing gave it,
+ * which is when it runs. The kinds are the daemon's three paced lanes: `launch`, a role process it
+ * is about to start, and `plugin-task`, the update task a stale-plugin round queues to a session
+ * already running, both held in the claim's machine and lost with a restart, which raises the wave
+ * again through its own paths; and `catch-up`, the notice a start writes to an architect already
+ * running in place of a launch, which waits on its own outbox row. */
+const legionWakeWaiting = z.object({
+  claim: nonEmptyString,
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  kind: nonEmptyString,
+  dueAt: timestamp,
 });
 
 /** `api.Issue` — `workers` is keyed by a plain string, not by the role names this build knows, so
@@ -525,7 +562,16 @@ const legionConsumerLag = z.object({
  * credential source or credential file path, required, and loose like `payload` above, so a
  * legion.yaml key added later is no contract change (contract 35); being `z.looseObject` it keeps
  * the keys it does not name, where the shapes around it drop theirs; `consumers` is the lag
- * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
+ * `wakesWaiting` is every wake the daemon's pacing is holding until its turn, in claim order, never
+ * null, empty at every moment outside a restart or a plugin wave (contract 53). It is optional
+ * here only because a daemon at this contract leaves it off one body: a reader before 53 refuses
+ * the key outright, empty as surely as naming a wake, so the route strips it for a caller in a pod
+ * whose claims record a contract below 53, and for a caller in a pod whose claims it cannot read
+ * at all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). A reader
+ * that finds it absent has been served that stripped body and learns nothing about which wakes
+ * wait; it is never a daemon older than this plugin, whom the boot gate and `legion probe-image`
+ * refuse. */
 export const LegionStateResponse = z.object({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -533,6 +579,7 @@ export const LegionStateResponse = z.object({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
+  wakesWaiting: z.array(legionWakeWaiting).optional(),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
@@ -690,11 +737,13 @@ const legionHoldRecord = z.object({
  * an issue pod, which holds its claim credential and no operator token, so the claim secret
  * authenticates it as `claims/ready` is authenticated — and it is a POST rather than a GET with a
  * query because that secret is a credential, which a URL carries into every proxy and access log
- * between the pod and the daemon. */
+ * between the pod and the daemon. `since` is a `LegionInstant`, not a `timestamp`: the session
+ * sends it, the daemon decodes it with `time.Parse(time.RFC3339, …)`
+ * (`internal/api/claims.go`), which refuses a time with no seconds, and so does this. */
 export const LegionReleaseRecordsRequest = z.strictObject({
   claimToken: nonEmptyString,
   secret: nonEmptyString,
-  since: timestamp,
+  since: LegionInstant,
 });
 
 export type LegionReleaseRecordsRequestBody = z.output<typeof LegionReleaseRecordsRequest>;
@@ -896,7 +945,7 @@ export const LegionControllerGrantRequest = z.strictObject({
 });
 
 /** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow: a phase
- * completion, or the implementer's report on a look of its closed issue's production check.
+ * completion, or the checking role's report on a look of its closed issue's production check.
  * A file-backed phase (planning, implementing, testing, reviewing) ends with a handoff record on
  * the Dispatch issue, which the worker writes with `dispatch handoff-write` under its own session;
  * its completion names it, `handoffId` and `handoffVersion`, which the daemon reads back from
@@ -909,7 +958,11 @@ export const LegionControllerGrantRequest = z.strictObject({
  * all three are optional here, and the daemon requires each where it applies. `verdict` is `pass`
  * or `fail` for the tester's completion, `pass`, `pending` or `fail` for a check report
  * (`CHECK_VERDICT_REQUIRED`), and the empty string for every other completion; it stays a string
- * on the wire, as the Go field is. */
+ * on the wire, as the Go field is. `wakeAt` is the check report's alone (contract 54): when the
+ * checking agent asks to be woken for its next look, which a pending report on a look that is not
+ * the check's last must name (`CHECK_WAKE_REQUIRED`) and which no other verdict and no phase
+ * completion may carry (`CHECK_WAKE_UNEXPECTED`). It is a `LegionInstant`, not a `timestamp`:
+ * the daemon's decode of it refuses a time with no seconds, and so does this. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,
@@ -918,6 +971,7 @@ export const LegionHandoffCompleteRequest = z.strictObject({
   commit: nonEmptyString.optional(),
   handoffId: nonEmptyString.optional(),
   handoffVersion: z.number().int().positive().optional(),
+  wakeAt: LegionInstant.optional(),
 });
 
 /** `api.IssueStatusRequest`, the controller's explicit board-status write. */

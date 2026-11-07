@@ -169,14 +169,23 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	// alive for as long as the object it is attached to, and the service reaches every resident
 	// room document through ygo's room table (s.srv): a closure holding the service strongly
 	// would be a cycle through live, which would then never be collected, and nor would anything
-	// it holds. The nil check skips the delete only where the service went first, and a service
-	// that is gone has no map to delete from (dispatch://INFRA-1085).
-	owner := weak.Make(s)
-	runtime.AddCleanup(live, func(load *roomLoad) {
-		if s := owner.Value(); s != nil {
-			s.roomLoads.CompareAndDelete(room, load)
+	// it holds. The rule covers the cleanup's argument alike, and the load reaches a document of
+	// its own: through the instance it holds, the updates that instance has classified and not
+	// yet stored, and the service and the room state each of their credits carries
+	// (roomInstance.unstored, UpdateCredit.service, and UpdateCredit.state, whose
+	// roomState.reservedFor is a *crdt.Doc). So the load is held weakly beside the service and
+	// the argument is an empty struct, which reaches nothing. The nil checks skip the delete only
+	// where the service or the load went first, and neither leaves anything to do: a service that
+	// is gone has no map to delete from, and a load that is gone is one no entry of s.roomLoads
+	// holds, since the map holds a load strongly for as long as the entry this cleanup would
+	// delete exists - a load stored for the room since would not match CompareAndDelete anyway
+	// (dispatch://INFRA-1085).
+	owner, record := weak.Make(s), weak.Make(load)
+	runtime.AddCleanup(live, func(struct{}) {
+		if s, l := owner.Value(), record.Value(); s != nil && l != nil {
+			s.roomLoads.CompareAndDelete(room, l)
 		}
-	}, load)
+	}, struct{}{})
 	s.catchUps.schedule(room, live)
 	return instance
 }
