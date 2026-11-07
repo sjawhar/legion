@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { NameVersionDialog } from "./NameVersionDialog";
 
@@ -14,12 +15,13 @@ test("renders nothing when closed", () => {
     />
   );
   try {
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
 });
-test("Save is disabled until the input is non-empty", () => {
+test("Save is disabled until the input is non-empty", async () => {
+  const user = userEvent.setup();
   const view = render(
     <NameVersionDialog error={false} onClose={() => {}} onSave={() => {}} open saving={false} />
   );
@@ -28,17 +30,21 @@ test("Save is disabled until the input is non-empty", () => {
     const input = screen.getByLabelText("What changed?");
     expect(save.disabled).toBe(true);
 
-    fireEvent.change(input, { target: { value: "   " } });
+    await user.click(input);
+    await user.paste("   ");
     expect(save.disabled).toBe(true);
 
-    fireEvent.change(input, { target: { value: "Tightened the intro" } });
+    await user.clear(input);
+    await user.click(input);
+    await user.paste("Tightened the intro");
     expect(save.disabled).toBe(false);
   } finally {
     view.unmount();
   }
 });
 
-test("Enter submits the trimmed summary", () => {
+test("Enter submits the trimmed summary", async () => {
+  const user = userEvent.setup();
   const saved: string[] = [];
   const view = render(
     <NameVersionDialog
@@ -51,15 +57,17 @@ test("Enter submits the trimmed summary", () => {
   );
   try {
     const input = screen.getByLabelText("What changed?");
-    fireEvent.change(input, { target: { value: "  Tightened the intro  " } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    await user.click(input);
+    await user.paste("  Tightened the intro  ");
+    await user.keyboard("{Enter}");
     expect(saved).toEqual(["Tightened the intro"]);
   } finally {
     view.unmount();
   }
 });
 
-test("Enter does nothing while the input is empty", () => {
+test("Enter does nothing while the input is empty", async () => {
+  const user = userEvent.setup();
   const saved: string[] = [];
   const view = render(
     <NameVersionDialog
@@ -72,14 +80,16 @@ test("Enter does nothing while the input is empty", () => {
   );
   try {
     const input = screen.getByLabelText("What changed?");
-    fireEvent.keyDown(input, { key: "Enter" });
+    await user.click(input);
+    await user.keyboard("{Enter}");
     expect(saved).toEqual([]);
   } finally {
     view.unmount();
   }
 });
 
-test("Cancel calls onClose", () => {
+test("Cancel calls onClose", async () => {
+  const user = userEvent.setup();
   let closed = 0;
   const view = render(
     <NameVersionDialog
@@ -91,7 +101,7 @@ test("Cancel calls onClose", () => {
     />
   );
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(closed).toBe(1);
   } finally {
     view.unmount();
@@ -103,7 +113,7 @@ test("a failed save keeps the dialog and the typed summary and shows the error i
     <NameVersionDialog error onClose={() => {}} onSave={() => {}} open saving={false} />
   );
   try {
-    expect(within(view.container).getByRole("alert").textContent).toContain(
+    expect(within(view.container).getByRole("alert")).toHaveTextContent(
       "Could not name this version"
     );
     expect(

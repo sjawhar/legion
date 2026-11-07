@@ -123,6 +123,8 @@ function stubReads(readVersion: number | null) {
   const getDocumentRead = spyOn(api, "getDocumentRead").mockResolvedValue(readOf(readVersion));
   const getReferences = spyOn(api, "getReferences").mockResolvedValue(parts);
   const getArtifactBlocks = spyOn(api, "getArtifactBlocks").mockResolvedValue(blocks);
+  // The margin reads the issue's asks for every document it shows; none of these rows has one.
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const putRead = answerRoute<
     (id: string, body: { version: number }, bounds: WriteBounds) => Promise<unknown>
   >("PUT", "/api/v1/me/documents/*/read");
@@ -139,6 +141,7 @@ function stubReads(readVersion: number | null) {
         getDocumentRead,
         getReferences,
         getArtifactBlocks,
+        listIssueAsks,
       ]) {
         spy.mockRestore();
       }
@@ -163,7 +166,7 @@ test("the Spec tab marks stale and changed blocks through the editor, names the 
     // The read version is the one the person had before this visit: the blocks above it are
     // marked, and the line names their sections.
     const line = await screen.findByText("Changed since you last read version 2: Rollout");
-    expect(line.getAttribute("role")).toBe("status");
+    expect(line).toHaveAttribute("role", "status");
     await waitFor(() =>
       expect(editor.blockMarks.at(-1)).toEqual([
         { blockId: "p-plan", className: staleBlockMark, title: STALE_BLOCK_TITLE },
@@ -216,7 +219,7 @@ test("with no read version the Spec tab shows no line and marks no changed block
         { blockId: "p-plan", className: staleBlockMark, title: STALE_BLOCK_TITLE },
       ])
     );
-    expect(screen.queryByText(/Changed since you last read/)).toBeNull();
+    expect(screen.queryByText(/Changed since you last read/)).not.toBeInTheDocument();
   } finally {
     cleanup();
     reads.restore();

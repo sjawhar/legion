@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerIssuePatches } from "../../__tests__/send-answers";
@@ -149,9 +150,11 @@ test("IssueComponentsLine reads Not attached, and stays read-only without an arc
   );
   try {
     expect(view.q.getByTestId("issue-components").textContent).toBe("Components:Not attached");
-    expect(view.q.queryByRole("link")).toBeNull();
+    expect(view.q.queryByRole("link")).not.toBeInTheDocument();
     await waitFor(() => expect(view.listProjectArchitectureSources).toHaveBeenCalledTimes(1));
-    expect(view.q.queryByRole("button", { name: "Edit components of CORE-7" })).toBeNull();
+    expect(
+      view.q.queryByRole("button", { name: "Edit components of CORE-7" })
+    ).not.toBeInTheDocument();
     // No source: the tree is never asked for.
     expect(view.getArchitecture).not.toHaveBeenCalled();
   } finally {
@@ -174,12 +177,13 @@ test("IssueComponentsLine lists an explicit set as chips, marks retired ids, and
     view.q.getByText("dispatch-server");
     view.q.getByText("web");
     const retired = view.q.getByText("retired: legacy-ui");
-    expect(retired.getAttribute("title")).toBe(
+    expect(retired).toHaveAttribute(
+      "title",
       "legacy-ui is no longer in the project's architecture model"
     );
     const ancestor = view.q.getByRole("link", { name: "CORE-1" }) as HTMLAnchorElement;
-    expect(ancestor.getAttribute("href")).toBe("/issues/CORE-1");
-    expect(view.q.getByTestId("issue-components").textContent).toContain("inherited from CORE-1");
+    expect(ancestor).toHaveAttribute("href", "/issues/CORE-1");
+    expect(view.q.getByTestId("issue-components")).toHaveTextContent("inherited from CORE-1");
   } finally {
     view.unmountAll();
   }
@@ -194,13 +198,14 @@ test("IssueComponentsLine shows a none attachment with its reason", () => {
     expect(view.q.getByTestId("issue-components").textContent).toBe(
       "Components:None — hiring, not code"
     );
-    expect(view.q.queryByRole("link")).toBeNull();
+    expect(view.q.queryByRole("link")).not.toBeInTheDocument();
   } finally {
     view.unmountAll();
   }
 });
 
 test("with architecture sources the line offers the picker with every source's components, fetching the tree only once it opens, and PATCHes an explicit set", async () => {
+  const user = userEvent.setup();
   const view = renderLine(
     { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     tree
@@ -212,7 +217,7 @@ test("with architecture sources the line offers the picker with every source's c
     // The header decides editability from the source list alone: the tree (refetched on
     // every issue event in the project) waits for the picker.
     expect(view.getArchitecture).not.toHaveBeenCalled();
-    fireEvent.click(trigger);
+    await user.click(trigger);
     await waitFor(() => expect(view.getArchitecture).toHaveBeenCalledTimes(1));
     const option = await screen.findByRole("option", { name: "dispatch-server · Dispatch server" });
     const listbox = screen.getByRole("listbox", { name: "Components options" });
@@ -223,11 +228,12 @@ test("with architecture sources the line offers the picker with every source's c
         .getAllByRole("option")
         .map((row) => row.textContent)
     ).toEqual(["dispatch-server · Dispatch server", "infra-cluster · Cluster"]);
-    fireEvent.click(option);
-    fireEvent.click(screen.getByRole("option", { name: "infra-cluster · Cluster" }));
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search components" }), {
-      key: "Escape",
-    });
+    await user.click(option);
+    await user.click(screen.getByRole("option", { name: "infra-cluster · Cluster" }));
+    // The picker's own Escape handler sits on the search input, so the press has to reach it:
+    // focusing it directly leaves the open picker as the clicks left it.
+    screen.getByRole("combobox", { name: "Search components" }).focus();
+    await user.keyboard("{Escape}");
     await waitFor(() => expect(view.patchIssue).toHaveBeenCalledTimes(1));
     expect(view.patchIssue).toHaveBeenCalledWith(
       "CORE-7",

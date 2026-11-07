@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, ArtifactApproval, ArtifactReview } from "../../api/types";
@@ -104,7 +105,7 @@ test("a stale approval's label and title carry both the approved and latest vers
 test("the header hides Approve for a current approval but offers Request changes", () => {
   const view = renderChip(artifact({ latest_version: 3, state: "approved", version: 3 }), "header");
   try {
-    expect(screen.queryByRole("button", { name: /^Approve( v\d+)?$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Approve( v\d+)?$/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Request changes" })).not.toBeNull();
   } finally {
     view.unmount();
@@ -121,6 +122,7 @@ test("the header's Approve reads the latest version for a stale approval", () =>
 });
 
 test("clicking Approve posts an approved review and refreshes the issue and inbox", async () => {
+  const user = userEvent.setup();
   const createArtifactReview = spyOn(api, "createArtifactReview").mockResolvedValue({
     actor: { id: "alice", kind: "user" },
     artifact_id: "artifact-1",
@@ -135,7 +137,7 @@ test("clicking Approve posts an approved review and refreshes the issue and inbo
   });
   const view = renderChip(artifact({ latest_version: 3, state: "awaiting" }), "header");
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await user.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(createArtifactReview).toHaveBeenCalledTimes(1));
     expect(createArtifactReview).toHaveBeenCalledWith(
       "artifact-1",
@@ -149,6 +151,7 @@ test("clicking Approve posts an approved review and refreshes the issue and inbo
 });
 
 test("Request changes requires a reason before it can submit, then posts it", async () => {
+  const user = userEvent.setup();
   const createArtifactReview = spyOn(api, "createArtifactReview").mockResolvedValue({
     actor: { id: "alice", kind: "user" },
     artifact_id: "artifact-1",
@@ -163,17 +166,16 @@ test("Request changes requires a reason before it can submit, then posts it", as
   });
   const view = renderChip(artifact({ latest_version: 3, state: "awaiting" }), "header");
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    await user.click(screen.getByRole("button", { name: "Request changes" }));
     const dialog = screen.getByRole("dialog", { name: "Request changes" });
     const submit = within(dialog).getByRole("button", { name: "Request changes" });
     expect(submit.hasAttribute("disabled")).toBe(true);
 
-    fireEvent.change(within(dialog).getByLabelText("Reason"), {
-      target: { value: "Needs another pass" },
-    });
-    expect(submit.hasAttribute("disabled")).toBe(false);
+    await user.click(within(dialog).getByLabelText("Reason"));
+    await user.paste("Needs another pass");
+    expect(submit).not.toHaveAttribute("disabled");
 
-    fireEvent.click(submit);
+    await user.click(submit);
     await waitFor(() => expect(createArtifactReview).toHaveBeenCalledTimes(1));
     expect(createArtifactReview).toHaveBeenCalledWith(
       "artifact-1",
@@ -192,6 +194,7 @@ test("Request changes requires a reason before it can submit, then posts it", as
 // A reason Dispatch refuses for its length is refused the same way every time, and the server's
 // words name the block and the bound: the dialog shows them in place of wording of its own.
 test("a refused reason shows the server's message", async () => {
+  const user = userEvent.setup();
   const refusal =
     "reason block 1 (paragraph) is 1 characters over the 32000-character block limit (32001/32000)";
   const createArtifactReview = spyOn(api, "createArtifactReview").mockRejectedValue(
@@ -199,12 +202,11 @@ test("a refused reason shows the server's message", async () => {
   );
   const view = renderChip(artifact({ latest_version: 3, state: "awaiting" }), "header");
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    await user.click(screen.getByRole("button", { name: "Request changes" }));
     const dialog = screen.getByRole("dialog", { name: "Request changes" });
-    fireEvent.change(within(dialog).getByLabelText("Reason"), {
-      target: { value: "x".repeat(32_001) },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Request changes" }));
+    await user.click(within(dialog).getByLabelText("Reason"));
+    await user.paste("x".repeat(32_001));
+    await user.click(within(dialog).getByRole("button", { name: "Request changes" }));
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(refusal));
   } finally {
@@ -217,6 +219,7 @@ test("a refused reason shows the server's message", async () => {
 // The dialog closes with no refusal, the reviews are read again, and a second press is a fresh
 // open of the dialog rather than a second review of the reason already sent.
 test("a change request made with its answer lost closes the dialog, refuses nothing and reads again", async () => {
+  const user = userEvent.setup();
   const createArtifactReview = spyOn(api, "createArtifactReview").mockRejectedValue(
     new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
   );
@@ -234,16 +237,15 @@ test("a change request made with its answer lost closes the dialog, refuses noth
     </QueryClientProvider>
   );
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    await user.click(screen.getByRole("button", { name: "Request changes" }));
     const dialog = screen.getByRole("dialog", { name: "Request changes" });
-    fireEvent.change(within(dialog).getByLabelText("Reason"), {
-      target: { value: "Needs another pass" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Request changes" }));
+    await user.click(within(dialog).getByLabelText("Reason"));
+    await user.paste("Needs another pass");
+    await user.click(within(dialog).getByRole("button", { name: "Request changes" }));
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Request changes" })).toBeNull()
+      expect(screen.queryByRole("dialog", { name: "Request changes" })).not.toBeInTheDocument()
     );
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(queryClient.getQueryState(["artifact-reviews", "artifact-1"])?.isInvalidated).toBe(true);
     expect(createArtifactReview).toHaveBeenCalledTimes(1);
   } finally {
@@ -279,13 +281,14 @@ test("clicking the chip opens a popover listing every review", async () => {
       version: 3,
     },
   ];
+  const user = userEvent.setup();
   const listArtifactReviews = spyOn(api, "listArtifactReviews").mockResolvedValue(reviews);
   const view = renderChip(
     artifact({ latest_version: 3, state: "changes_requested", version: 3 }),
     "list"
   );
   try {
-    fireEvent.click(screen.getByRole("button", { name: "Changes requested" }));
+    await user.click(screen.getByRole("button", { name: "Changes requested" }));
     const dialog = await screen.findByRole("dialog", { name: "Reviews" });
     expect(within(dialog).getByText(/alice approved v2/)).not.toBeNull();
     expect(within(dialog).getByText(/bob requested changes on v3/)).not.toBeNull();
@@ -301,6 +304,7 @@ test("clicking the chip opens a popover listing every review", async () => {
 // A host that selected this approval request - the Inbox's reading pane - learns from the chip
 // that the reader reviewed it here, so it can move on to the next item.
 test("a review the server records tells the host, once, that the document was reviewed", async () => {
+  const user = userEvent.setup();
   const createArtifactReview = spyOn(api, "createArtifactReview").mockResolvedValue({
     actor: { id: "alice", kind: "user" },
     artifact_id: "artifact-1",
@@ -319,7 +323,7 @@ test("a review the server records tells the host, once, that the document was re
   });
   try {
     expect(reviewed).toBe(0);
-    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await user.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(reviewed).toBe(1));
     expect(createArtifactReview).toHaveBeenCalledTimes(1);
   } finally {

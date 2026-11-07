@@ -1,18 +1,73 @@
-import { expect, spyOn, test } from "bun:test";
-import { act, fireEvent, waitFor, within } from "@testing-library/react";
+import { beforeEach, expect, spyOn, test } from "bun:test";
+import { act, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http } from "msw";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
+  artifact,
   createQueryClient,
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { api } from "../../api/client";
-import type { Ask, IssueAskRow } from "../../api/types";
+import type { Ask, DocumentRead, IssueAskRow, IssueDecisions } from "../../api/types";
 
 answerTextReadsWithTheSeededText();
+
+/**
+ * What `GET /api/v1/issues/CORE-1/asks` answers for the rest of the test: the rows the test
+ * seeded into the asks cache, so the refetch a write sets off hands the block back the same ask
+ * rather than dropping it. A test that spies `api.listIssueAsks` never reaches the handler.
+ */
+let issueAskRows: IssueAskRow[] = [];
+
+/**
+ * The reads the document surface makes of its own record, blocks and read mark, and of the
+ * issue's asks and decisions, each answered with the API's empty shape so the page renders its
+ * loaded-empty state rather than its error state.
+ */
+beforeEach(() => {
+  issueAskRows = [];
+  answerRequests(
+    http.get("/api/v1/artifacts/:id", ({ params }) =>
+      params.id === artifact.id
+        ? Response.json(artifact)
+        : Response.json(
+            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
+            { status: 404 }
+          )
+    ),
+    http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
+    http.get("/api/v1/issues/:key/asks", () => Response.json(issueAskRows)),
+    http.get("/api/v1/issues/:key/decisions", () =>
+      Response.json({
+        decisions: [],
+        document: null,
+        open_questions: [],
+      } satisfies IssueDecisions)
+    ),
+    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
+      Response.json({
+        artifact_id: String(params.id),
+        read_at: null,
+        version: null,
+      } satisfies DocumentRead)
+    ),
+    // Opening a document the viewer has never read records the version they are looking at.
+    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
+      const { version } = (await request.json()) as { version: number };
+      return Response.json({
+        artifact_id: String(params.id),
+        read_at: "2026-09-09T00:00:00Z",
+        version,
+      } satisfies DocumentRead);
+    })
+  );
+});
 
 // ---------------------------------------------------------------------------------------------
 // Decision (`:::ask`) blocks: the wiring from editor node views to the React card and back to
@@ -78,8 +133,10 @@ const blockAsk: Ask = {
 };
 
 test("ProofDocument hands its decision blocks the indexed ask; the hosted card answers through the ask route and the document's reads refresh", async () => {
+  const user = userEvent.setup();
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [blockAsk]);
+  issueAskRows = [{ ...blockAsk, last_reply: null }];
   queryClient.setQueryData(["artifact", "artifact-1", "text"], { markdown: "stale" });
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: blockAsk,
@@ -126,12 +183,13 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     const hosted = await block.findByRole("article", { name: "Urgency: High" });
     expect(within(hosted).getByText("Architect for CORE-1")).toBeDefined();
     await waitFor(() => expect(getAsk).toHaveBeenCalledWith("ask-1"));
-    fireEvent.click(await block.findByRole("radio", { name: "Ship Release it" }));
-    fireEvent.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
-    fireEvent.change(block.getByLabelText("Your answer"), { target: { value: "Go." } });
+    await user.click(await block.findByRole("radio", { name: "Ship Release it" }));
+    await user.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
+    await user.click(block.getByLabelText("Your answer"));
+    await user.paste("Go.");
     const getArtifactText = spyOn(api, "getArtifactText");
     const textReadsBeforeAnswer = getArtifactText.mock.calls.length;
-    fireEvent.click(block.getByRole("button", { name: "Answer" }));
+    await user.click(block.getByRole("button", { name: "Answer" }));
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
@@ -153,6 +211,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
 });
 
 test("after Ask back on a decision block, the hosted card's turn label follows the refetched issue asks to the agent's turn", async () => {
+  const user = userEvent.setup();
   const openAsk: Ask = { ...blockAsk, waiting_on: "human" };
   // The list route answers rows: the ask plus its newest reply, and no thread unasked.
   const handedOver: IssueAskRow = {
@@ -215,9 +274,10 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     if (section === null) throw new Error("the ask block shell was not mounted");
     const block = within(section as HTMLElement);
     expect((await block.findByTestId("turn-ask-1")).textContent).toBe("Waiting on you");
-    fireEvent.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
-    fireEvent.change(block.getByLabelText("Your answer"), { target: { value: "Ship where?" } });
-    fireEvent.click(block.getByRole("button", { name: "Ask back" }));
+    await user.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
+    await user.click(block.getByLabelText("Your answer"));
+    await user.paste("Ship where?");
+    await user.click(block.getByRole("button", { name: "Ask back" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     // The clarification invalidates the owner's asks; the refetch hands the block the new turn.
     await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
@@ -245,6 +305,7 @@ test("a closed issue's current document shows a withdrawn block's record from it
   };
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [withdrawn]);
+  issueAskRows = [{ ...withdrawn, last_reply: null }];
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   queryClient.setQueryData(["artifact", "artifact-1", "version", 1], {
     authors: [{ id: "alice", kind: "user" }],
@@ -279,9 +340,9 @@ test("a closed issue's current document shows a withdrawn block's record from it
     const current = within(mountBlock(0));
     expect((await current.findByTestId("ask-resolution-badge")).textContent).toBe("Withdrawn");
     expect(current.getByText(/Withdrawn when alice closed the issue$/)).toBeDefined();
-    expect(current.queryByText(/Withdrawn by the close of CORE-1/)).toBeNull();
-    expect(current.queryByRole("radio")).toBeNull();
-    expect(current.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(current.queryByText(/Withdrawn by the close of CORE-1/)).not.toBeInTheDocument();
+    expect(current.queryByRole("radio")).not.toBeInTheDocument();
+    expect(current.queryByRole("button", { name: "Answer" })).not.toBeInTheDocument();
 
     // The same block and row on a saved version: the version reads its own attributes, so a
     // withdrawal made after it never shows there.
@@ -289,14 +350,15 @@ test("a closed issue's current document shows a withdrawn block's record from it
     await waitFor(() => expect(editors).toHaveLength(2));
     const saved = within(mountBlock(1));
     expect(await saved.findByText("Resolved")).toBeDefined();
-    expect(saved.queryByTestId("ask-resolution-badge")).toBeNull();
-    expect(saved.queryByText(/Withdrawn/)).toBeNull();
+    expect(saved.queryByTestId("ask-resolution-badge")).not.toBeInTheDocument();
+    expect(saved.queryByText(/Withdrawn/)).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
 });
 
 test("the open-decision link names its block as encodeBlockId writes it, in its href and in the hash it sets", async () => {
+  const user = userEvent.setup();
   const decision: Ask = { ...blockAsk, block_id: "ship_it" };
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [decision]);
@@ -311,8 +373,8 @@ test("the open-decision link names its block as encodeBlockId writes it, in its 
     await waitFor(() => expect(editors).toHaveLength(1));
     const nav = await within(view.container).findByRole("navigation", { name: "Open decisions" });
     const link = within(nav).getByRole("link", { name: "Should we ship?" });
-    expect(link.getAttribute("href")).toBe("#b-ship%5Fit");
-    fireEvent.click(link);
+    expect(link).toHaveAttribute("href", "#b-ship%5Fit");
+    await user.click(link);
     expect(window.location.hash).toBe("#b-ship%5Fit");
     expect(editors[0]?.focusedBlocks).toContain("ship_it");
   } finally {
@@ -325,8 +387,10 @@ test("the open-decision link names its block as encodeBlockId writes it, in its 
 // A pane's editor is read-only, but `blocksReadOnly` is `isClosed || schemaReadOnly` still: the
 // whole point of the Inbox's reading pane is that the reader answers the decision there.
 test("a pane's decision block hosts its answer form and tells its host which question was answered", async () => {
+  const user = userEvent.setup();
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [blockAsk]);
+  issueAskRows = [{ ...blockAsk, last_reply: null }];
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: blockAsk,
     answers: [],
@@ -371,8 +435,8 @@ test("a pane's decision block hosts its answer form and tells its host which que
     const block = within(section as HTMLElement);
     // The hosted card, not the block's own read-only record of its attributes.
     expect(await block.findByRole("article", { name: "Urgency: High" })).toBeDefined();
-    fireEvent.click(await block.findByRole("radio", { name: "Ship Release it" }));
-    fireEvent.click(block.getByRole("button", { name: "Answer" }));
+    await user.click(await block.findByRole("radio", { name: "Ship Release it" }));
+    await user.click(block.getByRole("button", { name: "Answer" }));
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(answered).toEqual(["ask-1"]));
   } finally {

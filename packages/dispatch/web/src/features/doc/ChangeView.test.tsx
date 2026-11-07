@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { fireEvent, render, within } from "@testing-library/react";
+import { render, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { ChangeView } from "./ChangeView";
 import * as changeSet from "./change-set";
@@ -114,7 +115,8 @@ test("a changed table row marks the cell that changed, the table staying one blo
   }
 });
 
-test("a run of unchanged blocks folds behind one control, a block of context on each side", () => {
+test("a run of unchanged blocks folds behind one control, a block of context on each side", async () => {
+  const user = userEvent.setup();
   const body = "\n\nA.\n\nB.\n\nC.\n\nD.\n\n";
   const view = render(
     <ChangeView after={`First changed.${body}Last changed.\n`} before={`First.${body}Last.\n`} />
@@ -129,7 +131,7 @@ test("a run of unchanged blocks folds behind one control, a block of context on 
     ]);
 
     const show = within(card).getByRole("button", { name: "Show 2 unchanged blocks" });
-    fireEvent.click(show);
+    await user.click(show);
     expect(blocks(view.container)).toEqual([
       ["changed", "First changed."],
       ["unchanged", "A."],
@@ -140,14 +142,15 @@ test("a run of unchanged blocks folds behind one control, a block of context on 
     ]);
 
     const hide = within(card).getByRole("button", { name: "Hide 2 unchanged blocks" });
-    fireEvent.click(hide);
+    await user.click(hide);
     expect(blocks(view.container).length).toBe(4);
   } finally {
     view.unmount();
   }
 });
 
-test("the heading of the section a change sits in is drawn while the heading itself is folded", () => {
+test("the heading of the section a change sits in is drawn while the heading itself is folded", async () => {
+  const user = userEvent.setup();
   const body = "# Plan\n\nIntro.\n\n## Rollout\n\nAlpha.\n\nBeta.\n\nGamma.\n\n";
   const view = render(<ChangeView after={`${body}Delta changed.\n`} before={`${body}Delta.\n`} />);
   try {
@@ -158,8 +161,8 @@ test("the heading of the section a change sits in is drawn while the heading its
       ["changed", "Delta changed."],
     ]);
 
-    fireEvent.click(within(card).getByRole("button", { name: "Show 5 unchanged blocks" }));
-    expect(within(card).queryByTestId("change-section")).toBeNull();
+    await user.click(within(card).getByRole("button", { name: "Show 5 unchanged blocks" }));
+    expect(within(card).queryByTestId("change-section")).not.toBeInTheDocument();
     expect(blocks(view.container).map(([change]) => change)).toEqual([
       "unchanged",
       "unchanged",
@@ -187,13 +190,14 @@ test("two versions that hold the same text show the document, unmarked and unfol
       "unchanged",
     ]);
     expect(card.querySelector("ins, del")).toBeNull();
-    expect(within(card).queryByRole("button")).toBeNull();
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
   } finally {
     view.unmount();
   }
 });
 
-test("opening a fold diffs no changed block the view already diffed", () => {
+test("opening a fold diffs no changed block the view already diffed", async () => {
+  const user = userEvent.setup();
   const version = (first: string, middle: string, last: string): string =>
     `${first}\n\nA.\n\nB.\n\nC.\n\nD.\n\n${middle}\n\nE.\n\nF.\n\nG.\n\nH.\n\n${last}\n`;
   const changedWords = spyOn(changeSet, "changedWords");
@@ -214,9 +218,9 @@ test("opening a fold diffs no changed block the view already diffed", () => {
       "Show 2 unchanged blocks",
       "Show 2 unchanged blocks",
     ]);
-    fireEvent.click(folds[0]);
+    await user.click(folds[0]);
     expect(changedWords.mock.calls.length).toBe(diffed);
-    fireEvent.click(within(card).getByRole("button", { name: "Show 2 unchanged blocks" }));
+    await user.click(within(card).getByRole("button", { name: "Show 2 unchanged blocks" }));
     expect(changedWords.mock.calls.length).toBe(diffed);
     expect(blocks(view.container).map(([change]) => change)).toEqual([
       "changed",
