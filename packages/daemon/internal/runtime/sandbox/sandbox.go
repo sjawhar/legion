@@ -1118,7 +1118,7 @@ func (r *Runtime) RescueUnpushed(ctx context.Context, k runtime.Known, request r
 // the previous image's agents call or read leaves such a pod's agents calling this daemon as the
 // older release, and a pod created under an account the configuration has since moved off leaves
 // its agents holding the identity that account grants, so a release is pinned, or the old
-// account deleted, only once every tree is drained or every pod relaunched, and the boot log is
+// account deleted, only once every tree is drained or every pod replaced, and the boot log is
 // where an operator reads which pods are still to go. Only a warning: refusing the pod would
 // stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {

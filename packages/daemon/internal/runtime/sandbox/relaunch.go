@@ -84,10 +84,10 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // before the round existed: no round is ever opened over such a pod, so a launch that kept it
 // would leave its role in a pod the configuration has left behind for ever (movedInPod,
 // roundCovers). Every facet of the pod itself but the account reaches this launch as a moved
-// address — the two whose worker cannot be reached at all and the four a round asks about in a
-// covered pod — and the shape its template was built from is read here (shapeDrift, the one
-// reading PodDrift takes of a covered pod's shape). A launch installing a stale-plugin pair into
-// such a pod keeps it, as it always did
+// address — the two whose worker cannot be reached at all and the four driftedInPod reads, which
+// in a covered pod are a round's — and the shape its template was built from is read here
+// (shapeDrift, the one reading PodDrift takes of a covered pod's shape). A launch installing a
+// stale-plugin pair into such a pod keeps it, as it always did
 // (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
 // that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
 // still is.

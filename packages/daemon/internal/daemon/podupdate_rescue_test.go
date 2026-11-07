@@ -207,11 +207,11 @@ func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 }
 
 // podUpdateAccountDrift is the reason PodDrift gives for a pod running as a ServiceAccount other
-// than the configured one, pinned whole: drift.go builds it as "account " + <the account the pod
-// runs as> + ", now " + <the configured account> (PodDrift, accountDrift), and the two halves
-// here are a pod left on `default` under a configuration that now names `legion-worker`. An
-// operator reads this phrase off the round's own task, so a change of it in drift.go is read
-// beside the test below of where that reason leads.
+// than the configured one, spelled as drift.go builds it: "account " + <the account the pod runs
+// as> + ", now " + <the configured account> (PodDrift, accountDrift), here a pod left on `default`
+// under a configuration that now names `legion-worker`. This round rig scripts PodDrift, so
+// nothing here reads drift.go: the sandbox package's TestPodDriftNamesTheServiceAccountThePodRunsAs
+// holds that spelling, and this copy of it only makes the round below one opened on the account.
 const podUpdateAccountDrift = "account default, now legion-worker"
 
 // The ServiceAccount a pod runs as reaches its replacement the way every other drift of an issue
@@ -222,8 +222,8 @@ const podUpdateAccountDrift = "account default, now legion-worker"
 // opened on that reason alone does what a round does: every worker claim of the issue is asked
 // and answers, the push check runs over the pod's disk and carries what it still held to a
 // rescue branch on the remote, and only then is the pod replaced and the claims let go of the
-// round. The rest of the round's machinery is held by the tests around this one; this is the one
-// place the account is shown carrying a pod all the way to its replacement.
+// round. The rest of the round's machinery is held by the tests around this one; this one holds
+// the daemon's half of the account's path, with PodDrift's half held in the sandbox package.
 func TestPodUpdateCarriesAnAccountDriftedPodToItsReplacement(t *testing.T) {
 	d := rescuetest.New(t, podUpdateIssue)
 	d.Write(d.Workspace, "account.txt", "work the pod on the old account never pushed\n")
