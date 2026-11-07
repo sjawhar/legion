@@ -592,7 +592,7 @@ func (m *Manager) installedFromCommand(ctx context.Context, role AppRole, repo g
 func (m *Manager) listInstallation(ctx context.Context, role AppRole, repo ghrepo.Repository) (installed, refused bool, err error) {
 	m.ForgetNarrowingRefusal(role, repo.Owner(), []string{repo.Name()})
 	lease, err := m.ReadToken(ctx, role, repo.Owner(), []string{repo.Name()})
-	if errors.Is(err, ErrNotInstalled) || errors.Is(err, ErrNarrowingRefused) {
+	if errors.Is(err, ErrNotInstalled) || NarrowingRefused(err) {
 		return false, false, nil
 	}
 	what := fmt.Sprintf("read whether the %s App is installed on %s", role, repo)

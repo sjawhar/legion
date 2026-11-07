@@ -427,7 +427,10 @@ func sayLeftOut(log *slog.Logger, role AppRole, owner, repo, because string) {
 // hold. It is said each time it happens rather than once for the life of the process, as
 // sayLeftOut's lines are: no repository of the set is refused on its own, so none of them is
 // what the record is keyed by, and an answer that disagrees with itself this way is worth a line
-// at every bundle until it stops. It carries no token.
+// at every bundle until it stops. So it repeats at every launch and every refresh while GitHub
+// keeps answering that way, which is the point: nothing else says that the installation's two
+// answers cannot both be true, and the line stops the moment one of them changes. It carries no
+// token.
 func sayDirectoryLeftOut(log *slog.Logger, role AppRole, owner string, repos []string) {
 	if log == nil {
 		log = slog.Default()
@@ -569,7 +572,7 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 	if err == nil {
 		return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), true, nil
 	}
-	if hold.write || !narrowingRefused(err) {
+	if hold.write || !NarrowingRefused(err) {
 		return ghconfig.Rendered{}, false, err
 	}
 	if len(hold.repos) == 1 {
@@ -581,7 +584,7 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 		return ghconfig.Rendered{}, false, err
 	}
 	lease, held, err := overReached(ctx, tokens, appRole, hold, answered, only)
-	if narrowingRefused(err) {
+	if NarrowingRefused(err) {
 		if forgetter, ok := tokens.(ReadScopeForgetter); ok {
 			for _, repo := range answered {
 				forgetter.ForgetReadScope(appRole, hold.owner, []string{repo})
@@ -590,7 +593,7 @@ func dirEntry(ctx context.Context, tokens Tokens, appRole AppRole, hold dirLease
 		if answered, only, err = probeReached(ctx, tokens, appRole, hold, answered, log); err != nil {
 			return ghconfig.Rendered{}, false, err
 		}
-		if lease, held, err = overReached(ctx, tokens, appRole, hold, answered, only); narrowingRefused(err) {
+		if lease, held, err = overReached(ctx, tokens, appRole, hold, answered, only); NarrowingRefused(err) {
 			sayDirectoryLeftOut(log, appRole, hold.owner, answered)
 			return ghconfig.Rendered{}, false, nil
 		}
@@ -618,7 +621,7 @@ func probeReached(ctx context.Context, tokens Tokens, appRole AppRole, hold dirL
 	for _, repo := range repos {
 		one, err := hold.over([]string{repo}).mint(ctx, tokens, appRole)
 		switch {
-		case narrowingRefused(err):
+		case NarrowingRefused(err):
 			sayLeftOut(log, appRole, hold.owner, repo, refusedNarrowing)
 			continue
 		case err != nil:

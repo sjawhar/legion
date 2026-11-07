@@ -558,7 +558,7 @@ func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error)
 			m.leases[cacheKey] = lease
 			delete(m.refusals, cacheKey)
 			maps.DeleteFunc(m.leases, func(_ scope, held Lease) bool { return !held.ExpiresAt.After(minted) })
-		case narrowingRefused(err):
+		case NarrowingRefused(err):
 			m.refusals[cacheKey] = refusedNarrowingAt{err: err, at: minted}
 		}
 		waiting.lease, waiting.err = lease, err
@@ -569,10 +569,15 @@ func (m *Manager) lease(ctx context.Context, request mintRequest) (Lease, error)
 	}
 }
 
-// narrowingRefused reports a failure a Manager remembers (refusals): GitHub refusing the
-// narrowing the request named, and not its own trouble, which the same request may pass through
-// a moment later (TransientError).
-func narrowingRefused(err error) bool {
+// NarrowingRefused reports GitHub refusing the narrowing a request named, and not GitHub's own
+// trouble, which the same request may pass through a moment later (TransientError): a
+// rate-limited 422 reads as both, and is the second. It is the one predicate every caller that
+// acts on a refusal reads — a Manager deciding what to remember (refusals), a bundle deciding
+// which repositories a directory holds (credential.go's dirEntry), the mapping's installation
+// read (listInstallation), the provisioning adapter's fallback (internal/daemon's
+// implementTokens) and the controller route's answer (internal/api) — so that none of them
+// reads a rate limit as an answer about what an installation reaches.
+func NarrowingRefused(err error) bool {
 	var trouble *TransientError
 	return errors.Is(err, ErrNarrowingRefused) && !errors.As(err, &trouble)
 }

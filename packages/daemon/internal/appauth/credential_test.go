@@ -912,7 +912,7 @@ func (troubledTokens) ReadToken(context.Context, AppRole, string, []string) (Lea
 
 // A read refused with GitHub's own trouble leaves no directory out, whatever else the refusal
 // reads as: the bundle fails, so the caller tries again, where leaving a directory out would
-// record an owner as unreachable on the strength of a rate limit (dirEntry, narrowingRefused).
+// record an owner as unreachable on the strength of a rate limit (dirEntry, NarrowingRefused).
 func TestGitHubsTroubleThatReadsAsARefusalFailsTheBundleAndLeavesNothingOut(t *testing.T) {
 	log, said := bundleLog()
 	left := NewLeftOut()

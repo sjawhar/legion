@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -582,7 +581,7 @@ func (t *implementTokens) Token(ctx context.Context, repo ghrepo.Repository) (st
 	if err == nil {
 		return lease.Token, nil
 	}
-	if !errors.Is(err, appauth.ErrNarrowingRefused) {
+	if !appauth.NarrowingRefused(err) {
 		return "", err
 	}
 	lease, err = t.apps.Token(ctx, appauth.Implement, repo)

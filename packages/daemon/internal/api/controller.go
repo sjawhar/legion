@@ -207,7 +207,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
 		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
 		return
-	case errors.Is(err, appauth.ErrNarrowingRefused):
+	case appauth.NarrowingRefused(err):
 		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_UNREACHABLE", "default", strings.ToLower(req.Default), "error", err)
 		writeFailure(w, http.StatusInternalServerError, "DEFAULT_OWNER_UNREACHABLE", err.Error())
 		return

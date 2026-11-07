@@ -130,8 +130,9 @@ func readCredentialRequest(r io.Reader) map[string]string {
 // repository, where the bundle holds it, and the owner's own otherwise. It normalizes the name
 // for a directory (ghRepositoryName), so a caller — the gh wrapper's target
 // (gh_selectors.go) as much as a git credential request's path — may hand it as it was given
-// it; the gh wrapper keys a repository by that same name as it reads a command, so that two
-// spellings of one repository are one repository, and normalizing again here changes nothing.
+// it; the gh wrapper keys a repository by that same name as it reads a command, so two
+// spellings of one repository are one repository, and normalizing it again here changes
+// nothing for any name GitHub holds.
 // A repo no bundle directory could be named for (ghconfig.IsDirName) is one
 // the bundle holds none for, so it answers the owner's rather than refusing. An owner the bundle
 // holds no directory for at all is refused (ownerGHConfigDir): it is no owner of this project.
@@ -147,6 +148,8 @@ func repositoryGHConfigDir(ownersDir, owner, repo string) (string, error) {
 // ghRepositoryName is a repository's name as the bundle directory holding its token is named for
 // it: lowercased, and without the `.git` git's credential path and a clone URL carry, which gh
 // trims as it reads a remote (ghrepo.FromURL) and which no GitHub repository's own name ends in.
+// One trim is all a spelling of such a name needs, so a second call changes nothing; a name
+// ending `.git.git` would lose one suffix a call, and GitHub holds no repository of that name.
 func ghRepositoryName(repo string) string {
 	return strings.TrimSuffix(strings.ToLower(repo), ".git")
 }

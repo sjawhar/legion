@@ -83,8 +83,9 @@ func (s *selectors) pairOwner(value, what string) error {
 	return err
 }
 
-// onlyRepository is the one repository every selector of the command named, as the argument
-// names it: "" where a selector named the command's owner alone, where the selectors named two
+// onlyRepository is the one repository every selector of the command named, as the bundle's
+// directory holding its token is named for it (ghRepositoryName, the key selectors.repository
+// records): "" where a selector named the command's owner alone, where the selectors named two
 // repositories, and where they named none. A command whose selectors agree on one repository is
 // the one whose narrowest token the bundle may hold; every other reaches whatever else of the
 // owner's gh resolves, and so the owner's own directory. The owner is its caller's, the one
@@ -437,8 +438,9 @@ func isGitHubHost(host string) bool {
 // request's number, a tree's path), as the argument spells it. The caller that records it keys
 // it as the directory holding its token is named for it (selectors.repository,
 // gitcredential.go's ghRepositoryName), so two spellings of one repository are one selector;
-// the lookup normalizes it again, idempotently, and decides whether a bundle can hold a
-// directory of that name, since a name no directory can hold is one the bundle holds none for.
+// the lookup normalizes it again, which changes nothing for a name GitHub holds, and decides
+// whether a bundle can hold a directory of that name, since a name no directory can hold is one
+// the bundle holds none for.
 func repositoryTarget(value, what string, api bool) (owner, repo string, err error) {
 	host, rest := "", value
 	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
