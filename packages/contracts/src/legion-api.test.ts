@@ -1501,7 +1501,7 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
 // The wakes the pacing holds (contract 53): the golden names one of each kind the daemon paces,
 // in claim order, and a state outside a wave carries an empty list rather than none. The key is
 // not required: a daemon at this contract leaves it off the state it serves a caller whose pod's
-// plugin is older than 52, and the one it serves a caller whose pod's claims it cannot read at
+// plugin is older than 53, and the one it serves a caller whose pod's claims it cannot read at
 // all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). So a body
 // without the key parses, and a reader of it learns nothing about which wakes wait rather than
 // losing the whole state; what is refused is a wake with no kind at all.

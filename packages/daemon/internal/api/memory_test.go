@@ -78,10 +78,10 @@ var contract46Issue = []string{
 // the last strict reader before it knows, and the rest of the body as it is. The four downgrades
 // compose, band by band: a pod at 46 to 48 is served the update rounds it reads and neither the
 // memory draws, the trees nor the wakes the pacing holds; a pod at 49 or 50 the memory draws as
-// well, and still neither the trees nor the wakes; a pod at 51 the trees too, and still no wake;
-// a pod below 46 none of the four; and a pod at this contract, a pod whose claims record none and
-// a caller in no pod — the operator's `legion state`, whose memory line reads the draws and whose
-// queue line reads the wakes — are served all of them.
+// well, and still neither the trees nor the wakes; a pod at 51 or 52 the trees too, and still no
+// wake; a pod below 46 none of the four; and a pod at this contract, a pod whose claims record
+// none and a caller in no pod — the operator's `legion state`, whose memory line reads the draws
+// and whose queue line reads the wakes — are served all of them.
 func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 	full := stateFrom(t, populatedState(t), "192.0.2.1:41000", podClaims(memoryContract-1))
 	fullWakes, fullCarried := wakesServed(t, full)
@@ -104,8 +104,8 @@ func TestTheStateRouteServesAPodItsPluginContractsIssues(t *testing.T) {
 		// The band at 49 and 50, above memoryContract and below treeContract: the memory group
 		// is served and the two tree keys and `wakesWaiting` are not.
 		{name: "a pod at memoryContract", remote: statePodAddr + ":41000", sup: podClaims(memoryContract), memory: true, rounds: true},
-		// The band at 51 alone, at treeContract and below wakesWaitingContract: everything but
-		// `wakesWaiting` is served.
+		// The band at 51 and 52, from treeContract to below wakesWaitingContract: everything but
+		// `wakesWaiting` is served. This row is at treeContract, its lower edge.
 		{name: "a pod at treeContract", remote: statePodAddr + ":41000", sup: podClaims(treeContract), memory: true, trees: true, rounds: true},
 		{name: "a pod at this contract", remote: statePodAddr + ":41000", sup: podClaims(DaemonAPIVersion), memory: true, trees: true, rounds: true, wakes: true},
 		{name: "a pod whose claims record no contract", remote: statePodAddr + ":41000", sup: podClaims(0), memory: true, trees: true, rounds: true, wakes: true},

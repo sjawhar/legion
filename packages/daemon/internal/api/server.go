@@ -640,7 +640,7 @@ const memoryContract = 49
 const treeContract = 51
 
 // wakesWaitingContract is the daemon contract that added `wakesWaiting` to the state (version.go's
-// 52): a plugin before it reads the state with a strict schema that knows no such key and refuses
+// 53): a plugin before it reads the state with a strict schema that knows no such key and refuses
 // the whole body for it.
 const wakesWaitingContract = 53
 

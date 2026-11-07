@@ -544,7 +544,7 @@ const legionConsumerLag = z.object({
  * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43);
  * `wakesWaiting` is every wake the daemon's pacing is holding until its turn, in claim order, never
  * null, empty at every moment outside a restart or a plugin wave (contract 53). It is optional
- * here only because a daemon at this contract leaves it off one body: a reader before 52 refuses
+ * here only because a daemon at this contract leaves it off one body: a reader before 53 refuses
  * the key outright, empty as surely as naming a wake, so the route strips it for a caller in a pod
  * whose claims record a contract below 53, and for a caller in a pod whose claims it cannot read
  * at all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). A reader
