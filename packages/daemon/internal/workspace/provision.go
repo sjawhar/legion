@@ -121,16 +121,25 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, err
 	}
 	// The checkout writes the issue's working copy, every file of the tree, into the workspace the
-	// registration made with no files: the one step whose time follows the repository's size, and
-	// it writes nothing of the shared clone's, so it runs with the store lock let go, beside other
-	// issues' checkouts, holding one of the places the daemon bounds checkouts by.
+	// registration made with no files: past the shared clone's own clone, whose size-following
+	// steps share one CloneTimeout of their own (ensureRepoClone, above), it is the one step whose
+	// time follows the repository's size, and it writes nothing of the shared clone's, so it runs
+	// with the store lock let go, beside other issues' checkouts, holding one of the places the
+	// daemon bounds checkouts by.
+	//
+	// It is also the one command past those steps that no change of this repository's makes fit
+	// CommandTimeout's five minutes: one write of the largest repository mapped took nine minutes
+	// in an issue pod (CheckoutTimeout), and the runner killing it there failed the whole
+	// provision and spent one of the claim's three launches. So this command alone takes
+	// CheckoutTimeout (request.checkoutBound), and every provisioning command but it and those
+	// steps keeps the runner's slow-command budget.
 	store.unlock()
 	if checkout {
 		release, err := request.checkoutPlace(ctx)
 		if err != nil {
 			return Workspace{}, fmt.Errorf("check out workspace %s: wait for a checkout's place: %w", workspace.Dir, err)
 		}
-		_, err = RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "reset"})
+		_, err = runCheckedInWithin(ctx, run, workspace, request.checkoutBound(), []string{"jj", "sparse", "reset"})
 		release()
 		if err != nil {
 			return Workspace{}, fmt.Errorf("check out workspace %s: %w", workspace.Dir, err)
@@ -144,10 +153,13 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 // a launch must not undo. Provision registers a workspace with no pattern and no file (`jj
 // workspace add --sparse-patterns empty`) and checks it out after (`jj sparse reset`), so a
 // workspace whose checkout failed or was cut short — a jj error, a full disk, a daemon stopped
-// mid-checkout — holds no pattern until a provision checks it out. The read never snapshots the
-// working copy (--ignore-working-copy): a pane may be writing it, and a snapshot would run the
-// working-copy filters, fsmonitor and signing programs a tree agent can configure. A directory with
-// no `.jj` is refused, as every jj command in a workspace is (guardWorkspace).
+// mid-checkout — holds no pattern until a provision checks it out. A shared clone made from a
+// pod's feed permanently holds none either, its patterns cleared when it was made so it carries no
+// working tree (feedClone's `jj sparse set --clear`), and that is no unfinished checkout: this is
+// called on an issue's workspace, never on the clone it is a workspace of. The read never
+// snapshots the working copy (--ignore-working-copy): a pane may be writing it, and a snapshot
+// would run the working-copy filters, fsmonitor and signing programs a tree agent can configure.
+// A directory with no `.jj` is refused, as every jj command in a workspace is (guardWorkspace).
 func CheckedOut(ctx context.Context, run Runner, workspace Workspace) (bool, error) {
 	listed, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "sparse", "list", "--ignore-working-copy", "--color=never"})
 	if err != nil {

@@ -413,7 +413,7 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	// GatedSteps is the deployment's design gate as this issue stands in it: one entry for each
-	// step the deployment gates, in the order it gates them (contract 54). It is absent, as the
+	// step the deployment gates, in the order it gates them (contract 55). It is absent, as the
 	// gate itself is, for an issue that is not its tree's root, for a deployment that gates no
 	// step and for an issue the workflow does not record, so the wire never carries an empty
 	// list. DesignGate is unchanged beside it: it is the spec step's row, which every reader that
@@ -653,17 +653,24 @@ type SlotView struct {
 }
 
 // CheckView is an issue's open production check as the state shows it: the repository, pull
-// request and merge commit the check looks for in production (MergeCommit is empty until the first
-// build compare fills it for a pull request merged before the daemon recorded merge commits), when
-// it opened, how many looks the implementer has taken and whether the latest is still open, what
-// woke the latest look (LastWake, absent before the first look wakes), the check's bound
-// (NextWakeAt: the moment its last look starts, which is the one wake the record promises; the
-// deploy and build wakes before it are events, not timers), and whether the last look has started.
+// request and merge commit the check looks for in production (MergeCommit is empty for a pull
+// request merged before the daemon recorded merge commits), when it opened, the role that works
+// it (Role, the one the check recorded from the project's `production_check` when it opened), how
+// many looks that role has taken and whether the latest is still open, what woke the latest look
+// (LastWake, absent before the first look wakes), when the next look is due (NextWakeAt), and
+// whether the last look has started.
+//
+// NextWakeAt is the next look's time, whichever names it: the moment the checking agent named for
+// itself on a pending report, the retry of a look nobody reported, or — where neither stands —
+// the check's own bound, the moment its last look starts. The bound stays readable without a
+// field of its own: NextWakeAt is the bound whenever no agent's time is set, OpenedAt is here,
+// and `production_check_hours` is in the state's settings.
 type CheckView struct {
 	Repo        string         `json:"repo"`
 	PullRequest int            `json:"pullRequest"`
 	MergeCommit string         `json:"mergeCommit"`
 	OpenedAt    time.Time      `json:"openedAt"`
+	Role        string         `json:"role"`
 	Looks       int            `json:"looks"`
 	LookOpen    bool           `json:"lookOpen"`
 	LastWake    *CheckWakeView `json:"lastWake,omitempty"`
@@ -671,10 +678,12 @@ type CheckView struct {
 	Last        bool           `json:"last"`
 }
 
-// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
-// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
-// job and step success, or the build's commit), and At when.
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge` for
+// the look the close opens, `check wake` for one the checking agent's own wake_at or the retry of
+// a look nobody reported starts, and `bound` for the last look; a check whose look was woken
+// before the daemon stopped reading production can hold one of the causes that are gone), Detail
+// the cause's own detail — for `check wake`, the summary the agent's report gave or the retry's
+// own words — and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`

@@ -622,7 +622,36 @@ package api
 // main held 52 at the forward merge that renumbered this entry, bb24cc4d20d9; read main's own
 // number again at the next merge rather than from this line.)
 //
-// 54: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
+// 54: INFRA-809 -- the project decides whether a merge that closes an issue opens a production
+// check and who works it (`projects.<KEY>.production_check`, `off` or `tester`), and the checking
+// agent names its own next look. `api.CheckView` gains `role`, the role the check records as the
+// one that works it, always emitted; its `nextWakeAt` is now the time the **next look** is due —
+// the moment the checking agent named for itself on a pending report, the retry of a look nobody
+// reported, or the check's own bound where neither stands — where before it was always the bound.
+// The bound needs no field of its own: `nextWakeAt` is the bound whenever no agent's time is set,
+// `openedAt` is on the view and `production_check_hours` is in the settings body.
+// `api.HandoffCompleteRequest` gains `wakeAt`, which a pending check report on a look that is not
+// the check's last must carry and no other report may (`CHECK_WAKE_REQUIRED`,
+// `CHECK_WAKE_UNEXPECTED`, which the daemon also answers a phase completion that carries one),
+// and a report by a role the check does not record is refused (`CHECK_ROLE_MISMATCH`). Which of
+// the two a `handoff_complete` is, is the caller's own live assignment: a session whose task is a
+// look of its issue's production check reports on that look, and every other session's completion
+// is its phase's. A completion of a `done` issue, which runs no phase, from a session working no
+// look is neither, and is refused `CHECK_LOOK_NOT_SERVED` rather than being read as a phase
+// completion missing its commit. The settings body loses its `projects.<KEY>.deploys` block, with every
+// path by which the daemon guessed that production carried a merge; a plugin reads the settings
+// loosely, so that loss alone changes no strictly parsed shape. A plugin below this contract has
+// a strict reader that refuses a state whose check views carry `role`, and its `handoff_complete`
+// sends no `wakeAt`, which this daemon requires of a pending report, so the boot gate and `legion
+// probe-image` refuse the mixed pair. (This branch took 50 while main stood at 49;
+// sjawhar/legion#2731, dispatch://INFRA-1077, holds 50 on its own branch, and main has since
+// landed the admission cap at 51, the pane issue key at 52 (sjawhar/legion#2839) and INFRA-976's
+// wake pacing at 53 (sjawhar/legion#2805, merged as d43e0fe9 just before this one), so this
+// branch takes the number above them all, as the collision note says. main held 53 at the
+// forward merge that renumbered this entry, d43e0fe9bbb1; read main's own number again at the
+// next merge rather than from this line.)
+//
+// 55: INFRA-1272 -- the design gate is a list of steps a deployment declares, and the issue
 // record of `GET /legion/v1/state` gains `gatedSteps`, one entry for each step the deployment
 // gates, in the order it gates them (`api.GatedStepView`): the `step` (`decisions`, `criteria` or
 // `spec`), the document its architect registered for that step and that document's
@@ -634,19 +663,20 @@ package api
 // wire carries no empty list. `designGate` is unchanged beside it, the spec step's row as it has
 // always been, so a reader that asks one question of one gate reads what it read before.
 // `GET /legion/v1/state` authenticates nobody, so a caller from a pod whose claims record a
-// contract below 54 is served the issues without the field (api's stateFor, withoutGatedSteps),
+// contract below 55 is served the issues without the field (api's stateFor, withoutGatedSteps),
 // as a caller below 53 is served a body with no wakes waiting, one below 51 the issues without
 // the admission's trees and each issue's tree, one below 49 without the memory draw and one
-// below 46 without the claim views' update rounds; the five compose, and every reader from 54 on
+// below 46 without the claim views' update rounds; the five compose, and every reader from 55 on
 // takes the field as optional.
 // `POST /legion/v1/controller/secret` answers the same list as `designGateSteps` in place of the
-// one word `designGate`, which 54 drops: `legion controller start` is built from this daemon's
+// one word `designGate`, which 55 drops: `legion controller start` is built from this daemon's
 // own tree, so the two always ship together, and a `legion` of this release refuses an answer
 // that names no list at all.
 // (This branch took 50 while main held 49, then 52 when main landed its admission cap as 51, then
-// 53 when main landed the issue-key trailer as 52, and main has since landed the wake pacing as
-// 53, so this change takes the number above it, as
+// 53 when main landed the issue-key trailer as 52, then 54 when main landed the wake pacing as
+// 53, and main has since landed the optional production check as 54, so this change takes the
+// number above it, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
-// says. main held 53 at the forward merge that renumbered this entry, ffa063c5fc0d; read main's
+// says. main held 54 at the forward merge that renumbered this entry, b5482068c554; read main's
 // own number again at the next merge rather than from this line.)
-const DaemonAPIVersion = 54
+const DaemonAPIVersion = 55

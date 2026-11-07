@@ -94,7 +94,7 @@ env:
   # The Envoy Oh My Pi plugin. The seed before the first pi-envoy-v* tag is the version line this
   # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name on npm holds
   # only a placeholder 0.0.0 until its first publish, so reading it would restart the line at 0.x.
-  # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which every Oh
+  # scripts/pi-plugin-prepack.sh copies this plugin's ten skills into dist/skills, which every Oh
   # My Pi session loads as the plugin's skills, so a commit there releases whatever its type. Its
   # notices generator, the prepack itself and patches/ (the bundle inlines nats.js with
   # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
@@ -105,15 +105,17 @@ env:
     --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
     --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/
     --patch-path skills/outside-message/ --patch-path skills/plain-words/
+    --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     packages/broker-client/
     skills/agent-secrets/ skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/
     skills/dispatch-writing-specs/ skills/envoy/ skills/outside-message/ skills/plain-words/
+    skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Legion Oh My Pi plugin, seeded as the Envoy one is. scripts/pi-plugin-prepack.sh copies
-  # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
+  # this plugin's seven skills into dist/skills, which a Legion pane's prompts load, so a commit
   # there releases whatever its type. Its notices generator, the prepack itself and patches/ (the
   # bundle inlines nats.js through envoy-client, with its patch applied) are shipped build inputs
   # too, so they get the same patch release.
@@ -122,15 +124,13 @@ env:
     --patch-path skills/legion-architect/ --patch-path skills/legion-controller/
     --patch-path skills/legion-oracle/ --patch-path skills/legion-retro/
     --patch-path skills/legion-worker/ --patch-path skills/leading-a-work-stream/
-    --patch-path skills/ce-simplify-code/
-    --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/
+    --patch-path skills/simplify-settled-diff/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
     --patch-path patches/
     -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     packages/broker-client/
     skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/
-    skills/legion-worker/ skills/leading-a-work-stream/ skills/ce-simplify-code/
-    skills/thermonuclear-code-quality/ skills/thermonuclear-deep-review/
+    skills/legion-worker/ skills/leading-a-work-stream/ skills/simplify-settled-diff/
     scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Claude Code plugin, @sjawhar/claude-envoy. Its build runs from
   # packages/claude-envoy/scripts/build-inputs.txt, the one statement of what can change this
@@ -761,7 +761,7 @@ jobs:
           done
           # The skills, read back out of the same tarball: the rules are in
           # packages/claude-envoy/scripts/check-packed-skills.sh, which tests/packed-skills.test.ts
-          # runs over tarballs of its own. Without them every install loses all eight skills and
+          # runs over tarballs of its own. Without them every install loses all ten skills and
           # the dispatch-first hook hooks/hooks.json runs on every session throws.
           packages/claude-envoy/scripts/check-packed-skills.sh packages/claude-envoy/*.tgz
 

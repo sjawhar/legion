@@ -134,9 +134,6 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
-	build          string
-	buildErr       error
-	buildAsked     int
 	// gatedSteps is each list a gated_steps_publish row published, gatedStepsOf the project each
 	// went to, and gatedStepsErr what the publish answers.
 	gatedSteps    [][]string
@@ -179,10 +176,6 @@ func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, e
 }
 func (d *outboxDispatch) Handoff(context.Context, string) (dispatch.Handoff, error) {
 	return dispatch.Handoff{}, nil
-}
-func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
-	d.buildAsked++
-	return d.build, d.buildErr
 }
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
@@ -2226,7 +2219,7 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	}
 }
 
-// A production check has no later wake after its implementer exhausts a failed launch. The
+// A production check has no later wake after the role that works it exhausts a failed launch. The
 // architect receives the launch failure immediately instead of waiting for the look's bound.
 func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
@@ -2322,8 +2315,9 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	}{
 		{name: "the issue's own phase and run", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 2, want: true},
 		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, generation: 2, want: false},
-		// The implementer works implementing, retro and the production check: a task written for
-		// one of them is not the work of another, which the role alone cannot tell.
+		// One role works several phases — the implementer implementing and retro, and the role the
+		// check records each of its looks — and a task written for one of them is not the work of
+		// another, which the role alone cannot tell.
 		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, generation: 2, want: false},
 		// A re-admission restarts the issue in the phase it stood in: the run that is over's task
 		// of that phase is not the new run's work.

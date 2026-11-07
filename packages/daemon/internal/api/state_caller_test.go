@@ -190,7 +190,7 @@ func TestTheStateRouteServesAPodItsPluginContractsClaimViews(t *testing.T) {
 			// keys — `admission.trees` and each issue's `tree` — gone (tree_test.go holds that
 			// half), with `wakesWaiting` gone, the key a reader before contract 53 refuses empty
 			// as surely as filled (withoutWakesWaiting), and with the gated steps gone, the
-			// field contract 54 added.
+			// field contract 55 added.
 			var want, got map[string]any
 			if err := json.Unmarshal(full, &want); err != nil {
 				t.Fatal(err)

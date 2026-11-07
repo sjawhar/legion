@@ -651,9 +651,9 @@ const treeContract = 51
 const wakesWaitingContract = 53
 
 // gatedStepsContract is the daemon contract that added the issues' gated steps to the state
-// (version.go's 54): a plugin before it reads the state with a strict schema that knows no
+// (version.go's 55): a plugin before it reads the state with a strict schema that knows no
 // `gatedSteps` and refuses the whole body for it.
-const gatedStepsContract = 54
+const gatedStepsContract = 55
 
 // carriesUpdateRounds is whether any claim view of state carries `updateRound` or `updateHead`.
 func carriesUpdateRounds(state State) bool {

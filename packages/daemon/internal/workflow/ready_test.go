@@ -800,7 +800,7 @@ func readyEngine(mergeQueue string) *Engine {
 // readyEngineAt is readyEngine with its clock at now.
 func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), MergeQueueRole: mergeQueue, Linger: time.Hour, ProductionCheckRole: claim.RoleTester, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return now },
 	}, nil)
 }
