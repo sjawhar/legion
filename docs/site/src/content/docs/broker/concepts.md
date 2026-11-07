@@ -586,9 +586,9 @@ It ends when the carry window closes: an enrollment the box's end left dormant h
 for `BROKER_SESSION_CARRY_SECONDS`, 12 hours by default, and the sweep then revokes those grants and
 cancels those pending requests for good, with an `enrollment.carry_expired` audit row
 (`enroll.go`, `EndCarried`).
-Those 12 hours are the lifetime a request naming none already gets, so the default carry never
-outlives the grant it carries; 0 turns the carry off, and the broker refuses a window longer than a
-day.
+Those 12 hours are the longest lifetime a request naming none gets (one naming a human-tier secret
+gets 15 minutes), so the default carry is never longer than the longest grant given by default; 0
+turns the carry off, and the broker refuses a window longer than a day.
 And it ends at once when a person revokes the grant itself, the machine login behind it, or their
 sign-in on a box.
 The two login revokes reach the dormant enrollments that login made as well as its live ones, so a

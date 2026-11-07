@@ -148,7 +148,8 @@ machine's Application Default Credentials are its own identity, and so does ever
   `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
 - **`--default-grant session`** is optional. A request with no `--ttl` for secrets that all carry it
-  gets a grant that lasts until its session ends, instead of 12 hours.
+  gets a grant that lasts until its session ends, instead of the default: 15 minutes when any
+  secret the request names is human tier, and 12 hours otherwise.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
   Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
