@@ -18,8 +18,7 @@ import (
 var deployedSubjects = []string{"notifications.legion.>", "notifications.publishonly.>"}
 
 // deployStream creates ENVOY_NOTIFICATIONS as a deployment left it: the subjects above, and
-// retention and duplicate windows no binary of this checkout would install. Its consumer cap is
-// this binary's own (bus.StreamMaxConsumers), for the reason that constant records.
+// retention and duplicate windows no binary of this checkout would install.
 func deployStream(t *testing.T, uri string) nats.JetStreamContext {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
@@ -29,14 +28,13 @@ func deployStream(t *testing.T, uri string) nats.JetStreamContext {
 		t.Fatalf("open JetStream: %v", err)
 	}
 	_, err = js.AddStream(&nats.StreamConfig{
-		Name:         bus.Stream,
-		Subjects:     slices.Clone(deployedSubjects),
-		Retention:    nats.LimitsPolicy,
-		MaxConsumers: bus.StreamMaxConsumers,
-		MaxAge:       72 * time.Hour,
-		Duplicates:   72 * time.Hour,
-		Storage:      nats.FileStorage,
-		Replicas:     1,
+		Name:       bus.Stream,
+		Subjects:   slices.Clone(deployedSubjects),
+		Retention:  nats.LimitsPolicy,
+		MaxAge:     72 * time.Hour,
+		Duplicates: 72 * time.Hour,
+		Storage:    nats.FileStorage,
+		Replicas:   1,
 	})
 	if err != nil {
 		t.Fatalf("deploy the stream: %v", err)

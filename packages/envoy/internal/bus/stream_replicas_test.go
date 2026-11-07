@@ -57,7 +57,7 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
 // with limits this binary does not own and an id, changed by change. It discards old messages, as
 // a stream an earlier build created does. Its consumer cap is the binary's own, taken from
-// streamCfg with the rest, for the reason StreamMaxConsumers records.
+// streamCfg with the rest.
 func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	deployed := *streamCfg
 	deployed.Replicas = 3
@@ -291,7 +291,7 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("start setting %d: %v", testStreamMaxBytes, err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -529,7 +529,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	startOnCluster(t, cluster, WithReplicas(3))
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("ensure the stream with one server stopped: %v", err)
 	}
 	if _, err := EnsureKeyValue(clusterConn(t, cluster), counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
@@ -643,7 +643,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if _, err := EnsureKeyValue(client.Conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
@@ -705,14 +705,14 @@ func TestOwnedStreamRaisesTheConsumerCapWhereItBindsAndKeepsAHigherDeployedOne(t
 		version  string
 		want     int
 	}{
-		{"a stream with no cap, which the server answers as -1, on the hub's 2.15.1", -1, "2.15.1", StreamMaxConsumers},
+		{"a stream with no cap, which the server answers as -1, on the hub's 2.15.1", -1, "2.15.1", streamMaxConsumers},
 		{"the same stream on 2.10.29, which caps no stream that sets none", -1, "2.10.29", -1},
-		{"a stream whose cap is 0, which the server reads as none too, on 2.15.1", 0, "2.15.1", StreamMaxConsumers},
+		{"a stream whose cap is 0, which the server reads as none too, on 2.15.1", 0, "2.15.1", streamMaxConsumers},
 		{"a stream whose cap is 0 on 2.10.29", 0, "2.10.29", 0},
-		{"a stream capped below the compiled cap on 2.15.1", 1000, "2.15.1", StreamMaxConsumers},
-		{"a stream capped below the compiled cap on 2.10.29", 1000, "2.10.29", StreamMaxConsumers},
-		{"a stream an operator capped above it on 2.15.1", StreamMaxConsumers + 4000, "2.15.1", StreamMaxConsumers + 4000},
-		{"a stream an operator capped above it on 2.10.29", StreamMaxConsumers + 4000, "2.10.29", StreamMaxConsumers + 4000},
+		{"a stream capped below the compiled cap on 2.15.1", 1000, "2.15.1", streamMaxConsumers},
+		{"a stream capped below the compiled cap on 2.10.29", 1000, "2.10.29", streamMaxConsumers},
+		{"a stream an operator capped above it on 2.15.1", streamMaxConsumers + 4000, "2.15.1", streamMaxConsumers + 4000},
+		{"a stream an operator capped above it on 2.10.29", streamMaxConsumers + 4000, "2.10.29", streamMaxConsumers + 4000},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			info := &nats.StreamInfo{Config: nats.StreamConfig{Name: Stream, MaxConsumers: row.deployed}}
@@ -735,8 +735,8 @@ func TestOwnedStreamRaisesTheConsumerCapWhereItBindsAndKeepsAHigherDeployedOne(t
 func TestARefusedUpdateNamesTheConsumerCapAndTheServerThatTakesItOnlyForTheServersOwnRefusal(t *testing.T) {
 	serversRefusal := &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: maxConsumersRefusal}
 	uncapped := &nats.StreamConfig{Name: Stream, MaxConsumers: -1}
-	capped := &nats.StreamConfig{Name: Stream, MaxConsumers: StreamMaxConsumers}
-	namedCap := fmt.Sprintf("max_consumers %d", StreamMaxConsumers)
+	capped := &nats.StreamConfig{Name: Stream, MaxConsumers: streamMaxConsumers}
+	namedCap := fmt.Sprintf("max_consumers %d", streamMaxConsumers)
 	for _, row := range []struct {
 		name     string
 		refusal  error

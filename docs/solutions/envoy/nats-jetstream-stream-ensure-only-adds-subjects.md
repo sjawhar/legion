@@ -74,7 +74,7 @@ starts from the deployed configuration too: the replicas become the deployed cou
 `ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes the deployed one or
 `ENVOY_STREAM_MAX_BYTES`, whichever is more, the setting on a stream with none, and stays as
 deployed when the setting is unset; the consumer cap becomes the deployed cap or
-`bus.StreamMaxConsumers` (24000, compiled into the binary rather than read from a setting),
+`streamMaxConsumers` (24000, compiled into the binary rather than read from a setting),
 whichever is more, and the compiled cap on a stream whose cap reads `-1` or `0` only when the
 connected server is nats-server 2.15.0 or later (`serverDefaultsAnUnsetCap`), which is where such
 a stream is capped by the server at its own default of 1000; an older server leaves it

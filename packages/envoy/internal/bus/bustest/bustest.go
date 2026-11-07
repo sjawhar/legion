@@ -32,21 +32,19 @@ const (
 
 // DeployedThreeCopyStream is the stream as a three-copy deployment with a byte limit
 // (StreamMaxBytes) and an id (DeployedStreamID) holds it, discarding old messages as a stream an
-// earlier build created does, changed by change. Its consumer cap is the binary's own
-// (bus.StreamMaxConsumers), for the reason that constant records.
+// earlier build created does, changed by change.
 func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamConfig {
 	deployed := natsgo.StreamConfig{
-		Name:         bus.Stream,
-		Subjects:     bus.StreamCarriedSubjects(),
-		Retention:    natsgo.LimitsPolicy,
-		MaxConsumers: bus.StreamMaxConsumers,
-		MaxAge:       contracts.DeliveryDuplicateWindow,
-		Duplicates:   contracts.DeliveryDuplicateWindow,
-		Discard:      natsgo.DiscardOld,
-		Storage:      natsgo.FileStorage,
-		Replicas:     3,
-		MaxBytes:     StreamMaxBytes,
-		Metadata:     map[string]string{bus.StreamIDMetadataKey: DeployedStreamID},
+		Name:       bus.Stream,
+		Subjects:   bus.StreamCarriedSubjects(),
+		Retention:  natsgo.LimitsPolicy,
+		MaxAge:     contracts.DeliveryDuplicateWindow,
+		Duplicates: contracts.DeliveryDuplicateWindow,
+		Discard:    natsgo.DiscardOld,
+		Storage:    natsgo.FileStorage,
+		Replicas:   3,
+		MaxBytes:   StreamMaxBytes,
+		Metadata:   map[string]string{bus.StreamIDMetadataKey: DeployedStreamID},
 	}
 	change(&deployed)
 	return deployed

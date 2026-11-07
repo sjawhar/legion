@@ -97,7 +97,7 @@ func liveServerJetStream(t *testing.T, image string) (string, nats.JetStreamCont
 // What a stream carrying no consumer cap means is the server's, and this test puts both answers
 // to a real server. On the image the hub runs, nats-server 2.15.1, such a stream is capped at the
 // server's own default of 1000, so this binary raises it to the cap it compiles
-// (StreamMaxConsumers); on the copy of nats:2.10 the same stream has no limit at all, so the
+// (streamMaxConsumers); on the copy of nats:2.10 the same stream has no limit at all, so the
 // binary leaves it exactly as it is. The gate between the two is serverDefaultsAnUnsetCap, read
 // from the version the connected server answers, and each case below says which direction of
 // that read it fails on:
@@ -141,19 +141,19 @@ func TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereAL
 		if err != nil {
 			t.Fatalf("read the stream after the start: %v", err)
 		}
-		if capped.Config.MaxConsumers != StreamMaxConsumers {
-			t.Fatalf("the stream's consumer cap after the start = %d, want %d", capped.Config.MaxConsumers, StreamMaxConsumers)
+		if capped.Config.MaxConsumers != streamMaxConsumers {
+			t.Fatalf("the stream's consumer cap after the start = %d, want %d", capped.Config.MaxConsumers, streamMaxConsumers)
 		}
 
 		// An operator lowers the cap the start wrote; the client's keeper raises it back
 		// within a period, as it does every other setting this binary owns (keepStream).
 		lowered := capped.Config
-		lowered.MaxConsumers = StreamMaxConsumers / 2
+		lowered.MaxConsumers = streamMaxConsumers / 2
 		if _, err := js.UpdateStream(&lowered); err != nil {
 			t.Fatalf("operator lowering of the cap: %v", err)
 		}
 		raised := awaitKept(t, js, Stream, "the consumer cap", func(info *nats.StreamInfo) bool {
-			return info.Config.MaxConsumers == StreamMaxConsumers
+			return info.Config.MaxConsumers == streamMaxConsumers
 		})
 
 		// The same operator now takes the cap off instead of lowering it, which is the stream
@@ -171,7 +171,7 @@ func TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereAL
 			t.Fatalf("the stream's consumer cap after the operator unset it = %d, want the -1 this server answers for a stream with no cap", off.Config.MaxConsumers)
 		}
 		awaitKept(t, js, Stream, "the consumer cap over a stream the operator uncapped", func(info *nats.StreamInfo) bool {
-			return info.Config.MaxConsumers == StreamMaxConsumers
+			return info.Config.MaxConsumers == streamMaxConsumers
 		})
 	})
 
@@ -218,7 +218,7 @@ func TestAnUncappedStreamIsCappedOnTheHubsServerAndLeftAloneOnTheOlderOneWhereAL
 			// where maxConsumersRefused holds, the predicate the production path reads, so a
 			// refusal naming it is that refusal and no other answer this server happened to give:
 			// asserting the floor asserts the predicate, and the test checks it no second time.
-			for _, want := range []string{"max_consumers", strconv.Itoa(StreamMaxConsumers), streamMaxConsumersFloor, maxConsumersRefusal} {
+			for _, want := range []string{"max_consumers", strconv.Itoa(streamMaxConsumers), streamMaxConsumersFloor, maxConsumersRefusal} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the start's refusal %q does not name %q", err, want)
 				}

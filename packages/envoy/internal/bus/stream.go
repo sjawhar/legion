@@ -286,7 +286,7 @@ func StreamCaptures(topic string) bool {
 	return false
 }
 
-// StreamMaxConsumers is the consumer cap this binary compiles into the stream (streamCfg), the one
+// streamMaxConsumers is the consumer cap this binary compiles into the stream (streamCfg), the one
 // setting that bounds how many sessions can hold a session consumer of their own. What a stream
 // with no cap means to the server changed in nats-server 2.15. From that release the server caps
 // a stream with no cap, a deployed 0 and the -1 it answers for one alike, at a default of its
@@ -340,16 +340,7 @@ func StreamCaptures(topic string) bool {
 // KiB of store per consumer, so 24000 consumers are about 1.20 to 1.25 GiB of memory and about 13
 // MiB of store, against the hub's 16 GiB machine, where nats-server held 1.10 GiB resident on
 // 2026-10-30.
-//
-// It is exported for the fixtures that deploy the stream: every test fixture a start or the
-// keeper then reconciles carries this value, so the reconcile writes no cap change the module's
-// own in-process nats-server, which is older than streamMaxConsumersFloor, would refuse. That
-// server is older than 2.15 as well, so it applies no default of its own and a start against it
-// raises no uncapped stream at all (serverDefaultsAnUnsetCap). The raise of an uncapped deployed
-// stream to the cap is therefore proved nowhere in this process, and is proved against real
-// server images instead, by the natslive matrix of this package
-// (stream_max_consumers_live_test.go).
-const StreamMaxConsumers = 24000
+const streamMaxConsumers = 24000
 
 // streamMaxConsumersFloor is the first nats-server that takes a change of MaxConsumers on a stream
 // that already exists. Every server before it refuses such an update with maxConsumersRefusal,
@@ -360,7 +351,7 @@ const streamMaxConsumersFloor = "v2.12.5"
 
 // streamMaxConsumersDefaultMajor and streamMaxConsumersDefaultMinor are the first nats-server that
 // applies a consumer cap of its own to a stream that sets none, 2.15.0: it reads such a stream as
-// asking for JSDefaultMaxConsumersPerStream, which is 1000, the limit StreamMaxConsumers records.
+// asking for JSDefaultMaxConsumersPerStream, which is 1000, the limit streamMaxConsumers records.
 // Every server before it leaves such a stream with no limit, so there is nothing there for this
 // binary's cap to fix.
 const (
@@ -373,7 +364,7 @@ const (
 // streamMaxConsumersDefaultMajor.Minor or later. serverVersion is what the connected server
 // answers, read from (*nats.Conn).ConnectedServerVersion(), and the whole question this binary
 // asks of a deployed stream whose cap is -1 or 0: on such a server that stream is capped at 1000
-// and is raised to StreamMaxConsumers, on every older one it is unlimited and is left as it is
+// and is raised to streamMaxConsumers, on every older one it is unlimited and is left as it is
 // (ownedStream).
 //
 // Only the major and the minor are read, since the first such server is a minor's own first
@@ -419,14 +410,14 @@ func versionNumber(field string) int {
 // byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
 // is not an ErrRefused: the same publish is taken once age has made room.
 //
-// It carries the consumer cap (StreamMaxConsumers) as well, which a create takes on every
+// It carries the consumer cap (streamMaxConsumers) as well, which a create takes on every
 // nats-server; an update that changes a deployed stream's cap needs streamMaxConsumersFloor or
 // later, and the reconcile owns the cap from there (ownedStream).
 var streamCfg = &nats.StreamConfig{
 	Name:         Stream,
 	Subjects:     streamCarriedSubjects,
 	Retention:    nats.LimitsPolicy,
-	MaxConsumers: StreamMaxConsumers,
+	MaxConsumers: streamMaxConsumers,
 	MaxAge:       streamDuplicateWindow,
 	Duplicates:   streamDuplicateWindow,
 	Discard:      nats.DiscardNew,
@@ -598,7 +589,7 @@ func (r streamReconciliation) log() {
 //     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
 //     an operator's raise stands, and lowering or removing one is an operator step that needs
 //     every program's setting lowered or removed first;
-//   - the consumer cap, the deployed cap or cfg's (StreamMaxConsumers) when that is more, and
+//   - the consumer cap, the deployed cap or cfg's (streamMaxConsumers) when that is more, and
 //     cfg's on a stream whose cap is unset, a deployed -1 or 0 alike, only where
 //     defaultsAnUnsetCap holds and that stream is therefore capped at the server's own default
 //     of 1000: a start never writes a lower cap than it read, so an operator's raise stands, and
@@ -714,7 +705,7 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig, defaultsAnUnsetCa
 // A deployed cap of -1 or 0 is a stream that sets no cap. What that means is the connected
 // server's, which defaultsAnUnsetCap carries here (serverDefaultsAnUnsetCap): from nats-server
 // 2.15 such a stream is capped at the server's own default of 1000
-// (JSDefaultMaxConsumersPerStream), so it is raised to StreamMaxConsumers as a smaller cap is;
+// (JSDefaultMaxConsumersPerStream), so it is raised to streamMaxConsumers as a smaller cap is;
 // on every server before that it has no limit at all, so it is left exactly as it is and the
 // binary writes no cap where none was asked for. A stream that already carries a positive cap
 // below this binary's is raised on every server, since that cap bounds its consumers wherever it
@@ -846,7 +837,7 @@ func unanswered(err error) bool {
 //
 // An update that changes the deployed stream's consumer cap names the cap too, under the name
 // nats-server spells it (max_consumers), with the value this binary asks for; the cap is compiled
-// in rather than read from a variable (StreamMaxConsumers), so it is named as the field and not
+// in rather than read from a variable (streamMaxConsumers), so it is named as the field and not
 // as a setting an operator can change. That name carries the first server which can take the
 // change (streamMaxConsumersFloor) only when the server's answer is its own refusal of the change
 // (maxConsumersRefused), a bare maxConsumersRefusal that says neither which field nor which

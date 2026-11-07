@@ -125,7 +125,7 @@ func (c *Client) awaitKeeper() {
 // stream and a concurrent start or an operator took away. It writes keptStream: the stream as it
 // read it, with copies below cfg's count raised to it, a byte limit below cfg's, or none, raised to
 // cfg's when cfg sets one, a positive consumer cap below cfg's raised to cfg's
-// (StreamMaxConsumers), a deployed -1 or 0 raised to it as well where the connected server caps
+// (streamMaxConsumers), a deployed -1 or 0 raised to it as well where the connected server caps
 // such a stream at a default of its own and left exactly as it is on every server before that
 // (serverDefaultsAnUnsetCap), a missing StreamIDMetadataKey added, the age, the duplicate window
 // and discard set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the

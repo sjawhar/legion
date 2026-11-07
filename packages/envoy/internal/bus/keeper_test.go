@@ -159,7 +159,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 			t.Fatalf("the setting program's start left the stream at %+v (%v), want three copies, the byte limit and the id", info, err)
 		}
 	}}
-	if err := ensureStreamWithConfig(defaultStart, &defaults, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(defaultStart, &defaults, capsAnUnsetStream); err != nil {
 		t.Fatalf("the default program's start: %v", err)
 	}
 	if n := defaultStart.updates.Load(); n != 1 {
@@ -197,7 +197,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
 	newer := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	newer.Subjects = append(slices.Clone(streamCarriedSubjects), added)
-	if err := ensureStreamWithConfig(js, &limited, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(js, &limited, capsAnUnsetStream); err != nil {
 		t.Fatalf("the limited program's start: %v", err)
 	}
 	lowered := deployedStream(t, js).Config
@@ -207,14 +207,14 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	}
 
 	keeper := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
-		if err := ensureStreamWithConfig(js, &newer, leavesAnUnsetStream); err != nil {
+		if err := ensureStreamWithConfig(js, &newer, capsAnUnsetStream); err != nil {
 			t.Fatalf("the newer release's start: %v", err)
 		}
 		if subjects := deployedStream(t, js).Config.Subjects; !slices.Contains(subjects, added) {
 			t.Fatalf("the newer release's start left the subjects %v, want %s among them", subjects, added)
 		}
 	}}
-	restored, err := keepStream(keeper, &limited, leavesAnUnsetStream)
+	restored, err := keepStream(keeper, &limited, capsAnUnsetStream)
 	if want := []string{fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)}; err != nil || !slices.Equal(restored, want) {
 		t.Fatalf("the limited program's keeper restored %v (%v), want %v", restored, err, want)
 	}
@@ -222,11 +222,11 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 		t.Fatalf("subjects %v still hold %s: the keeper's write did not land after the newer start's", subjects, added)
 	}
 
-	restored, err = keepStream(js, &newer, leavesAnUnsetStream)
+	restored, err = keepStream(js, &newer, capsAnUnsetStream)
 	if want := []string{"subjects added " + added}; err != nil || !slices.Equal(restored, want) {
 		t.Fatalf("the newer release's keeper restored %v (%v), want %v", restored, err, want)
 	}
-	if restored, err := keepStream(js, &limited, leavesAnUnsetStream); err != nil || len(restored) != 0 {
+	if restored, err := keepStream(js, &limited, capsAnUnsetStream); err != nil || len(restored) != 0 {
 		t.Fatalf("the limited program's next pass restored %v (%v), want nothing", restored, err)
 	}
 	info := deployedStream(t, js)
@@ -253,11 +253,11 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
 	keeper := &interleavedJetStream{JetStreamContext: js, afterRead: func() {
-		if err := ensureStreamWithConfig(js, &defaults, leavesAnUnsetStream); err != nil {
+		if err := ensureStreamWithConfig(js, &defaults, capsAnUnsetStream); err != nil {
 			t.Fatalf("the start that moves the role lanes off: %v", err)
 		}
 	}}
-	restored, err := keepStream(keeper, &limited, leavesAnUnsetStream)
+	restored, err := keepStream(keeper, &limited, capsAnUnsetStream)
 	if err == nil || !strings.Contains(err.Error(), roleLane) || len(restored) != 0 {
 		t.Fatalf("the keeper's pass on the stream it read with the role lanes = %v (%v), want an error naming %s", restored, err, roleLane)
 	}
@@ -268,7 +268,7 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 		t.Fatalf("subjects %v capture the role lanes after the start moved them off", subjects)
 	}
 
-	restored, err = keepStream(js, &limited, leavesAnUnsetStream)
+	restored, err = keepStream(js, &limited, capsAnUnsetStream)
 	if want := []string{fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit)}; err != nil || !slices.Equal(restored, want) {
 		t.Fatalf("the keeper's next pass restored %v (%v), want %v", restored, err, want)
 	}
@@ -310,18 +310,18 @@ func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 	beta := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	beta.Subjects = append(slices.Clone(streamCarriedSubjects), "notifications.beta.>")
 	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
-	if err := ensureStreamWithConfig(js, &alpha, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(js, &alpha, capsAnUnsetStream); err != nil {
 		t.Fatalf("the alpha release's start: %v", err)
 	}
 
-	restored, err := keepStream(js, &beta, leavesAnUnsetStream)
+	restored, err := keepStream(js, &beta, capsAnUnsetStream)
 	if want := []string{"subjects added notifications.beta.>"}; err != nil || !slices.Equal(restored, want) {
 		t.Fatalf("the beta release's keeper restored %v (%v), want %v", restored, err, want)
 	}
 	counting := &countingJetStream{JetStreamContext: js}
 	for range 3 {
 		for _, cfg := range []*nats.StreamConfig{&alpha, &beta} {
-			if restored, err := keepStream(counting, cfg, leavesAnUnsetStream); err != nil || len(restored) != 0 {
+			if restored, err := keepStream(counting, cfg, capsAnUnsetStream); err != nil || len(restored) != 0 {
 				t.Fatalf("a keeper pass with subjects %v restored %v (%v), want nothing", cfg.Subjects, restored, err)
 			}
 		}
@@ -414,7 +414,7 @@ func TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne(t *testi
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions(settings).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg, leavesAnUnsetStream); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("start with the old limit: %v", err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -714,10 +714,10 @@ func TestRestoredFieldsNamesTheConsumerCapTheKeeperRaised(t *testing.T) {
 		version  string
 		want     string
 	}{
-		{"a cap an operator lowered", 1000, "2.10.29", fmt.Sprintf("max_consumers 1000 -> %d", StreamMaxConsumers)},
-		{"a stream with no cap on the hub's 2.15.1, which caps it at 1000", -1, "2.15.1", fmt.Sprintf("max_consumers -1 -> %d", StreamMaxConsumers)},
+		{"a cap an operator lowered", 1000, "2.10.29", fmt.Sprintf("max_consumers 1000 -> %d", streamMaxConsumers)},
+		{"a stream with no cap on the hub's 2.15.1, which caps it at 1000", -1, "2.15.1", fmt.Sprintf("max_consumers -1 -> %d", streamMaxConsumers)},
 		{"a stream with no cap on 2.10.29, which leaves it unlimited", -1, "2.10.29", ""},
-		{"a stream already at the cap", StreamMaxConsumers, "2.15.1", ""},
+		{"a stream already at the cap", streamMaxConsumers, "2.15.1", ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			info := &nats.StreamInfo{Config: nats.StreamConfig{

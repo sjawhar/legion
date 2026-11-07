@@ -2852,16 +2852,13 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open legacy JetStream: %v", err)
 	}
-	// The legacy stream carries the listener's own consumer cap (bus.StreamMaxConsumers), as a
-	// deployment the start below reconciles does, for the reason that constant records.
 	if _, err := legacyJS.AddStream(&natsgo.StreamConfig{
-		Name:         bus.Stream,
-		Subjects:     []string{"notifications.>"},
-		Retention:    natsgo.LimitsPolicy,
-		MaxConsumers: bus.StreamMaxConsumers,
-		MaxAge:       72 * time.Hour,
-		Storage:      natsgo.FileStorage,
-		Replicas:     1,
+		Name:      bus.Stream,
+		Subjects:  []string{"notifications.>"},
+		Retention: natsgo.LimitsPolicy,
+		MaxAge:    72 * time.Hour,
+		Storage:   natsgo.FileStorage,
+		Replicas:  1,
 	}); err != nil {
 		t.Fatalf("create legacy stream: %v", err)
 	}
