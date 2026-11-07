@@ -11,10 +11,10 @@ import (
 )
 
 // The append gate: the one read, under the document's advisory lock the appending transaction
-// holds, that says which version an append goes after and whether it is admitted at all
-// (gateAppend), and what each append is judged against - the cursor of the document
-// it was made on (documentCursor, appendingCursor) and, for a browser's update, what its room's
-// observer recorded with it (BrowserAppend).
+// holds, that says which version an append's run of updates goes after and whether it is admitted
+// at all (gateAppend), and what each append is judged against - the cursor of the document it was
+// made on (documentCursor, appendingCursor) and, for a browser's update, what its room's observer
+// recorded with it (BrowserUpdate).
 
 // documentCursor is the durable version the document a write was made on holds every update
 // through: a room instance's cursor for an update made in a room, or a transaction's own view of
@@ -55,21 +55,6 @@ const (
 	appendDerived
 )
 
-// BrowserAppend is what a room's own append of one of its updates carries to the store across
-// VersionedStore (AppendUpdateWithCredit, AppendRoomUpdateTx): cursor, the room instance the
-// update was made in, which the gate reads (appendBrowser) and the append advances once it has
-// committed, set only by a single append, since a flush's appends are gated on the flush itself
-// (appendingCursor); and observed, when the room's update observer took the update
-// (documentUpdateClass.observed), which tells an update the room took before its issue closed
-// from one taken after (observedBeforeClose). Its fields are unexported, so a store in another
-// package can only pass it on. A nil BrowserAppend is an append no browser's room gates: a
-// derived write is gated on the cursor of its own transaction's write or of the room that marked
-// its context (appendingCursor).
-type BrowserAppend struct {
-	cursor   *roomCursor
-	observed time.Time
-}
-
 // closeMargin is how long after an issue's close committed a browser update the room observed is
 // still taken as one made while the issue was open (observedBeforeClose). The close's notification
 // (dispatch_issue_open_changed) normally reaches every process's rooms within milliseconds of its
@@ -86,13 +71,19 @@ type BrowserAppend struct {
 const closeMargin = 2 * time.Second
 
 // appendGateStatement is the gate's one read, under the document's advisory lock the appending
-// transaction holds: the head (max(version), 0 for none), whether any stored row at or below the
-// room's cursor ($2) remains, which tells a room behind an intact history from one whose history a
-// rebuild, a prune or a compaction replaced (historyReplaced), and how long ago the document's
-// issue closed, in microseconds on the database's clock, null while it is open and for a document
-// of no issue (as issueOpen has it open). It is one indexed scan of one document's rows at each end
-// and one primary-key lookup each in artifacts and issues. The age is read at clock_timestamp(),
-// the moment of the read, not now(), the start of the appending transaction.
+// transaction holds: the head (max(version), 0 for none), the oldest stored version (min(version),
+// 0 for none), which tells a room behind an intact history from one whose history a rebuild, a
+// prune or a compaction replaced (appendGateRead.historyIntact, historyReplaced), and how long ago
+// the document's issue closed, in microseconds on the database's clock, null while it is open and
+// for a document of no issue (as issueOpen has it open). It is one indexed scan of one document's
+// rows at each end and one primary-key lookup each in artifacts and issues. The age is read at
+// clock_timestamp(), the moment of the read, not now(), the start of the appending transaction.
+//
+// The room's cursor is no parameter of it: the bound comes back and the comparison is made in Go,
+// so the read takes the document's id alone and a batch can queue it into the very pipeline that
+// takes the document's lock (queueAppendGate), reading the cursor after that pipeline returns.
+// Under the lock neither the cursor nor the head can move, so the later read is in the gate's
+// order.
 //
 // The issue is read here, in the append's own transaction, because a room whose process has not
 // heard the issue close (its listener redialing, up to RedialBackoff's ceiling, or the notification
@@ -103,39 +94,92 @@ const closeMargin = 2 * time.Second
 // (PgVersioned.recoverPruneTx) costs a round trip only where one stands rather than one on every
 // append: normally the column is null and the append goes on from this read alone.
 const appendGateStatement = `
-	select coalesce(max(version), 0), coalesce(min(version) <= $2, false),
+	select coalesce(max(version), 0), coalesce(min(version), 0),
 		(select (extract(epoch from clock_timestamp() - i.closed_at) * 1000000)::bigint
 			from artifacts a join issues i on i.key = a.issue_key where a.id = $1),
 		(select ceiling from doc_checkpoints where artifact_id = $1)
 	from doc_updates where artifact_id = $1`
 
 // appendGateRead is what one appendGateStatement read says about a document: latest, its head
-// (0 for an empty history); intact, whether any stored row at or below the reading room's cursor
-// remains; closedFor, how long ago its issue closed on the database's clock, nil while it is open
-// and for a document of no issue; and pruneCeiling, a crashed prune's checkpoint, nil while none
-// stands.
+// (0 for an empty history); oldest, the lowest stored version (0 for an empty history); closedFor,
+// how long ago its issue closed on the database's clock, nil while it is open and for a document
+// of no issue; and pruneCeiling, a crashed prune's checkpoint, nil while none stands.
 type appendGateRead struct {
 	latest       int64
-	intact       bool
+	oldest       int64
 	closedFor    *time.Duration
 	pruneCeiling *int64
 }
 
-// readAppendGate is appendGateStatement for room against a room instance holding every version
-// through through, read through q inside the appending transaction, under the document's advisory
-// lock that transaction's session holds.
-func readAppendGate(ctx context.Context, q Queryer, room string, through int64) (appendGateRead, error) {
-	var read appendGateRead
+// historyIntact is whether any stored row at or below through, the reading room's cursor, remains:
+// the column main's gate used to read as `min(version) <= $2`, computed here instead so the read
+// takes no cursor.
+func (read appendGateRead) historyIntact(through int64) bool {
+	return read.oldest != 0 && read.oldest <= through
+}
+
+// scan reads one appendGateStatement row into read.
+func (read *appendGateRead) scan(row pgx.Row) error {
 	var closedMicros *int64
-	if err := q.QueryRow(ctx, appendGateStatement, room, through).
-		Scan(&read.latest, &read.intact, &closedMicros, &read.pruneCeiling); err != nil {
-		return appendGateRead{}, fmt.Errorf("read the document's head for the append gate: %w", err)
+	if err := row.Scan(&read.latest, &read.oldest, &closedMicros, &read.pruneCeiling); err != nil {
+		return fmt.Errorf("read the document's head for the append gate: %w", err)
 	}
 	if closedMicros != nil {
 		closed := time.Duration(*closedMicros) * time.Microsecond
 		read.closedFor = &closed
 	}
+	return nil
+}
+
+// readAppendGate is appendGateStatement for room, read through q inside the appending transaction,
+// under the document's advisory lock that transaction's session holds.
+func readAppendGate(ctx context.Context, q Queryer, room string) (appendGateRead, error) {
+	var read appendGateRead
+	if err := read.scan(q.QueryRow(ctx, appendGateStatement, room)); err != nil {
+		return appendGateRead{}, err
+	}
 	return read, nil
+}
+
+// appendGate is the gate's read queued into a caller's batch (queueAppendGate) and its answer once
+// that batch has run (result). A batch of a room's browser updates queues the read into the
+// pipeline that takes the document's lock (appendRoomTx), so the read costs it no round trip of
+// its own.
+type appendGate struct {
+	room string
+	// ran is set once the read has scanned; err is its failure.
+	ran  bool
+	err  error
+	read appendGateRead
+}
+
+// queueAppendGate queues the gate's read of room into b, the caller's batch. The caller holds the
+// document's advisory lock in the transaction b runs in, and once b has run asks result.
+func queueAppendGate(b *pgx.Batch, room string) *appendGate {
+	gate := &appendGate{room: room}
+	b.Queue(appendGateStatement, room).QueryRow(gate.scan)
+	return gate
+}
+
+func (g *appendGate) scan(row pgx.Row) error {
+	if err := g.read.scan(row); err != nil {
+		g.err = err
+		return err
+	}
+	g.ran = true
+	return nil
+}
+
+// result is the gate's read once its batch has run. A read that failed, or never ran because a
+// statement before it in the batch failed, is an error too.
+func (g *appendGate) result() (appendGateRead, error) {
+	if g.err != nil {
+		return appendGateRead{}, g.err
+	}
+	if !g.ran {
+		return appendGateRead{}, fmt.Errorf("read the document's head for the append gate: room %s's read did not run", g.room)
+	}
+	return g.read, nil
 }
 
 // observedBeforeClose is whether a browser update the room's observer took age ago, on this
@@ -150,76 +194,106 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 	return !observed.IsZero() && age+closeMargin >= closedFor
 }
 
-// gateAppend is the gate: the verdict over read, one readAppendGate of room taken under the
-// document's advisory lock the appending transaction's session holds, so no append lands between
-// that read and its own - the version the append goes after (it is stored at latest+1),
-// ErrIssueClosed or ErrRoomBehindHead. The append comes from a room instance whose cursor holds
-// every version through through, ruled by kind, of an update the room's observer took at observed
-// (zero for a derived write or an append with no class). An appendBrowser append is refused when
-// the document's issue is closed and its room took the update later than closeMargin after the
-// close (observedBeforeClose), or when the room's history was replaced (historyReplaced); an
-// appendDerived append unless the room holds the head exactly. Equality for the derived rule, not
+// updateAge is how long ago the room's observer took an update, measured at the gate's read as the
+// database measures its issue's close. An update with no observed time has no age.
+func updateAge(observed time.Time) time.Duration {
+	if observed.IsZero() {
+		return 0
+	}
+	return time.Since(observed)
+}
+
+// gateAppend is the gate: the verdict over read, one appendGateStatement read of room taken under
+// the document's advisory lock the appending transaction's session holds, so no append lands
+// between that read and its own - the version the run's first update goes after (it is stored at
+// latest+1), how many of the run are admitted, ErrIssueClosed or ErrRoomBehindHead. The run comes
+// from a room instance whose cursor holds every version through through, ruled by kind, each
+// update carrying when the room's observer took it (BrowserUpdate.Observed, zero for a derived
+// write or an append with no class).
+//
+// An appendBrowser run is cut at the first update the document's closed issue no longer admits
+// (observedBeforeClose): the admitted updates are a prefix, because the run ascends in the order
+// the room took them and the rule is monotone in an update's age, so this stores exactly what the
+// same updates would have stored one transaction each, and ErrIssueClosed refuses the run only
+// when the prefix is empty. The rest stay queued, and each meets the gate again on its own call.
+// The whole run is refused when the room's history was replaced (historyReplaced); an
+// appendDerived run unless the room holds the head exactly. Equality for the derived rule, not
 // `through < head`: a room standing past the head holds a history the store no longer has.
 //
-// A browser's update refused for a replaced history above its room's cursor is admitted at the
-// head after all when that history still holds every item the update builds on
-// (storedHistoryHolds): a compaction folded the rows the room held into a later one, keeping their
-// items, which is no replacement for a delta that commutes. Refused, the update was dropped with
-// its room, and a browser whose issue closed meanwhile reconnects read-only and cannot send it
-// again. replaced reports such an admission: the room cannot catch up to that history, so its
-// caller marks the room's cursor (markReplaced), and once the append is stored the room is closed
+// A browser's run refused for a replaced history above its room's cursor is admitted at the head
+// after all when that history still holds every item the run builds on (storedHistoryHolds): a
+// compaction folded the rows the room held into a later one, keeping their items, which is no
+// replacement for deltas that commute. Refused, the updates were dropped with their room, and a
+// browser whose issue closed meanwhile reconnects read-only and cannot send them again. replaced
+// reports such an admission: the room cannot catch up to that history, so its caller marks the
+// room's cursor once for the run (markReplaced), and once the append is stored the room is closed
 // and reloaded at the head (Service.closeRoomOnReplacedHistory), rather than taking every later
 // update of its browsers down this path, a decode of the whole stored document under the
 // document's lock each.
-func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte, read appendGateRead, maxPending int) (latest int64, replaced bool, err error) {
-	latest, intact, closedFor := read.latest, read.intact, read.closedFor
-	// The update's age is taken at the read, as the database measures the close's.
-	var age time.Duration
-	if !observed.IsZero() {
-		age = time.Since(observed)
+func gateAppend(ctx context.Context, q Queryer, room string, through int64, kind appendKind, updates []BrowserUpdate, read appendGateRead, maxPending int) (latest int64, admitted int, replaced bool, err error) {
+	if len(updates) == 0 {
+		return 0, 0, false, fmt.Errorf("append document updates: no update to append")
 	}
-	switch {
-	case kind == appendBrowser && closedFor != nil && !observedBeforeClose(observed, age, *closedFor):
-		return 0, false, fmt.Errorf("%w: room %s's document belongs to an issue closed %s ago, and the room took the update %s ago",
-			ErrIssueClosed, room, closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
-	case historyReplaced(through, latest, intact):
-		if kind == appendBrowser && latest > through {
-			holds, holdsErr := storedHistoryHolds(ctx, tx, room, latest, update, maxPending)
-			if holdsErr != nil {
-				return 0, false, holdsErr
-			}
-			if holds {
-				return latest, true, nil
+	latest, admitted = read.latest, len(updates)
+	if kind == appendBrowser && read.closedFor != nil {
+		for admitted = 0; admitted < len(updates); admitted++ {
+			observed := updates[admitted].Observed
+			if !observedBeforeClose(observed, updateAge(observed), *read.closedFor) {
+				break
 			}
 		}
-		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
+		if admitted == 0 {
+			return 0, 0, false, fmt.Errorf("%w: room %s's document belongs to an issue closed %s ago, and the room took the update %s ago",
+				ErrIssueClosed, room, read.closedFor.Round(time.Millisecond), updateAge(updates[0].Observed).Round(time.Millisecond))
+		}
+		updates = updates[:admitted]
+	}
+	switch {
+	case historyReplaced(through, latest, read.historyIntact(through)):
+		if kind == appendBrowser && latest > through {
+			holds, holdsErr := storedHistoryHolds(ctx, q, room, latest, updates, maxPending)
+			if holdsErr != nil {
+				return 0, 0, false, holdsErr
+			}
+			if holds {
+				return latest, admitted, true, nil
+			}
+		}
+		return 0, 0, false, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
 			ErrRoomBehindHead, room, through, latest)
 	case kind == appendDerived && through != latest:
-		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
+		return 0, 0, false, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
 			ErrRoomBehindHead, room, through, latest)
 	}
-	return latest, false, nil
+	return latest, admitted, false, nil
 }
 
-// storedHistoryHolds reports whether room's stored history through head holds every item update
-// builds on: applied to the document that history decodes into (documentThrough), update parks
-// nothing, neither an item whose origin or predecessor is missing nor a delete of an item the
-// history lacks. A compaction's fold keeps every item it folds, so it holds what a room's update
-// was made on; a rebuild's seed is a document of other items, which a room's update parks on. A
-// history that already parks something answers false, as does an update it cannot apply.
-func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64, update []byte, maxPending int) (bool, error) {
+// storedHistoryHolds reports whether room's stored history through head holds every item updates,
+// the run the append would store, builds on: applied in the room's commit order to the document
+// that history decodes into (documentThrough), no update parks anything, neither an item whose
+// origin or predecessor is missing nor a delete of an item the history lacks. The history is
+// decoded once for the whole run, not once per update. A compaction's fold keeps every item it
+// folds, so it holds what a room's update was made on; a rebuild's seed is a document of other
+// items, which a room's update parks on. A history that already parks something answers false, as
+// does a run it cannot apply: the run is admitted whole or not at all.
+func storedHistoryHolds(ctx context.Context, q Queryer, room string, head int64, updates []BrowserUpdate, maxPending int) (bool, error) {
 	version := persistence.Version(head)
-	doc, err := documentThrough(room, version, storedUpdates(ctx, tx, room, version), maxPending)
+	doc, err := documentThrough(room, version, storedUpdates(ctx, q, room, version), maxPending)
 	if err != nil || doc == nil {
 		return false, err
 	}
 	if parks(doc) {
 		return false, nil
 	}
-	if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
-		return false, nil
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(doc, update.Update, nil); err != nil {
+			return false, nil
+		}
+		if parks(doc) {
+			return false, nil
+		}
 	}
-	return !parks(doc), nil
+	return true, nil
 }
 
 // historyReplaced is whether the stored history under a room instance holding every version
@@ -233,17 +307,16 @@ func historyReplaced(through, latest int64, intact bool) bool {
 	return latest < through || (through > 0 && !intact)
 }
 
-// roomCursorContextKey marks a context with the cursor of the room instance a derived append's
-// update was made in.
+// roomCursorContextKey marks a context with the cursor of the room instance an append's update was
+// made in.
 type roomCursorContextKey struct{}
 
-// withRoomCursor marks ctx with cursor for the gate in appendUpdateTxClass, as a derived append
-// (appendDerived). The appends made from a room outside any live write mark their own context,
-// since no ledger of theirs names the document they were made on: settlement's repairs
-// (settleRoomWithin), the block-id backfill's stamp (backfillBlockIDs) and the room's own append
-// of an update its observer recorded no class for (servicePersistenceAdapter.StoreUpdateContext).
-// A room's own browser append hands its cursor to the store with the update instead
-// (BrowserAppend).
+// withRoomCursor marks ctx with cursor for the gate (appendingCursor). The appends made from a
+// room outside any live write mark their own context, since no ledger of theirs names the document
+// they were made on: settlement's repairs (settleRoomWithin), the block-id backfill's stamp
+// (backfillBlockIDs) and the room's own append of an update its observer recorded no class for
+// (servicePersistenceAdapter.StoreUpdateContext). A room's own batch of browser updates is gated
+// on the flush it stores instead (RoomFlush, appendRoomTx).
 func withRoomCursor(ctx context.Context, cursor *roomCursor) context.Context {
 	if cursor == nil {
 		return ctx
@@ -255,53 +328,4 @@ func withRoomCursor(ctx context.Context, cursor *roomCursor) context.Context {
 func roomCursorFrom(ctx context.Context) *roomCursor {
 	cursor, _ := ctx.Value(roomCursorContextKey{}).(*roomCursor)
 	return cursor
-}
-
-// appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
-// own write to room when it has one, whose fork is what the write was made on; otherwise, for one
-// of a flush's own appends, flush, the room instance its updates were made in with the versions
-// the flush has appended folded in (RoomFlush); otherwise the cursor its caller marked the context
-// with (withRoomCursor), with the versions the caller's transaction has appended for that instance
-// folded in when it flushed the room (a settlement's repairs, storeRepair). A nil cursor is an
-// append no cursor gates. A browser's own append carries its cursor to the store with the update
-// (BrowserAppend), which no context marks.
-//
-// flush is passed by the appends of a flush alone (AppendRoomUpdateTx), and is the only way the
-// room's own persistence worker reaches its flush here: its transaction has no ledger, so the
-// cursor its context carries is the instance's alone, one version behind the head from the flush's
-// second append on. A joined transaction's flush appends pass it too (Service.flushThrough passes
-// flush to every append it makes), but the write branch comes first: a live write's own flush
-// (Ledger.flushThrough, from recordLiveOperation) is decided by the write, whose heldThrough folds
-// the flushed versions in (withOwnAppends). The flush branch decides the flush appends of a
-// transaction that holds no write of the room: a settlement's, a version's, the block-id
-// backfill's. What the ledger lookup in the room-cursor branch is for is the transaction's other
-// appends of that instance, the repairs storeRepair stores through AppendUpdateTx, which the
-// flush's versions gate.
-//
-// A transaction's write decides for itself: a cold write, whose fork came from the store because
-// no room of this process held the document or its room was behind (coldFork), carries no cursor
-// and is not gated. The gate refuses a write rendered from a room behind the head, and a cold
-// write renders from the store instead - it holds no room, its update commutes with whatever
-// landed since its read, and the room that loads after its publish reads the store, which holds
-// both by then.
-func appendingCursor(ctx context.Context, room string, flush *RoomFlush) documentCursor {
-	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil {
-		if write.point.cursor == nil {
-			return nil
-		}
-		return write
-	}
-	if flush != nil && flush.room == room {
-		if flush.cursor == nil {
-			return nil
-		}
-		return flush
-	}
-	if cursor := roomCursorFrom(ctx); cursor != nil {
-		if flush := ledgerFrom(ctx).flushFor(room); flush != nil && flush.cursor == cursor {
-			return flush
-		}
-		return cursor
-	}
-	return nil
 }

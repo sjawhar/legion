@@ -1,0 +1,5 @@
+kind: Added
+body: 'A Dispatch project carries the design-gate steps its Legion deployment gates: `PUT /api/v1/projects/{key}/gated-steps` records the list its daemon publishes, and `GET /api/v1/projects` answers it as `gated_steps`. An issue''s `decisions.md` is a document Dispatch knows by role, answered on the issue read as `decisions_artifact_id`.'
+time: 2026-11-06T08:45:06.053711136Z
+custom:
+    Issue: pr2848

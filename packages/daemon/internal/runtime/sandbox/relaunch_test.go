@@ -188,7 +188,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 			sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 			podObject(name, "uid-pod-old", "uid-sandbox-kept", labels, runningStatus()),
 		})
-		g.suspendDelay = 50 * time.Millisecond
+		g.suspendDelay.Store(int64(50 * time.Millisecond))
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "suspend", "create secret", "run", "record addresses")
 		if loc.Sandbox.PodUID == "uid-pod-old" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
@@ -389,7 +389,7 @@ func supersededIssue(t *testing.T, options ...rigOption) *rig {
 		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels)),
 		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
 	}, options...)
-	g.suspendDelay = 50 * time.Millisecond
+	g.suspendDelay.Store(int64(50 * time.Millisecond))
 	return g
 }
 
@@ -670,7 +670,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		}),
 		oldSecret,
 	})
-	g.suspendDelay = 50 * time.Millisecond
+	g.suspendDelay.Store(int64(50 * time.Millisecond))
 	g.launcher(workerToken)
 	spec := workerSpec(t)
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession

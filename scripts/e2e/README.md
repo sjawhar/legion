@@ -2306,7 +2306,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 - `spec-posted`
 
   each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate;
-  with `gates.design: off` the daemon moves the tree to planning
+  with `gates.design: off`, the empty list, the daemon moves the tree to planning
 
 - `advertise-host`
 
@@ -2648,7 +2648,7 @@ Each item below names a checkpoint, then what it holds; an item that names no ch
 
   `legion status … backlog` from the operator shell moves tree 3, Dispatch shows it, and tree 3's pods are gone.
   With tree 3 out and a slot free, the controller's slot wakes reach it:
-  its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line;
+  its Oh My Pi was launched with the daemon's `Design gate steps: none.` line;
   an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`;
   a minute later that issue is still unlabelled and unrecorded, since the controller starts no work a person did not hand over (the proof's scope says so too), and it is set `done`;
   tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed`

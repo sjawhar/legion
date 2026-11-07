@@ -132,7 +132,7 @@ func pacedCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root s
 		if err != nil || stored == nil {
 			return fmt.Errorf("read %s: %w", root, err)
 		}
-		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, launch, now, at)
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, launch, now, at)
 	}); err != nil {
 		t.Fatalf("queue the paced catch-up of %s: %v", root, err)
 	}
@@ -390,7 +390,7 @@ func TestAnOrdinaryCatchUpAndAHandOversAreNotDelayed(t *testing.T) {
 	// The hand-over's, which drops the ready's as every catch-up does (DropCatchUps): the composer
 	// every released decision's catch-up goes through (workflow.HandOverKept, CatchUpTheTreesOwed).
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return workflow.CatchUpTheTreesOwed(ctx, tx, records, config.DesignGateRootIssues, []string{"LEGION-1"}, now)
+		return workflow.CatchUpTheTreesOwed(ctx, tx, records, config.DesignGateRootIssues.Steps(), []string{"LEGION-1"}, now)
 	}); err != nil {
 		t.Fatalf("write the hand-over's catch-up: %v", err)
 	}

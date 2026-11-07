@@ -91,7 +91,11 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by this release's production check
+number is the one `DaemonAPIVersion` declares, last bumped by contract 55's design-gate steps
+(each root issue of `GET /legion/v1/state` carries `gatedSteps`, one entry for each step the
+deployment gates, which a caller from a pod below 55 is served without; `register_gate` takes the
+`step` its document is for; and `POST /legion/v1/controller/secret` answers `designGateSteps` in
+place of `designGate`), after contract 54's production check
 (INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
 default, decides whether a merge that closes an issue opens a check and who works it; the
 `check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it

@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -411,7 +412,14 @@ type Issue struct {
 	Workers     map[claim.Role]PhaseView `json:"workers"`
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
-	Slot        *SlotView                `json:"slot,omitempty"`
+	// GatedSteps is the deployment's design gate as this issue stands in it: one entry for each
+	// step the deployment gates, in the order it gates them (contract 55). It is absent, as the
+	// gate itself is, for an issue that is not its tree's root, for a deployment that gates no
+	// step and for an issue the workflow does not record, so the wire never carries an empty
+	// list. DesignGate is unchanged beside it: it is the spec step's row, which every reader that
+	// asks one question of one gate still takes.
+	GatedSteps []GatedStepView `json:"gatedSteps,omitempty"`
+	Slot       *SlotView       `json:"slot,omitempty"`
 	// WaitingOn is present only while the root is in awaiting_person: what it waits on from a
 	// person, when the wait began and, once a person answered, when and by what act.
 	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
@@ -566,6 +574,76 @@ type GateView struct {
 	ArtifactID      string `json:"artifactId"`
 	CurrentVersion  int    `json:"currentVersion"`
 	ApprovedVersion *int   `json:"approvedVersion"`
+}
+
+// GatedStepStatus is where one gated step of a deployment stands, as the issue's gate records say
+// it: the four answers a record can give.
+type GatedStepStatus string
+
+const (
+	// GatedStepUnregistered is a step the deployment gates that the issue holds no gate record
+	// for: its architect has registered no document for that step, and the step holds the tree's
+	// work until it does.
+	GatedStepUnregistered GatedStepStatus = "unregistered"
+	// GatedStepWaiting is a registered step whose current document version no person has reviewed:
+	// the approval or the changes request it records, if any, is of a version below the current
+	// one, which a newer version of the document left behind. It waits on a person.
+	GatedStepWaiting GatedStepStatus = "waiting"
+	// GatedStepApproved is a step a person approved at its current document version: the one
+	// status that lets the tree's work past the step (classify.DesignGateOpen).
+	GatedStepApproved GatedStepStatus = "approved"
+	// GatedStepChangesRequested is a step whose reviewer asked for changes at its current document
+	// version, which the architect was told of; ChangesReason carries the reason the reviewer gave.
+	GatedStepChangesRequested GatedStepStatus = "changes_requested"
+)
+
+// GatedStepView is one step of the deployment's design gate as one issue stands in it: the step,
+// the document its architect registered for the step, that document's current version, the
+// version a person approved, where the step stands and, for a step whose reviewer asked for
+// changes, the reason they gave. A step nobody has registered carries no document, no version and
+// no approval.
+type GatedStepView struct {
+	Step            record.DesignStep `json:"step"`
+	ArtifactID      string            `json:"artifactId,omitempty"`
+	CurrentVersion  int               `json:"currentVersion,omitempty"`
+	ApprovedVersion *int              `json:"approvedVersion"`
+	Status          GatedStepStatus   `json:"status"`
+	ChangesReason   string            `json:"changesReason,omitempty"`
+}
+
+// GatedStepViewsOf is steps, the design-gate steps a deployment gates, as one issue stands in
+// them: gates are that issue's gate rows by step (record.Store.GatesOf), and the answer is one
+// entry for each step, in the order the deployment gates them, never nil.
+//
+// The entries are the deployment's steps and not the issue's rows. A row of a step the deployment
+// no longer gates stays in the record — a deployment that gates that step again reads its true
+// state — and appears in no entry here, because it holds no work: every reader of the gate asks
+// the configured steps (classify.DesignGatesOpen). A configured step with no row is the other
+// direction, and is answered unregistered: it holds the tree's work, so a reader must see it.
+func GatedStepViewsOf(steps []record.DesignStep, gates map[record.DesignStep]record.DesignGate) []GatedStepView {
+	views := make([]GatedStepView, 0, len(steps))
+	for _, step := range steps {
+		gate, registered := gates[step]
+		if !registered {
+			views = append(views, GatedStepView{Step: step, Status: GatedStepUnregistered})
+			continue
+		}
+		view := GatedStepView{
+			Step:            step,
+			ArtifactID:      gate.ArtifactID,
+			CurrentVersion:  gate.LatestVersion,
+			ApprovedVersion: gate.ApprovedVersion,
+			Status:          GatedStepWaiting,
+		}
+		switch {
+		case classify.DesignGateOpen(gate):
+			view.Status = GatedStepApproved
+		case gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == gate.LatestVersion:
+			view.Status, view.ChangesReason = GatedStepChangesRequested, gate.ToldChangesReason
+		}
+		views = append(views, view)
+	}
+	return views
 }
 
 // SlotView is the admission slot the issue occupies and when it took it.
@@ -824,9 +902,12 @@ func WakesWaitingOf(held []supervise.WaitingWake, queued []WakeWaiting) []WakeWa
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route
 // owns. It does not commit it: the route can refuse one failed projection without publishing a
-// partial snapshot.
+// partial snapshot. It answers the project's claims beside the state, the ones it read through
+// that transaction to build the claim views, so the route decides what the caller's plugin reads
+// (server's stateFor) from the claims of the snapshot it serves, rather than reading the table a
+// second time at another moment.
 type StateSource interface {
-	State(ctx context.Context, tx pgx.Tx) (State, error)
+	State(ctx context.Context, tx pgx.Tx) (State, []supervise.Claim, error)
 }
 
 // StateTransactions begins the one snapshot transaction every state response reads through.

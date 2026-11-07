@@ -89,7 +89,14 @@ func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 // workflow.Config's zero value, which is the armed gate.
 func newAdmissionWithGate(t *testing.T, cap int, gate config.DesignGate, log *slog.Logger) *Admission {
 	t.Helper()
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: gate,
+	return newAdmissionWithSteps(t, cap, gate.Steps(), log)
+}
+
+// newAdmissionWithSteps is newAdmission under a design gate of several steps, which is what a
+// deployment's `gates.design` list resolves to.
+func newAdmissionWithSteps(t *testing.T, cap int, steps []record.DesignStep, log *slog.Logger) *Admission {
+	t.Helper()
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Steps: steps,
 		Clock: func() time.Time { return fixedNow }}, log)
 	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
@@ -200,7 +207,7 @@ func assertWaiting(t *testing.T, pool *pgxpool.Pool, want []string) {
 		if err != nil {
 			t.Fatalf("list slots: %v", err)
 		}
-		facts, err := record.ReadLineFacts(ctx, tx, records, testProject, issues)
+		facts, err := record.ReadLineFacts(ctx, tx, records, testProject, issues, nil)
 		if err != nil {
 			t.Fatalf("read the line facts: %v", err)
 		}

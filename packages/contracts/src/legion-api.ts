@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
+import { DISPATCH_KEY_PATTERN, GATED_STEPS, LEGION_ROLES } from "./legion-roles";
 
 /**
  * The Legion daemon's HTTP API, as its readers see it.
@@ -204,6 +204,29 @@ const legionGateView = z.object({
   approvedVersion: z.number().int().positive().nullable(),
 });
 
+/** `record.DesignStep` — one step of a deployment's design gate, each naming one document of the
+ * root issue: `decisions` its decisions document, `criteria` its Verification document, `spec`
+ * its primary document. */
+const legionDesignStep = z.enum(GATED_STEPS);
+
+/** `api.GatedStepView` — one step of the deployment's design gate as one issue stands in it
+ * (contract 55). `artifactId` and `currentVersion` are the document its architect registered for
+ * the step and that document's current version, absent until one is registered; `approvedVersion`
+ * is the version a person approved, null until one does. `status` is where the step stands:
+ * `unregistered` (the deployment gates it and the issue holds no record of it, so it holds the
+ * tree's work), `waiting` (registered, and no person has reviewed its current version),
+ * `approved` (a person approved its current version, the one status that lets the work past the
+ * step) or `changes_requested` (its reviewer asked for changes at its current version, with
+ * `changesReason` the reason they gave; absent under every other status). */
+const legionGatedStepView = z.object({
+  step: legionDesignStep,
+  artifactId: nonEmptyString.optional(),
+  currentVersion: z.number().int().positive().optional(),
+  approvedVersion: z.number().int().positive().nullable(),
+  status: z.enum(["unregistered", "waiting", "approved", "changes_requested"]),
+  changesReason: nonEmptyString.optional(),
+});
+
 /** `api.SlotView` — the admission slot the issue occupies and when it took it. */
 const legionSlotView = z.object({
   index: z.number().int().nonnegative(),
@@ -382,6 +405,13 @@ const legionIssue = z.object({
   workers: z.partialRecord(z.string(), legionPhaseView),
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
+  /** The deployment's design gate as this issue stands in it, one entry for each step the
+   * deployment gates, in the order it gates them (contract 55). This daemon always writes it, and
+   * it is empty for an issue that is not its tree's root, for a deployment that gates no step and
+   * for an issue the workflow does not record; a daemon before contract 55 writes none, which is
+   * why a reader takes it as absent rather than as an empty list. `designGate` above is unchanged
+   * beside it, the `spec` step's row, which a reader that asks one question of one gate takes. */
+  gatedSteps: z.array(legionGatedStepView).optional(),
   slot: legionSlotView.optional(),
   waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional(),
@@ -424,9 +454,8 @@ const legionBlockedIssue = z.object({
  * trees. A daemon at this contract writes it on every state, empty rather than null, and it is
  * optional here only because that daemon leaves it off one body: a reader before 51 refuses the
  * key outright, so the route strips `trees` and the issues' `tree` for a caller in a pod whose
- * claims record a contract below 51, and for a caller in a pod whose claims it cannot read at
- * all, which may be a pod at this contract (`api.stateFor`, `withoutTrees`). A reader that finds
- * it absent has been served that stripped body and learns nothing about which trees run; it is
+ * claims record a contract below 51 (`api.stateFor`, `withoutTrees`). A reader that finds it
+ * absent has been served that stripped body and learns nothing about which trees run; it is
  * never a daemon older than this plugin, whom the boot gate and `legion probe-image` refuse.
  * `blocked` is every root and every child Legion is waiting to start behind a Dispatch
  * issue nobody has finished, by issue key; a blocked issue the line carries is in `waiting` too.
@@ -776,11 +805,13 @@ export const LegionControllerRegisterResponse = z.object({
 export type LegionControllerRegistration = z.output<typeof LegionControllerRegisterResponse>;
 
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
- * capability the operator's bearer bought, and the project's `gates.design`, which
- * `legion controller start` tells the controller. The CLI reads it; the plugin never does. */
+ * capability the operator's bearer bought, and the design-gate steps the project gates
+ * (`gates.design`), in the order it gates them, which `legion controller start` tells the
+ * controller (contract 55). The list is empty for a deployment that gates no step and is never
+ * absent. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.object({
   secret: nonEmptyString,
-  designGate: z.enum(["root-issues", "off"]),
+  designGateSteps: z.array(legionDesignStep),
 });
 
 /** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:
@@ -981,12 +1012,16 @@ export const LegionIssueStatusRequest = z.strictObject({
   status: z.enum(["todo", "backlog", "icebox"]),
 });
 
-/** `api.GateRegisterRequest`, the architect's current Dispatch document approval target. */
+/** `api.GateRegisterRequest`, the architect's current Dispatch document approval target, for one
+ * step of the deployment's design gate. `step` is the step the document is for; a deployment
+ * that gates one step alone takes a request that leaves it out, and one that gates several
+ * refuses it (`GATE_STEP_REQUIRED`). */
 export const LegionGateRegisterRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
   artifactId: z.uuid(),
   version: z.number().int().positive(),
+  step: legionDesignStep.optional(),
 });
 
 /** `api.WaveReleaseRequest`, the architect's selected child issues. */

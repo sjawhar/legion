@@ -1,0 +1,32 @@
+-- 20261105204141_project_gated_steps.up.sql — the design-gate steps a project's deployment gates.
+--
+-- INFRA-1272: a Legion deployment's design gate stops being one document and becomes a list of
+-- steps, each naming one document of a root issue: `decisions` its decisions document, `criteria`
+-- its Verification document, `spec` its primary document. The daemon publishes the list it is
+-- configured with onto its project's row (PUT /api/v1/projects/{key}/gated-steps,
+-- api/project_gated_steps.go), so a person reading Dispatch sees what that deployment gates
+-- without reading its configuration.
+--
+-- The order the list is stored in is the order the deployment names, so `text[]` and not a set:
+-- the architect works the steps in that order and a reader of the row sees the same sequence.
+--
+-- The default is the empty array, and not null, because the two projects a reader must not have
+-- to tell apart read the same: a project whose daemon gates nothing, and one whose daemon has
+-- not published yet. Neither holds a step a person must approve, so neither needs a null to say
+-- "unknown", and every reader is spared a null case it would answer the same way. It also keeps
+-- the rolling-deploy rule (internal/dispatch/store/README.md): the release before this one
+-- inserts a project naming its own columns alone, and that row reads as gating nothing.
+--
+-- The check holds the elements to the three steps Legion knows, so a misspelt step is refused
+-- where it is written rather than read as a step nobody gates. `<@` leaves the empty array and
+-- any order of the three admitted, and a repeat as well: the route refuses a repeat, and the
+-- database's job here is the shape, not the route's input rules.
+--
+-- Adding a column with a constant default writes the catalog alone (Postgres 11 on), so it holds
+-- projects' ACCESS EXCLUSIVE lock for milliseconds and rewrites no row; the check is on the new
+-- column alone, whose every existing row takes the default, so it refuses none either. Its
+-- identifier is the UTC moment it was written, as `migrationid` requires of every migration past
+-- the numbered series, which closed at 0161 (cmd/dispatch/README.md, "Database migrations").
+alter table projects
+  add column gated_steps text[] not null default '{}'
+  check (gated_steps <@ array['decisions', 'criteria', 'spec']);

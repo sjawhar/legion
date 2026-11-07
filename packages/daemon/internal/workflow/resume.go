@@ -70,7 +70,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 			own = append(own, issue)
 		}
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own)
+	facts, err := record.ReadLineFacts(ctx, tx, e.store, e.cfg.Project, own, e.cfg.Steps)
 	if err != nil {
 		return intake.Result{}, err
 	}

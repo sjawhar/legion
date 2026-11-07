@@ -40,6 +40,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		LingerClose{Generation: 7},
 		WorkspaceRemove{Linger: 3},
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
+		GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}},
 		IssueBranch{Generation: 2},
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
 		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
@@ -163,7 +164,8 @@ func TestPersonHandoverPendingCountsOnlyMarkedStatusRows(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease}
+		OutboxKindCheckWake, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindPhaseEnded, OutboxKindIssueBundle, OutboxKindIssueRelease,
+		OutboxKindGatedStepsPublish}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard, LaneRoleMessage} {
 		for _, kind := range LaneKinds(lane) {
@@ -230,6 +232,8 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
 		{name: "a merge queue publish without a role", payload: MergeQueuePublish{Packet: "READY #42"}, reason: "merge queue publish requires role"},
 		{name: "a merge queue publish without a packet", payload: MergeQueuePublish{Role: "merge-queue"}, reason: "merge queue publish requires packet"},
+		{name: "a gated-steps publish without a project", payload: GatedStepsPublish{Steps: []DesignStep{DesignStepSpec}}, reason: "requires the project whose row it writes"},
+		{name: "a gated-steps publish naming no step of the gate", payload: GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{"verification"}}, reason: `names "verification", which is no design-gate step`},
 		{name: "a READY merge without a pull request", payload: ReadyMerge{Head: "c0de"}, reason: "READY merge requires its pull request number and head"},
 		{name: "a READY merge without a head", payload: ReadyMerge{Number: 42}, reason: "READY merge requires its pull request number and head"},
 		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: checkLookRefusal},
@@ -393,6 +397,104 @@ func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) 
 		if got := PersonActor(actor); got != want {
 			t.Errorf("PersonActor(%q) = %t, want %t", actor, got, want)
 		}
+	}
+}
+
+// The boot's publish of the deployment's design-gate steps is one outbox row addressed to the
+// bare project key rather than to an issue. The record's part is three things: the row is due to
+// the daemon of that project and to no other, which the same split_part scope answers for a key
+// with no hyphen; a boot writes the project's one row of the kind, replacing what a pending row
+// carries, so the list waiting for Dispatch is always the list the booting daemon holds; and a
+// finished row leaves nothing behind, so the boot after it queues its own.
+func TestGatedStepsPublishAtBoot(t *testing.T) {
+	now := time.Date(2026, 11, 6, 4, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	// boot is what openWorkflow does with the list it was configured with: write the project's
+	// one publish.
+	boot := func(project string, steps []DesignStep) {
+		t.Helper()
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.EnqueueGatedSteps(ctx, tx, GatedStepsPublish{Project: project, Steps: steps}, now))
+		})
+	}
+	// queued is the one publish the outbox holds for project, by row id and by what it carries.
+	queued := func(project string) (int64, GatedStepsPublish) {
+		t.Helper()
+		var held []OutboxRow
+		inTx(t, st, func(tx pgx.Tx) {
+			var err error
+			held, err = records.DueRows(ctx, tx, project, "", nil, now)
+			must(t, err)
+		})
+		if len(held) != 1 || held[0].Issue != project {
+			t.Fatalf("DueRows of %s = %#v, want the one publish addressed to the project key", project, held)
+		}
+		payload, err := DecodeOutboxPayload(held[0])
+		must(t, err)
+		publish, ok := payload.(GatedStepsPublish)
+		if !ok {
+			t.Fatalf("the row of %s decodes as %#v, want a gated-steps publish", project, payload)
+		}
+		return held[0].ID, publish
+	}
+
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	first, publish := queued("LEGION")
+	want := GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepCriteria, DesignStepSpec}}
+	if !reflect.DeepEqual(publish, want) {
+		t.Fatalf("the publish carries %#v, want %#v, the configured list in the configured order", publish, want)
+	}
+
+	// A second boot on the same list leaves the row it finds where it is, so a restart loop
+	// writes no second publish and takes nothing off the backoff the lane has set on this one.
+	boot("LEGION", []DesignStep{DesignStepCriteria, DesignStepSpec})
+	if id, again := queued("LEGION"); id != first || !reflect.DeepEqual(again, publish) {
+		t.Fatalf("a boot on the unchanged list left row %d carrying %#v, want row %d carrying %#v untouched", id, again, first, publish)
+	}
+
+	// A boot on a changed list while that row is still pending replaces what it carries: an
+	// operator who changes gates.design and restarts while Dispatch has yet to take the publish
+	// gets the list this daemon booted on, not the one the boot before it held.
+	boot("LEGION", []DesignStep{DesignStepSpec})
+	changedRow, changed := queued("LEGION")
+	if changedRow != first {
+		t.Fatalf("the boot on the changed list wrote row %d beside %d, want the pending row carrying the new list", changedRow, first)
+	}
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{DesignStepSpec}}); !reflect.DeepEqual(changed, want) {
+		t.Fatalf("the pending publish carries %#v after the boot on a changed list, want %#v", changed, want)
+	}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.DueRows(ctx, tx, "INFRA", "", nil, now)
+		must(t, err)
+		if len(rows) != 0 {
+			t.Fatalf("DueRows of INFRA = %#v, want nothing: LEGION's publish is LEGION's daemon's", rows)
+		}
+	})
+
+	var claimed OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		var ok bool
+		var err error
+		claimed, ok, err = records.ClaimRow(ctx, tx, changedRow, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatal("ClaimRow of the publish claimed nothing")
+		}
+		must(t, records.FinishOutbox(ctx, tx, claimed.ID, claimed.LeaseToken))
+	})
+
+	// The run deleted the row, so the next boot publishes whatever it is configured with now: a
+	// deployment that gates nothing publishes the empty list rather than nothing at all.
+	boot("LEGION", []DesignStep{})
+	ran, published := queued("LEGION")
+	if ran == changedRow {
+		t.Fatalf("the boot after the publish ran reused row %d, want a row of its own", ran)
+	}
+	if want := (GatedStepsPublish{Project: "LEGION", Steps: []DesignStep{}}); !reflect.DeepEqual(published, want) {
+		t.Fatalf("the next boot published %#v, want the empty list of a deployment that gates nothing", published)
 	}
 }
 

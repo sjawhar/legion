@@ -164,7 +164,9 @@
     "nats_urls": [],
     "projects": {},
     "gates": {
-      "design": "root-issues"
+      "design": [
+        "spec"
+      ]
     },
     "linger_hours": 72,
     "production_check_hours": 336,

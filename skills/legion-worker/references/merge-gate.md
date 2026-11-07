@@ -145,7 +145,9 @@ reviewing until you finish.
   the architect as a gap the tester and the reviewer named and neither refused, so the
   architect's acceptance is the only gate on it: the acceptance comment names that gap and
   decides there, accepting the issue or sending it back with the checks the architect writes,
-  which closes no design gate while dispatch://INFRA-175 has not shipped. The architect also
+  which closes the root's `criteria` step where the deployment gates that step, since that step
+  records the root's Verification document and each new version of a step's document closes it;
+  a child's Verification document is gated by nothing. The architect also
   reads the reviewer's own prose commits here, with the rest of the evidence, and that read is no
   new round. It does not
   accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
@@ -259,8 +261,10 @@ reviewing until you finish.
   ordinary arm cannot merge the person-only head. Ordinary READY does not wait for the disarm. The
   daemon tells that READY with the note at its head and the packet's `Merge:` line replaced, so the
   issue and the merge queue role are never asked to arm it. A READY the design gate refused is
-  submitted by the daemon when the approval that opens the gate moves the issue to
-  `awaiting_merge`. A push that moves the head past a READY the gate holds voids it before then:
+  submitted by the daemon once every gated step of the root's design gate is open, when the
+  approval that opens the last closed one moves the issue to `awaiting_merge`; the refusal named
+  one step and the version to approve, and no second READY is asked for however many steps held
+  it. A push that moves the head past a READY the gate holds voids it before then:
   the architect is told `READY_HEAD_MOVED` and has the merger build a new READY at the new head.
   The packet's second line records the step,
   `Merge: the daemon submits pull request #<n> at <head> once READY is accepted`.

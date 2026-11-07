@@ -25,7 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/testbuild"
-	"github.com/sjawhar/legion/daemon/internal/testpg"
+	"github.com/sjawhar/legion/daemon/internal/testpg/testdb"
 )
 
 func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T) {
@@ -337,10 +337,10 @@ type scratchDispatch struct {
 }
 
 // startScratchDispatchOn gives the server a scratch database of its own on the test DSN's
-// Postgres (testpg.Database) and starts the cmd/dispatch this process built.
+// Postgres (testdb.Database) and starts the cmd/dispatch this process built.
 func startScratchDispatchOn(t *testing.T, options scratchDispatchOptions) *scratchDispatch {
 	t.Helper()
-	database := testpg.Database(t, "dispatch_scratch_test")
+	database := testdb.Database(t, "dispatch_scratch_test")
 	root := options.root
 	if root == "" {
 		root = filepath.Join("..", "..", "..", "..")

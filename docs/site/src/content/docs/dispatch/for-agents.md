@@ -80,7 +80,7 @@ tells the agent who Dispatch takes it for.
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
-| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for, and the OAuth scopes its credential holds. `dispatch inbox` lists what the Inbox page of the person the agent acts for shows — Needs you, Waiting on agents, Later and Credential requests, each with its count and its rows — read with the agent's own credential, which must hold the `person` scope; it is the person's Dispatch Inbox, not the Envoy tool `envoy_inbox`, which lists what was delivered to this session. |
+| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for, and the OAuth scopes its credential holds. `dispatch inbox` lists what the Inbox page of the person the agent acts for shows — Needs you, Waiting on agents, Later, Unread threads and Credential requests, in that order, each with its count and its rows — read with the agent's own credential, which must hold the `person` scope; a thread's line names its owner (the issue key, the document slug, or the session of an Agent row), its kind, the first 80 characters of its subject, who wrote the newest reply, how long ago and the thread's reference; it is the person's Dispatch Inbox, not the Envoy tool `envoy_inbox`, which lists what was delivered to this session. |
 | Handoffs | `dispatch handoff-write` records a phase handoff on an issue as the agent's session: `--phase <phase>` and `--body-file <path>` (`-` reads stdin), one JSON object stored exactly as written, each write the phase's next version. `dispatch handoff-read` prints one line naming the phase, version, id, writing session and time, then the body exactly as stored; `--version <n>` reads an earlier version. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
@@ -129,7 +129,7 @@ Each kind of write reaches people differently. Pick by what you need from them.
 
 | You need | Use | Where it lands |
 | --- | --- | --- |
-| A decision only a person can make | An ask (`dispatch ask`, or a decision block in the spec) | The assignee's Inbox, under **Waiting on you** |
+| A decision only a person can make | An ask (`dispatch ask`, or a decision block in the spec) | The assignee's Inbox, waiting on them |
 | To point at a passage in a document | A comment with a quote (`dispatch comment`) | The document's margin and the issue's Conversation |
 | To change specific text | A suggestion (`dispatch suggest`) | The margin, where a person accepts or rejects it |
 | To tell people a deliverable landed, or answer a person's message | A message (`dispatch message`) | The issue's Conversation |
@@ -211,14 +211,15 @@ approval; the card shows that approval and a **Show diff** control that carries 
 
 ## Whose turn it is
 
-Every open ask is waiting on a person or on an agent, and the Inbox files it by that.
+Every open ask is waiting on a person or on an agent, and a person can group their Inbox by that
+(**View → Group by → Waiting on**).
 
-- Opening an ask puts it in the person's **Waiting on you**.
+- Opening an ask puts it in front of the person, waiting on them.
 - When the person replies without answering (**Ask back**), the turn is yours. Answer in the same
   thread with `dispatch comment --reply-to-ask`, or reword the question with
   `dispatch edit-ask`. Either puts the ask back in front of them. Do not open a second ask.
 - A progress note on an ask, such as "checking the release branch, back shortly", goes with
-  `--turn agent`. The ask stays under **Waiting on agents** and the person is not asked to act.
+  `--turn agent`. The ask then waits on you, and the person is not asked to act.
 
 Close what you opened. When an ask's answer arrives some other way, or the question no longer
 matters, resolve it with `dispatch resolve-ask`, giving the reason.

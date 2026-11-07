@@ -25,7 +25,8 @@ func AskEventPayload(ctx context.Context, q Queryer, ask model.Ask, changes mode
 // and the list says whose Replies count the write can have moved. It is never nil, so a thread
 // nobody has a row on is named as [] rather than left out. threadID is the thread as the
 // triggers key it: an ask's id; a comment's ask, else the root it replies to, else itself; an
-// issue message's root up in_reply_to.
+// issue message's root up in_reply_to. A direct (issue-less) message keeps no row here, and names
+// its thread root's author instead (api/thread_logins.go, directThreadLogins).
 func ThreadLogins(ctx context.Context, q Queryer, threadID string) ([]string, error) {
 	logins := []string{}
 	if err := q.QueryRow(ctx, `
@@ -36,11 +37,17 @@ func ThreadLogins(ctx context.Context, q Queryer, threadID string) ([]string, er
 	return logins, nil
 }
 
-// IssueThreadLogins is the thread_logins of an issue event that closed or reopened the issue: every
-// login with a Replies row on one of issueKey's open asks, sorted and never nil. The Replies count
-// leaves out an open ask on an open issue (api/replies.go, myRepliesUnread), so a close or a reopen
-// moves exactly those rows and no other. It reads the asks through asks_open and their rows through
-// user_threads_thread, so it never scans user_threads.
+// IssueThreadLogins is the status half of an issue event's thread_logins, for an event that
+// closed or reopened the issue: every login with a Replies row on one of issueKey's open asks,
+// sorted and never nil. The Replies list leaves out an open ask on an open issue assigned to that
+// login (api/replies.go, myRepliesOwner), so a close or a reopen moves exactly those rows and no
+// other. It reads the asks through asks_open and their rows through user_threads_thread, so it
+// never scans user_threads.
+//
+// An issue event carries logins on an assignee move too, the old and the new assignee, since the
+// same rule moves an open ask's row out of one Inbox and into the other; the two sets are joined
+// by api/thread_logins.go's issueWriteThreadLogins, which is the whole of what an issue event
+// names.
 func IssueThreadLogins(ctx context.Context, q Queryer, issueKey string) ([]string, error) {
 	logins := []string{}
 	if err := q.QueryRow(ctx, `

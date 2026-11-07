@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -160,6 +162,44 @@ func TestASpecDecisionThatNamesNoPersonIsNotRelayed(t *testing.T) {
 	}
 }
 
+// Under a deployment that gates more than one step, a parked root keeps a decision for each
+// document a person reviewed: the decisions document and the spec are two references, so the
+// newest-per-reference rule the keep follows (record.Store.AddParkedDecision) keeps both rather
+// than letting the second replace the first. The spec step's reference is the one every release
+// before the step list wrote, so a one-step deployment keeps exactly what it kept before.
+func TestGatedStepsKeepADecisionForEachDocumentAPersonReviewed(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, true)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateSuspended)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: &holderPublisher{},
+		supervisor: sup, project: "legion", now: time.Now}
+	decisions := record.Notice{Kind: "design-approved", Version: 2, Actor: "user:alice", Ref: "dispatch://LEGION-1/artifact/decisions-md"}
+	spec := record.Notice{Kind: "design-approved", Version: 4, Actor: "user:alice", Ref: "dispatch://LEGION-1/spec"}
+	for _, decision := range []record.Notice{decisions, spec} {
+		row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-1", decision, time.Now()))
+		if err := runner.notice(ctx, row, decision); err != nil {
+			t.Fatalf("relay the approval of %s: %v", decision.Ref, err)
+		}
+	}
+	kept := keptDecisions(t, pool, records, "LEGION-1")
+	refs := make([]string, 0, len(kept))
+	for _, decision := range kept {
+		refs = append(refs, decision.Ref)
+	}
+	slices.Sort(refs)
+	want := []string{"dispatch://LEGION-1/artifact/decisions-md", "dispatch://LEGION-1/spec"}
+	if !reflect.DeepEqual(refs, want) {
+		t.Fatalf("kept decisions %v, want one of each document: %v", refs, want)
+	}
+	told := parkedDecisions(t, pool)
+	if len(told) != 2 || told[0].Ref != decisions.Ref || told[0].Version != 2 || told[1].Ref != spec.Ref || told[1].Version != 4 {
+		t.Fatalf("parked-decision notices %#v, want one for each document at its own version", told)
+	}
+}
+
 // The parked-decision notice goes where every controller notice goes: the outbox's next run
 // publishes it on the project's controller topic, as "parked-decision on <issue>".
 func TestAParkedDecisionIsPublishedOnTheControllerTopic(t *testing.T) {
@@ -273,7 +313,7 @@ func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 	root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, root)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	answer := record.ParkedDecision{Issue: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
 		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -334,7 +374,7 @@ func TestADecisionAStaleStartReleasesReachesTheRunningArchitect(t *testing.T) {
 	root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
 		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 2, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, root)
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	answer := record.ParkedDecision{Issue: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
 		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -608,7 +648,7 @@ func TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce(t *test
 	// The hold of what a start's task names is the claim store's own write, so this runs through
 	// the daemon's own claim store: the catch-up the start applies must find those rows held.
 	sup.deps.Store = keptClaimStore{Store: outboxTreeStore(t, pool, root.Key)}
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
@@ -785,7 +825,7 @@ func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
 		{Ref: held, At: at, Issue: root.Key, Decision: record.DecisionAskAnswered, Actor: "user:alice"}}})
 
 	var logged bytes.Buffer
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories},
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()},
 		slog.New(slog.NewJSONHandler(&logged, nil)))
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
 		handlers: []intake.Handler{engine}, now: time.Now}
@@ -868,7 +908,7 @@ func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
 		{Ref: heldOnTheChild, At: at, Issue: childKey, Decision: record.DecisionAskResolved, Actor: "user:bob"}}})
 
 	var logged bytes.Buffer
-	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories},
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()},
 		slog.New(slog.NewJSONHandler(&logged, nil)))
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
 		handlers: []intake.Handler{engine}, now: time.Now}

@@ -32,7 +32,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/fixtureenv"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -104,28 +106,28 @@ type controllerDaemon struct {
 }
 
 func newControllerDaemon(t *testing.T) *controllerDaemon {
-	return newControllerDaemonGated(t, config.DesignGateRootIssues)
+	return newControllerDaemonGated(t, config.DesignGateRootIssues.Steps())
 }
 
-// newControllerDaemonGated is newControllerDaemon for a project whose `gates.design` is gate.
-func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerDaemon {
-	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: gate})
+// newControllerDaemonGated is newControllerDaemon for a project whose `gates.design` gates steps.
+func newControllerDaemonGated(t *testing.T, steps []record.DesignStep) *controllerDaemon {
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{steps: steps})
 }
 
 // newControllerDaemonWithTokens is newControllerDaemon whose GitHub credential route mints review
 // App tokens from tokens for a project under two owners, acme and sjawhar, for the tests of the
 // controller's GitHub credential fetch and refresh loop.
 func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *controllerDaemon {
-	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens,
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{steps: config.DesignGateRootIssues.Steps(), tokens: tokens,
 		repos: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}})
 }
 
-// controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
-// the project's mapped repositories (for the controller's addressing), and, for the
-// tests of the controller's GitHub credential route, a Tokens fake and the project's served
+// controllerDaemonOptions configures newControllerDaemonWithOptions: the design-gate steps the
+// project gates, the project's mapped repositories (for the controller's addressing), and, for
+// the tests of the controller's GitHub credential route, a Tokens fake and the project's served
 // repositories its mints are narrowed to.
 type controllerDaemonOptions struct {
-	gate         config.DesignGate
+	steps        []record.DesignStep
 	tokens       appauth.Tokens
 	repos        []ghrepo.Repository
 	repositories []string
@@ -174,10 +176,11 @@ func (fixedStateTransactions) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, e
 // addressing (controllerRepositories), in the order given, as the daemon serves them sorted. A nil
 // repositories (the zero value, most tests' default) stands in for a normally configured daemon
 // and answers one fixed repository; a non-nil empty slice is the explicit "this daemon's workflow
-// maps nothing" case a test must ask for by name.
+// maps nothing" case a test must ask for by name. It answers no claims: this daemon knows no
+// caller's pod, so the route reads none.
 type fixedStateSource struct{ repositories []string }
 
-func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
+func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, []supervise.Claim, error) {
 	repos := f.repositories
 	if repos == nil {
 		repos = []string{"acme/widgets"}
@@ -186,7 +189,7 @@ func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
 	for i, repo := range repos {
 		mapped[i] = api.MappedRepositoryView{Repo: repo}
 	}
-	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil
+	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil, nil
 }
 
 // newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and
@@ -197,7 +200,7 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Steps: opts.steps, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Tokens: opts.tokens, GitHubRepositories: func() []ghrepo.Repository { return opts.repos },
 		State: fixedStateSource{repositories: opts.repositories}, StateTransactions: fixedStateTransactions{},
 	}).Handler
@@ -643,7 +646,7 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 }
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
-// --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
+// --append-system-prompt holding the controller prompt, the daemon's design gate steps, and the
 // deployment instructions, then the one word daemon.ControllerStartCommand; under the operator's own
 // environment plus exactly the shared controller environment — the secrets as file pointers, never
 // values — including LEGION_CONTROLLER_START_MESSAGE, which that pi-legion command sends as the
@@ -677,7 +680,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	// `$(cat …)` drops each file's trailing newlines, as a shell does. The start message travels
 	// as LEGION_CONTROLLER_START_MESSAGE; argv ends with the command that sends it.
 	wantArgv := []string{"--append-system-prompt",
-		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`. The project's repositories are acme/widgets.\n\n" +
+		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate steps: `spec`. The project's repositories are acme/widgets.\n\n" +
 			strings.TrimRight(string(instructions), "\n"),
 		"/legion-controller-start"}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
@@ -760,34 +763,49 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	}
 }
 
-// The controller is told the daemon's real design gate policy, so under `gates.design: off` its take
-// comment promises no design approval that cannot happen (skill://legion-controller).
-func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.T) {
-	d := newControllerDaemonGated(t, config.DesignGateOff)
-	c := newControllerStart(t, d, controllerOptions{})
-	if code, _, errb := c.run(); code != 0 {
-		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
-	}
-	argv := c.argv()
-	if len(argv) != 3 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`. The project's repositories are acme/widgets.\n\n") {
-		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
+// The controller is told the design-gate steps the daemon really gates, so under a deployment
+// that gates none its take comment promises no design approval that cannot happen, and under
+// one that gates several it names each (skill://legion-controller). `legion controller start`
+// accepts every answer the route gives, so each deployment launches.
+func TestControllerStartTellsTheControllerTheDaemonsGatedSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []record.DesignStep
+		line  string
+	}{
+		{"two steps", []record.DesignStep{record.DesignStepCriteria, record.DesignStepSpec}, "Design gate steps: `criteria`, `spec`."},
+		{"root-issues", config.DesignGateRootIssues.Steps(), "Design gate steps: `spec`."},
+		{"off", config.DesignGateOff.Steps(), "Design gate steps: none."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newControllerDaemonGated(t, tc.steps)
+			c := newControllerStart(t, d, controllerOptions{})
+			if code, _, errb := c.run(); code != 0 {
+				t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+			}
+			argv := c.argv()
+			want := "\n\n" + tc.line + " The project's repositories are acme/widgets.\n\n"
+			if len(argv) != 3 || !strings.Contains(argv[1], want) {
+				t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry %q", argv, want)
+			}
+		})
 	}
 }
 
-// The operator-launched controller's addressing gains the project's repositories after its design
-// gate policy, as a sentence of its own, read from the daemon's own GET /legion/v1/state (the
-// unauthenticated route) and named in the order the daemon serves them, never the design-gate line
+// The operator-launched controller's addressing gains the project's repositories after its
+// design gate steps, as a sentence of its own, read from the daemon's own GET /legion/v1/state
+// (the unauthenticated route) and named in the order the daemon serves them, never the design-gate line
 // alone, once the daemon maps any repository.
 func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
 	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{
-		gate: config.DesignGateOff, repositories: []string{"acme/widgets", "sjawhar/legion-smoke"},
+		steps: config.DesignGateOff.Steps(), repositories: []string{"acme/widgets", "sjawhar/legion-smoke"},
 	})
 	c := newControllerStart(t, d, controllerOptions{})
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	want := "\n\nDesign gate policy: `gates.design: off`. The project's repositories are acme/widgets, sjawhar/legion-smoke.\n\n"
+	want := "\n\nDesign gate steps: none. The project's repositories are acme/widgets, sjawhar/legion-smoke.\n\n"
 	if len(argv) != 3 || !strings.Contains(argv[1], want) {
 		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
 	}
@@ -829,7 +847,7 @@ func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 // rather than refusing and burning a launch budget the App install cannot recover from on its own.
 func TestControllerStartLaunchesWithEveryRepositoryRefused(t *testing.T) {
 	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{
-		gate:         config.DesignGateOff,
+		steps:        config.DesignGateOff.Steps(),
 		rawStateBody: `{"repositories":{"mapped":[],"refused":[{"repo":"acme/widgets","reason":"the review App is not installed on acme/widgets"}]}}`,
 	})
 	c := newControllerStart(t, d, controllerOptions{})
@@ -847,7 +865,7 @@ func TestControllerStartLaunchesWithEveryRepositoryRefused(t *testing.T) {
 // unmapped by a refresh) also launches, naming the state for what it is — the same wording and
 // behavior on both launch paths.
 func TestControllerStartLaunchesWithNoRepositoryMappedOrRefused(t *testing.T) {
-	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateOff, repositories: []string{}})
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{steps: config.DesignGateOff.Steps(), repositories: []string{}})
 	c := newControllerStart(t, d, controllerOptions{})
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
@@ -871,19 +889,36 @@ func TestControllerStartNeverMintsWhenTheRepositoryReadFails(t *testing.T) {
 	c.wantNothingLaunchedOrWritten(c.defaultDir)
 }
 
-// A daemon that answers the secret without a policy it knows is refused, never guessed at: the
-// controller would otherwise promise, or withhold, a design approval on an assumption.
-func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
-	for _, body := range []string{`{"secret":"s"}`, `{"secret":"s","designGate":"sometimes"}`} {
+// A daemon that answers the secret without the steps it gates is refused, never guessed at: the
+// controller would otherwise promise, or withhold, a design approval on an assumption. A daemon
+// from before the list names no `designGateSteps` at all, and one beyond this release may name a
+// step this one does not know; the empty list is neither, and is the deployment that gates
+// nothing.
+func TestControllerSecretWithoutTheConfiguredStepsIsRefused(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"secret":"s"}`, "answered no design gate steps (designGateSteps); upgrade the daemon"},
+		{`{"secret":"s","designGateSteps":null}`, "answered no design gate steps (designGateSteps); upgrade the daemon"},
+		{`{"secret":"s","designGateSteps":["sometimes"]}`, `answered design gate step "sometimes", not 'decisions', 'criteria' or 'spec'; upgrade the daemon`},
+	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(body))
+			_, _ = w.Write([]byte(tc.body))
 		}))
 		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
 		server.Close()
-		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
-			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("fetchControllerSecret(%s) error = %v; want it to name %q", tc.body, err, tc.want)
 		}
+	}
+	// The empty list is a deployment that gates no step, which starts the controller.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"secret":"s","designGateSteps":[]}`))
+	}))
+	defer server.Close()
+	secret, steps, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
+	if err != nil || secret != "s" || steps == nil || len(steps) != 0 {
+		t.Fatalf("fetchControllerSecret of the empty list = %q, %v, %v; want the secret and a list that gates nothing", secret, steps, err)
 	}
 }
 
