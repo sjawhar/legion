@@ -56,7 +56,7 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 			return nil, nil, fmt.Errorf("read the root of %s: %w", fact.Tree, err)
 		}
 		if root != nil {
-			if live, err = record.TreeLive(ctx, a.store, tx, *root); err != nil {
+			if live, err = record.TreeLive(ctx, a.store, tx, *root, a.engine.GatedSteps()); err != nil {
 				return nil, nil, fmt.Errorf("read whether the tree of %s is live: %w", fact.Tree, err)
 			}
 		}
@@ -127,7 +127,7 @@ func (a *Admission) adoptQueuedRoots(ctx context.Context, tx pgx.Tx, respectHold
 		if err != nil {
 			return nil, nil, record.LineFacts{}, fmt.Errorf("list admission slots: %w", err)
 		}
-		facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+		facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 		if err != nil {
 			return nil, nil, record.LineFacts{}, err
 		}

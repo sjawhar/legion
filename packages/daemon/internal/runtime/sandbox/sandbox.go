@@ -762,13 +762,15 @@ func serviceAccountOr(name string) string {
 // account it was created with for its whole life — the field is fixed on the pod, and nothing the
 // daemon writes to the Sandbox moves it — so an operator who changes service_account reaches a
 // running pod only by replacing it: until then its agents hold the identity the old account
-// grants, whatever the configuration now says they may reach. relaunch replaces such a pod at the
-// next launch of any of its roles, reconcileCachePod at the next ensure of a cache's (a sweep, or
-// a new issue pod of its repository), and ReconcileOrphans warns of each one it finds, as all
-// three do for imageDrift. The comparison is of the live pod's spec.ServiceAccountName, never the
-// Sandbox's stored template: the API server keeps a named account as written. It reads an unset
-// account as `default` on both sides, because the two sides spell the same account differently —
-// the daemon writes "" into the template when service_account is unset (manifest.go, config's
+// grants, whatever the configuration now says they may reach. Such a pod is replaced by its own
+// update round, which asks every worker in it to push first, where a round covers its kind
+// (roundCovers, PodDrift), by the next launch of one of its roles where no round does (relaunch),
+// and by reconcileCachePod at the next ensure of a cache's (a sweep, or a new issue pod of its
+// repository); ReconcileOrphans warns of each one it finds, as all of them do for imageDrift.
+// The comparison is of the live pod's spec.ServiceAccountName, never the Sandbox's stored
+// template: the API server keeps a named account as written. It reads an unset account as
+// `default` on both sides, because the two sides spell the same account differently — the daemon
+// writes "" into the template when service_account is unset (manifest.go, config's
 // optionalString), where the API server writes "default" into the pod it creates — and comparing
 // either raw would read every pod of a deployment that names no account as drifted and replace
 // the whole fleet. A nil pod holds no drift: it is replaced for being absent.
@@ -1115,14 +1117,15 @@ func (r *Runtime) RescueUnpushed(ctx context.Context, k runtime.Known, request r
 // Each Sandbox whose pod runs an image other than the runtime's (imageDrift), or as a
 // ServiceAccount other than the configured one (accountDrift), is warned of, named with both
 // images or both accounts, at the boot reconciliation and at every sweep until the pod is
-// replaced — its update round's replacement for the image, a relaunch of one of its roles for the
-// account, which no round answers (warnPodDrift): a release whose daemon stops serving a route,
-// or stops setting a variable, that the previous image's agents call or read leaves such a pod's
-// agents calling this daemon as the older release, and a pod created under an account the
-// configuration has since moved off leaves its agents holding the identity that account grants,
-// so a release is pinned, or the old account deleted, only once every tree is drained or every
-// pod relaunched, and the boot log is where an operator reads which pods are still to go. Only a
-// warning: refusing the pod would stop it being observed.
+// replaced — its update round's replacement for the image, and for the account that same round's
+// where a round covers the pod, a relaunch of one of its roles where none does (warnPodDrift,
+// roundCovers): a release whose daemon stops serving a route, or stops setting a variable, that
+// the previous image's agents call or read leaves such a pod's agents calling this daemon as the
+// older release, and a pod created under an account the configuration has since moved off leaves
+// its agents holding the identity that account grants, so a release is pinned, or the old
+// account deleted, only once every tree is drained or every pod replaced, and the boot log is
+// where an operator reads which pods are still to go. Only a warning: refusing the pod would
+// stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
@@ -1179,7 +1182,7 @@ func (r *Runtime) warnPodDrift(u *unstructured.Unstructured) {
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}
 	if account, drifted := accountDrift(pod, r.pod.ServiceAccount); drifted {
-		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs as ServiceAccount %s, the configured ServiceAccount is %s; its agents hold that identity until the pod is relaunched",
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs as ServiceAccount %s, the configured ServiceAccount is %s; its agents hold that identity until the pod is replaced — by its update round where a round covers the pod, by the next launch of one of its roles where none does",
 			u.GetName(), account, serviceAccountOr(r.pod.ServiceAccount)),
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}

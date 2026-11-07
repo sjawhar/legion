@@ -127,7 +127,21 @@ projects:
 #                                      # --check-config prints one line
 #                                      # per pair, to read the equivalence back before a transfer.
 gates:
-  design: root-issues                  # a person approves each root's spec (the default); or off
+  design: [spec]                       # the design gate steps, in the order a person approves
+                                       # them: decisions (the root issue's decisions document),
+                                       # criteria (its Verification document), spec (its primary
+                                       # document). The daemon keeps one gate record per step,
+                                       # and the tree's phases, each released child and the
+                                       # merger's READY wait until a person has approved the
+                                       # document of every step listed here.
+                                       # [spec] is the default, and the word root-issues means
+                                       # it. [] gates nothing, and the word off means that: each
+                                       # registration opens its record at once and no person is
+                                       # asked. Any other word, a value that is neither a word
+                                       # nor a list, and a list naming one step twice are
+                                       # refused at load. --check-config prints the resolved
+                                       # list, design-gate-steps=decisions,criteria, or
+                                       # design-gate-steps=none when the list is empty.
 github_apps:
   implement:
     app_id: "100001"

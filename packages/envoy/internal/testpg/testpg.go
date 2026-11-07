@@ -1,13 +1,17 @@
 // Package testpg gives a test that brings its own servers, as a natslive test does with testnats,
-// an empty Postgres database and the URL to hand a binary. The caller migrates it itself. A test
-// of Dispatch's store against a server CI provides uses internal/dispatch/store/storetest instead,
-// which hands back a migrated store rather than a URL.
+// an empty Postgres database and the URL to hand a binary. The caller migrates it itself. URL is
+// the helper for a test that may have no server: it takes the one DISPATCH_TEST_DATABASE_URL
+// names, or starts a container when that variable is unset. DatabaseOn is the helper for a test
+// that already holds the URL of the server it runs on: it reads no variable and starts nothing.
+// A test of Dispatch's store that wants a migrated store rather than a URL calls
+// internal/dispatch/store/storetest instead.
 package testpg
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"os"
 	"testing"
@@ -55,37 +59,60 @@ func URL(t testing.TB) string {
 }
 
 // databaseOn creates a database of this test's own on the server raw names, and drops it when the
-// test ends. The name is random because every test of every package sharing that server takes one.
+// test ends.
 func databaseOn(t testing.TB, raw string) string {
 	t.Helper()
 	server, err := url.Parse(raw)
 	if err != nil {
-		t.Fatalf("parse %s: %v", databaseURLEnv, err)
+		// url.Parse's own error quotes the URL it was given, so only the error it wraps is printed.
+		t.Fatalf("parse %s: %v", databaseURLEnv, errors.Unwrap(err))
+	}
+	return DatabaseOn(t, databaseURL(*server, "postgres"), "testpg")
+}
+
+// DatabaseOn creates a database of this test's own on the server adminURL names, drops it when the
+// test ends, and returns adminURL with its path replaced by that database and its query kept. The
+// name is prefix, an underscore and eight random bytes in hex: it is random because every test of
+// every package sharing one server takes a name there.
+//
+// Both statements run on adminURL itself, which is exact for every caller because a caller passes
+// the URL its own statements run on, and that URL and the result differ only in the path.
+//
+// A failure names the server's host and the database, never adminURL: a DSN carries a credential,
+// and a test here prints none (docs/solutions/testing/a-proof-script-never-prints-a-dsn-a-userinfo-scrubber-leaks-the-query-and-keyword-password-forms-INFRA-229.md).
+// This function reads no environment variable and starts no container, so its failures can name
+// neither.
+func DatabaseOn(t testing.TB, adminURL, prefix string) string {
+	t.Helper()
+	server, err := url.Parse(adminURL)
+	if err != nil {
+		// url.Parse's own error quotes the URL it was given, so only the error it wraps is printed.
+		t.Fatalf("parse the admin URL of the Postgres server: %v", errors.Unwrap(err))
 	}
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		t.Fatalf("random database name: %v", err)
 	}
-	name := "testpg_" + hex.EncodeToString(suffix[:])
-	admin := databaseURL(*server, "postgres")
+	name := prefix + "_" + hex.EncodeToString(suffix[:])
 	// A copy of template1's files: created the default way, through the write-ahead log, an empty
 	// database costs 4.4 MB of log (docs/testing.md, "A database a Go test creates").
-	adminExec(t, admin, "create database "+name+" strategy file_copy")
-	// `with (force)` ends any connection the test left open, so one leaked pool cannot keep a
-	// database on a shared server for the rest of the run.
-	t.Cleanup(func() { adminExec(t, admin, "drop database "+name+" with (force)") })
+	adminExec(t, adminURL, server.Host, "create database "+name+" strategy file_copy")
+	// `with (force)` ends every backend attached to the database, which the drop needs because a
+	// database a connection still holds cannot be dropped. That covers a connection the test left
+	// open, so one leaked pool cannot keep a database on a shared server for the rest of the run.
+	t.Cleanup(func() { adminExec(t, adminURL, server.Host, "drop database "+name+" with (force)") })
 	return databaseURL(*server, name)
 }
 
-// adminExec runs one statement on the server's postgres database over a connection of its own:
-// neither create database nor drop database may run inside a transaction or against the database
-// it names.
-func adminExec(t testing.TB, admin, statement string) {
+// adminExec runs one statement over a connection of its own to adminURL: neither create database
+// nor drop database may run inside a transaction or against the database it names. host is that
+// server's host, printed in place of adminURL, which carries a credential.
+func adminExec(t testing.TB, adminURL, host, statement string) {
 	t.Helper()
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, admin)
+	conn, err := pgx.Connect(ctx, adminURL)
 	if err != nil {
-		t.Fatalf("connect to the Postgres %s names: %v", databaseURLEnv, err)
+		t.Fatalf("connect to the Postgres server at %s: %v", host, err)
 	}
 	defer conn.Close(ctx)
 	if _, err := conn.Exec(ctx, statement); err != nil {

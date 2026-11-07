@@ -7,12 +7,17 @@ import "errors"
 // minter requires that name to match its configured secret and HumanTier to be true.
 // GitHubOwners is a github-app secret's github-owners tag as lowercase logins; every other
 // kind leaves it nil. GitHubNarrowing is the narrowing a release asked for, nil for the
-// owner-wide tokens; only the github-app minter reads it.
+// owner-wide tokens; only the github-app minter reads it. GoogleScopes is a
+// google-service-account secret's scopes tag as the whole OAuth scope URLs
+// policy.Secret.ScopeURLs answers, and nil both for such a secret that names no scopes and for
+// every other kind; the service-account minter then asks Google for the cloud-platform scope
+// alone, which is what it asked for before the tag existed.
 type MintRequest struct {
 	Name            string
 	HumanTier       bool
 	Value           string
 	GitHubOwners    []string
+	GoogleScopes    []string
 	GitHubNarrowing *GitHubNarrowing
 }
 
@@ -71,10 +76,17 @@ var (
 	// or the broker's Azure projected token is unreadable, malformed or expired.
 	// The broker's operator looks at the projected volume, egress and the upstream's status.
 	ErrMintUpstream = errors.New("the upstream could not be asked")
+	// ErrMintNotBound: the google-service-account secret this release names is not bound to the
+	// account its stored value holds — the deployment's BROKER_SERVICE_ACCOUNT_SECRETS names
+	// another account for this secret, or names the secret not at all. Unlike ErrMintStoredValue,
+	// which the secret's owner fixes by storing a new value, this one is the deployment
+	// operator's to fix in that setting, which is why it is a class of its own; the mint is
+	// refused before any credential is resolved and before any call reaches Google.
+	ErrMintNotBound = errors.New("the deployment binds no such account to this secret")
 )
 
 // MintErrorClass names the class err wraps, for the broker's log line: "stored-value",
-// "refused", "narrowing", "upstream", or "unknown" for an error that wraps none.
+// "refused", "narrowing", "binding", "upstream", or "unknown" for an error that wraps none.
 func MintErrorClass(err error) string {
 	switch {
 	case errors.Is(err, ErrMintStoredValue):
@@ -85,6 +97,8 @@ func MintErrorClass(err error) string {
 		return "refused"
 	case errors.Is(err, ErrMintUpstream):
 		return "upstream"
+	case errors.Is(err, ErrMintNotBound):
+		return "binding"
 	default:
 		return "unknown"
 	}

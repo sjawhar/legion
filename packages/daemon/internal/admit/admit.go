@@ -16,7 +16,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -344,7 +343,7 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("list admission slots: %w", err)
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 	if err != nil {
 		return false, err
 	}
@@ -433,7 +432,7 @@ func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIss
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +460,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 	if err != nil {
 		return fmt.Errorf("list admission issues: %w", err)
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 	if err != nil {
 		return err
 	}
@@ -814,7 +813,7 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 	if root == nil {
 		return true, nil
 	}
-	live, err := record.TreeLive(ctx, a.store, tx, *root)
+	live, err := record.TreeLive(ctx, a.store, tx, *root, a.engine.GatedSteps())
 	if err != nil {
 		return false, fmt.Errorf("read whether %s's tree is live: %w", stored.Key, err)
 	}
@@ -902,11 +901,11 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	orphan := carry && !claim.IsTreeRoot(stored.Key, stored.Tree)
 	oldTree, oldGeneration := stored.Tree, stored.Generation
-	var gate *record.DesignGate
+	var gates map[record.DesignStep]record.DesignGate
 	var pr *record.PullRequest
 	var err error
 	if orphan {
-		gate, err = a.store.Gate(ctx, tx, oldTree)
+		gates, err = a.store.GatesOf(ctx, tx, oldTree)
 		if err != nil {
 			return fmt.Errorf("read gate of re-admitted orphan %s: %w", stored.Key, err)
 		}
@@ -930,7 +929,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	// among them, stays its own tree (workflow's RanAsRoot) and records no chain to be held under.
 	stored.Ancestry = nil
 	if !orphan {
-		stored.Phase, stored.Hold, stored.Awaiting, stored.ReadyPendingVersion = phase.Admitted, nil, nil, nil
+		stored.Phase, stored.Hold, stored.Awaiting = phase.Admitted, nil, nil
+		stored.ReadyPending = nil
 		// Another tree's work arriving without its run: the run it had was that tree's.
 		if !claim.IsTreeRoot(stored.Key, oldTree) {
 			stored.TakenBack = false
@@ -992,17 +992,19 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		}
 		// Every root a hand-over created is recorded as one, so its architect's catch-up says it was
 		// handed over and decomposes nothing anew; it is marked as carrying a gate, which tells the
-		// architect never to register its own spec, only when its old root had one. A root reopened
-		// in its linger has its gate cleared with the generation, so a second close hands its
-		// children over with none: such a child keeps its phase and pull request, and its architect
-		// registers its spec as a fresh root's does, the gate its READY needs.
-		if gate != nil {
+		// architect never to register its own spec, only when its old root had one. The carry takes
+		// every step's row, each keeping its own step, so a tree gated on several steps arrives
+		// approved on each of them as the old root was. A root reopened in its linger has its gate
+		// cleared with the generation, so a second close hands its children over with none: such a
+		// child keeps its phase and pull request, and its architect registers its spec as a fresh
+		// root's does, the gate its READY needs.
+		for _, gate := range gates {
 			gate.Issue = stored.Key
-			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
+			if err := a.store.PutGate(ctx, tx, gate); err != nil {
 				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
-		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: gate != nil})
+		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: len(gates) > 0})
 	}
 	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
 	// tree admitted by a person leaves its siblings' fences standing.
@@ -1020,29 +1022,43 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 }
 
 // keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
-// person's approval its gate holds of a version the spec has since moved past: the new
-// generation's architect registers its spec again on a cleared gate, and its start task
-// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. Under
-// gates.design off, which asks no person, nothing is kept and any pair an earlier re-admission kept
-// is dropped: no start names one there, so no delivery would forget it. Under an armed gate, a gate
-// that holds no stale approval drops an earlier pair, which this gate has since outgrown; a root
-// with no gate at all (an earlier re-admission cleared it and nothing has registered since) keeps
-// the earlier pair, which no start has delivered yet.
+// person's approval a gate of its holds of a version its document has since moved past: the new
+// generation's architect registers each step again on a cleared gate, and its start task
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. One
+// approval is kept, read from the first required step whose approved version sits below its
+// latest, because readmitted_approvals keeps one row for each root; it carries that step, so the
+// task names the document the person reviewed rather than the spec of every deployment.
+//
+// Where the deployment gates no step, which asks no person, nothing is kept and any pair an
+// earlier re-admission kept is dropped: no start names one there, so no delivery would forget
+// it. Otherwise a root whose required steps hold no stale approval drops an earlier pair, which
+// its gates have since outgrown; a root with a required step it holds no gate for (an earlier
+// re-admission cleared it and nothing has registered since) keeps the earlier pair, which no
+// start has delivered yet.
 func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
-	if a.engine.DesignGateOff() {
+	steps := a.engine.GatedSteps()
+	if len(steps) == 0 {
 		return a.store.DropReadmittedApproval(ctx, tx, key)
 	}
-	gate, err := a.store.Gate(ctx, tx, key)
+	gates, err := a.store.GatesOf(ctx, tx, key)
 	if err != nil {
 		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
 	}
-	switch {
-	case gate == nil:
-		return nil
-	case gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion:
-		return a.store.DropReadmittedApproval(ctx, tx, key)
+	unregistered := false
+	for _, step := range steps {
+		gate, ok := gates[step]
+		switch {
+		case !ok:
+			unregistered = true
+		case gate.ApprovedVersion != nil && *gate.ApprovedVersion < gate.LatestVersion:
+			return a.store.KeepReadmittedApproval(ctx, tx, key, record.KeptApproval{
+				Step: step, Approved: *gate.ApprovedVersion, Latest: gate.LatestVersion})
+		}
 	}
-	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
+	if unregistered {
+		return nil
+	}
+	return a.store.DropReadmittedApproval(ctx, tx, key)
 }
 
 // releaseSlots releases the slot of every issue of this project that no longer needs one
@@ -1133,8 +1149,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, erro
 // something that would make it stale (reread).
 //
 // Every path that promotes comes through here — a live fact, the controller tick, a hold's
-// release, the boot's Reconcile — so each of them is also a look at every issue a blocker holds
-// and at every slot whose worker has lost its task.
+// release, the boot's Reconcile — so each of them is also a look at every issue a blocker holds,
+// at every slot whose worker has lost its task, and at every tree a step that left gates.design
+// released (workflow.AdvanceOpenTrees).
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, []string, error) {
 	issues, slots, facts, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
 	if err != nil {
@@ -1326,7 +1343,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 				if err := a.engine.ResumeAwaitedRoot(ctx, tx, issue, *awaiting); err != nil {
 					return admitted, released, fmt.Errorf("resume %s after a person's answer: %w", issue.Key, err)
 				}
-				opened = opened || classify.DesignGateOpen(gate)
+				opened = opened || gate.Open()
 			case record.LineQueuedRoot:
 				issue.Status = "in_progress"
 				// A root whose tree is opened runs as a tree of its own, which no ancestry hold
@@ -1375,7 +1392,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 				if err := a.reenterStrandedChildren(ctx, tx, issue, issues); err != nil {
 					return admitted, released, err
 				}
-				opened = opened || classify.DesignGateOpen(gate)
+				opened = opened || gate.Open()
 			case record.LineFirstPhase:
 				if err := a.engine.StartFirstPhase(ctx, tx, issue, rows[issue.Key].Blockers); err != nil {
 					return admitted, released, err
@@ -1404,6 +1421,21 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err := a.finishFencedStarts(ctx, tx, issues, facts); err != nil {
 		return admitted, released, err
 	}
+	// A step leaving gates.design releases work no gate fact will ever reach: a merger's READY
+	// the dropped step refused. This pass is where it moves (workflow.AdvanceOpenTrees), from
+	// the records and the gates the pass has already read. It is handed the same predicate as
+	// ReconcileAwaiting above, for the same reason: a held root's record may still miss what
+	// Dispatch recorded, and a tree decided on it could be moved on at a document version a
+	// waiting event supersedes, which nothing takes back. The pass after the hold's release
+	// decides that tree.
+	//
+	// The other half of what a shorter list releases needs nothing here: a root left at admitted
+	// by a step that has gone is an issue whose first phase the waiting line offers a slot to on
+	// this very pass (record.Waiting, LineFirstPhase), because the line reads the gate's whole
+	// step list on every pass rather than waiting for a fact about it.
+	if err := a.engine.AdvanceOpenTrees(ctx, tx, issues, facts, heldKeys); err != nil {
+		return admitted, released, err
+	}
 	return admitted, released, nil
 }
 
@@ -1419,7 +1451,7 @@ func (a *Admission) reread(ctx context.Context, tx pgx.Tx) ([]record.Issue, []re
 	if err != nil {
 		return nil, nil, record.LineFacts{}, fmt.Errorf("list admission slots: %w", err)
 	}
-	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+	facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 	return issues, slots, facts, err
 }
 
@@ -1428,17 +1460,17 @@ func (a *Admission) reread(ctx context.Context, tx pgx.Tx) ([]record.Issue, []re
 // candidate, each read on the state the promotion leaves the issue in (record.LineKind): a
 // returning issue and one starting its first phase are at work by definition; an answered root
 // goes back to admitted, where it needs a slot only while its architect is still writing the
-// spec, which is what a gate that has never opened says; and a root whose tree is opened keeps
-// the phase its record carries, which record.AtWork reads, so a handed-over root arriving in
-// accepting or held needs none while one arriving in a worker phase does. A candidate that needs
-// none is promoted whatever the cap: it starts no worker, so holding it back would bound nothing
-// and would leave its tree closed for no reason.
-func slotFor(entry record.LineEntry, gate record.DesignGate) bool {
+// design, which is what a gate that has never opened at every step the deployment gates says;
+// and a root whose tree is opened keeps the phase its record carries, which record.AtWork
+// reads, so a handed-over root arriving in accepting or held needs none while one arriving in a
+// worker phase does. A candidate that needs none is promoted whatever the cap: it starts no
+// worker, so holding it back would bound nothing and would leave its tree closed for no reason.
+func slotFor(entry record.LineEntry, gate record.TreeGate) bool {
 	switch entry.Kind {
 	case record.LineReturning, record.LineFirstPhase:
 		return true
 	case record.LineAnswered:
-		return !gate.EverOpened
+		return !gate.EverOpened()
 	default:
 		return record.AtWork(entry.Issue, gate)
 	}
@@ -1731,7 +1763,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		if err != nil {
 			return nil, fmt.Errorf("list admission issues: %w", err)
 		}
-		facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues)
+		facts, err := record.ReadLineFacts(ctx, tx, a.store, a.project, issues, a.engine.GatedSteps())
 		if err != nil {
 			return nil, err
 		}

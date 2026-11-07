@@ -242,7 +242,7 @@ func TestAChangesRequestOnAnAnsweredWaitIsNamedByTheResume(t *testing.T) {
 			[]string{workflow.DesignApprovedWake}, []string{"revise"}},
 		{"no approval followed it",
 			[]intake.DispatchArtifact{review(intake.DispatchArtifactChangesRequested, 8, "wait no")},
-			[]string{"wait no", "revise the spec"}, []string{workflow.DesignApprovedWake}},
+			[]string{"wait no", "revise the primary document"}, []string{workflow.DesignApprovedWake}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, admission := waitingRoot(t, config.DesignGateRootIssues)
@@ -288,12 +288,12 @@ func TestTheResumeUnderGateOffSaysNoPersonApproved(t *testing.T) {
 	if len(resumes) != 1 {
 		t.Fatalf("architect starts = %q, want one resume", resumes)
 	}
-	for _, want := range []string{"revise the spec", workflow.DesignApprovedWake} {
+	for _, want := range []string{"revise the primary document", workflow.DesignApprovedWake} {
 		if !strings.Contains(resumes[0], want) {
 			t.Errorf("resume %q does not say %q", resumes[0], want)
 		}
 	}
-	for _, unwanted := range []string{"approved the spec", "is approved"} {
+	for _, unwanted := range []string{"approved the primary document", "is approved"} {
 		if strings.Contains(resumes[0], unwanted) {
 			t.Errorf("resume %q says %q under gates.design: off", resumes[0], unwanted)
 		}

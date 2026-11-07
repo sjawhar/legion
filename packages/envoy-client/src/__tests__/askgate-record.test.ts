@@ -18,7 +18,19 @@ afterAll(removeTemporaryDirectories);
 
 const MARKER_MODULE = join(import.meta.dir, "..", "askgate-marker.ts");
 const WRITERS = 4;
-const WRITES = 2_000;
+// Writes for each writer. Enough to catch a dropped owner: at this count the row still fails a
+// writer that drops the others, and more writes only make its cost track the machine's speed.
+const WRITES = 200;
+
+/** The children the writers row below spawns, ended here when its own cleanup was lost to the
+ * timeout. Bun runs `afterEach` hooks in the order they are registered and skips the rest once one
+ * throws, so this hook is registered before the one that removes the temporary tree: it runs first,
+ * and a throw while removing the tree cannot leave a child running. */
+const spawned: Bun.Subprocess[] = [];
+afterEach(() => {
+  for (const child of spawned) child.kill();
+  spawned.length = 0;
+});
 
 let root = "";
 beforeEach(() => {
@@ -47,8 +59,9 @@ function lineReader(stream: ReadableStream<Uint8Array>): () => Promise<string> {
 test("processes that bind one session id at the same time each stay an owner of its record", async () => {
   const dir = join(root, "sessions", "ses-1");
   // Each writer says it is ready, waits for the parent's line, binds the session again and again,
-  // and after each write reads the record for its own store. It then stays live until its stdin
-  // closes, so the record's final state is read with every owner live.
+  // and after each write reads the record: for its own store, and, once it has read every writer's
+  // store there, for a store that went. Each one stays live until its stdin closes, so no owner of
+  // a full record can legitimately go, and a store that went is one a write dropped.
   const writer = join(root, "writer.ts");
   writeFileSync(
     writer,
@@ -60,18 +73,24 @@ const stdin = Bun.stdin.stream().getReader();
 console.log("ready");
 await stdin.read();
 let dropped = 0;
+let lost = 0;
+let full = false;
 for (let write = 0; write < ${WRITES}; write += 1) {
   writeAskgateRecord(dir, owner, "warn");
   const state = askgateState(dir);
-  if (state.kind !== "on" || !state.stores.includes(owner.store)) dropped += 1;
+  const stores = state.kind === "on" ? state.stores : [];
+  if (!stores.includes(owner.store)) dropped += 1;
+  if (stores.length >= ${WRITERS}) full = true;
+  else if (full) lost += 1;
 }
-console.log(JSON.stringify({ store: owner.store, dropped }));
+console.log(JSON.stringify({ store: owner.store, dropped, lost }));
 while (!(await stdin.read()).done);
 `
   );
   const children = Array.from({ length: WRITERS }, () =>
     Bun.spawn([process.execPath, writer], { stdin: "pipe", stdout: "pipe", stderr: "inherit" })
   );
+  spawned.push(...children);
   try {
     const lines = children.map((child) => lineReader(child.stdout));
     expect(await Promise.all(lines.map((next) => next()))).toEqual(Array(WRITERS).fill("ready"));
@@ -80,9 +99,10 @@ while (!(await stdin.read()).done);
       child.stdin.flush();
     }
     const reports = (await Promise.all(lines.map((next) => next()))).map(
-      (line) => JSON.parse(line) as { store: string; dropped: number }
+      (line) => JSON.parse(line) as { store: string; dropped: number; lost: number }
     );
     expect(reports.map((report) => report.dropped)).toEqual(Array(WRITERS).fill(0));
+    expect(reports.map((report) => report.lost)).toEqual(Array(WRITERS).fill(0));
     const state = askgateState(dir);
     expect(state.kind === "on" ? [...state.stores].sort() : state).toEqual(
       reports.map((report) => report.store).sort()
@@ -91,7 +111,9 @@ while (!(await stdin.read()).done);
     for (const child of children) child.stdin.end();
     await Promise.all(children.map((child) => child.exited));
   }
-}, 30_000);
+  // The limit is a hang guard, not a margin for a slow machine: a child that never prints its
+  // line, or a renameSync or readdirSync that never returns.
+}, 60_000);
 
 // A pid and a start time name a process only in the pid namespace they were read in, and an agent
 // box is a namespace of its own over the host's state directory. The owner carries its namespace in

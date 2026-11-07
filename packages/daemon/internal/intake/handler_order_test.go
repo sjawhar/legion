@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -50,7 +51,7 @@ func TestABlockedByOnlyEditIsMirroredAheadOfTheEngineThatSkipsIt(t *testing.T) {
 		Rank: "U", HandedOver: true, ResolvedRepo: "acme/widgets", Blockers: []string{blocker},
 	}
 
-	engine := workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: orderProject, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	decider := &mirrorReader{records: records}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "blocked-by-only-edit", edit,
 		blockers.NewMirror(records, orderProject), engine, decider); err != nil {
@@ -79,7 +80,7 @@ func TestABlockedByOnlyEditIsMirroredAheadOfTheEngineThatSkipsIt(t *testing.T) {
 		HandedOver: true, LastDispatchSeq: 5,
 	})
 	if _, err := intake.ApplyFact(context.Background(), alone, "dispatch", "blocked-by-only-edit",
-		edit, workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil)))); err != nil {
+		edit, workflow.New(records, workflow.Config{Project: orderProject, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil)))); err != nil {
 		t.Fatalf("apply the blocked-by-only edit to the engine alone: %v", err)
 	}
 	if got := mirroredBlockers(t, alone, records, issue); got != nil {
@@ -112,7 +113,7 @@ func TestAClaimEventIsMirroredAheadOfTheEngine(t *testing.T) {
 	seed(pool, records)
 	reader := &claimReader{records: records}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "claimed", claimEvent,
-		blockers.NewMirror(records, orderProject), workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil))), reader); err != nil {
+		blockers.NewMirror(records, orderProject), workflow.New(records, workflow.Config{Project: orderProject, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil))), reader); err != nil {
 		t.Fatalf("apply the claim event: %v", err)
 	}
 	if reader.holder != "user:alice" || reader.seq != 6 {
@@ -123,7 +124,7 @@ func TestAClaimEventIsMirroredAheadOfTheEngine(t *testing.T) {
 	seed(alone, records)
 	aloneReader := &claimReader{records: records}
 	if _, err := intake.ApplyFact(context.Background(), alone, "dispatch", "claimed", claimEvent,
-		workflow.New(records, workflow.Config{Project: orderProject}, slog.New(slog.NewTextHandler(io.Discard, nil))), aloneReader); err != nil {
+		workflow.New(records, workflow.Config{Project: orderProject, Steps: config.DesignGateRootIssues.Steps()}, slog.New(slog.NewTextHandler(io.Discard, nil))), aloneReader); err != nil {
 		t.Fatalf("apply the claim event to the engine alone: %v", err)
 	}
 	if aloneReader.holder != "" || aloneReader.seq != 0 {

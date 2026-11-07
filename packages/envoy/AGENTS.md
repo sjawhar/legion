@@ -86,7 +86,7 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Stream definition**: `internal/bus/stream.go`
 
-  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
+  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit, consumer cap (`streamMaxConsumers`, 24000) and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
 
 - **Stream and bucket copies, stream byte limit**:
@@ -109,6 +109,28 @@ Each item below names a task and where its code is, then notes on it.
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
   A server's refusal of a create or raise stops the listener's start naming the setting and its value, while Dispatch's server, which reconciles in the background, keeps serving with the refusal logged;
   a bucket raise's refusal also names the bucket (`refusedSettings`, `raiseReplicas`)
+
+- **Stream consumer cap**:
+  `internal/bus/stream.go` (`streamMaxConsumers`, `serverDefaultsAnUnsetCap`, `ownedStream`, `refusedSettings`), `internal/bus/keeper.go`
+
+  The `ENVOY_NOTIFICATIONS` stream's consumer cap is compiled in rather than read from a setting:
+  `streamMaxConsumers`, 24000, which bounds how many sessions can hold a session consumer of their own.
+  A start and the keeper raise a smaller deployed cap to it and never lower one, as for the copies and the byte limit.
+  A deployed `-1` or `0`, a stream that sets no cap, is raised only where the connected server is nats-server 2.15.0 or later (`serverDefaultsAnUnsetCap`, read from `ConnectedServerVersion`):
+  only from 2.15 does the server cap such a stream itself, at its own default of 1000 (`JSDefaultMaxConsumersPerStream`), and every server before that leaves it unlimited, so there the raise would write a cap no deployment asked for.
+  A deployed cap that is positive and below 24000 is raised on every server, since such a cap bounds the stream's consumers wherever it runs.
+  The keeper reads the live connection's version each pass, so a stream left with no cap is raised at the first pass after its server is upgraded to 2.15.
+  That 1000 is the server-wide `JetStreamLimits.DefaultMaxConsumers`, which a server whose configuration leaves it unset starts at `JSDefaultMaxConsumersPerStream`, so the gate assumes the server's own default and nothing in the binary checks it.
+  A server started with `jetstream { limits { default_max_consumers: <n> } }` makes a stream with no cap mean `<n>` rather than 1000, and at `-1` or at a number above 24000 a start and the keeper would then lower that stream's limit to 24000 rather than raise it.
+  An account carrying its own positive JetStream `max_consumers` applies it to every stream of the account: above 24000 a start and the keeper lower an uncapped stream's limit the same way, and below 24000 the server refuses any stream whose cap is above the account's, so the create and the raise are both refused; an account limit of `-1` counts as not set and changes nothing.
+  No deployment of this repository sets either - the hub's rendered `jetstream` block carries `max_file_store`, `max_memory_store` and `store_dir` and nothing else, and it renders no `accounts` block - so this is written here rather than guarded in code.
+  Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is an operator step that needs every program's binary lowered first.
+  A stream the server already holds takes a cap change only on nats-server v2.12.5 or later:
+  every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
+  That refusal names `max_consumers`, the value the binary asks for and the floor (`refusedSettings`).
+  It stops the listener's start, while Dispatch's server, which reconciles in the background, keeps serving but neither reconciles nor keeps the stream, and logs `envoy nats reconnect hook failed; it is retried` until that becomes `envoy nats reconnect hooks have not succeeded` at ERROR;
+  so a deployment on a server before v2.12.5 whose stream holds a positive cap below 24000 cannot start a listener of this release.
+  A create carries the cap on every nats-server, a stream already at the cap needs no change, and a stream with no cap is sent none on a server before 2.15, so only such a deployment upgrades the nats-server first, keeping its store, and the listener's next start sets the cap
 
 - **Session delivery**: `internal/session/session.go`
 
@@ -405,14 +427,17 @@ Every open live socket ends at the signal through the lifetime `api.Register` ta
 It waits for them first, with no deadline of its own.
 The document service starts when they are done, or 11 s after the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only reading back what did), so it is done 5 s before the runtime's kill.
-The database pool closes once every request has answered and no connection of the shared or document-rooms pool is in use.
+The database pool closes once every request has answered and no connection of the shared, document-rooms or room-appends pool is in use.
 While the database answers, nothing but the runtime's kill bounds that wait, as with the deferred close of the pool this replaced:
 a write still waiting on a lock commits and is answered if it finishes before the kill.
-The database has stopped answering once three health probes in a row (`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those two pools taken back while they ran;
+The database has stopped answering once three health probes in a row (`silentProbes`, each `store.Pool.Healthy`'s two seconds) have failed with no connection of those pools taken back while they ran;
 a probe that answers, or a connection taken back, starts the count again.
 Then Dispatch exits without the connections waiting on it (`dispatch: exit with
 database connections still in use once the database stopped answering`), and the database rolls back what they held open;
 with nothing in flight over HTTP that is about 21 s after the signal.
+Closing the pool waits by the same rule (`closePool`):
+a connection taken after the pools were seen idle, such as ygo's persistence worker compacting a room as it exits, holds `store.Pool.Close` until it comes back or the probes say the database has stopped answering.
+`store.Pool.Close` closes the health probe's pool last, so the probe answers for as long as the close waits.
 
 An issue's task counts (`issues.tasks_done`, `tasks_total`, `tasks_version`, added by the `issue_task_progress` migration;
 LEGION-542) are the `- [ ]` / `- [x]` items of its primary document's latest version, and the number of that version.
@@ -489,7 +514,7 @@ A history that does not decode there, a log served merged among them, fails the 
 the room is not published, and its next access loads it afresh.
 Compaction (`compactRoom`) folds a document's rows at or below its fold point into that row, which then holds their state, and deletes the rows below it.
 The fold point is the newest row at or below the head older than two minutes on the database's clock (`compactTail`), so a row younger than that is left as written, byte for byte.
-It reads on its own two-connection pool (`store.Pool.Compaction`, `dispatch-compaction`) in one repeatable-read transaction, folds with no document lock held - from memory once that transaction ends when the rows total at most 32 MiB, streaming inside it otherwise - and then takes the document's lock on a connection of the same pool (`lockRoom`) for a short write.
+It reads on its own two-connection pool (`store.Pool.Compaction`, `application_name=dispatch-compaction`) in one repeatable-read transaction, folds with no document lock held - from memory once that transaction ends when the rows total at most 32 MiB, streaming inside it otherwise - and then takes the document's lock on a connection of the same pool (`lockRoom`) for a short write.
 That write checks the rows at or below the fold point are the ones it folded, version for version and xmin for xmin, and drops the fold when a prune, a rebuild, a delete or another compaction changed them, or when it had to finish a stranded prune first.
 The folded row's `content_changed` says whether any row it folded past the latest version's cursor, read inside that write, changed content.
 Three paths compact, all under that tail rule and none on a request goroutine:
@@ -505,7 +530,7 @@ text deleted before a version captured it is gone (the operator's decision, LEGI
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
 the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive`, and a settlement's or the block-id backfill's repair, `repairClass`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
 It stays one measure where a rendering is reused rather than made again:
-a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, the observer takes a published write's own rendering, and the replica's first run takes the room load's rendering of the state it starts from, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`, `renderedReplica.start`), since rendering is deterministic over one state;
+a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, the observer takes a published write's own rendering, and the replica's first run takes the room load's rendering of the state it starts from (a cold socket's admission's, carried on its preload, when the load took that preload), only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`, `renderedReplica.start`), since rendering is deterministic over one state;
 a margin write (`applyMargin`) renders nothing before it writes.
 It stays one measure where the observer renders less than the whole document, too:
 for an update that changed something inside some top-level blocks, `pmdoc.Layout.Splice` renders only those blocks into the markdown the replica keeps and answers exactly what a whole render of the new document writes or declines, and where it declines the observer renders the whole document (`renderedReplica.updateChangesMarkdown`).
@@ -624,9 +649,10 @@ Nor does that read wait for a failed room's recovery (`docs.WithoutRecoveryWait`
 it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`, `GET /blocks` and the block route wait.
 
 A read whose caller holds no transaction fork and whose server holds no resident room reads the stored document through a rendering cache.
-The cache is keyed by `doc_updates`' stored head (version plus the head row's transaction id), so an append, prune and re-append, rebuild, delete or compaction cannot serve an older rendering;
-every cold read checks that head, which it reads with the same SQL as the store's own head (`headVersion`).
-Its entry carries the canonical markdown, document token, block ranges/tokens and block paths, is immutable after construction, and is bounded by a weighted LRU of 256 MiB (`documentReadBudget`).
+The cache is keyed by `doc_updates`' stored head (version plus the head row's transaction id), so an append, prune and re-append, rebuild, delete or compaction cannot serve an older rendering.
+Every cold read checks that head, which it reads with the same SQL as the store's own head (`headVersion`, `DocumentStamp`).
+Its entry carries the canonical markdown, document token, block ranges/tokens and block paths, is immutable after construction, and is bounded by a weighted LRU whose budget `New` sets from the Go memory limit (`readBudgetFor`):
+one sixteenth of it, at least 64 MiB and at most 1 GiB, and 256 MiB (`documentReadBudget`) when no limit is set.
 An entry's weight counts every string and slice it holds, and a table's cells, header texts and row and column ordinals once however many paths share them;
 `TestADocumentReadWeighsAboutTheHeapItHolds` holds it within 0.97-1.25x of the heap an entry holds.
 A read hands out a copy of the blocks and of a path's entries, which callers write, and shares a table's descendant ids and a path's table position with every later read of that head, which no caller writes (`documentRead`).
@@ -795,9 +821,10 @@ Each LISTEN that stands sweeps every resident room, and each room instance that 
 Rows a catch-up applies are another process's content change:
 they credit no local peer, their ask blocks get no local author, and they re-arm only a settlement already armed here (`rearmSettle`), so editors on two processes get one version per burst.
 
-A browser's keystroke is its own append (`PersistCoalesceWindow = -1`), and storing it costs six round trips, every one of them under the document's advisory lock the room's persistence worker holds on its own connection (`withRoomLock`): the lock, the transaction, the gate read, the one batch of writes the append owes (`appendWrites`), the commit, and the unlock.
-The transaction-level lock is not among them: that session already holds the document's lock on that very connection, so the flush's appends take none of their own, which took a warm keystroke's store from seven round trips to six, counted on a real process.
-Every flush runs on a transaction or a session that already holds the room's lock, so no flush append takes one: the room's persistence worker holds the session-level lock on its connection (`withRoomLock`), and every caller of `Ledger.flushThrough` took the transaction-level lock before it read the head it is gated on - a live write's one read (`readFork`, `lockedHead`), a version capture's, a settlement's (`lockSettlementCursor`) and the block-id backfill's (`lockDocumentRoom`).
+A browser's keystroke is its own call and its own stored row (`PersistCoalesceWindow = -1`), but not its own transaction: a room's queued updates are stored together, one row per update, in one transaction on a connection of the room-appends pool (`appendRoomTx`, `docs/room_appends.go`).
+That transaction is about three round trips from the document's session lock to its release, every one of them under the lock it holds on that connection: the lock, the transaction and the gate read in the first pipeline, the one batch of writes the run owes (`appendWrites`) and the commit in the second, the unlock in the third — four on the rare batch whose gate read finds a prune's checkpoint and runs the prune's rest and the gate read again.
+The transaction-level lock is not among them: that session already holds the document's lock on that very connection, so the batch's appends take none of their own.
+Every flush runs on a transaction or a session that already holds the room's lock, so no flush append takes one: a room's batch holds the session-level lock on its room-appends connection (`appendRoomTx`), and every caller of `Ledger.flushThrough` took the transaction-level lock before it read the head it is gated on - a live write's one read (`readFork`, `lockedHead`), a version capture's, a settlement's (`lockSettlementCursor`) and the block-id backfill's (`lockDocumentRoom`).
 A writer that holds neither still takes `pg_advisory_xact_lock` at each append of its own (`appendUpdateTxClass`), but that is not what serialises two live writes of one document: the second waits on the document's owner row (`lockArtifactOwner`) and then on the room's lock at its one read of the document (`readFork`, `lockedHead`), both before it appends anything.
 `TestALiveWriteAndAKeystrokeQueueOnTheRoomsLockAndNeitherIsLost` is a live write against the room's own persistence worker, not two live writes: it shows the write waiting at that read while the worker's keystroke holds the room's lock, and both edits stored once the lock is free.
 
@@ -816,11 +843,11 @@ the caught-up rows re-arm it, and the re-armed settlement versions every update.
 Its authors come from `doc_pending_authors` and its actor from `doc_settlements_pending.last_actor`, read under the lock (`settlementAuthors`), so its credit does not depend on which process settles.
 A named or snapshot version whose room is behind the head, read under the document's advisory lock, is rendered from the stored document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those changes.
 A read (`heldTree`, `docTree`, `joinRead`) compares the room's cursor with the stored head and, when the room is behind, reads the stored document merged with the updates only that room holds (`storedWithUpdates`, over the instance's unstored updates after a drain of its log, `unstoredShare`), without waiting for the catch-up.
-It is then older than neither the store nor the room: the store holds what another process committed, and the merge holds the keystroke whose append is still in flight, which the stored document at that head is missing — a browser's own append is enough to leave its room judged behind for the moment between that append's commit and the cursor advance inside the same lock (`appendUpdate`), and no read takes back text the room has already sent its browsers.
+It is then older than neither the store nor the room: the store holds what another process committed, and the merge holds the keystroke whose append is still in flight, which the stored document at that head is missing — a browser's own append is enough to leave its room judged behind for the moment between that append's commit and the cursor advance inside the same lock (`appendRoomTx`), and no read takes back text the room has already sent its browsers.
 That drain is the one thing a read waits on the replica's lock for, for the length of one drain of the room's update log; every other read only tries that lock (`readLive`).
 
 Room sync closes and reloads a room only when its stored history is replaced under it (`historyReplaced`):
-a rebuild deleted every row and seeded head+1, a prune or a delete lowered the head, or a compaction folded rows the room has not taken in yet (`compactKeep` = 1 keeps the head row, so a room at the head is unaffected).
+a rebuild deleted every row and seeded head+1, a prune or a delete lowered the head, or a compaction folded rows the room has not taken in yet (every compaction Dispatch schedules folds under `tailRule`, whose fold point is at or below the head and which deletes no row above it, so a room at the head is unaffected).
 The follower confirms the verdict under the document's lock (`historyReplacedUnderLock`) and closes the room (`closeRoomBehindHead`, called by `roomCatchUps.closeReplaced`).
 The service closes a room, and its browsers reconnect, in these cases only:
 
@@ -847,7 +874,7 @@ Until the close has returned the room's writer slot is refused, `503 DOC_SERVICE
 The refused write's retry lands on the room that replaces the closed one.
 The close reaches only the instance that was checked, never a room that replaced it:
 ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep retires a room without the close gate, so the close checks the instance again inside a `Server.Apply` on the room, which the sweep never retires, with the close gate held, and closes it through ygo's `CloseRoomWithin`, the close of a caller inside its own Apply (`closeRoomInstance`);
-another caller inside the room (a browser joining, another Apply) holds that close off, as an open write does, and the evictor tries again a window later;
+another caller inside the room (a browser joining, another Apply) holds that close off, which answers `websocket.ErrRoomInUse` and closes nothing, so the close tries again - 1 ms apart, doubling to 50 ms - until the room is free (`closeWhenFree`);
 a room the sweep or another close retired first is left to the room that holds the document now, the reservation is lifted, and a settlement the reservation ended is armed again on it.
 A reservation outlasts its instance when the room is replaced before the close returns (`reservedFor`);
 the follower tries the replacement again once that close has returned.
@@ -911,7 +938,15 @@ A close writes the resolved state of the issue's open asks into the blocks that 
 That write moves the document's head, so an earlier-build room of the document closes as a room that falls behind, and its browsers reconnect with the scope the issue now allows.
 They show no other process's cursors.
 
-The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never documents touched since the process started (LEGION-513).
+The document socket's caps of 1,000 rooms and 1,000 browser connections (`DISPATCH_MAX_LIVE_ROOMS` and `DISPATCH_MAX_DOC_CONNECTIONS` set others;
+`reserveRoom`, `reserveConnection`) count ygo's live rooms, never documents touched since the process started (LEGION-513), and the connections registered on them, together with the rooms and connections the sockets being admitted reserved.
+A socket takes both places before it loads anything, each in the same step that checks its cap (a compare-and-swap on the connection count, a lock around the room places), so sockets that open at once never pass a cap, and a socket either cap turns away is refused `503`, never ygo's `401`.
+A room's place is shared by every socket and load that holds it, so a reserved room ygo then loads keeps the one place, and a room an API `Apply` loads takes a place from its load like any other.
+Every refused admission, failed load and closed socket gives its places back;
+a connection's place is its count from the reservation to `removeConnection`.
+Each is a count kept as rooms load and unload and browsers come and go, so admission walks no rooms.
+A socket's admission resolves the caller and reads the issue once each and hands both to ygo's authorization of the same request;
+a warm room's schema verdict is the one its replica observer recorded, and a cold open renders its document once.
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
@@ -1204,7 +1239,7 @@ one that deletes such a row or changes a key column, which is what the weaker le
 Nothing does either today; the check refuses it if something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker level that would not hold.
 **Order:** a transaction that takes both an owner row and the room lock takes the owner row first.
 The durable writers take no owner row at all
-— `appendUpdate`, `CaptureSnapshot`, `PruneAfter` and `Delete` reach the room through `withRoomLock`, and a compaction's write through `lockRoom` on a connection of the compaction pool;
+— a room's batch of browser updates (`AppendRoomFlush`, on a `store.Pool.RoomAppends` connection), `CaptureSnapshot`, `PruneAfter` and `Delete` (through `withRoomLock`'s `lockRoom`, on a shared-pool connection) and a compaction's write (through `lockRoom` on a connection of the compaction pool);
 each holds a session-level advisory lock on its own connection before it opens a transaction, so no row lock can precede it there
 — which is why order alone could not be the whole rule;
 but a transaction that does take both, such as an upload appending its event after writing the document, deadlocks against a settlement if it takes them the other way round.
@@ -1228,7 +1263,7 @@ The rule enforces itself.
 Every entry point that opens one of this pool's transactions marks its context with `store.WithTransactionTracking`:
 `api.Register` marks every route and the document websocket, and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the two CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`), `rebuild-refs`, the startup seeds and each migration mark their own.
 There is no exception: the document rooms' room sync runs each of its lanes on a mark of its own (`store.ForConcurrentWorker`, `docs.Service.RegisterRoomSync`), since a lane reads and writes the store outside any request, and the lanes run side by side - on one shared mark the catch-up lane's open transaction would have the issue-open lane's read of the issue refused, and that close or reopen would reach no room.
-A durable append holds its connection directly rather than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as long as it holds that connection and the room's advisory lock, and `Query` marks the caller for as long as its rows are open, so a cursor counts as the held connection it is.
+A durable writer that holds its connection directly rather than through a transaction - `lockRoom` and a batch of browser updates (`appendRoomTx`) - marks its context with `store.HoldsConnection` for as long as it holds that connection and the room's advisory lock (`holdRoom`), and `Query` marks the caller for as long as its rows are open, so a cursor counts as the held connection it is.
 A refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the log; the error itself is returned every time.
 A caller that runs independent reads side by side gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a connection:
 on one shared mark, one read's open cursor would refuse the others, and each read still takes one connection only (the delivery timeline's four reads do this).
@@ -1253,14 +1288,18 @@ Everything the load needs comes from that pool, `onLoadDocument`'s issue read in
 
 - a writer holding a connection and the issue's row lock waits for the load, so a load that waited for the shared pool would close the same cycle without a transaction of its own.
   The pool belongs to the store rather than to each `PgVersioned`, so a caller that constructs one to read a document borrows those connections instead of opening more.
-  The load balancer's probe takes the other one:
+  A room's browser updates are stored on the room-appends pool (`store.Pool.RoomAppends`, eight connections):
+  a room's queued updates go in one transaction per batch (`docs/room_appends.go`), holding one of its connections and the document's advisory lock for about three round trips, so typing in a document takes no connection a request could use.
+  Only that batch path takes one, and no holder of a document lock waits for one (settlements, live writes and the `withRoomLock` writers take theirs where they always have), which is why it cannot deadlock (`roomAppendsPoolSize`).
+  Its connections name themselves `dispatch-room-appends` in `pg_stat_activity`, and the rooms pool's `dispatch-rooms`, so a reader of the database's sessions tells an append from a load and both from a request.
+  The load balancer's probe takes another one:
   `store.Pool.Healthy` reads the highest applied schema version from the health pool (one connection, used by nothing else) under a `store.healthProbeTimeout` deadline derived from the caller's context, two seconds covering dial and query, and `/healthz` answers with the result, reporting that version as `schema_version`.
   That constant's doc owns the argument for the bound:
   every prober reads silence as a dead process, the tightest of them allows three seconds (`deploy/compose/dispatch.compose.yml`, `deploy/scripts/autodeploy.sh`) against the ALB's five, and nothing else bounds the wait usefully
   — a cold dial is floored at two minutes by `pgxpool`, forty times that tightest deadline, and once the connection is up nothing bounds the query at all, because a request context carries no deadline.
   Warm is production's normal state, so the unbounded case is the one it runs.
-  Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the shared pool cannot become a target a one- or four-connection pool can never reach, and both are deliberately unguarded
-  — a load or a probe taken under an open transaction must be served, not refused, and a separate pool cannot close the cycle the guard prevents.
+  The separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the shared pool cannot become a target a one-, four- or eight-connection pool can never reach, and they are deliberately unguarded
+  — a load or a probe taken under an open transaction must be served, not refused, a room's append runs under no request's transaction, and a separate pool cannot close the cycle the guard prevents.
   The events outbox reads and records its batches, and takes and renews its publisher hold, on a pool of its own too (`store.Pool.Outbox`, two connections):
   the batches it runs side by side take one statement at a time between them (`outbox.lanes`, the lock held around a statement and the drain of its rows and never across a send) and the hold's renewal runs beside them, so a renewal never waits behind a batch's statement, and a full shared pool must not hold back publishing or let the hold lapse.
   So does the event log's safe horizon (`store.Pool.Horizon`, two connections, the server's one `events.Horizon`):
@@ -3782,17 +3821,23 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
 
 - Every stream update the reconcile sends starts from the deployed configuration and sets only what Envoy owns (`reconciledStream`, `internal/bus/stream.go`):
   the subjects (above), the age and the duplicate window (72 hours), the replicas (the deployed count or `ENVOY_NATS_REPLICAS`, whichever is more), the byte limit (the deployed one or `ENVOY_STREAM_MAX_BYTES`, whichever is more;
-  the setting on a stream with none, the deployed one when unset) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
+  the setting on a stream with none, the deployed one when unset), the consumer cap (the deployed cap or `streamMaxConsumers`, 24000, whichever is more;
+  the compiled cap on a stream whose cap is a deployed `-1` or `0` only where the connected server is nats-server 2.15.0 or later, which caps such a stream at its own default of 1000, and the deployed `-1` or `0` left as it is on every older server, which leaves it unlimited: `serverDefaultsAnUnsetCap`) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
   The metadata and every other deployed field - `MaxMsgsPerSubject`, `MaxMsgSize`, storage, placement, compression and the rest - stay as they are, and a start that finds all of that in place sends no update.
-  A start's own write never lowers the stream's copies or its byte limit, so an operator's raise of either stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
+  A start's own write never lowers the stream's copies, its byte limit or its consumer cap, so an operator's raise of any of them stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
   a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
+  A create carries the consumer cap on every nats-server, but a stream the server already holds takes a cap change only on v2.12.5 or later:
+  every server before it refuses such an update with `nats: stream configuration update can not change MaxConsumers`, measured on v2.10.29, v2.11.0 and v2.12.0.
+  That refusal names `max_consumers`, the value the binary asks for and the floor, and stops the listener's start (`refusedSettings`), and Dispatch's server, which reconciles in the background, retries the reconcile and starts no keeper until it passes;
+  so a deployment on a server before v2.12.5 whose stream holds a positive cap below 24000 upgrades the nats-server first, keeping its store, and the next start then sets the cap.
+  A stream with no cap is sent no cap change at all before 2.15, so such a deployment is refused nothing and the cap is written at the first start or keeper pass after the upgrade.
   JetStream's stream update has no compare-and-swap:
   a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
 
 - The keeper (`internal/bus/keeper.go`) ends that:
-  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
-  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
-  Like a start, it never lowers the copies or the byte limit (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`).
+  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a consumer cap below its `streamMaxConsumers` (24000), a deployed `-1` or `0` included where the server caps such a stream itself (`serverDefaultsAnUnsetCap`, read from the live connection each pass), a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
+  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, max_consumers 1000 -> 24000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  Like a start, it never lowers the copies, the byte limit or the cap (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`), and an operator who lowers the cap by hand has it raised back within one period, with `max_consumers` in that WARN line.
   Its write is the stream as it read it with that put back, so it only adds subjects and removes or replaces none:
   two releases with different subject lists do not switch the stream back and forth, and a concurrent write the keeper's lands over loses its subject only until that release's own keeper adds it back a period later.
   A subject that a start had put in place of an overlapping one is the exception:
@@ -3806,6 +3851,8 @@ that is the rule and not a transitional measure, and it is what lets Dispatch de
   So with mixed settings during a rollout the stream can sit below the setting for up to one period after the last start;
   programs with different byte limits do not fight, since no keeper lowers a limit, and the largest stands.
   Lowering the copies (`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>`) and lowering or removing the limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`, `--max-bytes=-1` for none) are operator steps that need every program's setting changed first, or the keeper puts them back.
+  Lowering the cap (`nats stream edit ENVOY_NOTIFICATIONS --max-consumers=<n>`) is one too, and needs every program's binary lowered first, since the cap is compiled in;
+  that edit, like any change of `MaxConsumers` on a stream that already exists, needs nats-server v2.12.5 or later.
 
 - Every KV bucket Envoy opens through `bus.EnsureKeyValue` is created at `ENVOY_NATS_REPLICAS`, and one found with fewer copies is raised by an update of its stream `KV_<bucket>` that changes only its replicas, which needs `$JS.API.STREAM.UPDATE.KV_<bucket>` in the program's NATS grant (`bucketPermissions`, `packages/envoy/infra/core/permissions.go`);
   lowering a bucket (`nats stream edit KV_<bucket> --replicas=<n>`) likewise needs every program's setting lowered first.
@@ -4935,17 +4982,32 @@ A machine's own session is its fleet's service's and no person's: its credential
 `cmd/broker`'s `serviceNames` registers both settings' services with the policy loader, so a secret a machine service owns is served rather than refused `owner-tag-malformed`.
 The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without the alarm, and a failed reload keeps the last set;
 a reload cut short because `NewCurrent`'s context ended (the broker shutting down) is no failed load and logs nothing.
-`Set.Version`, the SHA-256 of every served secret's name, owner, tier, source, max grant, GitHub owners and requesters, is recorded on every request.
+`Set.Version`, the SHA-256 of every served secret's name, owner, tier, source, max grant, GitHub owners, requesters, scopes and admin mark, is recorded on every request.
 A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read back by `policy.ParseKindSource`).
 A grant ends for good when a release finds its secret's kind changed (a moved source) or its lifetime over the current max-grant (`Machine.endGrant`);
 a change reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
 `policy.Kinds`, `ValidKind`, `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES` separates its entries, a form an AWS tag value and a Secret Manager annotation both hold;
 a comma is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`) the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and `agent-secrets secret` create and retag all apply.
 `policy.TagRequesters` and `policy.ParseRequesters` are the one statement of who may ask for a secret at all (people by their lowercase sign-in email and services by the name the deployment registers, separated by white space as `github-owners` is, answered sorted and de-duplicated;
-a comma is refused `ErrRequestersComma`, a list naming nobody `ErrRequestersMissing`, and an entry that is neither `ErrRequestersEntry`), and `policy.RequesterRules` the one statement of what such a list demands of the secret's other tags (`requesters-max-grant`: a max grant, of an hour at most;
-`requesters-not-owner`: a `google-service-account` secret's list is exactly its own person owner), which the loader and `agent-secrets secret` create and retag all apply.
+a comma is refused `ErrRequestersComma`, a list naming nobody `ErrRequestersMissing`, and an entry that is neither `ErrRequestersEntry`).
+The list narrows who may ask and bounds no grant by itself.
+`policy.TagRules` is the one statement of what a secret's tags demand of each other, which the loader and `agent-secrets secret` create and retag all apply:
+`max-grant-required`, a max grant of an hour at most, is demanded of an admin secret (`policy.TagAdmin`) and of a `google-service-account` secret, and every other secret keeps its own cap, or none, so a person's mail and Drive logins stay at their tier and are capped by nothing;
+`requesters-not-owner` refuses a `google-service-account` secret whose list is not exactly its one person owner, and a service entry on an agent-tier one, a human-tier one being free to list registered services beside that owner so that a Legion pod can ask and the owner approves each request;
+`requesters-not-owner` again refuses a service entry on a secret the deployment binds to a `dev-<name>` account, at either tier, since such a token is one person's own;
+`scopes-kind` refuses a `scopes` tag on any kind but `google-service-account`, and `admin-tier` and `admin-requesters` refuse an admin secret that is not human tier or that names no requesters.
+`policy.TagScopes` and `policy.ParseScopes` are the one statement of which OAuth scopes a `google-service-account` secret's token carries: scope names separated by white space, each the part of a Google scope after `https://www.googleapis.com/auth/` and held to `^[a-z0-9][a-z0-9._-]*$`, answered sorted and each once (a comma is refused `ErrScopesComma`, a list naming no scope `ErrScopesMissing`, an entry that is no scope name `ErrScopesEntry`, a whole scope URL among them, and a name given twice `ErrScopesDuplicate`, each logged `scopes-malformed`), which the loader and `agent-secrets secret` create and retag all apply, and `Secret.ScopeURLs` puts the prefix back for the minter.
+The tag holds short names because the AWS store keeps its annotations as AWS tags and an AWS tag value holds at most 256 characters, which five whole scope URLs are longer than;
+a secret carrying none mints `cloud-platform` alone, as every token of this kind did before the tag existed, and a changed list reaches the token at the next release, since the minter reads the snapshot the release checked.
+`policy.TagAdmin` marks a secret whose grant is an administrator's, `"true"` its only value and anything else `admin-malformed`:
+the broker cannot tell such a secret from its kind, an admin console password and a personal API key both being stored strings, so the program that declares the secret says so, and the rules above then hold it to human tier, a requesters list and an hour's cap.
 `Set.Evaluate` reads the list before owner and tier and denies a requester it does not name `policy.ReasonRequesterNotListed`, which the request row keeps as its `decision_detail` (`<NAME>: requester-not-listed`, several joined with `"; "`) and the request routes answer as `detail`.
-The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential), `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`) and `google-service-account` (`secrets.GoogleServiceAccount`, in `internal/broker/secrets/googleserviceaccount.go`: an access token for the one service account the stored value names, minted by impersonating it with the broker's own Google credential through the IAM Service Account Credentials API, and served to the one person the secret's requesters name).
+The kinds are `github-app` (installation tokens from the stored App key), `google-login` (an access token from the stored authorized-user credential), `azure-login` (`secrets.AzureLogin`, in `internal/broker/secrets/azurelogin.go`) and `google-service-account` (`secrets.GoogleServiceAccount`, in `internal/broker/secrets/googleserviceaccount.go`: an access token for one Google service account, minted by impersonating it with the broker's own Google credential through the IAM Service Account Credentials API, carrying the scopes the secret's `scopes` tag names, and served to the one person the secret's requesters name beside the registered services a human-tier one may list).
+The stored value does not choose that account: the deployment's `BROKER_SERVICE_ACCOUNT_SECRETS` binds each such secret to the one account the broker may mint for, and `GoogleServiceAccount.Mint` refuses a secret the setting does not bind, and a stored value naming any other account, with `secrets.ErrMintNotBound` (`MintErrorClass` `binding`), before the broker's own credential is resolved and before any call reaches Google.
+The setting is whitespace-separated `<SECRET NAME>=<account email>` entries, such as `GCP_ADMIN=gcp-admin@example-project.iam.gserviceaccount.com` (`config.parseServiceAccountSecrets`), the name an uppercase agent-secret name (`policy.NameToSlug`) and the account a user-managed service account address held to `secrets.ValidServiceAccountEmail`, the minter's own rule, so no binding can name an address the minter would refuse;
+a Google-managed service agent is refused as it is in `BROKER_VM_SERVICES`, a secret named twice is refused, and one account may back two secrets, since only the secret's name is the key.
+Unset, no secret is bound and every `google-service-account` mint is refused, which is the safe side of the window between this build and the apply that writes the bindings.
+`cmd/broker` fills both readers from it: `secrets.GoogleServiceAccount.Accounts`, and `policy.Loader.ServiceAccounts`, which reads it for the one rule above — a secret bound to a `dev-<name>` account may list no service among its requesters.
 An Azure login stores only `{"tenant_id":"<tenant>","client_id":"<client>"}` and releases JSON with those ids, `federated_token` and `expires_at` (RFC3339 UTC from the JWT `exp`).
 `BROKER_AZURE_LOGIN_SECRET` selects the only agent-secret name allowed to release that token; unset (the default), every Azure login release is refused.
 `AzureLogin.Mint` also requires that secret to be human tier in the policy snapshot checked for the release, so retagging another secret to `azure-login`, or the configured secret to agent tier, cannot bypass approval.
@@ -4985,7 +5047,7 @@ a retag to a kind reread during the reads ends the grant for good, and one the p
 A minter's error names an upstream status by its number and a failed call by its class (`transportFailure`), never Go's transport text, the reason phrase or the body, and a Google `error_subtype` only when it is `invalid_rapt` or `rapt_required` (`googleReauthSubtypes`), else `unknown`.
 `policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what `agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
 this broker never reads the tag (`TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere`).
-A live grant is re-checked once the version moves, and always while any granted name is a service's, since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`);
+A live grant is re-checked once the version moves, always while any granted name is a service's, since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`), and always while any granted name carries a `requesters` tag, since an entry of that tag naming a service is matched through those same accounts (`anyListed`), so a pod whose account stops proving its service is re-checked even where the version stood still;
 the record line, the column and the API field that carry it keep the name `rules_version`, since records are content-addressed and stored bodies must still parse.
 `policy.NewSet` is the one place a `Version` is computed, ascending by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a single-name merge alike, so an unchanged namespace keeps its version (`TestGoldenDigest` pins the bytes).
 `Loader.LoadOne` reads one name with `Store.Describe` (`DescribeSecret`, or `GetSecret` and `GetSecretVersion`) under the same rules and the same refusal line, and `Current.RefreshOne` merges it into the live set;
@@ -5115,7 +5177,7 @@ SIGQUIT uses the kernel default, not Go's goroutine dump.
 Core dumps are disabled once, before the first value byte is read, for the rest of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
 `secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with `&` (the restored settings are compared with those bash hands a foreground job, and the label with the terminal's owner and echo when it is printed), a stop before the label, an orphaned group, a shell that exits under a background prompt, SIGTERM and SIGHUP after `bg`, an external SIGSTOP, bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins after the line, ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal restoration.
 
-`secret.go` builds the one tag map a write sends (`optionalTags`), owner and tier plus `kind`, `github-owners` and `max-grant` when the command names them, and the rollback guard beside a kind, under the broker's own rules (`policy.ValidKind`, `policy.ParseGitHubOwners`, `policy.ParseMaxGrant`), and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
+`secret.go` builds the one tag map a write sends (`optionalTags`), owner and tier plus `kind`, `github-owners`, `requesters`, `scopes`, `admin`, `max-grant` and `default-grant` when the command names them, and the rollback guard beside a kind, under the broker's own rules (`policy.ValidKind`, `policy.ParseGitHubOwners`, `policy.ParseRequesterShapes`, `policy.ParseScopes`, `policy.ParseMaxGrant`), and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
 AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets one).
 A `retag` is one write: it either sets tags or removes them, never both, and refuses `none` beside another change before any read or write, so a refused call never leaves it half applied.
 Either reads the secret's tags once (`currentTags`, a `heldTags` with GCP's etag) and builds from them the tags the secret will hold once the write lands (`after`), and applies the github-owners rule to those once (`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a `github-app` secret without owners.
@@ -5123,12 +5185,12 @@ Each writes against that read: GCP sends the held annotations, changed, with the
 AWS's tag calls take no condition, so its `setTags` and `removeTags` read the tags back (`awsBackend.raceCheck`) and, when another writer left a kind/owners pair the broker refuses, restore the tags read and answer `errTagsChanged` too, and the retag exits 1 naming the race.
 A retag on AWS is safe only with one writer at a time.
 The retag form lives in `secret_retag.go`.
-One that sets tags sends owner and tier in one `TagResource`, plus `kind` (with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM condition on the request's tags sees them;
+One that sets tags sends owner and tier in one `TagResource`, plus `kind` (with the rollback guard), `github-owners`, `requesters`, `scopes`, `admin`, `max-grant` and `default-grant` when the command sets them, so an IAM condition on the request's tags sees them;
 one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
-none`, `--max-grant none`) is one `UntagResource` of those keys.
+none`, `--requesters none`, `--scopes none`, `--admin none`, `--max-grant none`, `--default-grant none`) is one `UntagResource` of those keys.
 On `AccessDenied` for a retag that sets tags on a secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are an administrator's to change (a person's own secret may be made shared where their access allows the retag;
 only an existing shared secret's tags are reserved); `delete` schedules a 30-day recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`.
-GCP `create` creates the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any named kind, `github-owners`, max grant and the rollback guard beside a kind as annotations (never labels, so they carry no GCP label naming rules), then adds the value as its first version;
+GCP `create` creates the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any named kind, `github-owners`, requesters, scopes, admin mark, max grant, default grant and the rollback guard beside a kind as annotations (never labels, so they carry no GCP label naming rules), then adds the value as its first version;
 `set` adds a version to a secret already held;
 `retag` writes the same change into the annotations it read in one `UpdateSecret` (field mask `annotations`, with that read's etag), preserving every annotation it does not change;
 `delete` sets `expire_time` to now plus 30 days in one `UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the way AWS does:
@@ -5800,10 +5862,10 @@ A kind source is `mint:<kind>:<source>`:
 `Machine.release` parses it (`policy.ParseKindSource`;
 a malformed one is `policy.ErrKindSourceMalformed`), reads `<source>` through the store's own `Read`, and passes that value to `Machine.Minters[kind]`.
 It never returns the stored value.
-A minter's failure is `requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message (never an upstream's text), and one ERROR line for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and `class=` `stored-value`, `refused` or `upstream` (`secrets.MintErrorClass`).
+A minter's failure is `requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message (never an upstream's text), and one ERROR line for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and `class=` `stored-value`, `narrowing`, `refused`, `binding` or `upstream` (`secrets.MintErrorClass`).
 The usual re-check then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and
-— when the policy version moved since the grant was decided, or any granted name is a service's (`anyServiceOwned`:
-the version does not cover `BROKER_SERVICES`' accounts)
+— when the policy version moved since the grant was decided, any granted name is a service's (`anyServiceOwned`), or any granted name carries a `requesters` tag (`anyListed`):
+the version covers neither which service `BROKER_SERVICES`' accounts prove, nor the service an entry of that tag names, which is matched through those same accounts, so a pod whose account stops proving its service is re-checked even where the version stood still
 — that the current policy still allows every granted name (`stillAllowed`:
 a name the policy no longer serves, denies, or now wants approved that was granted automatically, or that it now wants approved by someone the request's `decided_by` login is not, all refuse, so an approved grant outlives an owner change only while its approver may still approve the secret, or once the new tags give its session the secret without asking;
 a name withheld from the session that its request got automatically is judged as an approval by `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime (`overMaxGrant`, which ends the grant for good, `GRANT_NOT_LIVE`, as a moved source does, through `Machine.endGrant`;

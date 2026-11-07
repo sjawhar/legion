@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+    The Legion state view answers `gatedSteps` on a root issue, one entry for each design-gate step the deployment gates, with its document, its current and approved versions, its status and a changes request's reason; `designGate` stays beside it. The controller secret route answers `designGateSteps` in place of `designGate`, `register_gate` takes a `step`, and a Dispatch project carries `gated_steps` while `decisions` joins the document roles. The settings body reports a project's `deploys` again, after contract 54 stopped reporting it: the loader still accepts the key, so the body names every key a file may set, and the list is always empty because the daemon holds no entry.
+time: 2026-11-06T08:44:54.142833142Z
+custom:
+    Issue: pr2848
