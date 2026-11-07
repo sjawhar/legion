@@ -187,6 +187,7 @@ A result at the head reads passed.
   await recordCheckResult(issue.key, {
     check: "c-older",
     commit: firstHead,
+    negative_control: "Moved the head; the result read older.",
     observed: "41 passed",
     role: "tester",
     verdict: "pass",
@@ -206,6 +207,7 @@ A result at the head reads passed.
   await recordCheckResult(issue.key, {
     check: "c-head",
     commit: secondHead,
+    negative_control: "Moved the head again; the result read older.",
     observed: "41 passed",
     role: "tester",
     verdict: "pass",

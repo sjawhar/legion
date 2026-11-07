@@ -259,6 +259,8 @@ Each item below names a task and where its code is, then notes on it.
 
   `POST /api/v1/issues/{key}/results` records one result against a `check` block of the issue's Verification document or of an ancestor's, as `check_results`, keeping the block's `changed_version` and `text_sha256` with it, and answers the pull-request body line it implies;
   `GET` lists each check of the issue's Verification document with every result recorded against it.
+  A pass on a `before_merge` check with an empty or blank `negative_control` is `400 NEGATIVE_CONTROL_REQUIRED`; an `after_merge` or `default_branch` pass, and any fail, may leave it empty.
+  Deploy the daemon with the updated result commands before enabling this Dispatch refusal; otherwise workers copy commands that the server rejects.
   A result's currency is computed at the read, never written by a push:
   a `before_merge` result is `current` while its commit is the head of an `open` pull request, or the final head of a `merged` one, attributed to the check's own issue (`pull_request_heads`, which the GitHub intake and the reconcile keep), and the check's words are the ones it proved;
   the issue a result was recorded on counts for nothing here, so a child's pull request never makes a result against a check above it `current`;

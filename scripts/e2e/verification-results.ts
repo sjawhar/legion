@@ -417,6 +417,7 @@ A result stands while its commit is the pull request's head.
   await record(a4Issue, {
     check: "a4",
     commit: commits.headOne,
+    negative_control: "Moved the head; this result read older.",
     observed: "recorded at the pull request's first head",
     run: "bash scripts/e2e/verification-results.sh",
     surface: "cli",
@@ -448,6 +449,7 @@ A result stands while its commit is the pull request's head.
   await record(a4Issue, {
     check: "a4",
     commit: commits.headTwo,
+    negative_control: "Left the earlier result at the old head; it read older after the push.",
     observed: "recorded at the pull request's new head",
     run: "bash scripts/e2e/verification-results.sh",
     surface: "cli",
@@ -489,6 +491,7 @@ A result stands while its commit is the head of a pull request of this repositor
   await record(forkIssue, {
     check: "fork",
     commit: commits.fork,
+    negative_control: "Used a fork's pull request; the result did not read current.",
     observed: "recorded at the commit the fork's pull request heads",
     run: "bash scripts/e2e/verification-results.sh",
     surface: "cli",
@@ -637,6 +640,8 @@ The pre-merge check of the same unreadable repository.
   await record(hiddenIssue, {
     check: "hidden-pre",
     commit: commits.hidden,
+    negative_control:
+      "Used a repository with no App installation; the result read unknown, not current.",
     observed: "the pre-merge run passed",
     run: "bash scripts/e2e/verification-results.sh",
     surface: "cli",
