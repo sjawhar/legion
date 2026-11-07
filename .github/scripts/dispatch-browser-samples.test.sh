@@ -111,6 +111,18 @@ run_report "$dir" webkit-alone
 check "on the memory reading" "$(contains "$out" '^::notice title=webkit-alone MemAvailable::')"
 check "and on the CPU reading" "$(contains "$out" '^::notice title=webkit-alone CPU::')"
 
+echo "case: a title is escaped as GitHub escapes a property, and in that order"
+# `,` would otherwise end the property and cut the title short, and `%` must be replaced before
+# the other two, or it re-encodes the `%` they write: swapping those lines gives `p%25%252Cq%253Ar`,
+# which the runner unescapes back to `p%2Cq%3Ar` rather than to the name. A single `:` ends
+# nothing, and is encoded because GitHub's property table holds it.
+dir=$(fixture title-escaped)
+printf '2000000\n' > "$dir/memory-samples.txt"
+printf 'machine 500\nmachine 1500\n' > "$dir/cpu-samples.txt"
+run_report "$dir" 'p%,q:r'
+check "on the memory reading" "$(contains "$out" '^::notice title=p%25%2Cq%3Ar MemAvailable::')"
+check "and on the CPU reading" "$(contains "$out" '^::notice title=p%25%2Cq%3Ar CPU::')"
+
 echo "case: no samples is a warning, not a reading of zero"
 # A step whose sampler died at once must not report 0 kB and 0 CPU-seconds as if it had
 # measured them.

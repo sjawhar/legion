@@ -104,14 +104,18 @@ case "$mode" in
   report)
     [ "$#" -eq 3 ] || usage "$@"
     title=$3
-    # A workflow command reads `::notice title=<value> <name>::`, where a property's value ends at
-    # a `,` and the command's own name at a `:`, and `%` begins an escape. So a title holding any
-    # of them is encoded here, once, rather than at each of the two `::notice` lines below: an
-    # alone leg's title is its project name (dispatch-browser.yaml:708), and a project named
-    # `a,b-alone` would otherwise be titled `a`. No name of today's matrix holds one - the install
-    # step refuses an engine name a comma or a space would produce - so this keeps a title true
-    # rather than fixing a fault anyone has seen. `%` is replaced first, or it would re-encode the
-    # `%` of the two replacements after it.
+    # These three are GitHub's own property escaping, applied once here rather than at each of the
+    # two `::notice` lines below. The runner reads `::<name> <k>=<v>,<k>=<v>::<data>`: it ends the
+    # command section at the next `::`, splits the properties on `,` and each pair on its first
+    # `=`, then unescapes each value (actions/runner, src/Runner.Common/ActionCommand.cs: the
+    # property table is `\r` %0D, `\n` %0A, `:` %3A, `,` %2C, `%` %25). So a `,` is what would cut
+    # a title short - an alone leg's title is its project name (dispatch-browser.yaml:708), and
+    # `a,b-alone` would be read as a title of `a` and a second property - while a single `:` ends
+    # nothing, and is encoded because the table holds it. `%` is replaced first, matching the
+    # runner's unescape, which takes `%25` last; the other way round would double-encode. `\r` and
+    # `\n` are left out: a matrix value written in YAML flow form cannot hold either. No name of
+    # today's matrix holds any of them - the install step refuses an engine name a comma or a space
+    # would produce - so this keeps a title true rather than fixing a fault anyone has seen.
     title=${title//%/%25}
     title=${title//,/%2C}
     title=${title//:/%3A}
