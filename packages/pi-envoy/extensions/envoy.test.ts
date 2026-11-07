@@ -19544,6 +19544,9 @@ describe("consumer delivery", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0]?.content).toContain("runs no side turn");
     expect(cards[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+    // The inert path stamps the hand-over state too, so a later reading of the stored transcripts
+    // says which state held the waiting card.
+    expect(cards[0]?.details).toMatchObject({ handOver: "inert" });
     expect(session.events.indexOf("written dispatch-late-btw")).toBeLessThan(
       session.events.indexOf(`${inbox} done`)
     );

@@ -170,7 +170,7 @@ import {
   modelReference,
 } from "../src/agent-stream";
 import { CardAges } from "../src/card-age";
-import { CardWake } from "../src/card-wake";
+import { CardWake, INERT_HAND_OVER } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import { sessionDispatchClient } from "../src/dispatch-session";
@@ -1142,6 +1142,9 @@ export default function envoyExtension(pi: PiApi): void {
   // on the message it writes, beside the wake's card marker. An `inert` card is a steer that starts
   // no turn on an idle host; a turn streaming when it is handed takes it and runs another model
   // turn for it, so `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
+  // It carries `details` of its own all the same, the hand-over state `INERT_HAND_OVER`, so a
+  // reading of the stored transcripts says which state held every waiting card; it carries no
+  // `envoyCard`, since the wake tracks no inert card and an id there would name nothing.
   // Every other card goes as the wake says (`CardWake.deliveryFor`): an aside with `triggerTurn`,
   // never a steer, so no card waits in the steering queue a person's typed message uses; the wake
   // records a startup card, which goes as a follow-up, before the host has it.
@@ -1158,7 +1161,7 @@ export default function envoyExtension(pi: PiApi): void {
           customType: "envoy-message",
           content,
           display: true,
-          ...(frame === undefined ? {} : { details: frame }),
+          details: { ...frame, handOver: INERT_HAND_OVER },
         },
         { deliverAs: "steer", triggerTurn: false }
       );
