@@ -502,6 +502,116 @@ check "fails once the step is gone" "$(is "$status" 1)"
 check "names the step, its job and the file that does not have it" \
   "$(contains "$out" 'a why cites step "echo build" of job build, which .github/workflows/site.yaml does not have')"
 
+# A job that calls a reusable workflow gives it its steps, so the go commands, the `env:` blocks
+# and the shells that decide what that job compiles are in the called file. The check reads them
+# there, exactly as it reads a job's own steps: ci.yaml's dispatch-browser job does this with
+# dispatch-browser.yaml, whose multiprocess job builds the Dispatch server.
+
+# calls_workflow <root>: a `suite` job that calls .github/workflows/suite.yaml, whose `rows` job
+# builds ./cmd/app, with the filter, the ci-ok map entry and the gate that go with it.
+calls_workflow() {
+  local root=$1
+  replace "$root/.github/workflows/ci.yaml" '      image: ${{ steps.filter.outputs.image }}' \
+    $'      image: ${{ steps.filter.outputs.image }}\n      suite: ${{ steps.filter.outputs.suite }}'
+  replace "$root/.github/workflows/ci.yaml" "            image:" \
+    $'            suite:\n              - \'.github/workflows/ci.yaml\'\n              - \'.github/workflows/suite.yaml\'\n              - *workspace\n              - \'mod/cmd/app/*\'\n              - \'mod/lib/*\'\n            image:'
+  replace "$root/.github/workflows/ci.yaml" '{"app": "app", "image": "image"}' \
+    '{"app": "app", "image": "image", "suite": "suite"}'
+  cat >> "$root/.github/workflows/ci.yaml" <<'YAML'
+  suite:
+    needs: changes
+    if: needs.changes.outputs.suite == 'true'
+    uses: ./.github/workflows/suite.yaml
+    with:
+      ci-ok-changes: ${{ toJSON(needs.changes) }}
+YAML
+  cat > "$root/.github/workflows/suite.yaml" <<'YAML'
+name: Suite
+on:
+  workflow_call:
+    inputs:
+      ci-ok-changes:
+        type: string
+        default: ""
+jobs:
+  rows:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build the app
+        run: go build ./cmd/app
+        working-directory: mod
+      - name: Report ci-ok when this is the run's last job
+        if: always()
+        uses: ./.github/actions/ci-ok-report
+        with:
+          job: suite
+          changes: ${{ inputs.ci-ok-changes }}
+          job-status: ${{ job.status }}
+YAML
+  replace "$root/.github/scripts/ci_job_reads.py" 'EXCLUDED = {' \
+    $'GATES.append(gate("suite", "suite", runs=[\n    run("mod", ["./cmd/app"], at("rows", "Build the app", ".github/workflows/suite.yaml") + ": go build ./cmd/app",\n        step="Build the app", text="go build ./cmd/app", mode="build"),\n], reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition"),\n          Read(".github/workflows/suite.yaml", "the suite reads the definition of the steps it runs")]))\nEXCLUDED = {'
+}
+
+echo "case: a gate whose job calls a workflow is read over that workflow's jobs"
+root=$(fixture called-workflow-green)
+calls_workflow "$root"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "counts the called job's files" "$(contains "$out" '^suite: [0-9][0-9]* files, 0 uncovered (filter suite)$')"
+
+echo "case: a package added to the called workflow's go command, outside the job's filter"
+root=$(fixture called-workflow-package)
+calls_workflow "$root"
+replace "$root/.github/workflows/suite.yaml" "        run: go build ./cmd/app" "        run: go build ./cmd/app ./other"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job of the called file and the line" \
+  "$(contains "$out" 'job rows of .github/workflows/suite.yaml, which job suite calls step "Build the app" runs `go build ./cmd/app ./other`')"
+check "names the package the called job now also builds" "$(contains "$out" 'it also names ./other')"
+
+echo "case: a go command of the called workflow that no Run claims"
+root=$(fixture called-workflow-unclaimed)
+calls_workflow "$root"
+replace "$root/.github/workflows/suite.yaml" "      - name: Build the app" \
+  $'      - name: Vet the library\n        run: go vet ./lib\n        working-directory: mod\n      - name: Build the app'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "asks for the Run" \
+  "$(contains "$out" 'job rows of .github/workflows/suite.yaml, which job suite calls step "Vet the library" runs `go vet ./lib`, which no Run in ci_job_reads.py lists')"
+
+# The three comments of dispatch-browser.yaml that tell a reader to keep a name out of a step's
+# `env:` rest on this: the called file's env: and shell: reach the gate's go commands, so one
+# the check cannot read drops them to everything a go command can read.
+echo "case: a name outside ENV_ALLOWED in the called workflow's step env"
+root=$(fixture called-workflow-env)
+calls_workflow "$root"
+replace "$root/.github/workflows/suite.yaml" "        working-directory: mod" \
+  $'        working-directory: mod\n        env:\n          PROBE_SETTING: on'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the env it cannot read" "$(contains "$out" 'step "Build the app".s env sets PROBE_SETTING')"
+check "and falls to every Go file of the repository" "$(contains "$out" 'mod/other/other.go')"
+
+echo "case: a shell: on the called workflow's step"
+root=$(fixture called-workflow-shell)
+calls_workflow "$root"
+replace "$root/.github/workflows/suite.yaml" "        working-directory: mod" \
+  $'        working-directory: mod\n        shell: bash'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the shell" "$(contains "$out" 'step "Build the app" runs under shell: `bash`')"
+check "and falls to every Go file of the repository" "$(contains "$out" 'mod/other/other.go')"
+
+# A `#` line is not a command. dispatch-browser.yaml's install steps say in a comment that the
+# job writes nothing to $GITHUB_ENV, and reading that as a write would be exactly backwards.
+echo "case: a comment naming \$GITHUB_ENV in the called workflow's step"
+root=$(fixture called-workflow-env-comment)
+calls_workflow "$root"
+replace "$root/.github/workflows/suite.yaml" "        run: go build ./cmd/app" \
+  $'        run: |\n          # This job writes nothing to $GITHUB_ENV, for the reason its head gives.\n          go build ./cmd/app'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
 echo "case: a package added to a go command the table claims, outside the job's filter"
 root=$(fixture appended-package)
 replace "$root/.github/workflows/ci.yaml" "run: go test ./cmd/app ./lib" "run: go test ./cmd/app ./lib ./other"

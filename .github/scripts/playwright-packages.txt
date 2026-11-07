@@ -1,0 +1,113 @@
+# The apt packages the Dispatch browser suite installs for Playwright: Playwright's whole
+# ubuntu24.04-x64 list, which is the union of the `tools`, `chromium`, `firefox` and `webkit`
+# entries of that table in playwright-core's lib/coreBundle.js. Nothing is left out of it.
+#
+# This file held that list less four media packages until dispatch://INFRA-1506
+# (cybermonklabs/legion#2888) put the whole list back: WebKit plays video and audio through
+# GStreamer, so without gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-libav
+# and libavcodec60 it loads a page and plays nothing. What each of those four carries, and the
+# decoder guard that proves they reached the GStreamer registry, are in the head of
+# .github/scripts/playwright-install.sh, the script that reads this file.
+#
+# Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456: the 79 names below and
+# gstreamer1.0-tools resolve, with their dependencies, to 182 packages and 114 MB of archives
+# (`0 upgraded, 182 newly installed, 0 to remove and 27 not upgraded.` and `Need to get 114 MB
+# of archives.`).
+#
+# gstreamer1.0-tools is not one of these names. It is the one package the install adds that
+# Playwright's list does not name - it carries the `gst-inspect-1.0` the decoder guard runs -
+# and it is held apart, in the script's `step_tools`, because this file is what
+# .github/scripts/playwright-deps-current.sh holds against Playwright's own list, name for name.
+#
+# One script reads it, .github/scripts/playwright-install.sh, which the "Install the lane's
+# Playwright browsers" step of .github/workflows/dispatch-browser.yaml's shard job and of its
+# alone job both run; its `grep` drops these `#` lines and the blank ones. That filter is
+# load-bearing: the shell reads this file, not apt, and `$packages` is left unquoted there and
+# splits into words, so a comment line reaches apt as one package name per word. That script
+# then holds this list against Playwright's own with .github/scripts/playwright-deps-current.sh.
+#
+# On a Playwright upgrade, re-derive the list as that union again, with nothing taken out of it.
+# Deriving it at run time by subtracting one apt closure from another does not work and must not
+# be written: the closure of the four that carry playback and the closure of the rest share 35
+# packages Playwright's own list names or needs, and the subtraction leaves WebKit unable to
+# launch. That paragraph is a standing refusal, not a record of a design that was taken out:
+# nobody is to re-derive a reduced list.
+fonts-freefont-ttf
+fonts-ipafont-gothic
+fonts-liberation
+fonts-noto-color-emoji
+fonts-tlwg-loma-otf
+fonts-unifont
+fonts-wqy-zenhei
+gstreamer1.0-libav
+gstreamer1.0-plugins-bad
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+libasound2t64
+libatk-bridge2.0-0t64
+libatk1.0-0t64
+libatomic1
+libatspi2.0-0t64
+libavcodec60
+libavif16
+libcairo-gobject2
+libcairo2
+libcups2t64
+libdbus-1-3
+libdrm2
+libenchant-2-2
+libepoxy0
+libevent-2.1-7t64
+libflite1
+libfontconfig1
+libfreetype6
+libgbm1
+libgdk-pixbuf-2.0-0
+libgles2
+libglib2.0-0t64
+libgstreamer-gl1.0-0
+libgstreamer-plugins-bad1.0-0
+libgstreamer-plugins-base1.0-0
+libgstreamer1.0-0
+libgtk-3-0t64
+libgtk-4-1
+libharfbuzz-icu0
+libharfbuzz0b
+libhyphen0
+libicu74
+libjpeg-turbo8
+liblcms2-2
+libmanette-0.2-0
+libnspr4
+libnss3
+libopus0
+libpango-1.0-0
+libpangocairo-1.0-0
+libpng16-16t64
+libsecret-1-0
+libvpx9
+libwayland-client0
+libwayland-egl1
+libwayland-server0
+libwebp7
+libwebpdemux2
+libwoff1
+libx11-6
+libx11-xcb1
+libx264-164
+libxcb-shm0
+libxcb1
+libxcomposite1
+libxcursor1
+libxdamage1
+libxext6
+libxfixes3
+libxi6
+libxkbcommon0
+libxml2
+libxrandr2
+libxrender1
+libxslt1.1
+xfonts-cyrillic
+xfonts-scalable
+xvfb

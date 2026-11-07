@@ -119,12 +119,24 @@ jobs:
     steps:
       - uses: ./.github/actions/pull-test-images
       - run: docker pull $REGISTRY@$NATS
-      # The three shapes IMAGE_FROM covers in the real tree, so this fixture holds its entries
-      # to a command each, as the check demands.
+      - run: docker run --rm "\$ENVOY_SMOKE_IMAGE" ls
+YAML
+  # The third shape IMAGE_FROM covers lives in the file that holds it in the real tree: the
+  # browser suite's own workflow, whose shard job starts the file store from the digest a Go
+  # constant names, which is why the fixture below writes that job and no other. It was
+  # ci.yaml's dispatch job's step until the suite moved out of it.
+  # The check holds each entry to a command, so this shape has a file of its own here too.
+  cat > "$root/.github/workflows/dispatch-browser.yaml" <<YAML
+name: Dispatch browser suite
+on:
+  workflow_call:
+jobs:
+  shard:
+    runs-on: ubuntu-24.04
+    steps:
       - run: |
           image=\$(sed -n 's/^const Image = "\\(.*\\)"\$/\\1/p' packages/envoy/internal/tests3/seaweedfs.go)
-          docker pull "\$image"
-      - run: docker run --rm "\$ENVOY_SMOKE_IMAGE" ls
+          docker run -d --name dispatch-e2e-files "\$image" server -s3
 YAML
   cat > "$root/.github/actions/pull-test-images/action.yml" <<'YAML'
 name: Pull the images tests start

@@ -122,7 +122,7 @@ function fail(error: unknown): never {
 
 /** The lane's bucket in the file store the caller started, made here with one request. A bucket
  *  is mutable state every lane would otherwise share; a run of one lane keeps the caller's own,
- *  the bucket it made itself (`.github/workflows/ci.yaml`). */
+ *  the bucket it made itself (`.github/workflows/dispatch-browser.yaml`'s shard job). */
 async function laneBucket(index: number, count: number): Promise<string | undefined> {
   const endpoint = (process.env.DISPATCH_E2E_FILE_STORE_ENDPOINT ?? "").trim().replace(/\/$/, "");
   const bucket = (process.env.DISPATCH_E2E_FILE_STORE_BUCKET ?? "").trim();

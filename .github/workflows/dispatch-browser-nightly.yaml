@@ -1,0 +1,50 @@
+name: Dispatch browser nightly
+
+# The full browser lane, once a night and on request. ci.yaml's dispatch-browser job runs the
+# pull-request lane on a change, the two projects a pull request is held to, and the full lane -
+# all eight parallel projects, the three `-alone` ones and the two-process job - on every other
+# event, so the merge group and the push to main each run it. This run covers a day with no such
+# event (.github/workflows/dispatch-browser.yaml, which holds every step).
+#
+# What a red run does, and what it does not. The run fails, and its merged report, every leg's
+# blob and the failed legs' traces are artifacts of that run; GitHub mails the default branch's
+# last committer that a scheduled workflow failed. Nothing else is told: this call passes no
+# `ci-ok-changes`, so the merge job's report step does not run and the run posts no check, files
+# no issue and sends no message. dispatch://INFRA-1066's R22 owns a reader for nightly results,
+# and this workflow deliberately builds no second one: a reader written here is the thing R22
+# would then have to replace.
+#
+# GitHub starts a scheduled run from the default branch alone, so the nightly is main's copy of
+# this file and of the workflow it calls, never a pull request's (e2e.yaml's head comment states
+# the same of its own nightly). A change to either is proven before main by ci.yaml's
+# dispatch-browser job: the pull-request lane on the pull request that makes it, and the full
+# lane in the merge group that lands it. It runs here only once it is on main.
+
+on:
+  schedule:
+    # Nightly, hours from e2e.yaml's 04:41, the repository's other schedule: a full lane takes
+    # four shard machines, three alone machines and a two-process machine at once, and two
+    # nightlies starting together would queue behind each other for the account's runners.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+# One nightly at a time. A run that overran into the next night would otherwise run beside the
+# new one on the same runners; `cancel-in-progress: false` queues the new run instead of killing
+# the old one, so neither night's report is lost.
+concurrency:
+  group: dispatch-browser-nightly
+  cancel-in-progress: false
+
+# What the called workflow's jobs need: the clone and the pinned downloads (`contents: read`),
+# and the merge job's read of this run's own jobs through the API (`actions: read`). No
+# `checks: write`, which the ci-ok report would need: this call passes no `ci-ok-changes`, so
+# that step does not run and this workflow posts no check.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  full:
+    uses: ./.github/workflows/dispatch-browser.yaml
+    with:
+      lane: full

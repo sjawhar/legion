@@ -30,7 +30,8 @@
 #   1. a file a gate reads that its filter does not match (up to 20 named per gate, with why),
 #   2. a gate whose filter the changes job lacks, or whose job's (or step's) if: does not test it,
 #   3. a job or step gated on a filter the table neither lists in GATES nor EXCLUDES,
-#   4. a run: line of a ci.yaml job that starts a go command (test, vet, build, run, list,
+#   4. a run: line of a ci.yaml job - or of a job of a local workflow that job calls, which is
+#      where such a job's steps are - that starts a go command (test, vet, build, run, list,
 #      install, generate) no Run of a gate on that job claims and no exact entry's step holds, or
 #      a claimed line in the simple form (below) whose packages, -tags, -race or mode (test, vet,
 #      or build) are not exactly its Run's,
@@ -80,8 +81,9 @@
 # defaults.run.shell on the job or the workflow, no container: on the job, no name outside
 # ENV_ALLOWED (test configuration go never reads; GO*, CGO_*, BASH_ENV, ENV, HOME,
 # XDG_CONFIG_HOME and PATH are outside it) in the workflow's, job's or step's env, no step of the
-# job writing $GITHUB_ENV or $GITHUB_PATH or running `go env -w`
-# (each reaches every later go command unseen), and the step's working directory (its own, else
+#      job writing $GITHUB_ENV or $GITHUB_PATH or running `go env -w` on a line of its script
+#      that is not a comment
+#      (each reaches every later go command unseen), and the step's working directory (its own, else
 # the job's or workflow's defaults.run, else the root) the Run's. A -race line's closure is the
 # one `go list -race` lists, so its Run says race too. A script_run is held exact instead: the
 # script's line holding its text must be that text alone and uncontinued, under such an env,
@@ -100,8 +102,9 @@
 # reads. It fails wide, never narrow: a new evasion is answered by falling to everything, not by
 # more parsing.
 #
-# What it reads, and what it does not: ci.yaml's own steps (their run: text, shell, working
-# directory and env: blocks), the job's and workflow's env and defaults, and the scripts and steps
+# What it reads, and what it does not: ci.yaml's own steps and those of the jobs of a local
+# workflow one of its jobs calls (their run: text, shell, working directory and env: blocks),
+# each job's own env and defaults and those of the file that holds it, and the scripts and steps
 # the table pins. It does not read the environment a local action or a repository script writes
 # (a composite action's own $GITHUB_ENV or $GITHUB_PATH, a script's export), nor what such a
 # script runs beyond its pinned line. A pinned repository script is read the way Python splits

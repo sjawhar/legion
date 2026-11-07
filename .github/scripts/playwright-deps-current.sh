@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# Does the pinned apt list of ci.yaml's "Install Playwright Chromium, WebKit and Firefox" step
-# still hold the same names as Playwright's own list? That step installs Playwright's whole
-# ubuntu24.04-x64 list, so the two lists hold the same names, and this script holds them against
-# each other both ways: every name Playwright asks for is one the pinned list holds, and every
-# pinned name is one Playwright asks for. It runs after the step's install, so it also expects
-# Playwright to report nothing missing. Either of the first two failing is a list that has
-# fallen behind, and the third failing is an install that did not deliver the names it was
-# given; this fails on any of them.
+# Does the pinned apt list of .github/workflows/dispatch-browser.yaml's "Install the lane's
+# Playwright browsers" step still hold the same names as Playwright's own list? That step
+# installs Playwright's whole ubuntu24.04-x64 list, so the two lists hold the same names, and
+# this script holds them against each other both ways: every name Playwright asks for is one
+# the pinned list holds, and every pinned name is one Playwright asks for. It runs after the
+# step's install, so it also expects Playwright to report nothing missing. Either of the first
+# two failing is a list that has fallen behind, and the third failing is an install that did
+# not deliver the names it was given; this fails on any of them.
 #
-# The pinned list is the arguments. Playwright's own list is printed nowhere, so it is read from
-# the `apt-get install -s --no-install-recommends` call its dry run makes, which the recording
-# `apt-get` below captures.
+# The pinned list is the arguments, and the file it comes from is
+# .github/scripts/playwright-packages.txt, one package per line, which
+# .github/scripts/playwright-install.sh reads and hands to this check. Playwright's own list is
+# printed nowhere, so it is read from the `apt-get install -s --no-install-recommends` call its
+# dry run makes, which the recording `apt-get` below captures.
 #
-# Its one caller is that step, which runs it from packages/dispatch after `bunx playwright
-# install chromium webkit firefox`, so both sides are read from the same state. It changes no
+# gstreamer1.0-tools is in neither list. The install script adds it for the `gst-inspect-1.0`
+# its decoder guard runs, and Playwright's list does not name it, so it is kept out of the
+# pinned list and out of these arguments; a check that was given it would fail the second
+# direction below. That script's head says the same.
+#
+# Its one caller is .github/scripts/playwright-install.sh, which the install step of
+# dispatch-browser.yaml's shard job and of its alone job both run. It runs this check from
+# packages/dispatch, the working-directory of both of those steps, after its own
+# `bunx playwright install`, so both sides are read from the same state. It changes no
 # directory, and the one file it writes, the record of Playwright's apt call, is in a temporary
 # directory it removes on exit.
 #
 # It takes the pinned list as its arguments, and `bunx` resolves Playwright from the caller's
 # working directory, so it reads the Dispatch suite's Playwright only when it is run from
 # packages/dispatch: .github/scripts/playwright-deps-current.sh $packages
-# CI runs it in ci.yaml's dispatch job, and its tests in ci.yaml's test job.
+# CI runs it in those two jobs of dispatch-browser.yaml, and its tests in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -159,14 +168,14 @@ done
 failed=false
 if [ "${#unpinned[@]}" -gt 0 ]; then
   echo "::error::Playwright asks for system packages the install step's list does not pin:" \
-    "${unpinned[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unpinned[*]} - re-derive the pinned list in .github/scripts/playwright-packages.txt" \
+    "from playwright-core's lib/coreBundle.js, as that file's head says."
   failed=true
 fi
 if [ "${#unasked[@]}" -gt 0 ]; then
   echo "::error::the install step's list pins system packages Playwright does not ask for:" \
-    "${unasked[*]} - re-derive packages= in .github/workflows/ci.yaml from playwright-core's" \
-    "lib/coreBundle.js, as the comment above that step says."
+    "${unasked[*]} - re-derive the pinned list in .github/scripts/playwright-packages.txt" \
+    "from playwright-core's lib/coreBundle.js, as that file's head says."
   failed=true
 fi
 if [ "${#missing[@]}" -gt 0 ]; then

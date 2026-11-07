@@ -1469,9 +1469,10 @@ own lane's values under the plain names.
 A lane's Postgres comes from one of two providers (`e2e/harness-postgres.ts`),
 and a run of more than one lane that names neither is refused naming both.
 `DISPATCH_E2E_PG_IMAGE` is a `docker run` of the image digest the caller names,
-which is CI's path: a runner has Docker and no Postgres binaries, and the
-`dispatch` job passes the pgvector digest its `postgres` service ran before the
-lanes. `DISPATCH_E2E_PG_BIN` is a directory holding `initdb` and `pg_ctl`,
+which is CI's path: a runner has Docker and no Postgres binaries, and the shard
+and alone jobs of `.github/workflows/dispatch-browser.yaml` pass the pgvector
+digest on their browser step's own command line.
+`DISPATCH_E2E_PG_BIN` is a directory holding `initdb` and `pg_ctl`,
 which is a developer's and an issue pod's path, where there is a Postgres
 installation and no Docker; that provider runs `initdb` once per run and copies
 the data directory it made per lane, since `initdb` is the cost that grows with
@@ -1505,11 +1506,44 @@ against servers a person started (`DISPATCH_E2E_REUSE_SERVERS=1`),
 `packages/pi-legion/scripts/skill-scenarios/seed.ts` and
 `scripts/e2e/dispatch-claimant-delivery.sh`.
 
-CI runs the whole suite, with more than one worker, in the `dispatch` job of
-`.github/workflows/ci.yaml`, which exports the worker count and the pgvector
-digest on the browser step's own command line. A role does not run the whole
-suite in an issue pod — two CPUs do not carry it — it runs the files it is
-working on.
+Every browser row of the suite runs in `.github/workflows/dispatch-browser.yaml`, which
+`.github/workflows/ci.yaml`'s `dispatch-browser` job calls with one of two lanes.
+A pull request runs the `pull-request` lane: the projects `chromium` and `iphone`, split over four
+shard machines, each leg running `--shard=N/4` with four workers.
+A merge group, a push to main and the nightly (`.github/workflows/dispatch-browser-nightly.yaml`)
+run the `full` lane: all eight parallel projects over those same four shards, the three `-alone`
+projects each on a machine of its own with `--no-deps` and one worker, and the two-process job.
+Each shard leg exports the worker count and the pgvector digest on the browser step's own command
+line rather than in an `env:`, for the reason that step's comment gives: a name outside
+`.github/scripts/ci_filter_coverage.py`'s `ENV_ALLOWED`, in the job's `env:` or in one of its
+steps', drops `e2e/run-server.sh`'s `go build` out of `.github/scripts/check-ci-filters.sh`'s
+reduction.
+The `merge` job of that workflow joins every leg's blob report into one report, publishes the
+run's rows, its flake rate and the legs that did not succeed, and is the one job of the workflow
+that reports ci-ok, so a run gets one verdict and not seven.
+The `dispatch` job of `.github/workflows/ci.yaml` keeps the dashboard's lint, typecheck, unit tests
+and build, and runs no browser row.
+A role does not run the whole suite in an issue pod — two CPUs do not carry it — it runs the files
+it is working on.
+
+One shard leg by hand is that leg's own command without CI's blob reporter and its memory and CPU
+samplers, run from `packages/dispatch` with a Postgres provider the lanes above name:
+`DISPATCH_E2E_WORKERS=4 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone --shard=1/4`.
+The `full` lane's leg names all eight parallel projects in place of those two.
+A local run retries nothing; CI retries a failed row once
+(`retries: process.env.CI ? 1 : 0` in `e2e/playwright.config.ts`), except in the three `-alone`
+projects and the two-process project, which set `retries: 0` of their own: a row whose claim is a
+wall-clock time has nothing to gain from a second attempt, and the two-process job writes no blob
+report, so a retried row there would be published nowhere.
+That retry is what makes a flaky row reportable: a row that fails and then passes is `flaky` in
+the merged report rather than failed, and the rate the `merge` job publishes counts those rows.
+The rate is of the sharded and `-alone` legs' rows; the two-process rows are in no rate, and one
+that fails fails its job, as before.
+The trace is one value for both runs, `trace: "retain-on-first-failure"`, which records the first
+attempt and keeps it when that attempt failed, so a flaky row carries the trace of the attempt
+that failed, which is the one that explains it.
+`on-first-retry` would not: it records on the retry alone, and a row is flaky exactly when its
+retry passed, so it would keep a trace of a green run and leave the failure none.
 
 A row of this suite takes under two seconds, or says above its `test(` why it
 cannot. The reason goes in a `// SLOW(>=2s): <what it spends the time on>`
@@ -1899,11 +1933,14 @@ reads while another writes it, and a fixed absolute path is somebody else's
 file on a shared box. `e2e/artifacts.e2e.ts` writes the note and the diagram it
 uploads that way; the tree holds no `e2e/fixtures/` directory.
 
-`e2e/tools/` holds the two tools that read a run. `ci-row-inventory.ts` turns
-one `dispatch` CI job's log into its per-row inventory, a TSV of
-`index project file line col title ms status`, with a reconciliation on stderr
-against the log's own `Running N tests using M worker(s)` line and its summary,
-exiting 1 when the counts disagree. `measure-summary.ts` summarises the records
+`e2e/tools/` holds two tools, and no third.
+`check-slow-rows.ts` is the row-length check the `SLOW(>=2s)` paragraph above describes.
+A per-row inventory is no longer a tool's: it comes from the merged JSON report of the
+`dispatch-browser` lane, which the `merge` job of `.github/workflows/dispatch-browser.yaml` writes
+with `playwright merge-reports --reporter=html,json,list` over every leg's blob report and uploads
+as the run's `dispatch-browser-report-<attempt>` artifact, each row in it carrying its project,
+file, line, title, status and duration.
+`measure-summary.ts` summarises the records
 of the timing fixture (`e2e/measure.ts` and `e2e/measure-reporter.ts`, which do
 nothing unless `E2E_MEASURE_FILE` names a file for the run to write): one
 markdown table per input file, so a base run and a head run read side by side,
@@ -1954,9 +1991,11 @@ mode runs them alone (the sign-in spec only under `DISPATCH_E2E_SIGNIN=oidc`, be
 twice (`web/dist`, then `web/dist-b` with `DISPATCH_BUILD=e2e-b`, so its entry chunk differs from
 A's even where CI sets `GITHUB_SHA`; `web/vite.config.ts` takes `DISPATCH_BUILD` first) and runs
 Playwright through `e2e/run.ts` in two-process mode with B on `dist-b`, passing on extra arguments
-(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). CI's
-`dispatch-browser-multiprocess` job runs it. Two-process mode starts its own servers, so the
-Playwright config refuses it with `PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`).
+The `multiprocess` job of `.github/workflows/dispatch-browser.yaml` runs it, on the full lane
+alone.
+Two-process mode starts its own servers, so the Playwright config refuses it with
+`PLAYWRIGHT_BASE_URL`, and `bun run dispatch:local` refuses it.
 
 `DISPATCH_E2E_SIGNIN` picks how the harness's servers sign a person in (`e2e/harness-signin.ts`):
 unset or empty is dev sign-in, above, and `oidc` is the production sign-in, through
@@ -1982,10 +2021,11 @@ header reaches only a navigation's first request and the callback is the issuer'
 checks that the browser lands on the page `next` named, signed in on both processes, and that
 `/_proxy/requests` saw each served where it was pinned; against a server that kept the sign-in in
 the memory of the process that started it, B answers the callback 400 `invalid or expired state`.
-`e2e/__tests__/harness-signin.test.ts` (`bun run test`) holds the refusals and the listener table's
-wiring. Run it as `DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess`; CI's
-`dispatch-browser-multiprocess` job runs it after the dev sign-in specs, on the dashboard the step
-before built.
+`e2e/__tests__/harness-signin.test.ts` (`bun run test`) holds the refusals and the listener
+table's wiring.
+Run it as `DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess`; the `multiprocess` job of
+`.github/workflows/dispatch-browser.yaml` runs it after the dev sign-in specs, on the dashboard
+the step before built.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
 starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port

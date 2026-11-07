@@ -170,12 +170,24 @@ const expectTimeout = 15_000;
 
 // Two-process mode's one project: the multiprocess specs, in Chromium, the sign-in spec alone under
 // DISPATCH_E2E_SIGNIN=oidc and every other one without it.
+//
+// `retries: 0`, against the one retry the run takes on CI, and for a reason of its own: the
+// `-alone` projects below also set it, but their argument is about the wall clock and does not
+// reach here. This project's argument is that nothing publishes its flaky rows. The job that
+// runs it (.github/workflows/dispatch-browser.yaml's multiprocess job) writes no blob report,
+// and the merge job that reports the run's flake rate reads the shard and alone legs' blobs
+// alone, so a row that failed and passed on a retry here would appear in no rate and no list.
+// Its test-results upload is `if: failure()`, so a retried row would leave no trace either. With
+// no retry the job stays what it has always been: a failed row fails it, the upload runs, and
+// the trace of that one attempt is kept (`trace: 'retain-on-first-failure'` below). A blob leg
+// for this job would end the argument, and there is none.
 const multiprocessProjects = [
   {
     name: "chromium",
     testMatch: harnessSignIn === "oidc" ? signInSpecs : multiprocessSpecs,
     testIgnore: harnessSignIn === "oidc" ? undefined : signInSpecs,
     use: { ...devices["Desktop Chrome"] },
+    retries: 0,
   },
 ];
 
@@ -358,6 +370,13 @@ const parallelProjects = [
  * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it
  * asserts, because what puts it here is that its claim is a wall-clock time, and
  * `heavy-bodies.e2e.ts` carries no engine tag at all - the two tagged projects ignore it.
+ *
+ * Each also sets `retries: 0`, which Playwright takes per project as it takes `workers`,
+ * against the one retry the run takes on CI. The reason is these rows' own, and holds whatever
+ * the reporting around them does: a row whose claim is a wall-clock time has nothing to gain
+ * from a second attempt, because a threshold that a regression misses half the time would fail
+ * the first attempt, pass the retry, be reported `flaky`, and leave the run green where it
+ * should be red. The multiprocess project above sets the same value on a different argument.
  */
 const aloneProjects = [
   {
@@ -366,6 +385,7 @@ const aloneProjects = [
     testMatch: clockSpecs,
     use: { ...devices["Desktop Chrome"] },
     workers: 1,
+    retries: 0,
   },
   {
     name: "firefox-alone",
@@ -373,6 +393,7 @@ const aloneProjects = [
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Firefox"] },
     workers: 1,
+    retries: 0,
   },
   {
     name: "webkit-alone",
@@ -384,6 +405,7 @@ const aloneProjects = [
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Safari"] },
     workers: 1,
+    retries: 0,
   },
 ] satisfies Project[];
 
@@ -399,6 +421,13 @@ export default defineConfig({
   // `test.describe.configure({ mode: "serial" })` and the reason.
   fullyParallel: true,
   workers: lanes,
+  // One retry on CI, none locally. A row that fails once and passes on the retry is reported
+  // `flaky` rather than failed, which is what the merged report of the dispatch-browser lane
+  // publishes its flake rate from. Locally a retry would hide a failure the developer is looking
+  // at, and `bun run e2e` is read as pass or fail. This is the sharded projects' value: the
+  // three `-alone` projects and the multiprocess one each set `retries: 0`, each for a reason
+  // its own comment gives.
+  retries: process.env.CI ? 1 : 0,
   // With E2E_MEASURE_FILE set, the timing fixture's reporter writes one row per test beside the
   // list reporter's own output (e2e/measure-reporter.ts); without it the run is untouched.
   reporter: measuring
@@ -409,7 +438,15 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
     baseURL: baseUrl,
     headless: true,
-    trace: "retain-on-failure",
+    // One value for both runs. `retain-on-first-failure` records the first attempt and keeps it
+    // when that attempt failed (`mode === "retain-on-first-failure" && this._testInfo.retry
+    // === 0`, node_modules/.bun/playwright@1.64.1/node_modules/playwright/lib/worker/
+    // workerProcessEntry.js:554), so a flaky row carries the trace of the attempt that failed,
+    // which is the one that explains it. `on-first-retry` records on the retry alone (:550,
+    // `retry === 1`), and a row is flaky exactly when its retry passed, so that mode would keep
+    // a trace of a green run and leave the failure none. Locally, with `retries: 0`, the first
+    // attempt is the only attempt, so this is the `retain-on-failure` the suite had before.
+    trace: "retain-on-first-failure",
   },
   // Runs before any row, against the servers the checks above require: it refuses a target that
   // does not read this run's fake Envoy, and in two-process mode a pair whose processes do not
