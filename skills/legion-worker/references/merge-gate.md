@@ -145,9 +145,9 @@ reviewing until you finish.
   is a gap the tester and the reviewer named and neither refused, so that comment is its only
   gate: it names the gap and decides how each delivered item is proven at this head, never
   whether one stays unmet; checks it writes close the root's `criteria` step where the
-  deployment gates that step, since that step records the root's Verification document and each
-  new version of a step's document closes it, and a child's Verification document is gated by
-  nothing. It also reads the reviewer's prose commits here with the rest, no new round, and does
+  deployment gates it, since that step records the root's Verification document, and a child's
+  is gated by nothing. It also reads the reviewer's prose commits here with the rest, no new
+  round, and does
   not accept while the issue holds a finding ask no controller took (`findings.md`, "When no
   controller takes it"). Approval is gated by the `before_merge` checks of the issue's own
   Verification document at its head, so a child's result against a root's check proves nothing:
