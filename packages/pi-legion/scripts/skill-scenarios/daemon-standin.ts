@@ -76,8 +76,8 @@ const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", r
  * the first four are the empty lists the daemon's MarshalJSON emits when there is none.
  * `wakesWaiting`, the wakes the pacing holds until their turn, is optional to the reader; the rig
  * carries it empty, as a daemon at this contract serves a caller in no pod holding no wake.
- * daemon's resolved legion.yaml with no credential in it, also required; the rig has no file, so
- * it carries the two keys the reader types at the daemon's defaults. */
+ * `settings` is the daemon's resolved legion.yaml with no credential in it, also required; the rig
+ * has no file, so it carries the two keys the reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [], trees: [issue], blocked: [] },
