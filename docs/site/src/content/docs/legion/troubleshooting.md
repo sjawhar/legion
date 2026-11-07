@@ -980,13 +980,24 @@ notice comes once per handoff commit, from whichever pass finds it first.
   right after it with the same `event_id` names the step that was running, with the error
   `context deadline exceeded`. Each Dispatch or GitHub read is cut on its own at the
   acknowledgement window, so a handling that reaches ten minutes is most often waiting on the
-  database, the fact lock above all: every fact of every consumer is applied under one Postgres
-  advisory lock held for its transaction (`pg_advisory_xact_lock(hashtext('legion.apply_fact'))`),
-  so one transaction that does not finish holds every other fact behind it. Facts are not its
-  only holders, so a wait here is not always another fact: the daemon's own boot reconcile and
-  its narrowing of a tree take it, as do the settlement of a parked tree's decision and the
-  publication of the repository mapping, each for the length of its own transaction. The next
-  delivery of the same event takes the same path and is cut the same way.
+  database. One Postgres advisory lock is what it most often waits on,
+  `pg_advisory_xact_lock(hashtext('legion.apply_fact'))`, which every fact takes for the length of
+  its transaction and the daemon's other lifecycle writes take too, so the holder is as often one
+  of those as another fact. Ask the daemon's database who holds it rather than guessing:
+
+  ```sql
+  select a.pid, a.state, a.xact_start, a.query
+    from pg_locks l
+    join pg_stat_activity a on a.pid = l.pid
+   where l.locktype = 'advisory'
+     and l.classid = (hashtext('legion.apply_fact')::bigint >> 32 & 4294967295)::oid
+     and l.objid = (hashtext('legion.apply_fact')::bigint & 4294967295)::oid
+     and l.objsubid = 1
+   order by l.granted desc, a.xact_start;
+  ```
+
+  The first row is the holder, the rest are waiting on it, and `xact_start` says how long it has
+  held. The next delivery of the same event takes the same path and is cut the same way.
 - **`an intake fact outlived its acknowledgement window and was held in progress while it ran`**
   (an info line with `consumer`, `event_id`, `delivered` and `took`). The handling took longer
   than the consumer's acknowledgement window (`worker_rpc_timeout_seconds`), and intake held the
