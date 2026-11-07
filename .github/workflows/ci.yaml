@@ -45,6 +45,21 @@ name: CI
 # only on a push to main whose job succeeded and whose restore missed the exact key. setup-bun
 # reads and writes its cache only on main (.github/actions/setup-bun).
 
+# Retries: every step below that gets something over the network makes five bounded attempts
+# rather than one, the last starting 150 s after the first (dispatch://INFRA-1545, R1). The loop
+# lives in one place, .github/scripts/ci-retry.sh, which a step sources and then calls as
+# `retry_fetch <what> <per-attempt bound in seconds> -- <command...>`; that file's own header
+# says why it is sourced rather than run, and why each attempt is bounded on its own. Where the
+# verb is curl no helper is needed: `--retry 7 --retry-all-errors --max-time <bound>` beside
+# `-fsSL` makes 8 attempts whose last starts 127 s after the first, and
+# .github/actions/install-changie/action.yml carries the one full explanation of that spelling,
+# `--fail` included. What retries is the download and never the work after it: each job's Go
+# modules come down in a `go mod download` step of its own, after that job's cache restore and
+# before its first Go step, so no `go build`, `go test`, `go vet` or `go run` is ever re-run by
+# a retry. Each bound is derived from its own step's measured maximum and names it beside the
+# call. A bound is per attempt, so a step's or a job's `timeout-minutes` is not its retry
+# arithmetic: the budgets this change leaves stale are recomputed by a task of their own.
+
 # No `paths:`: every change starts this workflow, and `changes` selects what runs. No `branches:`
 # on pull_request: a pull request on any base is tested. No `edited`: a title or body edit starts
 # no run (pr-title.yaml checks those). `ready_for_review` starts the run a draft skipped. No
@@ -228,6 +243,12 @@ jobs:
             biome: &biome
               - 'biome.json'
               - '.gitignore'
+            # The one retry every download of this workflow goes through: a job that installs
+            # dependencies, downloads a browser or downloads its Go modules sources this file and
+            # calls the retry_fetch it defines (the Retries note in this file's header), so a
+            # change to it must re-run those jobs.
+            ci_retry: &ci_retry
+              - '.github/scripts/ci-retry.sh'
             # The root Go workspace: a go command under go.work reads it, go.work.sum, and the
             # go.mod and go.sum of every module it binds, whose requirements move the versions the
             # build compiles.
@@ -588,6 +609,7 @@ jobs:
             # `go vet -tags e2e ./...` in packages/daemon.
             typecheck:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - 'packages/daemon/**'
               - *daemon_envoy_deps
@@ -597,6 +619,7 @@ jobs:
             # packages/claude-envoy/tests/build-inputs.test.ts.
             claude_envoy: &claude_envoy
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               # .bun-version is also read by scripts/build.ts:23: the build depends on the Bun it
               # pins.
               - *bun_install
@@ -681,6 +704,7 @@ jobs:
               - '.github/workflows/ci.yaml'
               - '.github/workflows/docs-pages.yaml'
               - '.github/workflows/docs-site.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - *go_workspace
@@ -743,6 +767,7 @@ jobs:
               - '.github/scripts/repo-paths.sh'
             contracts:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'packages/contracts/**'
@@ -768,11 +793,13 @@ jobs:
             # (the root manifest and lockfile pin its TypeScript and Bun types), and Biome.
             conflicts_script:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'scripts/conflicts/**'
             envoy_client:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'packages/envoy-client/**'
@@ -789,6 +816,7 @@ jobs:
             # The private workspace package both Oh My Pi plugins import.
             pi_shared:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'packages/pi-shared/**'
@@ -810,6 +838,7 @@ jobs:
             # skills guard reads (src/skills-guard.test.ts:29-33).
             pi_envoy:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'packages/pi-envoy/**'
@@ -837,6 +866,7 @@ jobs:
             # the package.
             pi_legion:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *biome
               - 'packages/pi-legion/**'
@@ -889,6 +919,7 @@ jobs:
               - *omp_install
             dispatch: &dispatch
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               # The install step runs it, so a change to it must re-run this job.
               - '.github/scripts/playwright-deps-current.sh'
               - *bun_install
@@ -959,6 +990,7 @@ jobs:
               - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *go_workspace
               # gofmt -l . walks every .go file under packages/envoy, and its tests walk it too
@@ -997,6 +1029,7 @@ jobs:
             # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
             envoy_infra_go:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - 'packages/envoy/infra/**'
               - *dispatch_server
@@ -1025,6 +1058,7 @@ jobs:
             # bun_install anchor: no test of these packages runs bun.
             envoy_go_race:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - 'packages/envoy/**'
               # listener-server-change takes its -run from this script, and this is the job that
@@ -1038,6 +1072,7 @@ jobs:
             # rather than the package list its closure would give.
             envoy_go_race_api:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - 'packages/envoy/**'
               # internal/dispatch/api/delivery_live_diff_test.go:982,1011.
@@ -1049,6 +1084,7 @@ jobs:
             # one and what those packages embed.
             envoy_go_race_docs:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               # The race step runs the package under this sampler (the step's comment says why).
               - '.github/scripts/race_memory.py'
               - *go_workspace
@@ -1098,6 +1134,7 @@ jobs:
             # in-process NATS (its line 47).
             dispatch_memory:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
@@ -1106,6 +1143,7 @@ jobs:
             # `go test -tags multiprocess ./cmd/dispatch`, the same closure as dispatch_memory.
             dispatch_multiprocess:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
@@ -1118,6 +1156,7 @@ jobs:
             # testdata included.
             listener_server_change:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - *listener_command
               - 'packages/envoy/internal/broker/helper/*'
@@ -1183,6 +1222,7 @@ jobs:
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *go_workspace
               - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/agent-secrets/*'
@@ -1235,6 +1275,10 @@ jobs:
             # steps' reads.
             envoy_smoke:
               - '.github/workflows/ci.yaml'
+              # The job's Go modules come down through this helper, which it sources (the
+              # Retries note in this file's header). Named rather than taken from the *ci_retry
+              # anchor: check-image-trigger-paths.sh reads this filter as a flat list of globs.
+              - '.github/scripts/ci-retry.sh'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
               # install (every workspace manifest, and the tarball
               # packages/proof-editor/package.json installs proof-sdk-upstream from) and the Bun
@@ -1303,6 +1347,7 @@ jobs:
             # read, runs it.
             envoy_e2e_local:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *go_workspace
               - 'packages/envoy/scripts/e2e-local.sh'
@@ -1320,6 +1365,7 @@ jobs:
             # run each plugin's NATS client through them; the plugins inline pi-shared.
             envoy_session_stall:
               - '.github/workflows/ci.yaml'
+              - *ci_retry
               - *bun_install
               - *go_workspace
               - 'packages/envoy/**'
@@ -1418,6 +1464,9 @@ jobs:
             # packages/envoy and, inside it, packages/envoy/infra): any Go change selects it.
             go_notices:
               - '.github/workflows/ci.yaml'
+              # The notices step's modules come down through this helper, which the download
+              # step before it sources (the Retries note in this file's header).
+              - *ci_retry
               - &any_go_change ['**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum', 'packages/daemon/**', 'packages/envoy/**']
               - '.github/go-release-targets.json'
               - '.github/agent-secrets-client-targets.json'
@@ -1486,6 +1535,8 @@ jobs:
             ci_images:
               - '.github/ci-images.yaml'
               - '.github/scripts/mirror-ci-images.sh'
+              # mirror-ci-images.sh reads the registry through this helper, which it sources.
+              - '.github/scripts/ci-retry.sh'
               - '.github/scripts/check-ci-images.sh'
               - '.github/scripts/ci_images.py'
               - '.github/actions/install-crane/**'
@@ -1611,15 +1662,26 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s over 180 observations in the 20 most
+      # recent successful ci.yaml push runs on main, over five times it. The step is named for
+      # the command it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job cites
+      # a frozen install by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
 
       # The frozen install above does not refuse a workspace `version` the lockfile does not hold.
       # --lockfile-only writes the lockfile the manifests imply and installs nothing, so a
       # difference here is what a reader's own `bun install` would write.
       - name: Check bun.lock agrees with the workspace manifests
         run: |
-          bun install --lockfile-only
+          . .github/scripts/ci-retry.sh
+          # Retried as the frozen install above is, and bounded by the same measurement: this
+          # resolve-only run reads the same manifests and installs nothing, so it cannot cost
+          # more than that install's 11 s maximum, and 60 s per attempt is over five times it.
+          retry_fetch "the lockfile the manifests imply" 60 -- bun install --lockfile-only
           if ! git diff --exit-code bun.lock; then
             echo "::error file=bun.lock::bun.lock disagrees with the workspace manifests; run bun install and commit bun.lock, and after a forward merge of main take one side's bun.lock whole before installing"
             exit 1
@@ -1648,6 +1710,25 @@ jobs:
             ~/.cache/legion
           key: go-notices-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-notices-{0}-', runner.os) || '' }}
+
+      # The modules the notices step loads for every release target, downloaded once and retried
+      # before it (the header's Retries note; the retried unit is the download, never the build).
+      # It runs on the step's own condition, so a run that skips the notices step downloads
+      # nothing. Three calls, because the step builds in three module directories and
+      # packages/envoy/infra is a workspace of its own, which the root go.work does not bind.
+      #
+      # 300 s per attempt: cold `go mod download` runs measured on an empty module cache at 81 s
+      # for packages/daemon, 77 s for packages/envoy and 113 s for packages/envoy/infra, so the
+      # bound is nearly four times the slowest of the root workspace's two and over two and a
+      # half times the infra module's. The cache restored above makes the common run cost
+      # nothing.
+      - name: Download the Go modules this job builds
+        if: needs.changes.result != 'success' || needs.changes.outputs.go_notices == 'true'
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+          retry_fetch "packages/envoy/infra's Go modules" 300 -- go -C packages/envoy/infra mod download
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
@@ -1794,6 +1875,15 @@ jobs:
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
 
+      # The module the vet below compiles, downloaded once and retried before it (the header's
+      # Retries note; the retried unit is the download, never the vet). 300 s per attempt: a cold
+      # `go mod download` of packages/daemon measured 81 s on an empty module cache, so the bound
+      # is nearly four times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
+
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
       - name: Vet the Go daemon, its e2e-tagged live proofs included
@@ -1866,8 +1956,13 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
 
       # The very command release.yaml's claude_envoy_build runs, so a pull request whose source
       # that job would refuse fails this job, and with it the required ci-ok, instead of merging
@@ -2026,6 +2121,20 @@ jobs:
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
+      # The modules this job's Go steps build, downloaded once and retried before the first of
+      # them (the header's Retries note; the retried unit is the download, never the build and
+      # never the test). One call: the root go.work binds packages/daemon and packages/envoy,
+      # and a download in either reads both modules' requirements, so this call also fetches what
+      # scripts/e2e/lib/held-port.test.ts builds packages/envoy's listener from (measured: the
+      # second call takes a second).
+      #
+      # 300 s per attempt: a cold `go mod download` of packages/daemon measured 81 s on an empty
+      # module cache, so the bound is nearly four times it; the restore above makes the common
+      # run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the Go workspace's modules" 300 -- go -C packages/daemon mod download
 
       # After setup-go: held-port.test.ts builds the real envoy-listener and hands it a held socket.
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict, the held-port helper)
@@ -2150,7 +2259,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Lint contracts
         run: bun run lint
         working-directory: packages/contracts
@@ -2180,7 +2295,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Lint the conflict measurement script
         run: bunx biome check --error-on-warnings scripts/conflicts
       # scripts/conflicts is no workspace; the root package pins its TypeScript and Bun types.
@@ -2206,7 +2327,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Build contracts for Envoy client
         run: bun run build
         working-directory: packages/contracts
@@ -2250,7 +2377,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Lint pi-shared
         run: bun run lint
         working-directory: packages/pi-shared
@@ -2296,7 +2429,13 @@ jobs:
       # (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub Actions without one. The pin
       # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build
         working-directory: packages/contracts
@@ -2388,7 +2527,22 @@ jobs:
             ~/.cache/go-build
           key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-daemon-{0}-', runner.os) || '' }}
-      - run: bun install --frozen-lockfile
+      # The module daemon-pane.test.ts runs `go run -overlay` in, downloaded once and retried
+      # before the test step that starts it (the header's Retries note; the retried unit is the
+      # download, never the run). 300 s per attempt: a cold `go mod download` of packages/daemon
+      # measured 81 s on an empty module cache, so the bound is nearly four times it; the restore
+      # above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/daemon's Go modules" 300 -- go -C packages/daemon mod download
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Build contracts for pi-legion
         run: bun run build
         working-directory: packages/contracts
@@ -2508,8 +2662,24 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The modules each lane's run-server.sh builds the Dispatch server from, downloaded once
+      # and retried before the first step that compiles (the Retries note in this file's header;
+      # the retried unit is the download, never the build). 300 s per attempt: a cold
+      # `go mod download` of packages/envoy measured 77 s on an empty module cache, so the bound
+      # is nearly four times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. The step is named
+      # for the command it runs, which is the handle .github/scripts/ci_job_reads.py's bun_job
+      # cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
         # e2e/agent-view.e2e.ts imports AGENT_STREAM_LIMITS and capAgentStreamText as values
         # (LEGION-548), which Playwright's own Node resolution reads from contracts' built
@@ -2715,6 +2885,13 @@ jobs:
           # the status separates a mirror that stalled from one that refused. What an exhausted
           # phase means is the caller's: the update below ends the step, and the download moves
           # to another origin and takes its last attempt there.
+          #
+          # This loop stays, and so do its four calls: the apt phase of this step is
+          # dispatch://INFRA-1443's, which dispatch://INFRA-1545's R2 lists as an exception, and
+          # its two attempts and then another origin are the design. The retry helper every
+          # other download in this repository's CI goes through makes five attempts on one
+          # origin and cannot switch, so putting it here would be a regression. The browser
+          # download at the end of this step is the half that uses it.
           attempts() {
             local left=$1 what=$2 status
             shift 2
@@ -2763,8 +2940,17 @@ jobs:
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $packages
           # The browsers alone. Named, because with no argument Playwright resolves its own
-          # default set rather than this job's three.
-          bunx playwright install chromium webkit firefox
+          # default set rather than this job's three. This download is the half of this step
+          # that retries, through .github/scripts/ci-retry.sh (the header's Retries note); the
+          # apt phase above keeps its own loop, for the reason stated there.
+          #
+          # 900 s per attempt: the three cold browser downloads measured 634 s together across
+          # the 20 most recent successful ci.yaml push runs on main, against 28 s where the
+          # cache served them, so the bound is over 40 per cent above that cold maximum. The
+          # step's own `timeout-minutes` above is older than this retry and is not recomputed
+          # here.
+          . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
+          retry_fetch "Playwright's three browsers" 900 -- bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
           # given on this line: $packages, unquoted so it splits into words, as apt takes it
@@ -2985,8 +3171,22 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The modules this job's "Build the Dispatch server" step and each lane's run-server.sh
+      # compile, downloaded once and retried before either (the header's Retries note; the
+      # retried unit is the download, never the build). 300 s per attempt: a cold
+      # `go mod download` of packages/envoy measured 77 s, so the bound is nearly four times it.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
         # The e2e helpers the specs import read some of contracts' values from its built dist/,
         # through Playwright's own Node resolution (the dispatch job's step of the same name).
@@ -3027,7 +3227,16 @@ jobs:
         # playwright-Linux- entry is 481 MiB. The dispatch job's cache stays and is worth its
         # place; this job's would not be.
         timeout-minutes: 4
-        run: bunx playwright install chromium
+        run: |
+          # The download retries through .github/scripts/ci-retry.sh (the header's Retries note).
+          # 300 s per attempt: this step measured at most 15 s across the 20 most recent
+          # successful ci.yaml push runs on main, where the browsers came from the runner image's
+          # cache - the 339 s in the table above is a wider window and almost all of it the apt
+          # fetch this step no longer makes - and a cold Chromium is about 210 s, so the bound is
+          # 20 times the measured maximum and above that cold figure. The step's
+          # `timeout-minutes` above is older than this retry and is not recomputed here.
+          . "$GITHUB_WORKSPACE/.github/scripts/ci-retry.sh"
+          retry_fetch "Playwright's Chromium" 300 -- bunx playwright install chromium
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard against two server processes
         # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
@@ -3069,7 +3278,13 @@ jobs:
       # endpoint and Dispatch, and refuses on GitHub Actions without one. The pin is read from
       # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
       - uses: ./.github/actions/install-claude-code
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
         working-directory: packages/claude-envoy
@@ -3140,7 +3355,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -3156,6 +3377,14 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-test-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-test-{0}-', runner.os) || '' }}
+      # The module the steps below test, build and pack, downloaded once and retried before the
+      # first of them (the header's Retries note; the retried unit is the download, never the
+      # build and never the test). 300 s per attempt: a cold `go mod download` of packages/envoy
+      # measured 77 s on an empty module cache, so the bound is nearly four times it.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -3343,6 +3572,15 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-infra-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-infra-{0}-', runner.os) || '' }}
+      # The infra module's own workspace, downloaded once and retried before the vet and the
+      # tests below (the header's Retries note; the retried unit is the download, never the
+      # build and never the test). 300 s per attempt: a cold `go mod download` of
+      # packages/envoy/infra measured 113 s on an empty module cache, so the bound is over two
+      # and a half times it.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy/infra's Go modules" 300 -- go -C packages/envoy/infra mod download
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -3475,6 +3713,15 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The module the race step builds, downloaded once and retried before it (the header's
+      # Retries note; the retried unit is the download, never the build and never the test).
+      # 300 s per attempt: a cold `go mod download` of packages/envoy measured 77 s on an empty
+      # module cache, so the bound is nearly four times it. This job restores no module cache, so
+      # this is where every one of its modules arrives.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
         run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
@@ -3522,6 +3769,12 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # As envoy-go-race's download step: 300 s per attempt against a cold packages/envoy
+      # measured at 77 s, nearly four times it, and this job restores no module cache either.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Race-test the Dispatch API
         run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
@@ -3590,6 +3843,13 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The module the race step builds, downloaded once and retried before it (the header's
+      # Retries note). 300 s per attempt against a cold packages/envoy measured at 77 s, nearly
+      # four times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       # Under the sampler, not bare: the race detector maps about four bytes of shadow memory per
       # byte of heap, and this package's race binary asked for more than the runner's 16 GiB,
       # which has no swap. The kernel killed this step three times with no output at all, which
@@ -3676,6 +3936,13 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The module the step below builds, downloaded once and retried before it (the header's
+      # Retries note). 300 s per attempt against a cold packages/envoy measured at 77 s, nearly
+      # four times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       # -v, because the package's leak check prints its line from TestMain after the tests have
       # run: go test in package-list mode buffers the test binary's own output and drops it when
       # the package passes, so without -v a green run would carry the `ok` line and nothing else,
@@ -3729,6 +3996,14 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # The module the memory tests build, downloaded once and retried before them (the header's
+      # Retries note; the retried unit is the download, never the test). 300 s per attempt
+      # against a cold packages/envoy measured at 77 s, nearly four times it. This job restores
+      # no module cache, so this is where its modules arrive.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Memory tests of the Dispatch server
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh memory ./cmd/dispatch)
@@ -3783,6 +4058,12 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # As dispatch-memory's download step: 300 s per attempt against a cold packages/envoy
+      # measured at 77 s, nearly four times it, and this job restores no module cache either.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Two-process tests of the Dispatch server
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/dispatch)
@@ -3836,6 +4117,13 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The module the soak builds, downloaded once and retried before it (the header's Retries
+      # note). 300 s per attempt against a cold packages/envoy measured at 77 s, nearly four
+      # times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Server-change soak of the listener
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh serverchange ./cmd/listener)
@@ -3905,6 +4193,12 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # As dispatch-memory's download step: 300 s per attempt against a cold packages/envoy
+      # measured at 77 s, nearly four times it, and this job restores no module cache either.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Two-process tests of the secrets broker
         run: |
           pattern=$(../../.github/scripts/go-tagged-tests.sh multiprocess ./cmd/broker)
@@ -3947,6 +4241,19 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
+      # Both modules this job compiles on the host: packages/envoy for the smoke test, and
+      # packages/envoy/infra, a workspace of its own, for the live tests and the plugin build.
+      # Downloaded once and retried before any of them (the header's Retries note; the retried
+      # unit is the download, never the build and never the test). 300 s per attempt: cold
+      # `go mod download` runs measured 77 s for packages/envoy and 113 s for
+      # packages/envoy/infra on an empty module cache, so the bound is nearly four times the
+      # first and over two and a half times the second. This job restores no module cache, so
+      # this is where its modules arrive. The image builds below download inside the image.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
+          retry_fetch "packages/envoy/infra's Go modules" 300 -- go -C packages/envoy/infra mod download
       # Every image the build or the test starts (testnats.Image and the smoke image's base
       # images) is pulled first, for the reason .github/actions/pull-test-images gives. Every
       # FROM of docker/Dockerfile names a digest and no ARG, so the substitution below expands
@@ -4051,7 +4358,12 @@ jobs:
           version=$(sed -n 's/^const DockerPluginVersion = "\(.*\)"$/\1/p' internal/pulumitest/pulumitest.go)
           [ -n "$version" ] || { echo "::error::no const DockerPluginVersion in internal/pulumitest/pulumitest.go"; exit 1; }
           tarball="$RUNNER_TEMP/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
-          curl -fsSL -o "$tarball" "https://github.com/pulumi/pulumi-docker/releases/download/v$version/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
+          # Retried in curl's own spelling, which .github/actions/install-changie/action.yml
+          # explains in full, `--fail` - the `f` of `-fsSL` - included. 30 s per attempt: this
+          # step measured at most 1 s across the 20 most recent successful ci.yaml push runs on
+          # main, so the bound is 30 times its measured maximum.
+          curl -fsSL --retry 7 --retry-all-errors --max-time 30 \
+            -o "$tarball" "https://github.com/pulumi/pulumi-docker/releases/download/v$version/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy/infra
@@ -4112,7 +4424,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -4127,6 +4445,14 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The module e2e-local.sh builds the listener and natsd from, downloaded once and retried
+      # before it (the header's Retries note; the retried unit is the download, never the build).
+      # 300 s per attempt against a cold packages/envoy measured at 77 s, nearly four times it;
+      # the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
       # never reaches: an unknown option, --help, and an E2E_NATS_PORT, E2E_PORT or E2E_SESSION_PORT
       # another process already holds, which the driver uses as given and fails on rather than
@@ -4186,7 +4512,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
+      # Retried like every install in this workflow (the header's Retries note); 60 s per attempt
+      # against this install's measured maximum of 11 s, over five times it. Named for the
+      # command it runs, which is the handle ci_job_reads.py's bun_job cites it by.
+      - name: bun install --frozen-lockfile
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 60 -- bun install --frozen-lockfile
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -4202,6 +4534,14 @@ jobs:
             ~/.cache/go-build
           key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      # The module test/envoy-stack.ts builds the listener and natsd from, downloaded once and
+      # retried before the suites start it (the header's Retries note; the retried unit is the
+      # download, never the build). 300 s per attempt against a cold packages/envoy measured at
+      # 77 s, nearly four times it; the restore above makes the common run cost nothing.
+      - name: Download the Go modules this job builds
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "packages/envoy's Go modules" 300 -- go -C packages/envoy mod download
       - name: Build contracts for the stall suites
         run: bun run build
         working-directory: packages/contracts
