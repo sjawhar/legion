@@ -3370,23 +3370,30 @@ export type UserState = Record<string, UserIssueState>;
 /** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
  * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
  * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
- * to messages this viewer sent that are newer than both and not read by id (`read_replies`). */
+ * to messages this viewer sent that are newer than both and not read by id (`read_replies`);
+ * `pinned_at` is when the viewer pinned the session, which puts it in their sidebar's Agents
+ * list, oldest pin first. */
 export interface UserAgentState {
   readonly cleared_before?: string;
   readonly read_through?: string;
   /** Absent from an API older than the count, which a rollback can leave a live tab talking to,
    *  so every reader treats it as none rather than rendering NaN. */
   readonly unread_replies?: number;
+  /** RFC3339; absent when the viewer has not pinned this session. */
+  readonly pinned_at?: string;
 }
 
-/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, or any
- * of them together. `read_through` only moves forward and covers every reply up to it;
- * `read_replies` names the session's own messages and covers those alone, for a view that shows
- * only some of a session's replies. The response is the session's whole `UserAgentState`. */
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, the
+ * pin, or any of them together. `read_through` only moves forward and covers every reply up to
+ * it; `read_replies` names the session's own messages and covers those alone, for a view that
+ * shows only some of a session's replies; `pinned` true pins the session to the viewer's sidebar
+ * and false unpins it, touching neither the Clear nor the read mark. The response is the
+ * session's whole `UserAgentState`. */
 export interface UserAgentStateInput {
   readonly cleared_before?: string;
   readonly read_through?: string;
   readonly read_replies?: readonly string[];
+  readonly pinned?: boolean;
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */

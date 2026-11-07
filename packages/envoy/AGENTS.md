@@ -2712,7 +2712,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   inherited attachments are not edges), `model.GraphEdgeKinds`, the structural edge kinds, holds `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
 
 - Per-user agent state is its own tables and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue).
-  `PUT /api/v1/me/agents/{session_id}/state` (needs the `person` scope) takes `{cleared_before?, read_through?, read_replies?}` (the first two RFC3339;
+  `PUT /api/v1/me/agents/{session_id}/state` (needs the `person` scope) takes `{cleared_before?, read_through?, read_replies?, pinned?}` (the first two RFC3339;
   at least one): `cleared_before` upserts the viewer's Clear into `user_agent_state(login, session_id, cleared_before)` (`store/migrations/0033_user_agent_state.up.sql`), replacing the previous one, and `read_through` upserts their read mark into `user_agent_read(login, session_id, read_through)` (`0051_user_agent_read.up.sql`), which only moves forward so a tab that read less a moment ago cannot make a reply unread again, keyed on `model.CanonicalLogin(actor.ID)` as `user_ask_snooze` is.
   `read_replies`, the ids of messages the path's session wrote, adds one row per reply to `user_agent_reply_read(login, session_id, reply_id)` (`0067_user_agent_reply_read.up.sql`, keyed on the canonical login too, primary key `(login, reply_id)`), which reads those replies and no other:
   a view that shows only some of a session's replies (the broadcast page, each recipient's reply to that broadcast) writes it, because moving the read mark through them would also read the session's older reply to another message, which the viewer never saw.
@@ -2723,13 +2723,18 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   one `uuid.Parse` cannot read, or one that is not a message the path's session wrote, is `400 INVALID_STATE`, and nothing the request names is written.
   `0051` also inserts one read mark, at the migration's own time, for every (human, session) that already had an issue-less direct message, so the deploy does not turn every reply ever stored into an unread one.
   The read mark is a table of its own because a viewer who has only read a conversation has no Clear, and `user_agent_state.cleared_before` stays `not null` for a Dispatch that predates the read mark and scans it as a timestamp.
+  The pin is a table of its own for both reasons together (`store/migrations/20261106215223_user_agent_pin.up.sql`, INFRA-812): `user_agent_state.cleared_before` cannot be null, so a pinned session nobody has cleared would have no row to carry it, and that table's `login` is the raw actor id where the pin, like the read mark, is keyed on `model.CanonicalLogin(actor.ID)`.
+  `pinned` true upserts `user_agent_pin(login, session_id, pinned_at)` with the server's clock, and false deletes the row;
+  either leaves the Clear beside it exactly as it was, since pinning a conversation is not reading it.
+  The write runs in the PUT's own transaction and announces `user_agent_state.updated` as a Clear does, so another browser of the same person draws the pin with no reload.
   No field given, a malformed value, or a cutoff more than a minute ahead of the server clock (`agentStateCutoffSkew`, the allowance for a fast browser clock) is `400 INVALID_STATE`;
   a value the skew admits is stored as `least(value, now())`, so a reply that lands while a fast browser's mark is still ahead of the server counts;
   the PUT answers the session's whole state.
 
-- `GET /api/v1/me/agents/state` returns `{[session_id]: {cleared_before?, read_through?, unread_replies}}` for the caller:
+- `GET /api/v1/me/agents/state` returns `{[session_id]: {cleared_before?, read_through?, unread_replies, pinned_at?}}` for the caller:
   `unread_replies` counts the rows of `unreadDirectRepliesCTE` (`api/unread_replies.go`, the one definition the conversation window's unread term reads too):
   the session's replies anywhere under a direct message this viewer sent it (an issue-less message targeted at it, a broadcast's copy included, whose author matches the viewer's canonical login) that are newer than both the read mark and the Clear and that the viewer has not read by id, and a session with unread replies appears even with no stored row.
+  `pinned_at` is the viewer's own pin, and the read is a three-way join (`userAgentStatesQuery`): a session that is only pinned, with no Clear, no read mark and no unread reply, is in the answer on its pin alone.
   The PUT touches no message and appends one `user_agent_state.updated` event (`{login, session_id}`, owned by the session like its issue-less messages, so the outbox publishes it nowhere and it never notifies), which the viewer's other open tabs and devices refetch their state on;
   a PUT that names only replies already read by id or passed by the read mark changes nothing and appends none, since a broadcast page sends its replies again on every visit while the session has an unread reply elsewhere.
   A reply the Clear hides but the read mark has not passed is neither, though `unread_replies` leaves it out:

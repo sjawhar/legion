@@ -14,8 +14,8 @@ import "github.com/sjawhar/envoy/internal/dispatch/model"
 // conversation window still lists it by activity, like any other conversation the session is in. It is the recursive part of a
 // `with recursive` query and ends in two relations: `unread_direct_replies(session_id, root_id,
 // reply_id, created_at)`, and the marks it reads them against,
-// `direct_marks(session_id, read_through, cleared_before, at)`, which is also what
-// `GET /api/v1/me/agents/state` answers with.
+// `direct_marks(session_id, read_through, cleared_before, at)`, which is one of the three
+// sources `GET /api/v1/me/agents/state` joins (the viewer's pin is the third).
 //
 // Both endpoints that read it build on this fragment rather than on a predicate of their own:
 // `GET /api/v1/me/agents/state` counts its rows per session (`unread_replies`), and

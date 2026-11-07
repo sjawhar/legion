@@ -12,6 +12,10 @@ import {
 } from "@legion/contracts";
 import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
+/** The `context` frame as the contract carries it: the two figures, with the share they make
+ *  left to the viewer (`contextShare` in `components/ContextRing.tsx`). */
+export type AgentStreamContextFrame = Extract<AgentStreamFrame, { kind: "context" }>;
+
 /**
  * The live conversation a session is streaming, assembled from frames that arrive in whatever
  * order the session's own concurrent handlers produced them.
@@ -31,8 +35,12 @@ export interface AgentConversation {
   /** The model and thinking level the session runs now, as its newest `settings` frame reports
    *  them (INFRA-195); absent until one arrives, which a plugin older than the frame never sends. */
   readonly settings?: AgentStreamSettings;
-  /** The highest `seq` already applied per message id, per tool call id, to the command list and
-   *  to the settings. */
+  /** How full the session's context window is, as its newest `context` frame reports it
+   *  (INFRA-812); absent until one arrives. A session whose host reports no window, or a window
+   *  of zero, publishes none, and the view then draws no ring and no figure. */
+  readonly context?: AgentStreamContextFrame;
+  /** The highest `seq` already applied per message id, per tool call id, to the command list, to
+   *  the settings and to the context figures. */
   readonly applied: Readonly<Record<string, number>>;
 }
 
@@ -145,6 +153,19 @@ export function isRenderableFrame(value: unknown): value is AgentStreamFrame {
   if (frame.kind === "settings") {
     return isSettings(frame as unknown as Record<string, unknown>);
   }
+  if (frame.kind === "context") {
+    // Two finite figures or nothing. A window of zero is no window at all: the contract says a
+    // host reporting one publishes no frame, so a frame carrying one is a publisher this build
+    // does not know, and dropping it leaves the ring absent rather than drawn at 0 percent.
+    return (
+      typeof frame.tokens === "number" &&
+      Number.isFinite(frame.tokens) &&
+      frame.tokens >= 0 &&
+      typeof frame.contextWindow === "number" &&
+      Number.isFinite(frame.contextWindow) &&
+      frame.contextWindow > 0
+    );
+  }
   if (frame.kind !== "message") return false;
   const { message } = frame;
   if (message === undefined || message === null) return false;
@@ -201,6 +222,16 @@ export function applyFrame(state: AgentConversation, frame: unknown): AgentConve
       ...state,
       applied: { ...state.applied, [key]: frame.seq },
       settings: frame,
+    };
+  }
+  if (frame.kind === "context") {
+    // One figure per session, last-writer-wins by `seq` as the settings and the list are.
+    const key = "context";
+    if ((state.applied[key] ?? 0) >= frame.seq) return state;
+    return {
+      ...state,
+      applied: { ...state.applied, [key]: frame.seq },
+      context: frame,
     };
   }
   const key = `m:${frame.message.id}`;

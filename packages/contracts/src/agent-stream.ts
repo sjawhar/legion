@@ -216,6 +216,29 @@ export type AgentStreamFrame =
       readonly kind: "commands";
       readonly seq: number;
       readonly commands: readonly AgentStreamCommand[];
+    }
+  /**
+   * How much of its context window the session fills now, as the host's own `getContextUsage()`
+   * reports it (INFRA-812). The publisher sends it after each message of a turn, at each turn
+   * start and after a compaction, at most one time in each of its own intervals, and keeps the
+   * newest one in every replay. The frame carries the two figures alone; the share they make is
+   * the viewer's to draw.
+   *
+   * They travel in a frame of their own rather than beside the model on `settings` because a
+   * viewer drops a whole frame whose fields do not validate, and a bad figure here would take
+   * the model picker and the thinking level down with it.
+   */
+  | {
+      readonly v: typeof AGENT_STREAM_PROTOCOL;
+      readonly kind: "context";
+      readonly seq: number;
+      /** Context tokens the conversation holds now, as the host estimates them. */
+      readonly tokens: number;
+      /**
+       * The current model's context window, in tokens. Always above zero: a session whose host
+       * reports no window publishes no frame at all.
+       */
+      readonly contextWindow: number;
     };
 
 /** What the relay asks a session for, and the ping that keeps it publishing. */

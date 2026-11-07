@@ -98,6 +98,15 @@ export interface SessionContext {
    * live from a context kept since `session_start`. Absent on a host that predates it.
    */
   readonly getAsyncJobSnapshot?: () => AsyncJobSnapshot | null;
+  /**
+   * The host's `ctx.getContextUsage()`: how much of the current model's context window this
+   * session's conversation fills now, or undefined when the host holds no breakdown to answer
+   * with. It takes no argument on the extension surface, and it is read live from a context
+   * kept since `session_start`. Absent on a host that predates it, so a call site asks
+   * `typeof ctx.getContextUsage === "function"` first, as the host's own callers do
+   * (`typeof this.session.getContextUsage === "function"`).
+   */
+  readonly getContextUsage?: () => ContextUsage | undefined;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     /**
@@ -158,6 +167,25 @@ export interface AsyncJobDelivery {
   readonly delivering: boolean;
   readonly nextRetryAt?: number;
   readonly pendingJobIds: readonly string[];
+}
+
+/**
+ * `ctx.getContextUsage()`'s answer: the context tokens the session's conversation holds now and
+ * the window they are measured against.
+ *
+ * Read out of the pinned binary (`.omp-pin`,
+ * `github:sjawhar/oh-my-pi@18.16.0-sami.20261105-032528`), which builds the extension context
+ * with `getContextUsage: () => this.#d()` over a session method answering
+ * `{tokens: usedTokens, contextWindow, percent: usedTokens / contextWindow * 100}`, and nothing
+ * at all when it holds no context breakdown. `percent` is nullable because the same build
+ * carries a second wiring of this shape, the status line's startup session, which answers
+ * `{tokens: 0, contextWindow, percent: null}`: a reader of these figures handles a host that
+ * reports a window and no percentage.
+ */
+export interface ContextUsage {
+  readonly tokens: number;
+  readonly contextWindow: number;
+  readonly percent: number | null;
 }
 
 /** A side turn: one question to the session's model, answered without touching the transcript. */
