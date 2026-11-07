@@ -4817,7 +4817,7 @@ export async function executeDispatchTool(
       // the session has the words or whether Dispatch is still trying.
       const message = await client.agentMessage(session, {
         body: stringArg(args, "body"),
-        delivery: args.delivery as MessageDeliveryMode,
+        delivery: stringArg(args, "delivery") as MessageDeliveryMode,
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
       });
       const attempt = message.deliveries.at(-1);
