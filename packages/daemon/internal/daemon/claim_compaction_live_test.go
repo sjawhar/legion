@@ -7,14 +7,14 @@
 // under the real daemon. scripts/e2e/claim-compaction.sh builds this driver with `-tags e2e` and
 // owns the nats-server and the PostgreSQL it runs against.
 //
-// It is a sibling of provider_error_retry_live_test.go and shares its machinery: the local
-// runtime that starts a pane with no tmux (localruntime_live_test.go), liveAgentProof's reads of
-// a claim and of the daemon's own log, the recording log handler, the model stand-in and the
-// overlay writers both proofs hold (live_agent_proof_test.go), the run's own database and the
-// two plugins packed from this checkout. What it proves is the other half of
-// R3, so it is a script of its own rather than more steps of that one: the two runs would
-// otherwise share a wall clock, and this one starts four panes and waits out a compaction the
-// endpoint holds for over half a minute.
+// It is a sibling of provider_error_retry_live_test.go, and what the two share is the live-proof
+// base that sits beside them (live_agent_proof_test.go): liveAgentProof's reads of a claim and
+// of the daemon's own log, the recording log handler, the model stand-in, the overlay writers,
+// the run's own database and the two plugins packed from this checkout. The local runtime that
+// starts a pane where there is no tmux is localruntime_live_test.go's. What it proves is the
+// other half of R3, so it is a script of its own rather than more steps of that one: the two
+// runs would otherwise share a wall clock, and this one starts four panes and waits out a
+// compaction the endpoint holds for over half a minute.
 //
 // The overlays are this deployment's rendered shape, which is what makes the compaction's form
 // provable (paneOverlays): an image-capable model, Oh My Pi's own default compaction method order
