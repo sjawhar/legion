@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // envName is a name a shell accepts as a variable, which is also a valid Kubernetes Secret key.
@@ -34,15 +35,29 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 
 // GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
 // files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the project
-// — the role's App token for owner, the one the agent writes to (its issue's repository's owner),
-// and a token of the same App narrowed to reading for every other owner — with owner's directory
-// the bundle's default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle
-// root (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked for the same owner, as
-// the leases near their expiry. The controller writes to no owner and acts as the review App
-// (appauth.AppRoleFor): its bundle holds every owner read-only, the owner it is asked for its
-// default, or the first owner when it is asked for none. A project with no GitHub owner at all to
-// mint for is ErrNoGitHubOwner.
-type GitHubCredential func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error)
+// — the role's App token for the one repository repo names, the one the agent writes to (its
+// issue's), in that repository's owner's directory, and a token of the same App narrowed to
+// reading for every other owner — with a directory of its own under the write owner for each
+// other repository that owner serves, holding a token narrowed to that repository alone. The
+// bundle's default, which GH_CONFIG_DIR names, is repo's own recorded owner's directory. The
+// runtime writes it under the agent's bundle root (LEGION_GH_OWNERS_DIR) and rewrites it from the
+// same function, asked for the same repository, as the leases near their expiry. A call that
+// names no repository writes to nothing: every directory is read-only and the first owner,
+// sorted, is the default, which is what a tmux tree pane whose claim the daemon records no
+// repository for gets. A controller's bundle is no call of this at all, at its launch as at its
+// refresh: it comes from ControllerCredential, which answers by owner. A project with no GitHub
+// owner at all to mint for is ErrNoGitHubOwner.
+type GitHubCredential func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error)
+
+// ControllerCredential is the daemon's one function a runtime calls for the project controller's
+// own gh bundle (appauth.ControllerCredential), which answers by default owner where
+// GitHubCredential answers by repository: a controller works no repository, so a bundle asked
+// for by one would take its default from the first owner the project serves, sorted, and a
+// project that gained an owner sorting before it would move a running controller's default away
+// from the directory its launch fixed as GH_CONFIG_DIR. A refresh asks it for the owner the
+// controller's launch recorded; a launch asks for none, taking the first owner, which is the
+// default it then records.
+type ControllerCredential func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error)
 
 // ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
 // project whose repositories none of the Apps can act on, and a caller that names no owner. A
@@ -52,7 +67,7 @@ var ErrNoGitHubOwner = errors.New("no GitHub owner to mint an App lease for")
 // GHConfigDir is the tmux pane's bundle root (LEGION_GH_OWNERS_DIR): `<state_dir>/secrets/<claim>-gh`,
 // the directory holding the claim's gh bundle (ghconfig.WriteBundle), named for its claim token so
 // the daemon prunes it with the claim's other secret files. Its default owner's directory
-// (ghconfig.OwnerDir) is the pane's GH_CONFIG_DIR. A pod has no use for it: there the files are a
+// (ghconfig.Dir) is the pane's GH_CONFIG_DIR. A pod has no use for it: there the files are a
 // Secret volume the manifest mounts.
 func GHConfigDir(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-gh")

@@ -103,8 +103,8 @@ mapping in Dispatch.
 
 Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
 implement App, a review App and an Envoy App. The daemon mints each agent's token from its role's
-App, with the App's whole installation permissions, so the implement and review Apps' permissions
-are exactly what Legion's agents can do on GitHub:
+App, narrowed to the repositories that agent works and to the permissions its work needs, so the
+implement and review Apps' permissions bound what Legion's agents can do on GitHub:
 
 | App | Write | Read |
 | --- | --- | --- |
@@ -112,7 +112,12 @@ are exactly what Legion's agents can do on GitHub:
 | **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
-change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App asks accounts for, and
+`gh api /app/installations/<id> --jq .permissions`, under the App's own JWT, shows what one
+account granted it. The mint reads that second set before each token and asks for the role's
+permissions cut down to it: a permission the account has not approved is left out of the
+request, and the daemon says so once on its stderr, naming the App, the owner and the
+permission. The daemon itself reads
 GitHub with the implement App too, in a pass as it starts and every two minutes after: it reads
 each open pull request's base branch and the checks that branch requires (its rulesets and its
 branch protection), since only those decide whether CI is red at a head, and so where Legion sends
@@ -451,7 +456,7 @@ What each part is for:
   names the old repository. The loader refuses a pair whose two names are one repository, a
   repository renamed twice, a chain of two pairs (`a/b` to `c/d` with `c/d` to `e/f`), and one
   owner's repositories moved to two owners (`a/b` to `c/d` with `a/e` to `f/g`), since the gh
-  directory a worker reads is keyed by an owner and holds one installation's token; several
+  bundle holds one directory for that owner and one installation's token in it; several
   repositories of one owner may move to one owner, and a rename inside the owner (`a/b` to `a/c`)
   counts as a move to that owner, so `a/b` to `a/c` beside `a/e` to `f/g` is refused.
   `legion start --check-config` prints one line
@@ -496,8 +501,8 @@ What each part is for:
 - **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role, in its own
   namespaces,
   runs before each start of its Oh My Pi. It runs in the role's working directory with the role's
-  environment, and its `git`
-  answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
+  environment, and its `git` answers `https://github.com` for your project's repositories with the
+  role's App token: write for the issue's own repository, read for every other. Oh My Pi starts
   only once it exits 0; a failure is a failed launch, and its output is in the role's log. Under
   this runtime it must fetch nothing: a clone in a role's launch context ends the pod's gVisor
   sandbox a few seconds in, so install skills with `skills_repository` below and leave `setup` to
@@ -955,7 +960,7 @@ Closing the terminal leaves the project without one, and the daemon logs
   line. It is what says whether a wave is still going out, and the last `due` on it is when the
   last of that wave goes.
 
-  The `consumer` lines are the lag of the daemon's three durable consumers on the
+  The `consumer` lines are the lag of the daemon's durable consumers on the
   `ENVOY_NOTIFICATIONS` stream: `legion-go-<project>-dispatch` (Dispatch's issue events and the
   project's repository mapping), `legion-go-<project>-github` (the GitHub events of the project's
   repositories) and `legion-go-<project>-wake` (the Envoy listener's wake reports). Each says how

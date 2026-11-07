@@ -472,6 +472,20 @@ func (r *Rig) MintAccountToken(t *testing.T, account string, lifetime time.Durat
 	return r.podIssuer.Mint(t, r.podKey, claims)
 }
 
+// MintAccountPodToken is MintAccountToken bound to podUID: the projected ServiceAccount token a
+// pod's own kubelet mounts, which names both the account it runs as and the pod it is. A service
+// that logs in with one of these logs in as that pod rather than as the account at large, which
+// is what lets several pods of one account hold logins at the same time.
+func (r *Rig) MintAccountPodToken(t *testing.T, account, podUID string, lifetime time.Duration) string {
+	t.Helper()
+	claims := r.podIssuer.Claims(account, podAudience)
+	now := time.Now()
+	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
+	claims["exp"] = now.Add(lifetime).Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	return r.podIssuer.Mint(t, r.podKey, claims)
+}
+
 // MintSubjectToken mints a pod's projected ServiceAccount token for account, bound to podUID and
 // carrying this Rig's exchange audience: the subject token POST /v1/oauth/token takes for the
 // Kubernetes token type. A podUID of "" mints one bound to no pod, which the exchange refuses.

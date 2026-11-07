@@ -268,14 +268,18 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 	return logins[appauth.Review], nil
 }
 
-// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// mintAtBoot mints the implement and then the review App token for repo, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+// token passed asks GitHub only for the review token. A mint asks for what each App's
+// installation is granted of the role's set and says on stderr what it left out (appauth's
+// exchangeGranted), so a permission an account has not approved no longer stops the boot: what
+// does is a repository the installation cannot reach, an installation granted none of the set
+// at all, or GitHub's own trouble lasting past the retries.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, repo ghrepo.Repository, log *slog.Logger) error {
 	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, appAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
-			if _, err := tokens.Token(ctx, role, owner); err != nil {
+			if _, err := tokens.Token(ctx, role, repo); err != nil {
 				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
@@ -285,9 +289,9 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
-// checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
-// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
-// written before the record carried its repository.
+// checked for both GitHub Apps) into repos, the served repositories every role's gh bundle reads
+// its directories from, the Apps' logins, the App tokens minted for every served repository, then
+// the fill of any record written before the record carried its repository.
 //
 // reserve is the daemon's one wake limiter as the engine reaches it (run builds it, before this
 // and before supervision, which reserves its launches from the same one): the moment the one
@@ -339,8 +343,15 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if err != nil {
 		return nil, err
 	}
-	for _, owner := range w.repositories.Owners() {
-		if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+	// A token names the repository it acts on, so the boot proves each App's key on every
+	// repository the mapping serves rather than once per owner: an installation that does not
+	// reach one of them, or that is granted none of the permissions a role's write token asks
+	// for, stops the boot naming the repository and the set, where it would otherwise leave a
+	// role with no gh files at its launch. An installation granted some of the set mints with
+	// what it is granted, and the mint says the rest on stderr (appauth's exchangeGranted), so
+	// one permission awaiting an account's approval costs the role no gh files at all.
+	for _, repo := range w.repositories.Accepted() {
+		if err := mintAtBoot(ctx, tokens, repo, log); err != nil {
 			return nil, err
 		}
 	}
@@ -766,10 +777,10 @@ func (w *workflowRuntime) reconcileListing(ctx context.Context, issues []dispatc
 // adoption (adoptIdentity) — so neither can mint on an owner the repository has left and fail
 // every launch of a tree open at the transfer.
 func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, recorded ghrepo.Repository) (runtime.GitIdentity, error) {
-	owner := w.repositories.serving(recorded).Owner()
-	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
+	served := w.repositories.serving(recorded)
+	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), served)
 	if err != nil {
-		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
+		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, served, err)
 	}
 	return lease.Identity, nil
 }

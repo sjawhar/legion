@@ -54,6 +54,18 @@ const DURATION_MS: Readonly<Record<string, number>> = {
 };
 /** A driver's error code is printed only in this shape, so no message text ever is. */
 const SAFE_CODE = /^[A-Z][A-Z0-9_]*$/;
+/**
+ * The host state pi-envoy stamps on a card it hands the host, as the `handOver` field of the
+ * `details` the host persists with the message. It is printed only in this shape, a lower-case
+ * word of letters and hyphens, starting with a letter and at most 20 long, so no message text
+ * ever is, and a state the plugin adds later prints as it stands.
+ */
+const SAFE_STATE = /^[a-z][a-z-]{0,19}$/;
+/**
+ * What a line prints in place of that state: for a card that carries none in that shape, and for
+ * a card written before the plugin stamped the state.
+ */
+const UNSTAMPED = "unstamped";
 const SUFFIX = ".jsonl";
 
 const USAGE = `usage: bun scripts/sessions/message-wait.ts --since <duration> [options]
@@ -78,8 +90,12 @@ Options:
 Prints one line per wait of at least the threshold, longest first, in two groups: the waits a
 bash or task call was open for, which the verdict fails on, and every other wait. Each line carries the
 wait, the message's arrival, the calls open at the arrival, the call that took the longest part
-of the wait, and the session. Then the arrivals no assistant message ever answered, which are no
-measured wait, and a verdict line.
+of the wait, the host state when the plugin handed the card over, and the session. Then the
+arrivals no assistant message ever answered, which are no measured wait, and a verdict line.
+
+The plugin's own notices, and the wake it sends itself, are no Envoy message from another
+session: they are in no count and on no line, and no wait is measured for them. A card the
+plugin wrote before it stamped the host state prints that state as unstamped.
 
 A wait runs from the message's own arrival, which its record's timestamp gives, to the first
 assistant message written after that record. Oh My Pi writes the record when the session folds
@@ -115,6 +131,8 @@ interface Arrival {
    * much of the wait it took. None when no call ran at all: the session sat idle.
    */
   readonly longest?: { readonly toolName: string; readonly ms: number };
+  /** The host state when the plugin handed the card over, printed in the shape above. */
+  readonly handOver: string;
 }
 
 interface Measurement {
@@ -133,6 +151,12 @@ interface SessionRecord {
   readonly type?: unknown;
   readonly customType?: unknown;
   readonly timestamp?: unknown;
+  /** The card's own fields, which pi-envoy writes and the host persists: `localNotice` marks a
+   *  notice of the plugin's own (`LOCAL_ENVOY_NOTICE`, `packages/pi-shared/src/envoy-notice.ts`,
+   *  written by `packages/pi-envoy/extensions/envoy.ts` and `src/card-wake.ts`), and `handOver`
+   *  the host state at the hand-over. The shapes are read here, never imported: this script
+   *  imports nothing of the packages. */
+  readonly details?: { readonly localNotice?: unknown; readonly handOver?: unknown };
   readonly message?: { readonly role?: unknown; readonly toolCallId?: unknown };
   readonly data?: {
     readonly toolName?: unknown;
@@ -241,10 +265,20 @@ interface ToolCall {
   to: number;
 }
 
-/** An arrival as the walk holds it: its instant, and the wait once an assistant message lands. */
+/**
+ * An arrival as the walk holds it: its instant, the host state the card was handed over in, and
+ * the wait once an assistant message lands.
+ */
 interface PendingArrival {
   readonly at: number;
+  readonly handOver: string;
   waitMs: number | null;
+}
+
+/** The host state the card carries, in the shape above, or `UNSTAMPED` when it carries none. */
+function handOverState(details: SessionRecord["details"]): string {
+  const state = details?.handOver;
+  return typeof state === "string" && SAFE_STATE.test(state) ? state : UNSTAMPED;
 }
 
 /**
@@ -294,8 +328,18 @@ function measureSession(path: string, text: string): SessionMeasurement {
       continue;
     }
     if (record.type === ARRIVAL_TYPE) {
-      if (record.customType === ARRIVAL_CUSTOM_TYPE && !Number.isNaN(at)) {
-        const arrival: PendingArrival = { at, waitMs: null };
+      // A record the plugin marked as a notice of its own is no arrival at all: it is left out of
+      // every count and every line, and it ends nobody's wait.
+      if (
+        record.customType === ARRIVAL_CUSTOM_TYPE &&
+        !Number.isNaN(at) &&
+        record.details?.localNotice !== true
+      ) {
+        const arrival: PendingArrival = {
+          at,
+          handOver: handOverState(record.details),
+          waitMs: null,
+        };
         measured.push(arrival);
         waiting.push(arrival);
       }
@@ -317,7 +361,7 @@ function measureSession(path: string, text: string): SessionMeasurement {
     waiting.length = 0;
   }
   const session = sessionLabel(path, role);
-  const arrivals = measured.map(({ at, waitMs }) => {
+  const arrivals = measured.map(({ at, handOver, waitMs }) => {
     const openMs = waitMs ?? Math.max(0, last - at);
     const open: string[] = [];
     let longest: { toolName: string; ms: number } | undefined;
@@ -328,7 +372,15 @@ function measureSession(path: string, text: string): SessionMeasurement {
         longest = { toolName: call.toolName, ms };
       }
     }
-    return { session, at, waitMs, openMs, open, ...(longest === undefined ? {} : { longest }) };
+    return {
+      session,
+      at,
+      waitMs,
+      openMs,
+      open,
+      handOver,
+      ...(longest === undefined ? {} : { longest }),
+    };
   });
   return { arrivals, unparsed };
 }
@@ -368,7 +420,7 @@ function describe(arrival: Arrival): string {
     arrival.longest === undefined
       ? "no call ran during the wait"
       : `longest call in the wait ${arrival.longest.toolName} ${formatDuration(arrival.longest.ms)}`;
-  return `open: ${open}  ${longest}`;
+  return `open: ${open}  ${longest}  hand-over: ${arrival.handOver}`;
 }
 
 /** The report, line by line, so a reader and a test see the same run. */
@@ -390,7 +442,10 @@ function report(measurement: Measurement, options: Options): string[] {
   const lines = [
     scope,
     "each line below: the wait, the arrival, the calls open at the arrival (the calls the " +
-      "verdict turns on), the call that took the longest part of the wait, and the session",
+      "verdict turns on), the call that took the longest part of the wait, the host state when " +
+      "the plugin handed the card over, and the session; the plugin's own notices and its own " +
+      "wake are in no count and on no line, and a card written before the plugin stamped the " +
+      "state prints unstamped",
   ];
   const groups = [
     [

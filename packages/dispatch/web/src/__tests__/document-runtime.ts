@@ -196,7 +196,8 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       handle.view,
       options.blockSchema,
       options.onAskBlockHosts,
-      options.watchPicture
+      options.watchPicture,
+      options.anchoredBlock
     );
     editors.push(editor);
     return handle;

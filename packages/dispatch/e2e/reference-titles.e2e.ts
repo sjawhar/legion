@@ -1,14 +1,23 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createComment, editArtifact, getArtifact, listMyReplies } from "./api";
+import {
+  answerAsk,
+  createAsk,
+  createComment,
+  editArtifact,
+  getArtifact,
+  listMyAnswers,
+} from "./api";
 import { documentEditor, openSpec } from "./editor";
 import {
   ANCHOR,
+  answeredQuestionPreview,
   collapsedMarginThread,
+  inboxReplyTurn,
+  openInboxReplies,
   openMarginThread,
   type ReferenceWorld,
   referenceAgent,
-  repliesPreview,
   seedReferenceWorld,
   TARGET_KINDS,
   type Target,
@@ -21,13 +30,20 @@ import { asUser } from "./users";
  * What a `dispatch://` reference reads as, everywhere a person meets one: the title of what it
  * names. A bare address and a link whose text is its own address — the form a document stores an
  * autolink in — both read as the target's title in the live editor, in a past version of the
- * same document, in a rendered comment and in the inert one-line preview of that comment's
- * reply; a link whose text its author wrote keeps those words; and an address whose target does
- * not exist reads as the address, since there is no title to read it as.
+ * same document, in a rendered comment, in that comment's reply where the Inbox draws it, and
+ * in an inert one-line preview; a link whose text its author wrote keeps those words; and an
+ * address whose target does not exist reads as the address, since there is no title to read it
+ * as.
+ *
+ * The inert one-line preview is read on the Answers page. The Replies page carried it until
+ * INFRA-450 deleted that page, and the Inbox that took its rows draws a thread whole with live
+ * links rather than a preview of it, so the preview a reader still meets is an answered ask's
+ * question (`answeredQuestionPreview`).
  */
 
 // Each row seeds the shared world, writes a second version of the host's spec, an anchored
-// comment and ten Replies threads, then reads five surfaces.
+// comment, ten threads the Inbox lists as Reply rows and ten answered asks, then reads six
+// surfaces.
 test.setTimeout(180_000);
 
 test.beforeEach(async () => {
@@ -49,13 +65,24 @@ interface Missing {
   readonly path: string;
 }
 
+/** Where one reference text was written: a thread the Inbox lists as a Reply row, whose reply
+ *  holds the text, and an answered ask whose question holds it. */
+interface Written {
+  /** The thread's root, which is also the Inbox row's thread id. */
+  readonly thread: string;
+  /** The reply holding the text, which is the turn the Inbox row draws it in. */
+  readonly reply: string;
+  /** The answered ask whose question holds the text, which is its Answers row's id. */
+  readonly ask: string;
+}
+
 interface Seeded {
   readonly world: ReferenceWorld;
   /** The anchored comment on the host's spec, which writes every form. */
   readonly comment: string;
   readonly missing: readonly Missing[];
-  /** The root of each Replies thread, by the text its reply holds. */
-  readonly replies: ReadonlyMap<string, string>;
+  /** Where each reference text was written, by the text itself. */
+  readonly written: ReadonlyMap<string, Written>;
 }
 
 /** The three forms a document's text writes a reference in. */
@@ -72,9 +99,9 @@ function forms(kind: TargetKind, target: Target): readonly string[] {
  * link whose text is its own address, and as a link its author worded) and the two addresses
  * whose targets are missing; then a second version of that spec, so version 1 is a past
  * version; then an anchored comment writing the bare and self-addressed forms and the missing
- * addresses; then one Replies thread per form and per missing address, each reply that text
- * alone (one reply holding them all would be longer than the 160 characters a Replies row
- * keeps).
+ * addresses; then, per form and per missing address, a thread whose reply is that text alone -
+ * which the Inbox lists as a Reply row - and an ask whose question is that same text, answered
+ * by the reader so the Answers page draws its inert preview.
  */
 async function seedTitles(): Promise<Seeded> {
   const world = await seedReferenceWorld();
@@ -125,7 +152,7 @@ async function seedTitles(): Promise<Seeded> {
   );
   expect(anchored.anchor?.quote).toBe(ANCHOR);
 
-  const replies = new Map<string, string>();
+  const written = new Map<string, Written>();
   const texts = [
     ...KINDS.flatMap((kind) => {
       const { address } = world.targets[kind];
@@ -135,15 +162,27 @@ async function seedTitles(): Promise<Seeded> {
   ];
   for (const text of texts) {
     const root = await createComment(world.host.key, { body: "Where does this reference lead?" });
-    await createComment(world.host.key, { body: text, reply_to: root.id }, referenceAgent);
-    replies.set(text, root.id);
+    const reply = await createComment(
+      world.host.key,
+      { body: text, reply_to: root.id },
+      referenceAgent
+    );
+    // The ask is the session's, the answer the reader's: that is what puts a row on their
+    // Answers page, and the row's preview is the question the session wrote.
+    const ask = await createAsk(
+      world.host.key,
+      { options: [{ label: "Yes" }, { label: "No" }], question: text },
+      referenceAgent
+    );
+    await answerAsk(ask.id, { expected_edited_at: null, selected: ["Yes"] });
+    written.set(text, { ask: ask.id, reply: reply.id, thread: root.id });
   }
-  // Each reply is its thread's whole first line, the thread on alice's Replies page.
-  const listed = await listMyReplies({ limit: 50 });
-  expect(new Map(listed.rows.map((row) => [row.thread_id, row.reply.first_line]))).toEqual(
-    new Map([...replies].map(([text, root]) => [root, text]))
+  // Each answered ask is one row of alice's Answers page, under the question the session wrote.
+  const answers = await listMyAnswers({ limit: 50 });
+  expect(new Map(answers.rows.map((row) => [row.ask_id, row.question]))).toEqual(
+    new Map([...written].map(([text, where]) => [where.ask, text]))
   );
-  return { comment: anchored.id, missing, replies, world };
+  return { comment: anchored.id, missing, world, written };
 }
 
 /** The one paragraph of a document view that starts with `label`. */
@@ -180,7 +219,7 @@ function missingAnswered(page: Page, seeded: Seeded): Promise<unknown> {
 }
 
 for (const kind of KINDS) {
-  test(`a bare address and a link whose text is its own address to the ${kind.toLowerCase()} read as its title in the live editor, a past version, a comment and its reply's preview`, async ({
+  test(`a bare address and a link whose text is its own address to the ${kind.toLowerCase()} read as its title in the live editor, a past version, a comment, its reply on the Inbox and an inert one-line preview`, async ({
     browser,
   }, testInfo) => {
     const seeded = await seedTitles();
@@ -215,10 +254,24 @@ for (const kind of KINDS) {
       await expect(past).not.toContainText("A second version.");
       await expectDrawnTitles(past, kind, target);
 
-      // The inert one-line preview: each form reads as the title, with no link inside it.
-      await page.goto("/replies");
+      // The reply itself, where a reader meets it on the Inbox: below the reading column's
+      // width a Reply row is the card that draws its thread whole, with live links
+      // (`refresh-freshness.e2e.ts` reads the same row), so each form is a link reading as the
+      // title.
+      await openInboxReplies(page);
       for (const text of [target.address, `[${target.address}](${target.address})`]) {
-        const preview = repliesPreview(page, seeded.replies.get(text) ?? "");
+        const where = seeded.written.get(text);
+        const turn = inboxReplyTurn(page, where?.thread ?? "", where?.reply ?? "");
+        await expect(turn.locator(`a[data-dispatch-ref="${target.address}"]`)).toHaveText(
+          target.title
+        );
+      }
+
+      // The inert one-line preview, which the Answers page carries now that the Replies page
+      // is gone: each form reads as the title, with no link inside it.
+      await page.goto("/answers");
+      for (const text of [target.address, `[${target.address}](${target.address})`]) {
+        const preview = answeredQuestionPreview(page, seeded.written.get(text)?.ask ?? "");
         await expect(preview.locator(`[data-dispatch-ref="${target.address}"]`)).toHaveText(
           target.title
         );
@@ -279,11 +332,12 @@ test("a link its author worded keeps its words in the document, and an address w
     await expectWordsAndAddresses(page.getByTestId("version-view"), seeded);
 
     // The inert one-line preview shows each missing address as written, with no link in it.
-    const repliesAnswered = missingAnswered(page, seeded);
-    await page.goto("/replies");
-    await repliesAnswered;
+    // The Answers page carries it now that the Replies page is gone.
+    const answersAnswered = missingAnswered(page, seeded);
+    await page.goto("/answers");
+    await answersAnswered;
     for (const { address } of seeded.missing) {
-      const preview = repliesPreview(page, seeded.replies.get(address) ?? "");
+      const preview = answeredQuestionPreview(page, seeded.written.get(address)?.ask ?? "");
       await expect(preview.locator(`[data-dispatch-ref="${address}"]`)).toHaveText(address);
       await expect(preview.locator("a")).toHaveCount(0);
     }
