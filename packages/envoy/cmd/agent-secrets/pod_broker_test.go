@@ -1,3 +1,5 @@
+//go:build unix
+
 // packages/envoy/cmd/agent-secrets/pod_broker_test.go
 //
 // The fake broker `enroll --pod` is driven against: it takes the token login, the enrollment and

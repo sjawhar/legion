@@ -92,6 +92,19 @@ and never through `--out`, so the command `enroll --pod` prints names that direc
 and runs as it reads whichever of the two named the directory. Every other form then reads the
 key dir as a box's.
 
+An enrolment the broker refuses leaves the key — a new key while the old enrollment is live is
+refused `ALREADY_ENROLLED` — and records what the broker said in `<out>/enrollment.error`, which
+every later `agent-secrets` call in that directory reads out to the caller. A run that succeeds
+removes it.
+
+**Nothing in the pod ends its enrollment.** `unenroll` goes through the machine's
+`agent-secrets-helper`, which a pod has not, so a pod cannot end its own; and the broker is never
+told the pod is gone, so a pod that dies leaves its enrollment until its lease lapses — at most
+`BROKER_LEASE_SECONDS` after the last renewal, since `renew` dies with the pod. Someone who needs
+it ended sooner revokes the machine login it was made under, on Dispatch's machine-login page,
+which ends every enrollment under that login at once (the "Revoke a session" guide, built from
+`docs/site/src/content/docs/broker/guides/revoke-a-session.md`).
+
 The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 

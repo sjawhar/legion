@@ -1,3 +1,5 @@
+//go:build unix
+
 // packages/envoy/cmd/agent-secrets/pod_enroll_test.go
 //
 // `enroll --pod` against a projected token file and a fake broker: what the pod reads, what it
@@ -11,12 +13,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,6 +244,11 @@ func TestPodUsageRefusals(t *testing.T) {
 		{"--pod with no token file", []string{"--pod", "--service", testPodService, "--pod-token-file", ""}, nil, "--pod-token-file"},
 		{"--pod with no key dir", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile}, map[string]string{"AGENT_SECRETS_KEY_DIR": ""}, "--out"},
 		{"--pod with no broker URL", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile}, map[string]string{"AGENT_SECRETS_URL": ""}, brokerURLVar},
+		// --helper's three, each refused by name rather than silently ignored, as --helper
+		// itself is beside --pod.
+		{"--pod with --runtime-id", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--runtime-id", "pod-1"}, nil, "--runtime-id is --helper's"},
+		{"--pod with --thumbprint", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--thumbprint", "tp"}, nil, "--thumbprint is --helper's"},
+		{"--pod with --session-id", []string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--session-id", "s-1"}, nil, "--session-id is --helper's"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_SECRETS_URL", broker.URL)
@@ -353,5 +362,135 @@ func TestARefusedPodLoginExitsAndNamesTheIdentity(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), token) {
 		t.Fatal("the refusal printed the pod's token")
+	}
+}
+
+// TestARefusedEnrolmentLeavesTheRefusalBesideTheKey: a pod whose enrolment the broker refuses
+// keeps its key — a new key while the old enrollment is live is ALREADY_ENROLLED — and that
+// leaves the one state a later call cannot read on its own: key.pem with no enrollment, which
+// selectSigner reaches on the key alone and then finds no id for. So the refusal is written
+// into enrollment.error beside the key, and a later `agent-secrets` call says what the broker
+// said. A re-run that succeeds takes that file away again.
+func TestARefusedEnrolmentLeavesTheRefusalBesideTheKey(t *testing.T) {
+	token := fakePodToken(t, testPodAccount, testPodUID)
+	tokenFile := writePodToken(t, token)
+	out := t.TempDir()
+	refuse := true
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/launcher-credentials/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"credential_id": "credential-for-the-pod", "expires_at": time.Now().Add(time.Hour),
+			})
+			return
+		}
+		if refuse {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"code": "POD_SELF_ENROLL_ONLY", "error": "this machine login enrols its own pod alone",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"enrollment_id": "enrollment-of-the-pod", "lease_expires_at": time.Now().Add(time.Hour), "slot": nil,
+		})
+	}))
+	defer broker.Close()
+	t.Setenv("AGENT_SECRETS_URL", broker.URL)
+	t.Setenv("AGENT_SECRETS_KEY_DIR", out)
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdEnroll([]string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--out", out}, &stdout, &stderr); code != 1 {
+		t.Fatalf("the refused enrolment = exit %d, want 1 (stderr %q)", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(out, keyFile)); err != nil {
+		t.Fatalf("the key after a refused enrolment: %v; it is kept on purpose", err)
+	}
+	recorded, err := readTrimmed(filepath.Join(out, enrollmentErrorFile))
+	if err != nil {
+		t.Fatalf("read %s after a refused enrolment: %v", enrollmentErrorFile, err)
+	}
+	for _, want := range []string{"POD_SELF_ENROLL_ONLY", "403", testPodUID} {
+		if !strings.Contains(recorded, want) {
+			t.Fatalf("%s holds %q, which does not name %q", enrollmentErrorFile, recorded, want)
+		}
+	}
+	if strings.Contains(recorded, token) {
+		t.Fatalf("%s holds the pod's token", enrollmentErrorFile)
+	}
+
+	// What a later call now says: the broker's refusal, not a missing file.
+	if _, _, err := buildSigner(); err == nil ||
+		!strings.Contains(err.Error(), enrollmentErrorFile) || !strings.Contains(err.Error(), "POD_SELF_ENROLL_ONLY") {
+		t.Fatalf("a later call after a refused enrolment = %v; want it to name %s and what the broker said", err, enrollmentErrorFile)
+	}
+
+	refuse = false
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdEnroll([]string{"--pod", "--service", testPodService, "--pod-token-file", tokenFile, "--out", out}, &stdout, &stderr); code != 0 {
+		t.Fatalf("the run that succeeds = exit %d, stderr %q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(out, enrollmentErrorFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s after a run that succeeded: %v; want it gone", enrollmentErrorFile, err)
+	}
+	if _, _, err := buildSigner(); err != nil {
+		t.Fatalf("a later call after the run that succeeded: %v", err)
+	}
+}
+
+// TestTwoRunsOnOneDirectoryTakeTurns: a pod can run `enroll --pod` more than once over one key
+// directory, and without the lock the second logs in again — moving the launcher credential the
+// first is still enrolling under — and the two race over key.pem and enrollment. The lock is the
+// only thing holding that off, and nothing else in this package exercises it. Four runs at once
+// on one directory must leave one key, one enrollment id, and must not have made four logins
+// race: each run either made the enrollment or got that same one back.
+func TestTwoRunsOnOneDirectoryTakeTurns(t *testing.T) {
+	tokenFile := writePodToken(t, fakePodToken(t, testPodAccount, testPodUID))
+	broker, calls := servePodBroker(t, "enrollment-of-the-pod")
+	out := filepath.Join(t.TempDir(), "keys")
+	t.Setenv("AGENT_SECRETS_URL", broker.URL)
+
+	const runs = 4
+	codes := make([]int, runs)
+	outs := make([]strings.Builder, runs)
+	errs := make([]strings.Builder, runs)
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for i := range runs {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			codes[i] = cmdEnrollPod(testPodService, tokenFile, out, &outs[i], &errs[i])
+		}()
+	}
+	close(start)
+	wait.Wait()
+
+	for i := range runs {
+		if codes[i] != 0 {
+			t.Fatalf("run %d = exit %d, stderr %q; every run on one directory must succeed in its turn", i, codes[i], errs[i].String())
+		}
+		if got := strings.TrimSpace(outs[i].String()); got != "enrollment-of-the-pod" {
+			t.Fatalf("run %d printed %q, want the one enrollment id", i, got)
+		}
+	}
+	if id, err := readTrimmed(filepath.Join(out, enrollmentFile)); err != nil || id != "enrollment-of-the-pod" {
+		t.Fatalf("the enrollment file = %q (%v), want the one id", id, err)
+	}
+	// One key, so the enrollment every run got back is the one that key holds: the first run
+	// wrote it and the rest reused it rather than writing their own.
+	thumbprints := map[string]bool{}
+	for _, call := range calls() {
+		if call.path == "/v1/enrollments" {
+			thumbprints[call.body["thumbprint"]] = true
+		}
+	}
+	if len(thumbprints) != 1 {
+		t.Fatalf("the runs enrolled %d keys, want one: the lock did not serialize them", len(thumbprints))
 	}
 }

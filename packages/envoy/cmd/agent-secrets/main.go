@@ -529,8 +529,8 @@ func selectSigner(dir string) (string, Signer, error) {
 		}
 		id, idErr := readTrimmed(filepath.Join(dir, enrollmentFile))
 		if idErr != nil {
-			if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
-				return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
+			if reason, rerr := readTrimmed(filepath.Join(dir, enrollmentErrorFile)); rerr == nil {
+				return "", nil, fmt.Errorf("%w (%s: %s)", idErr, enrollmentErrorFile, reason)
 			}
 			return "", nil, idErr
 		}

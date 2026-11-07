@@ -1,3 +1,5 @@
+//go:build unix
+
 // packages/envoy/cmd/agent-secrets/pod_concurrent_e2e_test.go
 //
 // Two pods of one ServiceAccount enrolling themselves at the same time, against the real broker
@@ -137,5 +139,75 @@ func TestTwoPodsOfOneAccountEnrolThemselvesAtOnce(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(p.out, keyFile)); err != nil {
 			t.Fatalf("pod %s: its session key: %v", p.uid, err)
 		}
+	}
+}
+
+// TestAPodEnrolsItselfAgainstTheRealBroker is this mode against real handlers and real Postgres,
+// one pod, which needs no schema the tree does not have, so it runs everywhere the two-pod row
+// above skips. The stub broker verifies nothing, so until this the shape of what `enroll --pod`
+// sends — the signed request object, the service it names, the pod token, the launcher proof
+// over the enrollment — was pinned only against a fake that would have taken anything. Here the
+// broker refuses each of them if it is wrong.
+//
+// A re-run on the same directory is driven too, because the broker answers a key whose
+// enrollment is live with that enrollment and no fresh lease: the run has to renew it, and the
+// renewal is a different proof (the session key's, not the login key's) that the real verifier
+// checks.
+func TestAPodEnrolsItselfAgainstTheRealBroker(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	t.Setenv("AGENT_SECRETS_URL", rig.URL)
+	podUID := uuid.NewString()
+	tokenFile := writePodToken(t, rig.MintAccountPodToken(t, brokertest.DaemonAccount, podUID, time.Hour))
+	out := filepath.Join(t.TempDir(), "keys")
+
+	var stdout, stderr strings.Builder
+	if code := cmdEnrollPod("legion-daemon", tokenFile, out, &stdout, &stderr); code != 0 {
+		t.Fatalf("enroll --pod against the real broker = exit %d, stderr %q", code, stderr.String())
+	}
+	id := strings.TrimSpace(stdout.String())
+	if id == "" {
+		t.Fatalf("enroll --pod printed no enrollment id; stderr %q", stderr.String())
+	}
+	if written, err := readTrimmed(filepath.Join(out, enrollmentFile)); err != nil || written != id {
+		t.Fatalf("the enrollment file = %q (%v), want the id it printed, %s", written, err, id)
+	}
+
+	// The broker's own row: the enrollment is this pod's, live, and under a launcher credential
+	// the account's own token login made.
+	var kind, runtimeID, subject string
+	if err := rig.Store.Pool.QueryRow(context.Background(),
+		`select e.kind, e.runtime_id, coalesce(c.subject,'') from enrollments e
+			join launcher_credentials c on c.id = e.launcher_credential_id
+			where e.id=$1 and e.revoked_at is null and e.lease_expires_at > now()`, id).
+		Scan(&kind, &runtimeID, &subject); err != nil {
+		t.Fatalf("read the enrollment the broker made: %v", err)
+	}
+	if kind != "pod" || runtimeID != podUID || subject != brokertest.DaemonAccount {
+		t.Fatalf("the enrollment = kind %s, runtime %s, under %s; want a pod enrollment of %s under %s", kind, runtimeID, subject, podUID, brokertest.DaemonAccount)
+	}
+
+	// The re-run: same key, same enrollment, and a lease the renewal pushed out.
+	var before time.Time
+	if err := rig.Store.Pool.QueryRow(context.Background(), `select lease_expires_at from enrollments where id=$1`, id).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.Store.Pool.Exec(context.Background(),
+		`update enrollments set lease_expires_at = now() + interval '1 minute' where id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdEnrollPod("legion-daemon", tokenFile, out, &stdout, &stderr); code != 0 {
+		t.Fatalf("the re-run = exit %d, stderr %q", code, stderr.String())
+	}
+	if again := strings.TrimSpace(stdout.String()); again != id {
+		t.Fatalf("the re-run's enrollment = %s, want the one the key already holds, %s", again, id)
+	}
+	var after time.Time
+	if err := rig.Store.Pool.QueryRow(context.Background(), `select lease_expires_at from enrollments where id=$1`, id).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !after.After(before.Add(-time.Second)) {
+		t.Fatalf("the lease after the re-run = %s, want it renewed past the minute it was cut to (%s)", after, before)
 	}
 }

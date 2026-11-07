@@ -181,21 +181,43 @@ func cmdEnrollPod(service, tokenFile, out string, stdout, stderr io.Writer) int 
 }
 
 // enrolPod is cmdEnrollPod's work, with the directory made and the lock held.
+//
+// Every refusal that leaves a key behind is written into the key dir's enrollment.error as well
+// as printed. key.pem with no enrollment is the one state a later `agent-secrets` call cannot
+// read on its own: selectSigner takes the key dir's branch on the key alone, finds no id, and
+// without that file answers `read <dir>/enrollment: no such file or directory` — the broker's
+// refusal lost, and the sign-in, helper and machine-signer branches below never reached. The
+// key is kept on purpose (a new key while the old enrollment is live is refused
+// ALREADY_ENROLLED), so the marker is what makes keeping it safe. A box's launcher writes the
+// same file for the same reason.
 func enrolPod(service, tokenFile, out, base, prefix string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
+	// refuse prints line and, where this directory holds a key, records line beside it. A run
+	// that has not reached enrollSessionKey yet leaves no key of its own, but an earlier run's
+	// is enough: the test is the file, not how far this run got. Each caller returns 1 itself,
+	// so every exit code in this command stays a literal the reference generator can read.
+	refuse := func(line string) {
+		fmt.Fprintln(stderr, line)
+		if !exists(filepath.Join(out, keyFile)) {
+			return
+		}
+		if err := writeFileAtomic(filepath.Join(out, enrollmentErrorFile), []byte(line+"\n"), 0o600); err != nil {
+			fmt.Fprintf(stderr, "%s --pod: record that refusal in %s: %v\n", prefix, enrollmentErrorFile, err)
+		}
+	}
 	token, err := readPodToken(tokenFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: %v", prefix, err))
 		return 1
 	}
 	identity, err := podClaims(token)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: %v", prefix, err))
 		return 1
 	}
 	launcherKey, err := proof.NewKey()
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: generate the login key: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: generate the login key: %v", prefix, err))
 		return 1
 	}
 	// The identifier names this pod in the signed request object; the broker names the credential
@@ -204,41 +226,47 @@ func enrolPod(service, tokenFile, out, base, prefix string, stdout, stderr io.Wr
 		{Type: "launcher_credential", Identifier: identity.PodUID, Service: service},
 	}, "", "", nil, time.Now())
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: sign the login request: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: sign the login request: %v", prefix, err))
 		return 1
 	}
 	c := newClient(base)
 	credentialID, err := c.TokenLogin(ctx, token, request)
 	if err != nil {
-		fmt.Fprintln(stderr, podRefusal(prefix, "log in", identity, base, err))
+		refuse(podRefusal(prefix, "log in", identity, base, err))
 		return 1
 	}
 	key, err := enrollSessionKey(out)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: %v", prefix, err))
 		return 1
 	}
 	thumbprint, err := proof.Thumbprint(&key.PublicKey)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s --pod: thumbprint: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: thumbprint: %v", prefix, err))
 		return 1
 	}
 	enrollmentID, alreadyLive, err := c.CreatePodEnrollment(ctx, &podLauncherSigner{key: launcherKey, credentialID: credentialID}, identity.runtimeID(), thumbprint, token)
 	if err != nil {
-		fmt.Fprintln(stderr, podRefusal(prefix, "enrol", identity, base, err))
+		refuse(podRefusal(prefix, "enrol", identity, base, err))
 		return 1
 	}
 	if alreadyLive {
 		// The broker gave back the enrollment this key already holds without extending its
 		// lease, so a pod that only ever re-runs enroll would let that lease lapse.
 		if _, err := c.RenewEnrollment(ctx, &fileSigner{key: key, enrollmentID: enrollmentID}, enrollmentID, token); err != nil {
-			fmt.Fprintln(stderr, podRefusal(prefix, "renew the lease of the enrollment it already holds", identity, base, err))
+			refuse(podRefusal(prefix, "renew the lease of the enrollment it already holds", identity, base, err))
 			return 1
 		}
 	}
 	if err := writeFileAtomic(filepath.Join(out, enrollmentFile), []byte(enrollmentID+"\n"), 0o600); err != nil {
-		fmt.Fprintf(stderr, "%s --pod: %v\n", prefix, err)
+		refuse(fmt.Sprintf("%s --pod: %v", prefix, err))
 		return 1
+	}
+	// The id is written, so an earlier run's refusal is spent: selectSigner reads the error file
+	// only where it finds no id, and it now finds one. Removed after the id rather than before
+	// it, so a failed write above never leaves the directory with neither.
+	if err := os.Remove(filepath.Join(out, enrollmentErrorFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "%s --pod: remove the earlier refusal in %s: %v\n", prefix, enrollmentErrorFile, err)
 	}
 	// A pod keeps no credential helper to re-run this command, so it needs a renewer: say which
 	// one, on stderr, where it cannot be mistaken for the enrollment id. The key directory is
@@ -321,6 +349,14 @@ func enrollSessionKey(dir string) (*ecdsa.PrivateKey, error) {
 // A pod can run `enroll --pod` more than once over one directory, so two runs can overlap;
 // without the lock the second would log in again (moving the launcher credential the first is
 // still enrolling under) and the two would race over key.pem and enrollment.
+//
+// It is keyed on the directory, so two runs in one pod that name different --out directories
+// take different locks and are not serialized: each logs in, and the second moves the credential
+// the first enrolled under. That case is knowingly uncovered. A pod has no writable path of its
+// own outside the key dir to key a lock on, and giving one pod two key directories is an
+// operator's choice with no use this mode serves — one pod is one session. What ends the hazard
+// rather than narrowing it is the broker's per-pod launcher credential, after which a second
+// login of the same pod moves nothing another pod holds.
 const enrollLockFile = "enroll.lock"
 
 // errNoEnrollLock is lockEnrollDir's answer on a platform with no flock, where no Kubernetes pod

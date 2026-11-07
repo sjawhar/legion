@@ -43,8 +43,9 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required without --pod: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
 	podFlag := flags.Bool("pod", false, "enroll this Kubernetes pod with the projected service-account token its own kubelet mounts")
 	service := flags.String("service", "", "--pod: the broker-side service this pod's service account is bound to")
-	podTokenFile := flags.String("pod-token-file", defaultPodTokenFile, "--pod: a pod's projected service-account token file (default "+defaultPodTokenFile+")")
-	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "--pod: the directory holding key.pem and enrollment (default AGENT_SECRETS_KEY_DIR)")
+	// PrintDefaults appends the default itself, so neither usage names it twice.
+	podTokenFile := flags.String("pod-token-file", defaultPodTokenFile, "--pod: a pod's projected service-account token file")
+	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "--pod: the directory holding key.pem and enrollment; AGENT_SECRETS_KEY_DIR when not given")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -57,6 +58,17 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if *podFlag {
+		// --runtime-id, --thumbprint and --session-id are --helper's. A pod's runtime id is the
+		// pod UID its own token carries, its thumbprint is the key this command writes, and it
+		// registers no agent session, so each of them given here asked for something this mode
+		// does not do. Refused by name, as --helper beside --pod is one line above, rather than
+		// silently ignored.
+		for _, name := range []string{"runtime-id", "thumbprint", "session-id"} {
+			if flagGiven(flags, name) {
+				fmt.Fprintf(stderr, "agent-secrets enroll: --%s is --helper's and --pod takes none of it: a pod's runtime id is the pod UID of the token it presents, its thumbprint is the key this writes into --out, and it registers no agent session\n", name)
+				return exitUsageError
+			}
+		}
 		return cmdEnrollPod(*service, *podTokenFile, *out, stdout, stderr)
 	}
 	if !*helperFlag {
