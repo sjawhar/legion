@@ -3,7 +3,6 @@ package intake
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -14,13 +13,14 @@ import (
 )
 
 // heldFacts is a handler whose fact costs work, as every fact does — it takes the one fact lock
-// and writes records — but whose work the test ends rather than the clock: every Apply records
-// the fact it was handed and then waits for release, so the test can read what the consumer holds
-// while a fact is still in hand instead of racing a sleep against the acknowledgement window.
+// and writes records — but whose work the test ends rather than the clock: every Apply reports
+// that it has a fact in hand and then waits for release, so the test can read what the consumer
+// owes while a fact is still in hand instead of racing a sleep against the acknowledgement window.
 type heldFacts struct {
+	// started carries the name of the first fact the handler is handed, which the failure message
+	// below names. It is buffered for that one fact, and every later Apply leaves it as it is.
+	started chan string
 	release chan struct{}
-	mu      sync.Mutex
-	facts   []string
 }
 
 func (h *heldFacts) Apply(_ context.Context, _ pgx.Tx, fact Fact) (Result, error) {
@@ -28,19 +28,12 @@ func (h *heldFacts) Apply(_ context.Context, _ pgx.Tx, fact Fact) (Result, error
 	if issue, ok := fact.(DispatchIssue); ok {
 		name = issue.Key
 	}
-	h.mu.Lock()
-	h.facts = append(h.facts, name)
-	h.mu.Unlock()
+	select {
+	case h.started <- name:
+	default:
+	}
 	<-h.release
 	return Result{}, nil
-}
-
-// taken is the facts the handler has been handed so far, in order; until release each of them is
-// one the handler still holds.
-func (h *heldFacts) taken() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return slices.Clone(h.facts)
 }
 
 // A consumer working a backlog takes each message's acknowledgement window for that message's own
@@ -54,13 +47,18 @@ func (h *heldFacts) taken() []string {
 // So this holds the fact handler on the first event of a backlog of twelve and, while it is held,
 // reads what JetStream says the consumer owes an acknowledgement for: a consumer that fetches
 // consumerFetchBatch messages owes no more than that however long a fact takes, and nothing it
-// holds can outlive its window behind another message's work. Released, every event is prepared
-// exactly once, which is the same statement counted at the other end.
+// holds can outlive its window behind another message's work. That held read is what guards the
+// fetch batch; the preparation count is not the same statement counted at the other end, since
+// once the handler is released the facts finish in milliseconds and a larger batch would pass it.
+// Every event prepared exactly once says only that nothing was redelivered or applied twice over
+// the run.
 func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *testing.T) {
 	pool := migratedPool(t)
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	spec.AckWait = 2 * time.Second
+	// A hang guard, not the subject: a hold longer than this window has the held fact delivered
+	// again and prepared twice, which is what the preparation count below reads as a fault.
+	spec.AckWait = time.Minute
 	var mu sync.Mutex
 	prepared := map[string]int{}
 	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) (DispatchIssue, error) {
@@ -81,15 +79,21 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 				`"payload":{"key":%q,"status":"backlog","title":"a backlog event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, i+1, key, key)))
 	}
 
-	facts := &heldFacts{release: make(chan struct{})}
+	facts := &heldFacts{started: make(chan string, 1), release: make(chan struct{})}
 	defer runConsumers(t, consumers, facts)()
 	// The handler is released before the consumers are stopped, whatever ends the test: a stop
 	// waits for Run to return, and Run cannot return while a handler of its own holds a fact.
 	release := sync.OnceFunc(func() { close(facts.release) })
 	defer release()
 
+	var held string
 	testwait.Eventually(t, "the handler holding the backlog's first fact", func() bool {
-		return len(facts.taken()) > 0
+		select {
+		case held = <-facts.started:
+			return true
+		default:
+			return false
+		}
 	})
 	item, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
 	if err != nil {
@@ -99,9 +103,12 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 	if err != nil {
 		t.Fatalf("read the Dispatch consumer's info: %v", err)
 	}
-	if info.NumAckPending > consumerFetchBatch {
-		t.Fatalf("the Dispatch consumer owes an acknowledgement for %d messages while the handler holds %v, want at most the %d it fetches: the rest spend their window queued",
-			info.NumAckPending, facts.taken(), consumerFetchBatch)
+	// The literal is deliberate: this row is what guards consumerFetchBatch, so it must not be
+	// written in terms of the constant it guards - raising the constant would raise this bar with
+	// it and the row would pass whatever the library then holds.
+	if info.NumAckPending > 1 {
+		t.Fatalf("the Dispatch consumer owes an acknowledgement for %d messages while the handler holds %s, want at most the one it fetches: the rest spend their window queued",
+			info.NumAckPending, held)
 	}
 
 	release()

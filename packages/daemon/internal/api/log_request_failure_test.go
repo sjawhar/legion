@@ -9,13 +9,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
-func TestLogRequestFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
+func TestLogRequestFailureLogsWarnOnceTheRequestItselfHasEnded(t *testing.T) {
 	for _, c := range []struct {
 		name          string
 		err           error
 		cancelRequest bool
+		expireRequest bool
 		beginStop     bool
 		wantLevel     string
 	}{
@@ -23,19 +25,24 @@ func TestLogRequestFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
 			name:          "a request whose client went away, whose call failed with that cancellation, on a running daemon",
 			err:           context.Canceled,
 			cancelRequest: true,
-			wantLevel:     "INFO",
+			wantLevel:     "WARN",
 		},
 		{
-			name:          "a request whose client's deadline passed, whose call failed with it, on a running daemon",
+			name:          "a request whose own deadline passed, whose call failed with it, on a running daemon",
 			err:           context.DeadlineExceeded,
-			cancelRequest: true,
-			wantLevel:     "INFO",
+			expireRequest: true,
+			wantLevel:     "WARN",
 		},
 		{
 			name:          "a request whose client went away, whose call failed of its own, on a running daemon",
 			err:           errors.New("connection refused"),
 			cancelRequest: true,
 			wantLevel:     "ERROR",
+		},
+		{
+			name:      "a live request whose call failed with something else's cancellation, on a running daemon",
+			err:       context.Canceled,
+			wantLevel: "ERROR",
 		},
 		{
 			name:      "a live request on a daemon whose stop has begun",
@@ -63,8 +70,15 @@ func TestLogRequestFailureLogsInfoWhenNobodyIsLeftToActOnIt(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/legion/v1/operator/claims", nil)
 			requestContext, hangUp := context.WithCancel(request.Context())
 			defer hangUp()
-			if c.cancelRequest {
+			switch {
+			case c.cancelRequest:
 				hangUp()
+			case c.expireRequest:
+				// A deadline already in the past leaves the request's own context ended with
+				// DeadlineExceeded, with no wait for the clock.
+				var expired context.CancelFunc
+				requestContext, expired = context.WithDeadline(request.Context(), time.Now().Add(-time.Minute))
+				defer expired()
 			}
 			request = request.WithContext(requestContext)
 
