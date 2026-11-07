@@ -458,7 +458,7 @@ the mark reads `unread` when the probe could not read `retry.modelFallback` unde
 — the probe pod's log says why — and the daemon's report shows the row open).
 An image row the image carries prints `present` with its evidence (`codegraph`'s:
 the CLI on PATH and the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on).
-A live row prints `reported` (``each session reports it at start; `legion state` renders it: <summary>``:
+A live row prints `reported` (``a claimed session reports it while it runs, so the probe cannot check it; `legion state` renders it: <summary>``:
 the probe proves nothing of it; [The deployment's capability report](#the-deployments-capability-report) says what each session measures), a deployment row `reported` too (the daemon reports it from the deployment's configuration), a withheld row `withheld` with its ruling, and an image row the image lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one.
 The daemon's Agent Sandbox runtime runs the same command in a probe Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every boot, and requires `agent-models=resolved`:
@@ -1493,7 +1493,7 @@ Do these steps in this order:
      `capabilities`, `production_check_hours`, `pod_update_max_open_rounds`, `pod_update_rounds_per_minute`, `worker_backends` and `role_config_files`;
 
    - under `projects.<KEY>`, the `repo` the earlier release requires (`projects.<KEY>.repo must
-     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
+     be "owner/name" (got "undefined")`, `readProject` in `internal/config/stage3.go` at that tag) and every key this release added there, `commit_issue_trailer_repos`, `deploys`, `memory`, `merge` and `slack_channels`, each `Unknown key "projects.<KEY>.<key>"`;
 
    - `tree_volume` where this release's file sets `issue_volume` (`unknown key
      runtime.kubernetes.issue_volume`, `members` in `internal/config/config.go` at that tag), one `resources.<role>` entry per workflow role where it sets `resources.issue` (`runtime.kubernetes.resources key "issue" must be a role (architect, planner, implementer,
@@ -1969,6 +1969,19 @@ where handed_over_from <> '' and memory_drawn_at is null
               where l.project = regexp_replace(lower(issues.project), '[^a-z0-9]', '', 'g')
                 and l.tree = issues.handed_over_from);
 ```
+
+**The issue key in a pane's commits (daemon API contract 52).**
+A release at contract 52 tells a pane the issue key it stamps into its commits, `LEGION_ISSUE_TRAILER`, whenever `projects.<KEY>.commit_issue_trailer_repos` names the repository that pane works:
+the pane's jj then appends a `Dispatch: <KEY>` line to every commit made in the pane's own workspace, beside the `Omp-Session:` line it already appended, so a squash landing that branch carries the issue key in its message.
+The repositories a project serves stay Dispatch's mapping (Settings → Repositories → Projects), and the key only selects among them:
+a name the project does not serve stamps nothing, and boot says so once per name, `workflow: commit_issue_trailer_repos names a repository this project does not serve, so no pane stamps a commit with the issue key for it`, serving the project as before.
+The variable is the runtime's own under both runtimes, so `runtime.kubernetes.pod.env` and `runtime.tmux.pane_env` are refused for setting it, and a pane of a repository the key does not name is told nothing and carries the session line alone.
+
+To roll this release back to contract 51, put `legion.yaml` back without `projects.<KEY>.commit_issue_trailer_repos`, which the earlier release refuses as a key it does not know (`unknown key projects.<KEY>.commit_issue_trailer_repos`), and re-pin it.
+There is no SQL to run and no column to drop: the change adds no store migration, and no record holds the key or the trailer.
+What the rollback costs is the line:
+a pane of the earlier release is told no key and stamps none, so every commit it makes carries the session line alone, and a base branch that requires the issue line in the commit that lands refuses such a branch until a role describes a commit of it with that line by hand.
+The commits already stamped keep their line: it is in their messages, which nothing rewrites.
 
 ### Contract discipline
 
@@ -2581,7 +2594,7 @@ Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
 every worker is a full agent), 21 rows, each checked at one site.
 The image rows (`eval-js`, `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`, `claude-code`) are `legion probe-image`'s ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once the probe passed;
-the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are proved by each session at its start, which measures them inside its own Oh My Pi and reports them with its ready, and the daemon renders each from what its live sessions reported (LEGION-663;
+the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) are measured by each claimed session while it runs, inside its own Oh My Pi, and reported on a `claims/ready` of its own, and the daemon renders each from what its live sessions reported (LEGION-663, INFRA-927;
 the paragraphs after the deployment rows);
 the withheld rows carry the ruling that keeps them from every worker (`network`:
 dispatch://LEGION-5, the pod is the boundary, except a workload a role starts where its deployment's cluster admits it and the Service fronting it ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role));
@@ -2621,15 +2634,18 @@ A deployment row is `present` when the deployment satisfies it, `decided` when `
 a decision on a satisfied row is moot and the row reads present), and `open` otherwise, carrying the line that records one.
 A name that is not one of the four is refused at load naming them; a blank reason too.
 
-A live row is proved by each session at its start.
-The Legion extension (`packages/pi-legion/src/capability-report.ts`) measures the six inside Oh My Pi once `claims/register` has answered
-— concurrently, while the jj attribution and the Envoy role claim run
-— and sends the report with `claims/ready` (`capabilities`:
-`measuredAt`, `elapsedMs` and `rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s.
+A live row is measured by each claimed session while it runs.
+The Legion extension measures the six inside Oh My Pi (`packages/pi-legion/src/capability-report.ts`) on the 5 s interval that session already runs, under the rule in `packages/pi-legion/src/capability-schedule.ts`: at a tick at which it is idle and no measurement of its own is running, first at the sixth tick for the architect and one tick later for each following role of `LEGION_ROLES` (the merger's is the eleventh, 55 s), so one pod's six roles start their attempts on different ticks;
+each role counts those ticks from its own interval, which starts at its own boot, and a role busy at its due tick measures at its first idle tick instead, so the offset spreads the first attempts rather than keeping two roles' measurements from ever overlapping;
+it sends each report on a `claims/ready` of its own (`capabilities`:
+`measuredAt`, `elapsedMs` and `rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s, the budgets unchanged.
+A measurement whose rows are not all present, a report the daemon refuses and a call that fails are each followed by another attempt five ticks later, for at most three measurements in the life of the process;
+a session whose accepted report had every row present measures no more, and a report measured while a turn starts is held and sent at the next idle tick.
+So a role's rows read `unchecked` from its ready until its first idle measurement (30 s to 55 s for a role that is not prompted, and until the first idle tick after its turn for one that is), where before this change a check that lost the boot race read `open` for the session's life (INFRA-927).
 A check that fails, throws or runs past its budget is a failing row carrying the reason, never a stopped session, and the daemon normalises what arrives (a live row the session left out reads `not
 reported by this session`, a name the table has no live row for is dropped, a detail is one line with every credential it quotes redacted, cut at 1024 bytes) and never refuses a ready for what it reports.
 The state route answers without authentication, so the extension cleans each detail the same way before it sends it, and the daemon cleans a report it reads back from the store at boot too.
-The ready after a regained Envoy role re-sends the same report; the controller's ready carries none.
+A boot's ready and the ready after a regained Envoy role carry no report at all, and the controller measures nothing and sends none.
 Each row's check, and the fact a passing one reports:
 
 - `subagents`: `pi.agents` is exposed, the `task` tool is registered, and every agent the registration's `promptAgents` names (the task agents the role's prompts dispatch) is resolved by `discoverAgents` in the workspace and none is in `task.disabledAgents` — `task resolves <n>
@@ -3995,10 +4011,12 @@ What it may wait on instead is the predecessor's claim being *reaped*
 
 Under gVisor the container cgroup changes nothing inside the sandbox:
 `runsc` sizes the sandbox from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉)
-— except on GKE Autopilot, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md):
-there `nproc` reflects gVisor's own host-vCPU presentation instead, a known gap ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu limits there
+— except on GKE Autopilot's container-optimized compute platform, where a sandboxed pod reads `nproc` 2 whatever it reserves and whatever its host holds (measured 2026-11-05 at 2, 2.5, 3, 4 and 6 CPU, each on an 8-vCPU node, dispatch://INFRA-928/artifact/measurements-2026-11-05-md):
+there the pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) read Σ cpu limits exactly at each of those sizes, which is why that quota, not `nproc`, is what [the live proof](../scripts/e2e/README.md) asserts there,
+while a pod of the same cluster placed on a node of a named machine series (`cloud.google.com/machine-family`) read 3 at a 3-CPU limit, its whole reservation, where the rule above holds
 — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's whole reservation while its siblings idle.
 The reservation is the pod's working set, and its request is what the scheduler counts.
+Measured on INFRA's pool on 2026-11-05, a pod's own processes on that platform reached about 1.3 to 1.9 cores whether the pod reserved 2, 2.5 or 3 CPU (1.321, 1.367 and 1.392 cores over 300-second runs on one node, and 1.8227 cores in a running issue pod at a 3-CPU limit), so reserving more cpu there bought that workload little more work ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665), "Actual CPU capacity is lower than assigned CPU capacity when gVisor sandbox is enabled").
 
 **The bound.**
 Concurrently running issue pods are bounded by what the pool's `limits.cpu` and `limits.memory` leave for pods of the per-pod sum of requests:

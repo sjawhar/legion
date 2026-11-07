@@ -60,9 +60,15 @@ function quoted(part: string): string {
 
 /** What the fixture's text reads as once formatted on one line: no syntax, the words in order,
  *  the heading's own words between the opening paragraph and the body, and the reference
- *  replaced by its resolved title (`Design decision`). */
+ *  replaced by its resolved title, which for an issue is its key then its title
+ *  (`CORE-1 Design decision`). */
 const RENDERED = new RegExp(
-  [OPENING, "Heading", BODY.replace("dispatch://CORE-1", "Design decision"), `${FIRST} ${SECOND}`]
+  [
+    OPENING,
+    "Heading",
+    BODY.replace("dispatch://CORE-1", "CORE-1 Design decision"),
+    `${FIRST} ${SECOND}`,
+  ]
     .map(quoted)
     .join("\\s+")
 );
@@ -167,7 +173,7 @@ function expectFormatted(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { reference: null, text: "link" },
-    { reference: "dispatch://CORE-1", text: "Design decision" },
+    { reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -185,7 +191,7 @@ function expectFormattedWithLiveLinks(element: HTMLElement): void {
   }));
   expect(links).toEqual([
     { href: "https://example.com/docs", reference: null, text: "link" },
-    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "Design decision" },
+    { href: "/issues/CORE-1", reference: "dispatch://CORE-1", text: "CORE-1 Design decision" },
   ]);
 }
 
@@ -228,7 +234,7 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
     expectBody(reasoning);
     expect(turn.querySelectorAll("h2")).toHaveLength(2);
     expect(turn.querySelectorAll("ul")).toHaveLength(2);
-    expect(turn.textContent).toContain("Bold then code and a link to Design decision.");
+    expect(turn.textContent).toContain("Bold then code and a link to CORE-1 Design decision.");
     for (const syntax of LITERAL_SYNTAX) {
       expect(turn.textContent).not.toContain(syntax);
     }

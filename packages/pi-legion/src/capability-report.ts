@@ -4,19 +4,23 @@ import type { LegionCapabilityReportBody, LegionCapabilityRow } from "@legion/co
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors";
 
 /**
- * The six live capability rows a Legion session measures as it boots and reports with
- * `claims/ready` (LEGION-663): what the daemon's `capabilities` table calls `subagents`,
- * `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools` and `github`. Each check
- * proves the capability from inside the session, the way the agent would use it: the `task` tool
- * resolving the agents the role's prompts dispatch, one real web search, the configured MCP servers
- * connecting, the repository's own extensions and skills loaded, the Envoy tools registered and
- * `dispatch read` answering, and the role's App login through `gh api graphql {viewer{login}}`.
+ * The six live capability rows a Legion session measures (LEGION-663): what the daemon's
+ * `capabilities` table calls `subagents`, `web-search`, `mcp`, `repository-extensions`,
+ * `dispatch-envoy-tools` and `github`. Each check proves the capability from inside the session,
+ * the way the agent would use it: the `task` tool resolving the agents the role's prompts
+ * dispatch, one real web search, the configured MCP servers connecting, the repository's own
+ * extensions and skills loaded, the Envoy tools registered and `dispatch read` answering, and the
+ * role's App login through `gh api graphql {viewer{login}}`.
+ *
+ * This module measures the rows; when a session measures them and sends them on a `claims/ready`
+ * of its own is `./capability-schedule`'s — an idle tick of the session's own 5 s interval, never
+ * its boot, which measures nothing (INFRA-927).
  *
  * The daemon renders the report and never refuses a session for it, so a failing check is a
- * failing row, never a stopped boot: `measureCapabilities` never throws. Every row's detail leaves
- * cleaned (`cleanDetail`), since a check quotes upstream errors and the report reaches the
- * daemon's unauthenticated state route. Every collaborator a check needs is behind
- * `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
+ * failing row and never an error its caller has to handle: `measureCapabilities` never throws.
+ * Every row's detail leaves cleaned (`cleanDetail`), since a check quotes upstream errors and the
+ * report reaches the daemon's unauthenticated state route. Every collaborator a check needs is
+ * behind `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
  */
 
 /** The budget of one check; a check still pending at it is a failing row. */
@@ -607,8 +611,10 @@ export function cleanDetail(text: string): string {
   return cut;
 }
 
-/** `8 s` for a whole number of seconds, else the milliseconds. */
-function budgetLabel(ms: number): string {
+/** A budget as a message reads it: `8 s` for a whole number of seconds, else the milliseconds.
+ * Exported so the schedule's send bound writes its timeout the same way this module's checks
+ * write theirs (`./capability-schedule`). */
+export function budgetLabel(ms: number): string {
   return ms % 1_000 === 0 ? `${ms / 1_000} s` : `${ms} ms`;
 }
 

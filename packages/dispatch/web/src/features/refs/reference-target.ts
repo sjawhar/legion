@@ -6,6 +6,7 @@ import {
   type QueryObserverResult,
   type QueryStatus,
   queryOptions,
+  type UseQueryResult,
   useQuery,
 } from "@tanstack/react-query";
 
@@ -22,6 +23,7 @@ import type {
   IssueReferenceSummary,
   IssueReferenceSummaryDocument,
   MessageRead,
+  ReferenceQuestions,
 } from "../../api/types";
 import { itemOfBlock } from "./block-reference";
 import { useMarkdownHeadline } from "./markdown-engine";
@@ -34,6 +36,7 @@ import {
   referencedArtifact,
 } from "./routes";
 import { referenceTargetKind } from "./target-id";
+import { prefixReference, routeWithWholeIds, type TextSource } from "./text-references";
 
 /**
  * The queries behind a `dispatch://` reference's target, shared by every surface that resolves
@@ -156,6 +159,38 @@ export const blockQuery = (reference: string | undefined) =>
     staleTime: Number.POSITIVE_INFINITY,
     refetchOnWindowFocus: refetchFailedOnFocus,
   });
+
+/** `GET /api/v1/references/questions?kind=&id=`: the question map a `#id` in one source's text
+ *  resolves against, which is the server's own map (`refs.ScopeOf` for the document that text
+ *  belongs to, `refs.QuestionMap` for the questions that document's latest version declares) -
+ *  the one map the page and the reference graph share. Keyed by the source, so two texts of one
+ *  source read it once. A source whose text belongs to no document answers 404, which leaves
+ *  its `#id`s as plain text, so the read is not retried. */
+export const questionsQuery = (source: TextSource | undefined) =>
+  queryOptions({
+    queryKey: ["references", "questions", source?.kind, source?.id] as const,
+    queryFn: () => api.getReferenceQuestions(source?.kind ?? "", source?.id ?? ""),
+    retry: false,
+  });
+
+/** The question map of a read's answer: each question block id its document declares to the
+ *  `dispatch://` reference of the ask settled for it, as the server writes that address. A
+ *  block whose ask has no address - an ask on an agent conversation's document - is left out,
+ *  since no reference names it. Undefined until the read answers. */
+export function questionReferences(
+  answer: ReferenceQuestions | undefined
+): Readonly<Record<string, string>> | undefined {
+  if (answer === undefined) {
+    return undefined;
+  }
+  const questions: Record<string, string> = {};
+  for (const question of answer.questions) {
+    if (question.reference !== "") {
+      questions[question.block_id] = question.reference;
+    }
+  }
+  return questions;
+}
 
 /** The document a reference names, as much of it as a reference shows: an issue summary's
  *  document, a project document's summary, or an agent conversation's artifact cut to the same
@@ -298,10 +333,61 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
   }
 }
 
+/** The whole id each short id of a prefix's graph read names, to the reference it is stored
+ *  under: a block by its block id, every other record by its own. A read that answered nothing
+ *  names nothing, and the reference stays as the text wrote it. */
+export function resolvedPrefixItems(
+  answer: GraphReferences | undefined
+): Readonly<Record<string, string>> {
+  const node = answer?.node;
+  const reference = node?.ref;
+  if (node === undefined || reference === undefined) {
+    return {};
+  }
+  const id = node.block_id ?? node.id;
+  return id === "" ? {} : { [id]: reference };
+}
+
+/** `useWholeRouteRead`'s answer: the route with its short ids replaced, the reference its graph
+ *  read was keyed by (undefined for a route that writes every id whole, which reads nothing),
+ *  and that read, for a caller that also shows what an ambiguous prefix matched. */
+export interface WholeRouteRead {
+  readonly prefix: string | undefined;
+  readonly resolution: UseQueryResult<GraphReferences>;
+  readonly route: DispatchReferenceRoute | undefined;
+}
+
+/**
+ * `route` with every id it writes short replaced by the whole id it names, which one graph read
+ * of the reference as written answers (`GET /api/v1/references?to=…`, which the server resolves
+ * within the owner the reference names). A route that writes every id whole - every reference a
+ * page or a node gave - is answered as it stands and reads nothing extra. One whose short id
+ * names nothing yet, or nothing at all, is `undefined`, so the record behind it is read under
+ * its whole id or not at all and nothing is ever cached under a prefix.
+ *
+ * The read itself is returned beside it, for the surfaces that show an ambiguous prefix's
+ * matches (`ArtifactDocument`, `useItemLanding`); a caller that wants the route alone reads
+ * `.route`.
+ */
+export function useWholeRouteRead(route: DispatchReferenceRoute | undefined): WholeRouteRead {
+  const origin = window.location.origin;
+  const prefix = route === undefined ? undefined : prefixReference(route);
+  const resolution = useQuery({ ...referencesQuery(prefix), enabled: prefix !== undefined });
+  return {
+    prefix,
+    resolution,
+    route:
+      route === undefined || prefix === undefined
+        ? route
+        : routeWithWholeIds(route, resolvedPrefixItems(resolution.data), origin),
+  };
+}
+
 export function useReferenceData(
-  route: DispatchReferenceRoute | undefined,
+  given: DispatchReferenceRoute | undefined,
   options: ReferenceReadOptions
 ): ReferenceData {
+  const route = useWholeRouteRead(given).route;
   const blockReference = blockReferenceOf(route);
   // A block of a comment or message is read from its graph node alone, which carries its text:
   // no issue, document, ask, comment or message read behind it.
@@ -440,13 +526,14 @@ export function blockText(node: GraphReferences["node"]): string | undefined {
 
 /**
  * Every query behind a resolved reference title, shared by the Unfurl card and the inline
- * `RefLink` markdown/document rendering so both draw from one fetch path. An ask or comment
- * (whether issue-scoped or nested under a project document's `item`) resolves to its own text
- * rather than the owning issue's title or document; everything else falls back to the artifact
- * name (a document reference) or the issue title. A title drawn from text its author wrote (the
- * question, the comment) is that Markdown projected to plain words and cut
- * (`useMarkdownHeadline`): a link's text can hold no formatting, so a `**Blocking:**` question
- * titles its link `Blocking: …`, never `**Blocking:** …`. The description is the target's own
+ * `RefLink` markdown/document rendering so both draw from one fetch path. An ask, a comment or
+ * an issue message (whether issue-scoped or nested under a project document's `item`) resolves
+ * to its own text rather than the owning issue's title or document; everything else falls back
+ * to the artifact name (a document reference) or the issue title. A title drawn from text its
+ * author wrote (the question, the comment, the message's body) is that Markdown projected to
+ * plain words and cut (`useMarkdownHeadline`): a link's text can hold no formatting, so a
+ * `**Blocking:**` question titles its link `Blocking: …`, never `**Blocking:** …`. The
+ * description is the target's own
  * Markdown, for the caller to render formatted: a message's body, a document's text (read only
  * with `options.text`), and an ask's or comment's text where the title had to cut it (a title
  * that holds the whole text needs no second copy under it); an issue with no document falls back
@@ -476,18 +563,16 @@ export function useReferenceTarget(
     case "block":
       authored = block === undefined ? undefined : blockText(block.node);
       break;
+    case "message":
+      authored = message?.message.body;
+      break;
   }
   const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
 
   if (kind === "message") {
-    return {
-      title:
-        message === undefined
-          ? undefined
-          : `${message.message.author.kind} ${message.message.author.id}`,
-      description: message?.message.body,
-      picture: undefined,
-    };
+    // A message reads as the head of what it says, the way a comment does; its own body is the
+    // description, which the cards under a message reference render formatted.
+    return { title: headline?.text, description: message?.message.body, picture: undefined };
   }
   if (kind === "ask" || kind === "comment" || kind === "block") {
     return {
