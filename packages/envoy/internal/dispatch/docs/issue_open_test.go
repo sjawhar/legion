@@ -1023,12 +1023,13 @@ func TestTheAppendGatesCloseMovesTheRecordsLatestEditSourceToThePendingSettlemen
 // of its own: that close marks the record closed again, writes the source the record holds -
 // bob's - to the row that already names him, takes it off the record, and only then queues on the
 // room's close gate, which the parked close holds (setRoomIssueOpen, closeWhenFree,
-// closeIssueBehindAParkedClose). It is what pins the credit-sequence half of the guard: the
-// reviewer measured that this test passed with that half reduced to state.closed alone, since
-// bob's load had left the record reading open and that flag by itself refused the write. With the
-// record reading closed again, what refuses the write is the credit sequence bob's keystroke
-// moved, the row's own facts refusing beside it, and a guard holding neither puts alice back over
-// bob.
+// closeIssueBehindAParkedClose). What refuses the parked close's write is the row: bob's
+// keystroke's append wrote his name over alice's and stamped the row an age no reading taken
+// before it holds (markUpdateOwed), so the write's own reading of the row disagrees with the
+// snapshot whatever the record says. The credit sequence that keystroke moved refuses the write
+// beside the row, and a guard holding neither puts alice back over bob. The run where the
+// sequence refuses a write the row's own facts cannot is its own test
+// (TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheRecordsSourceAloneMoved).
 //
 // Bob's edit is then recorded on the record again, as a landed browser edit of his records it
 // (recordActor): the second close took that source to the row, and a record holding no source,
@@ -1087,9 +1088,9 @@ func TestACloseForARefusedAppendLeavesThePendingSettlementRowTheRoomThatLoadedIn
 	// would hold on their own.
 	requireRecordClosed(t, service, artifactID)
 	requireRecordLastActor(t, service, artifactID, alicesEdit)
-	// The credit sequence that snapshot was read at, which bob's keystroke below must move: a
-	// write the record refuses at the sequence is not one the row's facts refused
-	// (recordClosedAt).
+	// The credit sequence that snapshot was read at, which bob's keystroke below must move: the
+	// second close leaves the record reading closed again, so the sequence is the half of the
+	// record's reading that stands against this write (recordClosedAt).
 	creditSeq := recordCreditSeq(t, service, artifactID)
 
 	writeIssueClosed(t, database, "DOC-1", false)
@@ -1226,13 +1227,16 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowASettlementTookWhile
 	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
 }
 
-// The close reads the document's stored head beside the row because the row's own facts can read
-// the same at both ends of its window while the row is not the one it read: no row at the
-// snapshot, an append writes one, the settlement that covers it takes it away, and at the write
-// there is no row again. Whether a row is there, the age it carries and the source it names read
-// as they did - the three of them are a reading of a row, and there is no row to read - so the
-// stored head, which that append moved, is the one reading that catches it
-// (settlementRowFacts.unchangedSince, readSettlementRowFacts).
+// A close for a closed issue whose snapshot read no row writes none. A document that owes no
+// settlement has no settlement for a source to name, and the row such a write puts back owes a
+// version for an edit a settlement has already covered, naming an editor who has not touched
+// the document since (persistLastActor, persistClosedLastActor). The row's own facts cannot
+// refuse that write: they read the same at both ends of the close's window while the document
+// is not the one it read - no row at the snapshot, an append writes one, the settlement that
+// covers it takes it away, and at the write there is no row again - since whether a row is
+// there, the age it carries and the source it names are a reading of a row, and there is no row
+// to read. Nor can the record, which neither a settlement nor another process's append moves
+// (settlementRowFacts.unchangedSince, recordClosedAt).
 //
 // Here the document is settled before anything else, so it owes nothing and holds no row; alice's
 // edit is then recorded on task A's record as a landed browser edit records it - a durable
@@ -1241,21 +1245,21 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowASettlementTookWhile
 // document still without a row. The issue closes unheard, as a listener's redial leaves it
 // (neither task here runs a room sync), far enough back for the update's age to decide it, and
 // the gate refuses alice's keystroke (ErrIssueClosed), whose append stores nothing and leaves the
-// head where it was (gateAppend). The close that refusal starts reads alice off the record and
-// closes the room, and is held where it has closed the room and has the row still to write
+// document where it was (gateAppend). The close that refusal starts reads no row and alice off
+// the record, closes the room, and is held where it has closed the room and has still to write
 // (parkCloseAfterRoomClosed).
 //
 // While it is held the issue reopens in the database and task B, a second Dispatch process on the
 // same database, writes carol's edit and settles the document: the write puts a row naming carol
-// there and moves the stored head, and the settlement takes that row away again. Task A hears
-// none of it, so its record still reads the issue closed at the credit sequence alice's refused
-// keystroke left it at, and the write meets a document with no row, as its snapshot did, standing
-// at a head its snapshot does not hold.
+// there and moves the stored document, and the settlement credits that edit with a version and
+// takes the row away again. Task A hears none of it, so its record still reads the issue closed
+// at the credit sequence alice's refused keystroke left it at, and the write meets a document
+// with no row, as its snapshot did, with carol's edit landed and versioned in between.
 //
 // The close is then let go and waited for (evictWG, waitForRefusedAppendClose). The document must
 // owe no settlement: a row put back here names alice on a document carol edited last and task B's
 // settlement has already versioned.
-func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheStoredHeadAloneMoved(t *testing.T) {
+func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereItsSnapshotReadNone(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	taskA, serverA := newTestServiceInstance(t, database)
@@ -1279,17 +1283,17 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheStoredHeadAl
 	typeOver(t, alice, "before", "alice typed after the close")
 	awaitRefusedAppendCloseParked(t, parked)
 	requireEnds(t, alice, "the close the gate's refusal started closed the room and left alice's browser connected")
-	// What the parked close holds: alice on a record reading closed, no row, and the head the
-	// refused keystroke left where it was.
+	// What the parked close holds: alice on a record reading closed, and no row at all, the
+	// reading that refuses its write below.
 	requireRecordClosed(t, taskA, artifactID)
 	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
 	// The credit sequence that snapshot was read at. Nothing here moves it again, so the record
-	// half of the guard passes at the write and the row's facts, the stored head among them, are
-	// what refuse it (recordClosedAt).
+	// half of the guard passes at the write, and the write is refused for the one reading left:
+	// its snapshot read no row (recordClosedAt, persistLastActor).
 	creditSeq := recordCreditSeq(t, taskA, artifactID)
 	requireNoPendingSettlement(t, taskA, artifactID, "the close parked with the record's source still to write")
 	if stored := storedHead(t, database, artifactID); stored != head {
-		t.Fatalf("the stored head of %s is %d, want %d: the refused keystroke stored nothing, so the head the close read is the one read before it",
+		t.Fatalf("the stored head of %s is %d, want %d: the refused keystroke stored nothing, so the document stands where it stood when the close read no row",
 			artifactID, stored, head)
 	}
 
@@ -1302,22 +1306,223 @@ func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheStoredHeadAl
 	settleTheDocumentNow(t, taskB, artifactID)
 	requireNoPendingSettlement(t, taskB, artifactID, "the settlement of carol's write on the other task")
 	if stored := storedHead(t, database, artifactID); stored <= head {
-		t.Fatalf("the stored head of %s is %d, want more than %d: carol's write on the other task is the one thing the close's snapshot cannot read back",
+		t.Fatalf("the stored head of %s is %d, want more than %d: carol's write on the other task is what moves the document between the close's reading of the row and its write, and no reading of the row shows it",
 			artifactID, stored, head)
 	}
 	// The write and the settlement on the other task left task A's record where it was, so the
-	// row's three facts and the record both read as the parked close read them.
+	// row's facts and the record both read as the parked close read them.
 	requireRecordClosed(t, taskA, artifactID)
 	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
 	if moved := recordCreditSeq(t, taskA, artifactID); moved != creditSeq {
-		t.Fatalf("the record of %s stands at credit sequence %d, want %d, the one the close read its source at: the write below would be refused by the record rather than by the stored head",
+		t.Fatalf("the record of %s stands at credit sequence %d, want %d, the one the close read its source at: the write below would be refused by the record rather than by its snapshot having read no row",
 			artifactID, moved, creditSeq)
 	}
 
 	close(release)
 	waitForRefusedAppendClose(t, taskA)
 	requireNoPendingSettlement(t, taskA, artifactID,
-		"the close let go once the other task had written and settled, leaving the stored head the one reading that moved")
+		"the close let go once the other task had written and settled, leaving the row reading at the write exactly as the close read it: none")
+	requireRecordClosed(t, taskA, artifactID)
+	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
+}
+
+// A close the append gate's refusal started must write back no source the record has moved past,
+// even where the row it read has not moved at all. The two part company whenever the room
+// observes an edit whose append has not landed: the credit names the editor on the record and
+// moves its credit sequence there and then, while the document's pending-settlement row is
+// written where that edit is stored, later or never (creditContentChange, markUpdateOwed). The
+// row then reads at the write exactly as the close read it while the record names somebody
+// else, so the credit sequence the source was read at is the one reading that refuses the
+// write, and the row's own facts cannot make it (recordClosedAt,
+// settlementRowFacts.unchangedSince, persistLastActor).
+//
+// Here alice types into a writable room on an open issue, alone in it, so her keystroke credits
+// her and nobody else and its append writes her to the row (connectedCreditLocked). Bob's name
+// then goes on that row as a committed write puts it there, without moving the row's age and
+// without touching the record (recordRowEditSource), so the row names bob while the record
+// names alice. The issue closes unheard, as a listener's redial leaves it (this test runs no
+// room sync), far enough back for the update's age to decide it, and the gate refuses alice's
+// next keystroke (ErrIssueClosed): the room credits her for it, which is the record's source
+// and its sequence moving once more, and the append stores nothing and leaves the row where it
+// was (gateAppend). The close that refusal starts reads bob's row and alice off the record,
+// closes the room, and is held where it has that row still to write (parkCloseAfterRoomClosed).
+//
+// While it is held carol's edit is recorded on the record as a landed browser edit records it -
+// a durable pending author and the record's latest edit source, with no settlement to take
+// either, this service's Settle being an hour (recordActor): the record names carol and stands
+// at a credit sequence past the one alice was read at, and the row, which no append has touched
+// since the close read it, still names bob.
+//
+// The close is then let go and waited for (evictWG, waitForRefusedAppendClose). The row must
+// still name bob. Nothing about the row refuses this write - it carries the age and the name the
+// close read, which the stored head standing still says - so the record is what refuses it, and
+// at the credit sequence alone, since the flag reads closed as the close left it. A guard asking
+// only for that flag puts alice on the row, naming as the document's latest editor a source the
+// record itself has moved past.
+func TestACloseForARefusedAppendWritesNoPendingSettlementRowWhereTheRecordsSourceAloneMoved(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newTestServiceInstance(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	// Alice's connect makes a durable append of its own that changes no content; it lands before
+	// the head is read, so the head stands still unless her keystroke moves it.
+	waitForLandedAppends(t, service, artifactID)
+	head := storedHead(t, database, artifactID)
+	alicesEdit := model.Actor{Kind: "user", ID: "alice"}
+	typeOver(t, alice, "before", "alice typed")
+	waitFor(t, roomWait(t), "alice's keystroke on the open issue to be stored", func() bool {
+		return storedHead(t, database, artifactID) > head
+	})
+	waitForLandedAppends(t, service, artifactID)
+	requireRecordLastActor(t, service, artifactID, alicesEdit)
+	requirePendingSettlementActor(t, service, artifactID, alicesEdit,
+		"alice's keystroke landed on the open issue, the last append to write the row")
+
+	bobsEdit := model.Actor{Kind: "user", ID: "bob"}
+	recordRowEditSource(t, service, artifactID, bobsEdit)
+	requirePendingSettlementActor(t, service, artifactID, bobsEdit,
+		"bob's committed write, which names him on the row and leaves the record alone")
+	requireRecordLastActor(t, service, artifactID, alicesEdit)
+	landed := storedHead(t, database, artifactID)
+	parked, release := parkCloseAfterRoomClosed(service, artifactID)
+
+	// Closed far enough back that the gate judges alice's keystroke by its age alone: inside the
+	// margin it stores a browser's update whatever its age (observedBeforeClose).
+	writeIssueClosedAgo(t, database, "DOC-1", closeMargin+30*time.Second)
+	typeOver(t, alice, "alice typed", "alice typed after the close")
+	awaitRefusedAppendCloseParked(t, parked)
+	requireEnds(t, alice, "the close the gate's refusal started closed the room and left alice's browser connected")
+	// What the parked close holds: alice on a record reading closed, and a row naming bob. A
+	// close holding no source writes no row whatever the guard does, and the readings below would
+	// hold on their own.
+	requireRecordClosed(t, service, artifactID)
+	requireRecordLastActor(t, service, artifactID, alicesEdit)
+	requirePendingSettlementActor(t, service, artifactID, bobsEdit, "the close parked with that row still to write")
+	// The row is the reading that cannot refuse the write below, and the head standing where it
+	// stood before alice's refused keystroke is what says so: an append is what stamps the row a
+	// new age, and none has landed since the close read it.
+	if moved := storedHead(t, database, artifactID); moved != landed {
+		t.Fatalf("the document moved from update %d to %d while the close waited: an append has written the row, and the write below would be refused by the row's own facts rather than by the credit sequence",
+			landed, moved)
+	}
+	creditSeq := recordCreditSeq(t, service, artifactID)
+
+	carolsEdit := model.Actor{Kind: "user", ID: "carol"}
+	service.recordActor(t, artifactID, carolsEdit)
+	if moved := recordCreditSeq(t, service, artifactID); moved == creditSeq {
+		t.Fatalf("the record of %s still stands at credit sequence %d, the one the parked close read its source at: carol's recorded edit must move it, or there is nothing here for the sequence to refuse",
+			artifactID, moved)
+	}
+
+	close(release)
+	waitForRefusedAppendClose(t, service)
+	requirePendingSettlementActor(t, service, artifactID, bobsEdit,
+		"the close let go once an edit the record took had moved it past the source that close read")
+	requireRecordLastActor(t, service, artifactID, carolsEdit)
+	requireRecordClosed(t, service, artifactID)
+}
+
+// recordRowEditSource names actor the latest edit source on artifactID's pending-settlement row,
+// under the document's advisory lock and without moving the row's age, as the transaction of a
+// committed write names who made the document's latest change (recordLatestEditSource). The
+// room's record is left as it is, so a test can hold a row and a record naming different people.
+func recordRowEditSource(t *testing.T, service *Service, artifactID string, actor model.Actor) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin naming %s on the row: %v", actor.ID, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock the document to name %s on the row: %v", actor.ID, err)
+	}
+	if err := recordLatestEditSource(ctx, tx, artifactID, &actor); err != nil {
+		t.Fatalf("name %s on the row: %v", actor.ID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s as the row's latest edit source: %v", actor.ID, err)
+	}
+}
+
+// A close for a closed issue reads the document's pending-settlement row before it reads the
+// room's record, and a settlement committing between the two readings is what that order is for.
+// Read the record first and such a settlement lands inside the snapshot's reading of the row
+// while the record's reading is from before it: the row the close then holds is as new as the
+// one its write re-reads under the document's advisory lock, so the row's facts agree, and the
+// record answers for nothing a settlement does - a settlement on another task moves neither this
+// record's closed flag nor its credit sequence - so the write commits a source the document has
+// moved past. Read the row first, as the close does, and that settlement is in neither reading
+// the snapshot holds: it shows in the write's own reading of the row, and the write is refused
+// (closeSnapshot, settlementRowFacts.unchangedSince, persistLastActor).
+//
+// A settlement alone cannot tell the two orders apart, since a close whose snapshot read no row
+// writes nothing whatever its record says (persistLastActor). What the record-first order lets
+// through is a row written again after that settlement: both of that order's readings hold it
+// and neither of this one's does. So the gap staged here holds the settlement and then the edit
+// it did not cover.
+//
+// Here the seed's append leaves a row naming user:seed, the room it loaded is evicted, and
+// alice's edit is recorded on task A's record as a landed browser edit records it - a durable
+// pending author and the record's latest edit source, with no settlement to take it, this
+// service's Settle being an hour (recordActor) - so the close has a source to write and a row to
+// read. The issue then closes, notified to task A and handed to it on a goroutine of its own,
+// and that close is parked between its two readings (closeIssueOnItsOwnGoroutine,
+// parkCloseBetweenItsSnapshotReads).
+//
+// While it is parked the issue reopens in the database, unheard here (this test runs no room
+// sync), and task B, a second Dispatch process on the same database, settles the document -
+// crediting the edits the row stood for with a version and taking the row
+// (clearSettlementPending) - and carol then writes through task B, the edit that settlement did
+// not cover, whose commit leaves the document owing again on a row naming her. Task A hears none
+// of it and loads no room of the document, so the record its close goes on to read reads exactly
+// as it did before the settlement.
+//
+// The close is then let go and waited for (awaitNotifiedClose). The row must still name carol:
+// the close read a row naming user:seed and the write re-reads carol's. A write made the other
+// way puts alice there, owing a settlement for an edit task B's version has already credited her
+// with, on a document carol edited last. The record keeps alice and reads closed, as a refused
+// write leaves both, since clearing is what a written row buys (persistClosedLastActor,
+// lastActorPersisted).
+func TestAnIssuesCloseWritesNoPendingSettlementRowASettlementTookInsideItsSnapshot(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	taskA, _ := newTestServiceInstance(t, database)
+	seedServiceText(t, taskA, artifactID, "before")
+	waitForLandedAppends(t, taskA, artifactID)
+	if err := taskA.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict the room the seed loaded: %v", err)
+	}
+	alicesEdit := model.Actor{Kind: "user", ID: "alice"}
+	taskA.recordActor(t, artifactID, alicesEdit)
+	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
+	requirePendingSettlementActor(t, taskA, artifactID, model.Actor{Kind: "user", ID: "seed"},
+		"the seed's append, which leaves the row the close reads at its snapshot")
+
+	taskB, _ := newTestServiceInstance(t, database)
+	carolsEdit := model.Actor{Kind: "user", ID: "carol"}
+	parked, release := parkCloseBetweenItsSnapshotReads(taskA, artifactID)
+	handled := closeIssueOnItsOwnGoroutine(t, taskA, "DOC-1")
+	awaitCloseParked(t, parked)
+
+	// The settlement runs on an open issue, as every settlement does (lockArtifactOwner), so the
+	// issue reopens first. Task A hears neither that nor anything below it.
+	writeIssueClosed(t, database, "DOC-1", false)
+	settleTheDocumentNow(t, taskB, artifactID)
+	requireNoPendingSettlement(t, taskB, artifactID, "the settlement on the other task, which took the row the close had read")
+	writeThroughLedger(t, taskB, artifactID, carolsEdit, "Carol typed on the other task.\n", withoutVersion)
+	requirePendingSettlementActor(t, taskB, artifactID, carolsEdit,
+		"carol's write on the other task, the edit its settlement did not cover")
+	// The settlement and the write on the other task left task A's record where it was, so the
+	// record the close reads below is the one it would have read before either of them.
+	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
+
+	close(release)
+	awaitNotifiedClose(t, handled)
+	requirePendingSettlementActor(t, taskA, artifactID, carolsEdit,
+		"the close let go once a settlement on the other task had taken the row it read and the edit after it had written another")
 	requireRecordClosed(t, taskA, artifactID)
 	requireRecordLastActor(t, taskA, artifactID, alicesEdit)
 }
@@ -1351,6 +1556,57 @@ func parkCloseAfterRoomClosed(service *Service, artifactID string) (parked chan 
 		<-release
 	}
 	return parked, release
+}
+
+// parkCloseBetweenItsSnapshotReads makes service park the first close of artifactID that reaches
+// the gap between the two readings its snapshot is made of: the document's pending-settlement
+// row, read first, and the room's record, read after it (betweenCloseSnapshotReads,
+// setRoomIssueOpen, closeSnapshot). It answers the channel the hook closes once that close is
+// parked (awaitCloseParked) and the one the test closes to let it go. The close holds no lock
+// and no transaction there, so a settlement of the document commits inside that gap as it would
+// have had nothing parked it. A close after the first runs unparked, as does every close of
+// another room: the staging holds one close, and a second waiting on a channel the test never
+// closes would be a close that never returns.
+func parkCloseBetweenItsSnapshotReads(service *Service, artifactID string) (parked chan struct{}, release chan struct{}) {
+	parked, release = make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	service.betweenCloseSnapshotReads = func(room string) {
+		if room != artifactID || !first.CompareAndSwap(false, true) {
+			return
+		}
+		close(parked)
+		<-release
+	}
+	return parked, release
+}
+
+// awaitCloseParked waits for the close a test parked between the two readings of its snapshot to
+// be parked there (parkCloseBetweenItsSnapshotReads), and fails the test unless it parks within
+// roomWait: until it is, the close has taken neither reading, and work the test stages now would
+// be in both rather than between them.
+func awaitCloseParked(t *testing.T, parked <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-parked:
+	case <-time.After(roomWait(t)):
+		t.Fatalf("the close had not parked between the two readings of its snapshot after %v", roomWait(t))
+	}
+}
+
+// closeIssueOnItsOwnGoroutine closes issueKey in the database and hands service the notification
+// that commit sends, on a goroutine of its own, for a test that parks that close where it has a
+// reading still to take (parkCloseBetweenItsSnapshotReads): the goroutine is what keeps the test
+// from waiting there with it. It answers the channel the goroutine closes once the notification
+// has been dealt with (awaitNotifiedClose).
+func closeIssueOnItsOwnGoroutine(t *testing.T, service *Service, issueKey string) chan struct{} {
+	t.Helper()
+	writeIssueClosed(t, service.store, issueKey, true)
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		service.issueOpenChanged(store.WithTransactionTracking(context.Background()), issueKey)
+	}()
+	return handled
 }
 
 // pendingSettlementActor is the latest editor the document's pending-settlement row names, nil

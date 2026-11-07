@@ -629,10 +629,12 @@ func TestTheQuestionMapRouteAnswersEverySourceKind(t *testing.T) {
 	issue := createInteractionIssue(t, handler, "QMP", "A spec with a question", "# Spec\n\nA passage.")
 	// The create path seeds the spec through the document service and queues that document's
 	// settlement once its transaction commits, after the response (issue_create.go,
-	// Docs.ScheduleSettlement); the settlement writes a version of its own. Wait for it here,
-	// because without this wait it can commit after the version seeded below, and then the
-	// newest version is the seeded spec with no `:::ask{#q1}` block: the question map is empty
-	// and every read in this test answers 200 with no questions.
+	// Docs.ScheduleSettlement); a settlement writes a version of its own wherever the document
+	// reads differently from the newest one. Wait for it here, because without this wait it can
+	// commit after the version seeded below, which the document does not hold: it then writes
+	// the create path's spec over that version, and the newest version is a spec with no
+	// `:::ask{#q1}` block: the question map is empty and every read in this test answers 200
+	// with no questions.
 	awaitSettled(t, database, issue.PrimaryArtifactID)
 	seedExec(t, database, "a version declaring a question block", `
 		insert into artifact_versions (artifact_id, number, markdown)
