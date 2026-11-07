@@ -138,6 +138,11 @@ Every topic starts with `notifications.`.
   `envoy_role_get(role=...)` finds the holder first.
   The forward is kept on the holder's inbox, so the holder's session gets it once from its own durable consumer, also after a restart, a reconnect, or while it was not running.
 
+- A message that must reach more than 4 role topics is the project controller's to send, not yours.
+  Each publish wakes a session, and a woken session reads its whole context again, which the provider charges as uncached input: a mean of 576,083 tokens a wake, a median of 493,636 and a ninetieth percentile of 1,327,888.
+  The controller is also the one session that can read whether a wave of wakes is already running, and a fan-out sent into a daemon restart or a pod roll is what puts an Anthropic organization over its per-minute uncached-input cap.
+  Send the controller the topics and the text, and it sends them at its own rate (`skill://legion-controller`).
+
 - For a team, the group subscribes to `notifications.team.<name>.>`, and any member publishes to `notifications.team.<name>.all`.
   Envoy's stream keeps a team topic, so a publish returns once it is stored and every session that follows the topic gets it once from its own consumer
   — yours too, when you subscribe — including a session that was not running then, for up to 72 hours.
