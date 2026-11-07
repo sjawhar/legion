@@ -186,19 +186,35 @@ events and sends them to the current Claude Code session as supported
 - A resumed server rebuilds the interests its session id already registered. `envoy_list` reports
   the union of live NATS subscriptions and registry interests with each topic's `source` (`live`,
   `registry`, `both`).
-- `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`.
+- `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`,
+  which names the writing process's client instance beside the session id and the role.
   `claude --resume <session-id>` finds that file and soft-reclaims the role with the saved
-  `previous_session_id`; a plain relaunch is a new session and inherits nothing. The listener
+  `previous_session_id`; a plain relaunch is a new session and inherits nothing. A record another
+  process wrote is pressed only while this process holds no role, since two `claude` processes of
+  one user share the state directory and a record is keyed by session id alone. The listener
   moves the role off that predecessor only when the predecessor has no live registration, when
   its live registration carries this process's own client instance id, or when either side
   carries no instance id. A predecessor another process still runs keeps the role, and the claim
   is refused naming it: this session goes on running and registered without the role, claims it
   again only on an explicit claim, and keeps the predecessor's role file, since that record
-  belongs to the live holder. Every healthy registration heartbeat checks and reasserts the role
-  if the listener lost it. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a closing pane
-  sends the whole process group) drains NATS and deregisters the session, naming this process's
-  client instance id, so the listener removes the registry entry only while it still carries
-  that id or none.
+  belongs to the live holder. A claim of a role already held under this session's own id is
+  decided on the standing claim: the listener grants it to the process that claim names, grants
+  it once nobody renewed that claim inside its live window, and otherwise refuses it naming this
+  very session, which keeps the role and the record here and asks again on the next heartbeat.
+  Only a refusal naming a different session ends the role and removes the record. Every healthy
+  registration heartbeat checks and reasserts the role if the listener lost it, and it confirms
+  the role only when the lookup names this session *and* this process and reports no hand-back
+  (`handed_back`); each heartbeat also renews the claims this process holds, whatever topics
+  that registration carries, and renews no claim the listener has marked handed back. A client
+  built before a release stated its process can hand this session's role lane back without
+  freeing the claim, which the listener marks rather than frees, so the mark is read as a role
+  this process does not hold and the next heartbeat claims it back, its grant a fresh record
+  with no mark. This process hands no lane back itself. Shutdown (stdin end, SIGTERM, SIGINT, or the SIGHUP a
+  closing pane sends the whole process group) drains NATS and deregisters the session, naming
+  this process's client instance id, so the listener removes the registry entry only while it
+  still carries that id or none, and every topic hand-back names it too, so a release frees only
+  the role claims this process holds; a release the holder's own renewal beat under each of the
+  route's three conditional deletes fails rather than reporting one it did not make.
 - `/clear` mints a new Claude session id, but a stdio MCP server keeps the `CLAUDE_CODE_SESSION_ID`
   it was spawned with. The SessionStart hook writes the current id to
   `${CLAUDE_PLUGIN_DATA}/sessions/<claude-pid>/session-id` (keyed by the `claude` process both the

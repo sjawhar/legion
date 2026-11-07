@@ -49,11 +49,16 @@ cleanup() {
       sleep 0.2
     done
   done
-  # A deregistered session keeps its interest entry until the listener reaps it; an
-  # unsubscribe with no topics removes the entry now.
+  # A deregistered session keeps its interest entry until the listener reaps it; the
+  # administrator's route removes the entry now. The empty-topics unsubscribe no longer serves a
+  # cleanup that names no process: it frees the role claims of the client instance its body
+  # states, and this script can state none — each channel server mints its own, no listener route
+  # reports it, and both processes have exited by the time this runs. DELETE
+  # /v1/interests/<session_id> removes a session's interests whoever holds them, which is what a
+  # cleanup wants.
   for id in "${session_ids[@]}"; do
-    curl --connect-timeout 2 --max-time 5 -fsS -o /dev/null -X POST -H 'Content-Type: application/json' \
-      "${envoy_url}/v1/interests/unsubscribe" --data "{\"session_id\":\"${id}\",\"topics\":[]}" || true
+    curl --connect-timeout 2 --max-time 5 -fsS -o /dev/null -X DELETE \
+      "${envoy_url}/v1/interests/${id}" || true
   done
   # Claude Code keeps a transcript directory per project path, named after it.
   rm -rf "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${workdir//[^A-Za-z0-9]/-}" "$workdir"

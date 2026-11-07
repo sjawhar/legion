@@ -194,15 +194,60 @@ const env = {
 };
 mkdirSync(env.HOME);
 
+/** The parent between the test and the rig: it puts the rig in a process group of its own
+ * (posix_spawnp with POSIX_SPAWN_SETPGROUP, which is setpgid in the child between fork and exec),
+ * waits for it, and reports its status as a shell does. `-I` keeps a caller's PYTHON* variables
+ * out of it; the rig's name is resolved on PATH, as posix_spawnp does, so it is the `bash` the
+ * rest of the run uses. */
+const setpgid = [
+  "import os, sys",
+  "pid = os.posix_spawnp(sys.argv[1], sys.argv[1:], os.environ, setpgroup=0)",
+  "status = os.waitpid(pid, 0)[1]",
+  "sys.exit(128 + os.WTERMSIG(status) if os.WIFSIGNALED(status) else os.WEXITSTATUS(status))",
+].join("\n");
+
+/** Runs the rig, in a process group of its own, and returns its exit status and its stderr.
+ *
+ * The rig stops its own tree before it exits (stop_tree, scripts/e2e/lib/rig.sh), and a process
+ * group that is orphaned — one no member's parent watches from another group of the same session —
+ * has the kernel send SIGHUP and SIGCONT to every member the moment it is orphaned with a stopped
+ * member in it. Where a Legion worker runs this suite each shell command is a session leader, so
+ * bun's own group is orphaned: a rig sharing it hangs the test runner up, and `bun test` dies of
+ * that SIGHUP (status 129) before printing any totals. Bun.spawn leaves its child in bun's own
+ * group, so the rig needs a parent that moves it out of it.
+ *
+ * A session of its own is the wrong tool: a setsid child leads its session, so the one parent
+ * outside its group is in another session, which the orphan test does not count, and the group is
+ * orphaned from the start — the rig hangs itself up with the first stop of its own teardown. What
+ * it needs is a group of its own inside bun's session, under a parent that stays in bun's group:
+ * that parent is the connection outside the group which keeps it from being orphaned in turn.
+ *
+ * A POSIX shell reaches setpgid only through job control, and a job-control shell writes its job
+ * table's notices on its stderr, which is the rig's: on bash 5.2.21, the ubuntu-24.04 runner's of
+ * ci.yaml's pi-legion job, `set -m; "$@" & wait "$!"` leaves `[1]+  Done` and the job's command
+ * there (bash 5.2.37 prints none, so that wrapper passed on a devbox and failed on the runner). So
+ * no shell stands between the test and the rig: python3's posix_spawnp sets the group and nothing
+ * else, has no job table to report from on any bash, and redirects none of the rig's stderr away,
+ * so a complaint of the wrapper's own still reaches this test. python3 is on PATH on that runner
+ * (ci.yaml's lint job runs .github/scripts/check-action-pins.sh, which runs python3, on the same
+ * ubuntu-24.04 image, with no setup-python step) and in a Legion worker pod
+ * (packages/daemon/docker/worker.Dockerfile installs python3 in its runtime-base stage and checks
+ * it, `python3 --version`, in the runtime image's toolchain step). The rig's own shell runs with
+ * job control off, as it always has. */
+async function runRig(args: string[], vars: Record<string, string> = {}) {
+  const child = Bun.spawn(["python3", "-I", "-c", setpgid, "bash", rig, ...args], {
+    env: { ...env, ...vars },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  return { code, stderr };
+}
+
 const start = String(Math.floor(Date.now() / 1000));
 const runs = await Promise.all(
   [1, 2].map(async (n) => {
-    const child = Bun.spawn(["bash", rig, "run", "askgate", "on", String(n), String(n), start], {
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    const { code, stderr } = await runRig(["run", "askgate", "on", String(n), String(n), start]);
     return { n, code, stderr, dir: path.join(work, "runs", `askgate-facts-on-${n}`) };
   })
 );
@@ -284,12 +329,7 @@ test("each run stops its Dispatch server when it ends", () => {
 // AskGate's review would time out under Oh My Pi's default handler limit, so a run whose profile
 // leaves the limit there scores the timeout rather than the rule: the rig refuses it, starting nothing.
 test("a run on a profile whose settings leave the handler limit at its default is refused, naming the key", async () => {
-  const child = Bun.spawn(["bash", rig, "run", "askgate", "stale", "1", "3", start], {
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  const { code, stderr } = await runRig(["run", "askgate", "stale", "1", "3", start]);
   expect(code).toBe(1);
   expect(stderr).toContain("extensionHandlers.toolCallTimeoutMs to 120000 or more");
   expect(existsSync(path.join(work, "runs", "askgate-facts-stale-1"))).toBe(false);
@@ -300,12 +340,9 @@ test("a run on a profile whose settings leave the handler limit at its default i
 // claim about what we run today): the run's working directory must hold that file, with the line
 // the prompt quotes.
 test("a link run's working directory holds the crontab its prompt cites, with the line it quotes", async () => {
-  const child = Bun.spawn(["bash", rig, "run", "askgate", "on", "1", "4", start], {
-    env: { ...env, SKILL_SCENARIOS_ASKGATE_CASE: "link" },
-    stdout: "pipe",
-    stderr: "pipe",
+  const { code, stderr } = await runRig(["run", "askgate", "on", "1", "4", start], {
+    SKILL_SCENARIOS_ASKGATE_CASE: "link",
   });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
   const dir = path.join(work, "runs", "askgate-link-on-1");
   const prompt = readFileSync(path.join(dir, "prompt.txt"), "utf8");

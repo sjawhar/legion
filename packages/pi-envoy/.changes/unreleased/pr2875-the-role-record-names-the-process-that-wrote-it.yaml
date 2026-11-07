@@ -1,0 +1,37 @@
+kind: Fixed
+body: |-
+  The `envoy-role-claim` transcript entry now names the session the claim was made for and the
+  process that wrote it, so two instances reading one transcript — a continuation that resumed a
+  live session's id — tell their own records apart: a release another process wrote ends no role
+  here, and a claim another process wrote is pressed only while this process holds none. A record
+  from a build before those fields is read exactly as it was.
+
+  Every claim and every topic hand-back states this instance's client instance id, so the
+  listener weighs each on the process making it: a release frees only the role claims this
+  process holds, and a claim of a role held under this session's own id is granted to the process
+  the standing claim names, or once nobody renewed that claim inside the listener's live window.
+  A claim the listener refused because the lookup names this very session under another process
+  is asked again on each heartbeat pass, so a relaunched role is no longer stranded by a stale
+  claim; every other refusal stays latched until a session event lands.
+
+  A heartbeat's re-assertion of a role this session already holds now confirms it only when the
+  lookup names this session and this process and reports no hand-back, a holder naming no
+  process being read as this one's, so a lane whose role a continuation took under this very
+  session's id claims again
+  instead of reading itself as the holder for ever and never handing the role back. The refusal
+  that re-assertion may get is weighed on the session it names: one naming this session's own id
+  is the other process's standing claim, so the role stays held here, no refusal is latched,
+  nothing is said, and the next heartbeat asks again; one naming a different session ends the
+  role here as before.
+
+  A lookup that answers `handed_back` is a role this process does not hold, however exactly it
+  names this session and this process: a client built before a release stated its process hands
+  a role's lane topic back without being able to free the claim, and the listener marks the
+  claim rather than freeing it, after which no registration renews it. The pass that reads the
+  mark claims the role again at once and the grant writes a fresh record with no mark, so a hold
+  marked that way is back before the listener's role claim reaper could free the role. Each
+  registration renews every claim of this process the listener has not marked, whatever topics
+  that registration carries.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875

@@ -253,10 +253,12 @@ go idle.
 
 ## smoke-role-takeover.sh
 
-Live proof that a soft role claim naming a predecessor takes the role only from a predecessor
-that is gone or is the claimant's own client instance (dispatch://INFRA-404, R8 and A5 of its
-spec). It is the only smoke here that needs neither a model provider nor a deployment: `go` and
-`bun` alone, so CI runs it as a step of the `envoy-session-stall` job.
+Live proof that a role claim is weighed on the process that holds it: a second process that
+resumed a live session's id can neither take, release nor outlast that session's role
+(dispatch://INFRA-783), and a soft claim naming a predecessor takes the role only from a
+predecessor that is gone or is the claimant's own client instance (dispatch://INFRA-404, R8 and
+A5 of its spec). It is the only smoke here that needs neither a model provider nor a deployment:
+`go` and `bun` alone, so CI runs it as a step of the `envoy-session-stall` job.
 
 It builds natsd (`packages/envoy/internal/testnats/cmd/natsd`) and the listener
 (`packages/envoy/cmd/listener`) from the checkout and runs both on loopback ports of its own, as
@@ -273,24 +275,61 @@ drives them with real client processes:
 
 Every client reaches the listener through a recording proxy of its own
 (`role-takeover/listener-proxy.ts`), so each request and the listener's answer to it is read from
-a log rather than inferred, and a request can be held: the first scenario below holds a fork's
-role claim back until another process has resumed and registered its predecessor.
+a log rather than inferred.
 
-One line per row of R8's table is printed with its outcome:
+The listener runs with windows of its own, because every row turns on whether a claim's holder is
+still answering for it: `ENVOY_SESSION_LIVE_WINDOW=10s`, which is how long a claim stands renewed
+after its holder's last registration, and `ENVOY_ROLE_CLAIM_REAP_INTERVAL=2s`, so every row is
+swept several times. The one claim the reaper frees in the run is the one a hand-back marked:
+no registration renews a marked claim, so it goes within one more reap interval of its renewal
+lapsing, though the client that handed it back goes on registering that session id.
+`ENVOY_SESSION_GONE_HORIZON` keeps its hour-long default all the same, since every unmarked
+claim is kept while its holder's session reads short of `gone`, which is what leaves every
+other row's holder in its role. The rows still read the listener's own word for each outcome — a claim
+granted, a `409`, or the lookup's `404` — which reads the same whether a standing claim lapsed
+where it stood or a pass had already removed it, and a row whose claimant must be refused is
+decided inside the window, its holder having answered for the claim immediately before. A row
+that waits the window out waits for the listener to say so, never for a sleep.
 
-- **row 1** — a claim under the id that holds the role keeps it: an Oh My Pi plugin reload, and a
-  Claude Code channel server restart, each under the session id that holds the role.
+Seventeen rows are printed, each with its outcome:
+
+- **row 1**, twice — a claim under the id that holds the role is granted because nobody renewed
+  the standing claim inside the live window: an Oh My Pi plugin reload, and a Claude Code channel
+  server restart, each under the session id that holds the role.
+
 - **row 2** — an Oh My Pi fork gets its parent's role, because the parent's live entry carries the
   claimant's own client instance id.
+
 - **row 3** — an Oh My Pi move, in one process, to a session whose records name the held role gets
   it, by the same case.
+
 - **row 4** — a Claude Code `/clear` handoff gets the role: the deregistration removes the
   process's own entry, and the claim then finds no live predecessor.
-- **row 5** — each of those after another process resumed the predecessor id and registered it
-  last is refused `409` naming the predecessor, and that process keeps the role. The fork case is
-  the spec's A5 scenario 1 and the `/clear` case its A5 scenario 2.
-- **A5** — a refused process stays registered, and after the holder exits the refused Oh My Pi
-  process takes the role on its next session event.
+
+- **INFRA-783**, four rows — a second process that resumed a live session's id is refused the role
+  that session holds (`409` naming it, in Oh My Pi and in Claude Code); the Oh My Pi one is then
+  granted the role once the holder stops renewing the claim and the window passes; and the
+  process that no longer holds the claim hands the role topic back, which frees nothing.
+
+- **row 5**, three rows — a claim naming a predecessor that is live inside another client
+  instance is refused `409` naming it, in Oh My Pi (A5 scenario 1), in a move made by that same
+  refused process, and in the Claude Code `/clear` handoff (A5 scenario 2). The live predecessor
+  is built from two session ids, since a second process claiming under one id is now decided on
+  the standing claim rather than on the predecessor it names.
+
+- **A5**, two rows — a refused process stays registered, and after the holder exits the refused
+  Oh My Pi process takes the role on its next session event.
+
+- **INFRA-783**, three further rows — an older client's hand-back, which is a release of a
+  role's own lane topic under the holder's session id stating no `client_instance_id`, frees
+  nothing and marks the claim: the lookup answers `handed_back`, the real Oh My Pi holder reads
+  that as a role it does not hold, claims it back at its next heartbeat and takes the lane's
+  next message. The same hand-back against an old-build holder, driven by `curl` because a
+  current client would take the role straight back, frees the role a live window and up to one
+  reap interval later while
+  that client is still registering. And a client that states no process at all — the shape every
+  claim standing at a deploy is in — keeps its role across three live windows of registrations
+  that carry no `client_instance_id`.
 
 ### Usage
 
@@ -300,10 +339,17 @@ bash packages/pi-envoy/scripts/smoke-role-takeover.sh --base-rev main@origin   #
 ```
 
 `--base-rev <rev>` builds only the listener from that revision, leaving every client as it is in
-the working copy, which is the negative control: against `main@origin` row 5's three cases fail,
-because that listener takes a role from any predecessor a claim names, live or not. It reads the
-revision without touching the working copy (`jj --ignore-working-copy log` resolves it, `git
-archive` extracts `packages/envoy`), moves no bookmark and writes nothing outside its scratch.
+the working copy, which is the negative control: against `main@origin` eleven of the seventeen
+rows fail. The four original INFRA-783 rows do, because that listener hands a role held under a
+session id to any process that claims under that id; A5's two scenarios and the row where the
+refused process takes the role once the holder exits do, because it takes a role from any
+predecessor a claim names, live or not; the two row 1 rows do, because it grants the claim but
+names no process for the holder; and the two hand-back rows do, because it has no mark to
+leave — it takes the live holder's lane topic out of the record and renews that holder's claim
+for ever. The third new row passes there, a claim naming no process never having been aged out
+by that listener either. It reads the revision without touching the working
+copy (`jj --ignore-working-copy log` resolves it, `git archive` extracts `packages/envoy`), moves
+no bookmark and writes nothing outside its scratch.
 
 Prerequisites, each checked before anything starts: `go`, `bun` with the checkout's dependencies
 installed, `curl`, `jq`, and `jj`, `git` and `tar` for `--base-rev`. Everything the run writes —
@@ -311,7 +357,7 @@ the two binaries, the JetStream store, each client's home and state directory, e
 request log — lives in one `mktemp -d` under `$TMPDIR`, which an exit trap removes after a pass
 and keeps after anything else. Nothing it starts inherits this shell's environment (`env -i` plus
 `PATH` and what the script sets), so an operator's `ENVOY_*`, `NATS_*` or `DISPATCH_*` variables
-never reach a client. A local run takes about a minute.
+never reach a client. A local run takes about two minutes, and about four with `--base-rev`.
 
 ### Exit codes
 
@@ -360,6 +406,18 @@ never run: it starts no process, so every script keeps its own isolation, logs, 
 messages and exit codes. A caller defines `refuse` and sets `local_stack_fail` to the function an
 exhausted port range is reported through (`refuse`, or `smoke-replay.sh`'s `fail`).
 `packages/envoy-client/test/envoy-stack.ts` is the same stack for the TypeScript suite.
+
+## listener-api.sh
+
+The listener's own HTTP surface, in the second sourced file `smoke-role-takeover.sh` brings in
+beside `local-stack.sh`: one raw call either way (`listener_get`, `listener_post`), the three
+requests a client built before dispatch://INFRA-783 sends, which that smoke drives by `curl`
+because no client in the checkout can be made to send them (`old_register`, `old_claim`,
+`old_handback`), and the readers every row states its outcome in — one field of
+`GET /v1/roles/<role>` (`role_field`, and `role_holder`, `role_instance`, `role_handed_back`,
+`role_reason`, `role_unrenewed` over it) and the registry's answer for a session (`registered`,
+`unregistered`). It is sourced, never run, and reads three variables the caller sets:
+`envoy_url`, `work` and `curl_max_time`.
 
 ## skill-scenarios/rig.sh
 

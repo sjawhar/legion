@@ -809,6 +809,44 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 }
 
+// roleClaimLiveWindow is the live window d's session registry runs with, which POST /v1/roles/set
+// weighs a standing claim's renewal against (store.Registry.ClaimRenewedWithin): read from that
+// registry exactly as the route reads it, so a test ages a claim past the very window the route
+// will judge it by.
+func roleClaimLiveWindow(d *listenerDeps) time.Duration {
+	live, _ := d.sessions.Windows()
+	return live
+}
+
+// ageRoleClaim moves role's stored claim back by age, both the moment it was claimed and the
+// renewal that follows it (store.RoleClaim), as a holder that has stopped answering for its claim
+// leaves it. Nothing frees a claim renewed inside the live window, so a test about a holder that
+// is gone has to age the claim the holder left behind.
+func ageRoleClaim(t *testing.T, d *listenerDeps, role string, age time.Duration) {
+	t.Helper()
+	roles, err := d.client.JS().KeyValue(bus.RoleClaimBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	entry, err := roles.Get(role)
+	if err != nil {
+		t.Fatalf("read %s's claim: %v", role, err)
+	}
+	claim, err := store.DecodeRoleClaim(entry.Value())
+	if err != nil {
+		t.Fatalf("decode %s's claim: %v", role, err)
+	}
+	aged := time.Now().Add(-age).UnixMilli()
+	claim.ClaimedAt, claim.RenewedAt = aged, aged
+	record, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatalf("encode %s's aged claim: %v", role, err)
+	}
+	if _, err := roles.Update(role, record, entry.Revision()); err != nil {
+		t.Fatalf("store %s's aged claim: %v", role, err)
+	}
+}
+
 // A role claim refreshes the claimant's session entry, and the entry it writes names no serving
 // port. An entry an earlier listener stored with one would otherwise be renewed by every claim
 // its client makes, while each of that client's registrations is refused (subscribeHandler); and
@@ -931,10 +969,14 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 	if err := claimant.sessions.Delete(context.Background(), "ses_gone_holder"); err != nil {
 		t.Fatalf("end ses_gone_holder's session: %v", err)
 	}
+	// The gone holder stopped answering for its claim when its session ended, which the claim's
+	// renewal has to say too: a claim renewed inside the live window is kept whatever the
+	// session bucket has lost.
+	ageRoleClaim(t, claimant, "lapsed-claim", 2*observer.sessions.TTL())
 	live := func(sessionID string) bool {
 		return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 	}
-	if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL()); err != nil || sweep.Reaped != 1 {
+	if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL(), observer.sessions.TTL()); err != nil || sweep.Reaped != 1 {
 		t.Fatalf("reap role claims = %+v, %v; want the one claim whose holder left the bucket", sweep, err)
 	}
 	for role, want := range map[string]string{"fresh-claim": "ses_fresh_holder", "lapsed-claim": ""} {
@@ -1142,7 +1184,9 @@ func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
 		live := func(sessionID string) bool {
 			return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
 		}
-		if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL()); err != nil || sweep.Reaped != 0 {
+		// A live window of zero so the claim's own renewal keeps nothing here: what must keep
+		// it is the session bucket the reaper cannot read.
+		if sweep, err := observer.registry.ReapRoleClaims(context.Background(), live, observer.sessions.TTL(), 0); err != nil || sweep.Reaped != 0 {
 			t.Fatalf("reap role claims while the session bucket cannot be read = %+v, %v; want none", sweep, err)
 		}
 		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
@@ -1426,7 +1470,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	}
 	sweep, err := restoredRegistry.ReapRoleClaims(context.Background(), func(id string) bool {
 		return roleHolderMayBeLive(logging.New("test"), restoredSessions, id)
-	}, live)
+	}, live, live)
 	if err != nil || sweep.Reaped != 1 {
 		t.Fatalf("the role reaper released %+v, %v; want the one claim whose holder is gone", sweep, err)
 	}
@@ -1646,19 +1690,43 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		}
 	})
 
-	t.Run("a claim under the holder's own session id keeps the role", func(t *testing.T) {
-		// The holder re-claims its own role and names a predecessor of another instance. The
-		// predecessor rule is never reached: the role is already this session's.
+	t.Run("a claim from the process that holds the role keeps it", func(t *testing.T) {
+		// The holder's own process re-claims its role and names a predecessor of another
+		// instance. The predecessor rule is never reached: the role is held under this
+		// claimant's own session id, by the very process making the claim, so the route
+		// decides on that claim alone.
 		registry, sessions, _, post := setup(t)
 		registerInstance(t, sessions, "ses_holder", claimantInstance)
-		claim(t, post, `{"session_id":"ses_holder","role":"sre"}`)
+		claim(t, post, fmt.Sprintf(`{"session_id":"ses_holder","role":"sre","client_instance_id":%q}`, claimantInstance))
 		registerInstance(t, sessions, "ses_other", otherInstance)
-		rec := post(`{"session_id":"ses_holder","role":"sre","soft":true,"previous_session_id":"ses_other"}`)
+		rec := post(fmt.Sprintf(`{"session_id":"ses_holder","role":"sre","soft":true,"previous_session_id":"ses_other","client_instance_id":%q}`, claimantInstance))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("the holder's own soft claim: status %d %s, want 200", rec.Code, rec.Body.String())
 		}
 		if holder := holderOf(t, registry, "sre"); holder != "ses_holder" {
 			t.Fatalf("holder after its own claim = %q, want ses_holder", holder)
+		}
+	})
+
+	t.Run("a live predecessor gives the role up to the process the request states", func(t *testing.T) {
+		// The claimant states its own process rather than leaving the route to read it from
+		// its registration, and the predecessor belongs to that same process: the role
+		// follows it, and the takeover is not the logged one, since neither side is
+		// unidentified. The claimant's registration carries no instance at all, so this is
+		// the stated id deciding and not the stored one.
+		registry, sessions, logs, post := setup(t)
+		registerInstance(t, sessions, "ses_pred", claimantInstance)
+		claim(t, post, `{"session_id":"ses_pred","role":"sre"}`)
+		registerInstance(t, sessions, "ses_claimant", "")
+		rec := post(fmt.Sprintf(`{"session_id":"ses_claimant","role":"sre","soft":true,"previous_session_id":"ses_pred","client_instance_id":%q}`, claimantInstance))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("soft claim stating the predecessor's own client instance: status %d %s, want 200", rec.Code, rec.Body.String())
+		}
+		if holder := holderOf(t, registry, "sre"); holder != "ses_claimant" {
+			t.Fatalf("holder after the claim = %q, want ses_claimant", holder)
+		}
+		if logged := logs.String(); strings.Contains(logged, "carries no client instance id") {
+			t.Fatalf("takeover log = %q, want none: the request named the instance both sides share", logged)
 		}
 	})
 
@@ -1692,12 +1760,15 @@ func TestRoleSetHandlerSoftClaimPredecessorInstance(t *testing.T) {
 		})
 	}
 
-	t.Run("a claim keeps the claimant's stored client instance id", func(t *testing.T) {
+	t.Run("a claim leaves the claimant's stored client instance id as it found it", func(t *testing.T) {
 		// The claim refreshes the claimant's registration, and that refresh must leave the id the
-		// next soft claim reads: a claim that cleared it would demote every later claim.
+		// next soft claim's predecessor rule reads: a claim that cleared it would demote every
+		// later claim. The instance the request states is not written there either, whatever it
+		// names: one registration per session id is a non-goal, and a second process claiming
+		// under this id must leave the registration of the process that registered it alone.
 		_, sessions, _, post := setup(t)
 		registerInstance(t, sessions, "ses_claimant", claimantInstance)
-		claim(t, post, `{"session_id":"ses_claimant","role":"sre","soft":true}`)
+		claim(t, post, fmt.Sprintf(`{"session_id":"ses_claimant","role":"sre","soft":true,"client_instance_id":%q}`, otherInstance))
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		stored, err := sessions.Refresh(ctx, "ses_claimant")
@@ -2106,15 +2177,22 @@ func TestUnsubscribeRequiresSessionIDAndReturnsRemovedTopics(t *testing.T) {
 		}
 	})
 }
-func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
+
+// The empty-topics unsubscribe is the shape a client leaving sends, and it frees the role claims
+// of the process it names (client_instance_id): the claim here names that very process, so the
+// role is free for its next holder.
+func TestUnsubscribeAllReleasesTheRoleClaimsOfTheProcessThatAsked(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	const (
 		sessionID = "ses_unsubscribe_role"
 		role      = "legion-controller"
 	)
-	if _, err := registry.SetRole(sessionID, "test-machine", role, false); err != nil {
-		t.Fatalf("SetRole: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	claimRequest := store.RoleClaimRequest{SessionID: sessionID, MachineID: "test-machine", ClientInstanceID: holdingProcess, Role: role}
+	if _, err := registry.SetRoleWithPrevious(ctx, claimRequest); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, sessionID, err)
 	}
 
 	mux := http.NewServeMux()
@@ -2124,7 +2202,7 @@ func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
 	mux.ServeHTTP(recorder, httptest.NewRequest(
 		http.MethodPost,
 		"/v1/interests/unsubscribe",
-		strings.NewReader(`{"session_id":"ses_unsubscribe_role","topics":[]}`),
+		strings.NewReader(`{"session_id":"ses_unsubscribe_role","topics":[],"client_instance_id":"`+holdingProcess+`"}`),
 	))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())

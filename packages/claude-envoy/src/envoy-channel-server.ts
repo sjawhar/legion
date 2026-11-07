@@ -71,8 +71,10 @@ import {
   type EnvoyClient,
   expandSubscriptionTopics,
   holderStateOf,
+  mayActOnRoleRecord,
   mergeInterestSources,
   newClientInstanceID,
+  roleHeldBy,
   type SubscribeResult,
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
@@ -1029,8 +1031,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
     return {
       dropping,
+      // The release names this process, so the listener frees the role claim of this process
+      // alone where one of these topics is a role's: a second process that resumed this session
+      // id keeps the role it holds.
       unsubscribing: serialized(() =>
-        options.client.unsubscribe({ sessionID: identity.id, topics }),
+        options.client.unsubscribe({
+          sessionID: identity.id,
+          topics,
+          clientInstanceID: options.clientInstanceID,
+        }),
       ),
     }
   }
@@ -1109,36 +1118,91 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
+   * Writes `file` as this session's role record, naming this process as its writer, so a second
+   * `claude` reading the same state directory — one that resumed this session id — tells its own
+   * record from this one's. The destination is the caller's, because `restoreRole` resolves it
+   * before it removes the predecessor's file while the record's `session_id` is read after.
+   */
+  const writeRoleRecord = (file: string, role: string): Promise<void> =>
+    writePersistedRole(file, {
+      session_id: identity.id,
+      role,
+      client_instance_id: options.clientInstanceID,
+    })
+
+  /**
+   * The id whose role record is still to be taken back, read by `transferRole` on every
+   * heartbeat: a handoff has moved away from it, a restore of it failed, or a restore of it was
+   * refused by a standing claim under this session's own id. Written by each caller of
+   * `restoreRole` from what that call answered, and by `adoptHandoff` for the id it left.
+   */
+  let roleTransferFrom: string | undefined
+
+  /**
    * Take back the role persisted for `previousSessionID` (this id on `--resume`,
    * the pre-`/clear` id on a handoff) with a soft claim naming that predecessor. The listener
    * grants such a claim only when that predecessor has no live registry entry, when its entry
    * carries this process's own client instance id, or when either side carries none; a
    * predecessor still live under another client instance keeps the role.
    *
-   * Which is why a refusal naming the predecessor itself keeps the record: it belongs to that
-   * live holder, another process sharing this state directory, and deleting it would cost that
-   * process its only way back to the role. A refusal naming any other session says the
+   * Answers `"pending"` when the role is still to be taken back from that id and only time
+   * decides it, `"settled"` when nothing more is to be asked of that record. The caller keeps
+   * the retry: a restore writes none of its own.
+   *
+   * A record another process wrote is pressed only while this process holds no role
+   * (`mayActOnRoleRecord`, the one rule both clients read). One state directory is read by two
+   * processes whenever a second `claude` resumes a live session's id, and a record is keyed by
+   * session id alone, so the record found here can be the other process's claim rather than a
+   * predecessor of this one's (dispatch://INFRA-783). With no role of its own this process has
+   * nothing to lose by asking, and the listener decides between the two; holding one, it leaves
+   * that record where its writer can still use it. A record written before the writer was named
+   * is nobody's in particular and is pressed as it always was.
+   *
+   * A refusal naming this session's own id is the standing claim of the process this one
+   * replaced — the `claude` that `--resume` continues, or the channel server this one restarted
+   * — which renewed that claim at its last heartbeat and so still stands inside the listener's
+   * live window. The listener grants it the moment nobody has answered for it inside that
+   * window, so that refusal is the `"pending"` answer and every heartbeat asks again until it
+   * is granted: one claim at boot and no more would cost this process its role for the life of
+   * the process, on every `--resume` and every restart inside the window. The record stays
+   * where it is, because the pending claim is read back out of it.
+   *
+   * Which is why a refusal naming the predecessor itself keeps the record too: it belongs to
+   * that live holder, another process sharing this state directory, and deleting it would cost
+   * that process its only way back to the role. A refusal naming any other session says the
    * predecessor demonstrably no longer holds it, so its record goes — the one path that removes
    * a role record by hand.
    */
-  const restoreRole = async (previousSessionID = identity.id): Promise<void> => {
+  const restoreRole = async (previousSessionID: string): Promise<"settled" | "pending"> => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID)
     const persisted = await readPersistedRole(previousFile)
-    if (persisted === undefined) return
+    if (persisted === undefined) return "settled"
+    if (
+      !mayActOnRoleRecord(
+        persisted.client_instance_id,
+        options.clientInstanceID,
+        heldRole !== undefined,
+      )
+    ) {
+      return "settled"
+    }
     const claim = await options.client.setRole({
       sessionID: identity.id,
       role: persisted.role,
       soft: true,
       previousSessionID: persisted.session_id,
+      clientInstanceID: options.clientInstanceID,
     })
     if (!claim.claimed) {
+      if (claim.holder === identity.id) return "pending"
       if (claim.holder !== persisted.session_id) await rm(previousFile, { force: true })
-      return
+      return "settled"
     }
     heldRole = persisted.role
     const currentFile = roleStateFile(options.stateDirectory, identity.id)
     if (previousFile !== currentFile) await rm(previousFile, { force: true })
-    await writePersistedRole(currentFile, { session_id: identity.id, role: persisted.role })
+    await writeRoleRecord(currentFile, persisted.role)
+    return "settled"
   }
 
   let regained: RoleRegainHook | undefined
@@ -1185,15 +1249,29 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
   }
 
-  /** `afterOutage`: the last tick's registration failed, so a holder the listener still names
-   * may have been answered "no holder" meanwhile. */
+  /**
+   * Re-establishes this session as the live holder of the role it holds, on every heartbeat.
+   * `afterOutage`: the last tick's registration failed, so a holder the listener still names may
+   * have been answered "no holder" meanwhile.
+   *
+   * The lookup confirms the role only when it names this session *and* this process
+   * (`roleHeldBy`, the one rule both clients read): a claim standing under this very session id
+   * that another process made is not this one's to renew, and reading it as confirmation is how
+   * a lane kept heartbeating while a continuation's claim held the role and then lapsed
+   * (dispatch://INFRA-783). Anything else is claimed again, soft.
+   *
+   * A refusal naming a different session ends the role here: that session holds it, and this
+   * one's record is the only thing that would claim otherwise, so it goes. A refusal naming this
+   * session is the standing claim of another process under this id, which the listener grants
+   * the moment that process stops renewing it; the role and its record stay, and the next
+   * heartbeat asks again. The record's mtime is refreshed as it is on a confirmed holder, so the
+   * age sweep never expires a record this process is still pressing a claim for.
+   */
   const reassertRole = async (afterOutage: boolean): Promise<void> => {
     if (heldRole === undefined) return
     const role = heldRole
-    const holder = await options.client
-      .getRole(role)
-      .then((info) => info.holder, undefinedOnNotFound)
-    if (holder === identity.id) {
+    const holding = await options.client.getRole(role).catch(undefinedOnNotFound)
+    if (roleHeldBy(holding, identity.id, options.clientInstanceID)) {
       await refreshRoleRecord()
       if (afterOutage) fireRegained(role, "reregistered")
       return
@@ -1202,40 +1280,41 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       sessionID: identity.id,
       role,
       soft: true,
+      clientInstanceID: options.clientInstanceID,
     })
     if (!result.claimed) {
-      heldRole = undefined
-      await rm(roleStateFile(options.stateDirectory, identity.id), { force: true })
+      if (result.holder !== identity.id) {
+        heldRole = undefined
+        await rm(roleStateFile(options.stateDirectory, identity.id), { force: true })
+        return
+      }
+      await refreshRoleRecord()
       return
     }
     fireRegained(role, "reclaimed")
   }
 
-  /**
-   * The id a handoff moved away from, until its role has been taken back; a
-   * handoff whose registration failed leaves it for the next heartbeat.
-   */
-  let roleTransferFrom: string | undefined
   /** Whether a failure to take back the queued role has been reported since the last success. */
   let roleTransferFailureReported = false
   /**
    * Best-effort, unlike `syncRegisteredInterests` behind it on the heartbeat. A failed transfer
-   * keeps its own retry, `roleTransferFrom`, which clears only once `restoreRole` resolves; a
-   * throw would add nothing to that and would end the tick before the interests reconciliation,
-   * on every tick for as long as the failure lasts — a resumed session would never adopt its
-   * subscriptions and a registry-side unsubscribe that failed would never be cleared. The
-   * session works without its role meanwhile; it does not work without its interests, whose read
-   * has no queue of its own and needs the failed tick, its report and its retry.
+   * keeps its own retry, `roleTransferFrom`, which this clears only once `restoreRole` answers
+   * that the record is settled; a throw would add nothing to that and would end the tick
+   * before the interests reconciliation, on every tick for as long as the failure lasts — a
+   * resumed session would never adopt its subscriptions and a registry-side unsubscribe that
+   * failed would never be cleared. The session works without its role meanwhile; it does not
+   * work without its interests, whose read has no queue of its own and needs the failed tick,
+   * its report and its retry.
    */
   const transferRole = async (): Promise<void> => {
     const from = roleTransferFrom
     if (from === undefined) return
     try {
-      await restoreRole(from)
-      roleTransferFrom = undefined
+      roleTransferFrom = (await restoreRole(from)) === "pending" ? from : undefined
       roleTransferFailureReported = false
     } catch (error) {
-      // Said once per failure run: every heartbeat retries it.
+      // `roleTransferFrom` is untouched, so the next heartbeat asks again.
+      // Said once per failure run.
       if (!roleTransferFailureReported) {
         roleTransferFailureReported = true
         process.stderr.write(
@@ -1388,7 +1467,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
     )
     if (drifted.length === 0) return
-    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted })
+    await options.client.unsubscribe({
+      sessionID: identity.id,
+      topics: drifted,
+      clientInstanceID: options.clientInstanceID,
+    })
   }
 
   // One tick at a time, and at most one pending behind it. `serialized` already
@@ -1523,22 +1606,28 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     // failure but one: a listener answer that is not JSON or misses the schema, an unreadable
     // role file, any transient error. The one is a role file whose bytes cannot be parsed, which
     // only `readPersistedRole` can tell apart: no later read of the same bytes succeeds, so it is
-    // not queued, and it costs this session its role and nothing more.
-    await restoreRole().catch((error: unknown) => {
+    // not queued, and it costs this session its role and nothing more. A claim the listener
+    // refused naming this very session is queued the same way, on the `"pending"` the restore
+    // answers: the process this one resumed renewed that claim at its last heartbeat, and the
+    // role comes back a live window and up to one reap interval later to a process that keeps
+    // asking.
+    try {
+      roleTransferFrom = (await restoreRole(identity.id)) === "pending" ? identity.id : undefined
+    } catch (error) {
       if (error instanceof UnparseableRoleRecordError) {
         process.stderr.write(
           `envoy-channel: ${messageFor(error)}; the session starts without a role\n`,
         )
-        return
+      } else {
+        roleTransferFrom = identity.id
+        // This is the first failure of the run `transferRole` reports, so it says nothing more
+        // until the retry has succeeded once.
+        roleTransferFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
+        )
       }
-      roleTransferFrom = identity.id
-      // This is the first failure of the run `transferRole` reports, so it says nothing more
-      // until the retry has succeeded once.
-      roleTransferFailureReported = true
-      process.stderr.write(
-        `envoy-channel: could not restore the role (${messageFor(error)}); the next heartbeat retries\n`,
-      )
-    })
+    }
   })
   // The first sweep, once the listener knows what the session follows: what was stored while it
   // was away (a resume included), or, for a new session, its cursors' start at the stream's end.
@@ -1635,10 +1724,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     },
     async rememberRole(role) {
       heldRole = role
-      await writePersistedRole(roleStateFile(options.stateDirectory, identity.id), {
-        session_id: identity.id,
-        role,
-      })
+      await writeRoleRecord(roleStateFile(options.stateDirectory, identity.id), role)
     },
     async shutdown() {
       if (shuttingDown) return
@@ -1679,6 +1765,9 @@ export interface ChannelToolRuntime {
   readonly identity: SessionIdentity
   readonly client: EnvoyClient
   readonly session: ChannelSession
+  /** The process the tools act as: the id every registration and every claim of this channel
+   *  server carries (`ChannelSessionOptions.clientInstanceID`). */
+  readonly clientInstanceID: string
 }
 export async function executeEnvoyTool(
   runtime: ChannelToolRuntime,
@@ -1766,7 +1855,14 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input)
-      const result = await runtime.client.setRole({ sessionID: identity.id, role: args.role })
+      // The claim names this process, as every claim this server makes does: the listener
+      // records it as the role's holder, so a second process on this session id cannot be
+      // mistaken for the one holding the role.
+      const result = await runtime.client.setRole({
+        sessionID: identity.id,
+        role: args.role,
+        clientInstanceID: runtime.clientInstanceID,
+      })
       if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`)
       await runtime.session.rememberRole(args.role)
       return result.interest
@@ -2084,13 +2180,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
       })
     }
-    runtime = { identity, client, session }
+    runtime = { identity, client, session, clientInstanceID }
     if (pane !== undefined && daemon !== undefined && !stopping) {
       claim = startLegionClaim({
         pane,
         sessionID: identity.id,
         daemon,
         client,
+        clientInstanceID,
         session,
         signal: booting.signal,
         log: logLegion,

@@ -4,7 +4,23 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
 import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
 
-const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
+/**
+ * The role record on disk: the session the role was claimed for, the role, and the process that
+ * wrote the record.
+ *
+ * `client_instance_id` is the writer's client instance — one Claude Code channel-server process,
+ * the same id its registrations and its claims carry. One state directory is read by two
+ * processes whenever a second `claude` resumes a live session's id, and the record is keyed by
+ * session id alone, so without the writer a process cannot tell its own record from the other's.
+ * It is optional because a record written before the field existed carries none: such a record
+ * loads and is read as written by no known process (`restoreRole` in the channel server presses
+ * it as it always did).
+ */
+const PersistedRole = z.object({
+  session_id: z.string().min(1),
+  role: z.string().min(1),
+  client_instance_id: z.string().min(1).optional(),
+})
 
 /**
  * The session id the channel server acts as, held once and passed by reference.
@@ -72,9 +88,10 @@ export class UnparseableRoleRecordError extends Error {
 }
 
 /**
- * The role a session held, from its role file; undefined when it has none. Bytes that do not
- * parse throw `UnparseableRoleRecordError`; every other failure to read them (`EACCES`, `EISDIR`,
- * any I/O error) propagates unchanged.
+ * The role a session held, from its role file; undefined when it has none. A record written
+ * before the writer was named carries no `client_instance_id` and loads unchanged. Bytes that do
+ * not parse throw `UnparseableRoleRecordError`; every other failure to read them (`EACCES`,
+ * `EISDIR`, any I/O error) propagates unchanged.
  */
 export async function readPersistedRole(
   roleFile: string,
@@ -137,14 +154,17 @@ export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise
  * title records follow, except the record of `currentSessionId` — the session running the sweep.
  *
  * A record's mtime is when its session was last seen holding the role: every heartbeat on which
- * the listener still names the session as holder touches the record (`refreshRoleRecord` in the
- * channel server), so this age reaches only a record whose session has not confirmed its role for
- * that long — in practice one that stopped running. Only one path removes a role file by hand —
- * a soft `setRole` another live session holds off (`claimed: false`, the listener's 409), never
- * any answer of the publish route — so a session that holds its role to the end leaves its file
- * behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and asks
- * the operating system about a pid, while a role file is keyed by session id and has no process
- * left to ask about.
+ * the listener still names the session as holder touches the record, and so does every heartbeat
+ * a refused process spends pressing its claim again (`refreshRoleRecord` in the channel server),
+ * so this age reaches only a record whose session has not confirmed its role for that long — in
+ * practice one that stopped running. Only one path removes a role file by hand — a soft
+ * `setRole` refused (`claimed: false`, the listener's 409) naming a session other than the one
+ * the record is for, which says that session demonstrably no longer holds the role — never any
+ * answer of the publish route, and never a refusal naming the record's own session, which is the
+ * role held under that id by another process. So a session that holds its role to the end leaves
+ * its file behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and
+ * asks the operating system about a pid, while a role file is keyed by session id and has no
+ * process left to ask about.
  *
  * The sweep runs at startup, before any heartbeat has touched anything, and a session whose claim
  * the listener refused there has not touched its own record either: age alone would expire the

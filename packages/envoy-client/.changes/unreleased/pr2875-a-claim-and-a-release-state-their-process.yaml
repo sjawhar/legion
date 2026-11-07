@@ -1,0 +1,26 @@
+kind: Added
+body: |-
+  `SetRoleInput` and `UnsubscribeInput` carry `clientInstanceID`, the process making the claim or
+  the release, sent as `client_instance_id` and omitted from the wire when the caller states none,
+  so an older listener sees an unchanged body. The listener records a claim's instance as the
+  role's holder and frees on a release only the role claims naming the releasing process, so a
+  second process that resumed a session's id can neither take that session's role nor hand it
+  back. `RoleInfo` exposes the holder's `client_instance_id`, which is how a refused claimant
+  tells its own session id held by another process from a different session holding the role,
+  and `handed_back`, the mark the listener leaves on a claim a hand-back could not free.
+
+  `roleHeldBy` reads a marked claim as a role nobody holds, whoever it names: no registration
+  renews such a claim, so a holder that read it as a hold would lose the role a live window and
+  up to one reap interval later. A hold an older client's hand-back marked is therefore claimed
+  again at the next heartbeat and comes straight back, the grant writing a fresh record with no
+  mark.
+
+  `unsubscribe` answers in `removed` the topics that left the listener's record rather than the
+  ones the request named: a role lane topic whose claim the release could not free stays in the
+  record, since one interest record serves every process running under one session id and that
+  topic is the interest half of a claim that still stands. A
+  release that states no process frees no claim that names one, frees a claim that names none
+  outright, and — where it names a role's own lane topic — marks the claim it could not free.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875

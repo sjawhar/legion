@@ -333,11 +333,60 @@ modification time.
 | `unresponsive` | It last registered longer ago than the live window but inside the gone horizon, `ENVOY_SESSION_GONE_HORIZON` (1 hour by default). **It is not dead.** It keeps its role claims and its issue claims, a message sent to it is stored and reaches it when it answers again, and nothing starts a replacement for it. |
 | `gone` | It last registered before the gone horizon, or Envoy holds no record of it. |
 
-Only the role claim reaper releases a role claim, and only once that role's holder is `gone`; it
-runs every `ENVOY_ROLE_CLAIM_REAP_INTERVAL` (5 minutes by default), a period of its own and not
-the session reaper's. No lookup, publish or failed delivery releases one. A Legion role whose
-agent process exits is `gone` at once, so its successor's soft claim takes the role without
-waiting out the live window; that claim replaces the holder, it does not release the claim.
+Only the role claim reaper releases a role claim. A claim renewed inside the live window is kept
+whatever its holder's session record says: a holder renews its claim by registering, and the
+process that holds it keeps the role. Past that window the claim is weighed on its holder's
+session, as it always has been: it is kept while that session is not yet `gone` and released
+once it is, for a claim that names a process and one that names none alike, so an `unresponsive`
+holder keeps its role. The one claim released while its holder's session still answers is one a
+hand-back marked, and then only once its own renewal has lapsed, since no registration renews a
+marked claim. The reaper runs every `ENVOY_ROLE_CLAIM_REAP_INTERVAL` (5 minutes by default), a
+period of its own and not the session reaper's. No lookup, publish or failed delivery releases
+one. A Legion role whose agent process exits is `gone` at once, so its successor's soft claim
+takes the role without waiting out the live window; that claim replaces the holder, it does not
+release the claim.
+
+A role is held by a process, not by a session id alone. A claim records the client instance that
+made it and the moment that process last answered for it, which is every registration that
+process sends, so a second process that resumes a live session's id is refused the role that
+session holds (`409` naming the session), and its hand-back of the role's topic frees nothing,
+while the process holding the claim keeps the role through both. Such a hand-back does not take
+the lane topic out of the record either, because one interest record serves every process under
+one session id and that topic is the interest half of a claim that still stands, written there
+by the claim itself: `POST /v1/interests/unsubscribe`
+answers in `removed` the topics that actually left the record, which is not always the list the
+request named. The second process is granted
+the role once the first stops answering for the claim and the live window passes, and only
+while Envoy can read its own view of the role claims: a listener that has just restarted is
+still filling that view, and nothing renews a claim while it cannot be read, so that one grant
+answers `503` with `Retry-After: 1` and claims nothing until the view answers again, rather
+than hand a live holder's role away because its renewal aged with nothing able to move it. A
+claim from the process the standing claim already names is granted through that refill, since
+it takes the role from nobody. `GET /v1/roles/<role>` answers the holding process's
+`client_instance_id` beside the holder's session id where the claim names a process, and leaves
+the field out where it names none, which is how a refused claimant tells its own session id
+held by another process from a different session.
+
+A registration renews every claim its own process holds, whatever topics it carries. What says a
+role was given up is the claim itself: a hand-back that could not free the claim — a release of
+that role's lane topic stating no client instance, the shape a client built before this change
+sends — marks the claim instead, no registration renews a marked claim, and the reaper frees the
+role at its next pass past the live window: one live window plus up to one reap interval, about
+ten minutes with the defaults above. `GET /v1/roles/<role>` answers `handed_back: true` for such
+a claim,
+on the 200 and on a lapsed holder's 404 alike, and leaves the key out otherwise. Both Oh My Pi
+and Claude Code read a marked claim as a role they do not hold, so a holder marked this way
+claims the role again at its next heartbeat and has it back, the fresh record carrying no mark.
+A registration that states no client instance at all renews the claims of its own session that
+name no process, so a claim standing at a deploy is kept until a registration of that session
+that names a process adopts it — any process of the session, not only the one that took the
+role. A release
+that loses its conditional delete to a record written since is not reported as a release: the
+claim is read again, a record still naming that same session and that same process is its own
+holder's renewal, and the delete goes out again at the revision that renewal left, three
+deletes in all. A claim renewed under every one of them is left standing and fails the request
+naming the role, so a client that is handing a role back sends the hand-back again rather than
+leaving the role held while its own registrations renew the claim.
 
 Dispatch judges a role route's holder by the same two windows, and both processes carry the same
 values: give every listener of a deployment and Dispatch's server the same
@@ -433,10 +482,10 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (on a doubling backoff, until GitHub records the delivery or 72 hours after its first failed attempt); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it raises a smaller limit, or none, to its own at start and every 30 seconds, and never lowers one ([Keeping the stream](#keeping-the-stream)). A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
-| `ENVOY_SESSION_LIVE_WINDOW` | How long after its last registration a session reads `live`, as a Go duration; default `5m`. Past it the session reads `unresponsive`, which is not dead ([Live, unresponsive, gone](#live-unresponsive-gone)). Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value. |
-| `ENVOY_SESSION_GONE_HORIZON` | How long after its last registration a session reads `unresponsive` before it reads `gone`, as a Go duration; default `1h`. Only a `gone` session loses its role claim. Keep it at or below `ENVOY_SESSION_MAX_AGE`, or a record the bucket expires first reads `gone` before the horizon. Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value: a horizon only the listener carries has Dispatch count an event sent to a holder the listener still calls `unresponsive`, with nothing sent ([Live, unresponsive, gone](#live-unresponsive-gone)). |
+| `ENVOY_SESSION_LIVE_WINDOW` | How long after its last registration a session reads `live`, as a Go duration; default `5m`. Past it the session reads `unresponsive`, which is not dead ([Live, unresponsive, gone](#live-unresponsive-gone)). It is also how long a role claim stands renewed after its holder's last registration: a claim renewed inside it is kept, and the process that holds it keeps the role. Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value. |
+| `ENVOY_SESSION_GONE_HORIZON` | How long after its last registration a session reads `unresponsive` before it reads `gone`, as a Go duration; default `1h`. Only a `gone` session loses its role claim, and then only when nobody renewed that claim inside the live window; the one claim released while its holder's session still answers is one a hand-back marked. Keep it at or below `ENVOY_SESSION_MAX_AGE`, or a record the bucket expires first reads `gone` before the horizon. Dispatch's server reads it too and judges a role route's holder by it, so give every listener of a deployment and Dispatch the same value: a horizon only the listener carries has Dispatch count an event sent to a holder the listener still calls `unresponsive`, with nothing sent ([Live, unresponsive, gone](#live-unresponsive-gone)). |
 | `ENVOY_SESSION_REAP_INTERVAL` | How often the session reaper deletes the records of `gone` sessions, and settles the session bucket's maximum age, as a Go duration; default `1m`. |
-| `ENVOY_ROLE_CLAIM_REAP_INTERVAL` | How often the role claim reaper looks for role claims whose holder is `gone` and releases them, as a Go duration; default `5m`. Nothing else releases a claim. While `ENVOY_SESSION_MAX_AGE` is below `ENVOY_SESSION_GONE_HORIZON`, keep it at or above that age: a record the bucket expires reads `gone` before the horizon, so a shorter period takes a merely stalled holder's role that much sooner. Once the maximum age covers the horizon no record goes early, and the period only says how long past the horizon a `gone` holder keeps its role: keep it well inside the horizon instead. |
+| `ENVOY_ROLE_CLAIM_REAP_INTERVAL` | How often the role claim reaper looks for role claims nobody has renewed inside the live window whose holder is `gone`, or which a hand-back marked, and releases them, as a Go duration; default `5m`. Nothing else releases a claim, and a claim its holder still renews is kept whatever that holder's session record says. While `ENVOY_SESSION_MAX_AGE` is below `ENVOY_SESSION_GONE_HORIZON`, keep it at or above that age: a record the bucket expires reads `gone` before the horizon, so a shorter period takes a merely stalled holder's role that much sooner. Once the maximum age covers the horizon no record goes early, and the period only says how long past the horizon a `gone` holder keeps its role: keep it well inside the horizon instead. |
 | `ENVOY_SESSION_MAX_AGE` | The `envoy_sessions` bucket's `MaxAge`, as a Go duration: how long a registration record survives in NATS. Unset, the listener leaves the bucket as it is. `/healthz` reports the age in use as `session_max_age`. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |

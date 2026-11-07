@@ -122,6 +122,7 @@ import {
   createEnvoyClient,
   expandSubscriptionTopics,
   holderStateOf,
+  mayActOnRoleRecord,
   mergeInterestSources,
   type SubscribeResult,
 } from "@legion/envoy-client/transport";
@@ -311,9 +312,13 @@ const ClaimIdentitySchema = DedupeIdentitySchema.extend({
 });
 
 /**
- * Transcript entry recording the role this session holds. Successful claims
- * write `{ role }`; legacy `{ role: null }` release records remain authoritative
- * when a resumed session decides whether to reclaim.
+ * Transcript entry recording the role this session holds. A successful claim writes
+ * `{ role, session_id, client_instance_id }`: the role, the session it was claimed for and the
+ * process that claimed it, since one transcript can be read by two processes at once (a
+ * continuation resuming a live session's id) and only the process that wrote a record acts on
+ * it while it holds a role. A `{ role: null }` release record, and any record from a build
+ * before the two fields existed, names no process and is read as this process's own, exactly as
+ * it was read then.
  */
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
@@ -496,7 +501,14 @@ function isLegionManagedEntry(entry: unknown): entry is LegionManagedEntry {
 interface RoleClaimEntry {
   readonly type: "custom";
   readonly customType: typeof ROLE_CLAIM_ENTRY;
-  readonly data: { readonly role: string | null };
+  readonly data: {
+    readonly role: string | null;
+    /** The session the claim was made for; absent on a record a build before it wrote. */
+    readonly session_id?: string;
+    /** The client instance that wrote the record: one Oh My Pi Envoy extension instance, the
+     *  same id its registrations carry. Absent on a record a build before it wrote. */
+    readonly client_instance_id?: string;
+  };
 }
 
 // A claim refused, or handed back, because the session it was decided for was no longer open:
@@ -525,7 +537,15 @@ function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   if (!("customType" in entry) || entry.customType !== ROLE_CLAIM_ENTRY) return false;
   if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
   if (!("role" in entry.data)) return false;
-  return entry.data.role === null || typeof entry.data.role === "string";
+  if (!(entry.data.role === null || typeof entry.data.role === "string")) return false;
+  // Both are absent on a record written before they existed, and a record that carries either as
+  // something other than a string names neither session nor process: it records nothing this
+  // process can read, so it is no claim record at all.
+  if ("session_id" in entry.data && typeof entry.data.session_id !== "string") return false;
+  if ("client_instance_id" in entry.data && typeof entry.data.client_instance_id !== "string") {
+    return false;
+  }
+  return true;
 }
 
 function resolveSkillsDirectory(): string {
@@ -2632,14 +2652,21 @@ export default function envoyExtension(pi: PiApi): void {
     deadlineMs: passDeadlineMs,
     notify: (message, level) => activeSessionContext?.ui.notify(message, level),
     log: logger,
-    appendRoleClaimEntry: (role) => {
+    appendRoleClaimEntry: ({ role, sessionID: claimedFor, clientInstanceID }) => {
       // The transcript is the one thing `omp --resume` guarantees, so it is the durable record
       // of the claim: the listener reaps a dead session's interest row 15 minutes after the
       // row's last write and releases the role claim separately, one session TTL after
       // heartbeats stop (a role claim is not an interest: see `ReapRoleClaims` in
       // packages/envoy/internal/store/kv.go), and this process's memory dies with it. A session
-      // that holds a role heartbeats from here on, whichever claim took it.
-      pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
+      // that holds a role heartbeats from here on, whichever claim took it. The record names the
+      // session the claim was made for and this process, so a second process reading the same
+      // transcript — a continuation that resumed a live session's id — tells its own records
+      // from this one's.
+      pi.appendEntry(ROLE_CLAIM_ENTRY, {
+        role,
+        session_id: claimedFor,
+        client_instance_id: clientInstanceID,
+      });
       if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     },
     dial: dialNats,
@@ -2979,21 +3006,37 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  const transcriptClaimedRole = (branch: readonly unknown[]): string | null | undefined => {
-    // The last claim entry wins: a claim followed by a release is no claim.
-    let role: string | null | undefined;
-    for (const entry of branch) {
-      if (!isRoleClaimEntry(entry)) continue;
-      role = entry.data.role;
-    }
-    return role;
+  // The newest role claim entry on `branch`, whatever process wrote it: the last one wins, since
+  // a claim followed by a release is no claim.
+  const transcriptRoleRecord = (branch: readonly unknown[]): RoleClaimEntry["data"] | undefined =>
+    branch.findLast(isRoleClaimEntry)?.data;
+
+  // What that record asks of this process: the role it claims, `null` for a release, and
+  // `undefined` where this process acts on no record at all — which `mayActOnRoleRecord`, the
+  // one rule both clients read, decides from the writer the record names. Two processes can
+  // read one transcript, a continuation resuming a live session's id, which is how a copy's
+  // release ended the live process's role for hours (dispatch://INFRA-783): a release another
+  // instance wrote ends nothing here while this process holds a role, and a claim it wrote is
+  // pressed only when there is no role to lose, where the listener decides the claim on the two
+  // processes rather than this side guessing.
+  const recordedRole = (branch: readonly unknown[]): string | null | undefined => {
+    const record = transcriptRoleRecord(branch);
+    if (record === undefined) return undefined;
+    return mayActOnRoleRecord(
+      record.client_instance_id,
+      registrationState.clientInstanceID,
+      registrationState.heldRole() !== undefined
+    )
+      ? record.role
+      : undefined;
   };
 
   // The role the host session `id` should hold:
-  //  - The role its own branch records: the transcript entry written at claim time is the durable
-  //    record (it survives `omp --resume` after the listener has reaped a dead session's rows),
-  //    and a recorded release is final. A fork's branch is a copy of its parent's, so it records
-  //    its parent's role; a `/new` records none; a resume or branch records its own.
+  //  - The role its own branch records, where that record is this process's to act on
+  //    (`recordedRole`): the transcript entry written at claim time is the durable record (it
+  //    survives `omp --resume` after the listener has reaped a dead session's rows), and a
+  //    recorded release is final. A fork's branch is a copy of its parent's, so it records its
+  //    parent's role; a `/new` records none; a resume or branch records its own.
   //  - Otherwise the role this process holds, when its hold is under `id` or a session `id`
   //    continues (a tree navigation to before the claim, or a fork from before it).
   //  - Otherwise, once when a pass establishes a resumed or switched session (`readRows`), the
@@ -3014,7 +3057,7 @@ export default function envoyExtension(pi: PiApi): void {
     readRows: boolean
   ): Promise<string | undefined> => {
     const want = (role: string) => (registrationState.refusalFor(id) === role ? undefined : role);
-    const recorded = transcriptClaimedRole(branch);
+    const recorded = recordedRole(branch);
     if (recorded === null) return undefined;
     if (recorded !== undefined) return want(recorded);
     const held = registrationState.heldRole();
@@ -3263,6 +3306,10 @@ export default function envoyExtension(pi: PiApi): void {
     // session, which has none.
     const settled = registrationState.roleSettledSession();
     const readRows = settled !== host && (branch.length > 0 || settled !== "");
+    // A refusal this session carries stands until a session event lands on it. The one refusal
+    // that is never recorded is a claim the listener refused because this very session id holds
+    // the role under another process, which it grants as soon as that process stops renewing
+    // it: nothing latches it, so the pass below claims again.
     const desired = await desiredRole(handle, host, branch, readRows);
     const unheard = lastHeard !== host;
     const held = registrationState.heldRole();
@@ -3543,9 +3590,11 @@ export default function envoyExtension(pi: PiApi): void {
     if (sessionID !== host) restoreLocalSessionState(context);
     // Ends at once a role the host session's own records rule out, so the new session never
     // takes the old role's notices while an earlier pass finishes; the pass hands the hold back.
+    // Only a record this process acts on ends anything (`recordedRole`): a release another
+    // process wrote on this transcript ends no role this one holds.
     registrationState.endUnwantedRole(
       host,
-      transcriptClaimedRole(context.sessionManager.getBranch?.() ?? []),
+      recordedRole(context.sessionManager.getBranch?.() ?? []),
       continuedBy(host)
     );
     // With inbound messages off the session opens no agent subject; a heartbeat's pass, when a

@@ -180,7 +180,7 @@ func TestSubjectIndexFollowsTheInterestBucket(t *testing.T) {
 		t.Fatalf("machine m2 matched %v, another machine's interest", got)
 	}
 
-	if err := other.Remove(t.Context(), "ses_idx", []string{"notifications.dispatch.issue.IDX-1.>"}); err != nil {
+	if _, err := other.Remove(t.Context(), "ses_idx", []string{"notifications.dispatch.issue.IDX-1.>"}, releasedByItsProcess); err != nil {
 		t.Fatalf("unsubscribe the topic: %v", err)
 	}
 	pollMatch(t, r, "m1", topic, 0, 5*time.Second)

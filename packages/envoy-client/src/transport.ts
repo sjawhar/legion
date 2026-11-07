@@ -119,6 +119,17 @@ const RoleWireSchema = z.object({
   // state as a session row reports it, so both are read and `holder_state` wins.
   state: WireStateSchema,
   holder_state: SessionStateSchema.optional(),
+  // The process the claim names as the role's holder, answered beside the holder's session id
+  // on the 200 and on the 404 that names a lapsed holder. Optional: a listener predating the
+  // field names none, and so does a claim an earlier build wrote.
+  client_instance_id: z.string().optional(),
+  // The hand-back mark the claim carries (`internal/store`'s `RoleClaim.HandedBack`): the
+  // holder gave this role back through a release that could not free the claim, so no
+  // registration renews it and the reaper frees the role a live window and up to one reap
+  // interval later. Answered on the 200 and on the 404 that names a lapsed holder. Optional:
+  // the listener omits it where the claim carries no mark, and a listener predating the field
+  // sends none, so an absent one means no mark.
+  handed_back: z.boolean().optional(),
 });
 
 const RoleHeldWireSchema = z.object({
@@ -311,6 +322,12 @@ export function mergeInterestSources(
 
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
 
+/**
+ * A role lookup's answer. Its `client_instance_id` is the process the holder's claim names,
+ * which is how a caller sees that the role is held under its own session id by another process:
+ * `setRole`'s 409 names the holding session alone, and that session id can be the refused
+ * caller's own, so a refused soft claim reads this lookup to tell the two apart.
+ */
 export type RoleInfo = z.infer<typeof RoleWireSchema>;
 
 /**
@@ -320,6 +337,69 @@ export type RoleInfo = z.infer<typeof RoleWireSchema>;
  */
 export function holderStateOf(role: RoleInfo): SessionState {
   return role.holder_state ?? role.state;
+}
+
+/** A process id as the two rules below weigh it: an empty one names no process, exactly as an
+ *  absent one does. The listener omits `client_instance_id` where the claim names no process,
+ *  and a build before it answered the empty string. */
+function namedProcess(id: string | undefined): string | undefined {
+  return id === "" ? undefined : id;
+}
+
+/**
+ * Whether a role lookup's answer is this caller's own hold: it names `sessionID` as the holder
+ * *and* `clientInstanceID` as the process whose claim stands, and it carries no hand-back mark.
+ * A claim standing under this very session id that another process made is not this caller's to
+ * renew — reading it as this caller's is how a lane kept heartbeating while a continuation's
+ * claim held the role and then lapsed (dispatch://INFRA-783) — while a claim naming no process
+ * at all is read as this caller's, since an older listener and a claim an earlier build wrote
+ * name none. `undefined` is the lookup's 404: no holder, so no hold of this caller's.
+ *
+ * A marked claim (`handed_back`) is no hold of anyone's, whoever the holder is: the mark is the
+ * listener's word that this role was handed back, so no registration renews the claim and the
+ * reaper frees the role a live window and up to one reap interval later. A process that still
+ * wants the role must claim again rather than read the lookup as confirmation. That covers the
+ * one case the clients must read the mark for: a client built before the claim named its
+ * process sends no client instance on a release, so its hand-back marks the live holder's
+ * claim instead of freeing it. The holder sees at its very next heartbeat that it does not
+ * hold the role, claims again, and is granted — a claim from the process the claim names
+ * always is — and the fresh claim clears the mark. A holder that really did hand the role back
+ * does not re-take it, because it no longer asks for a role it has ended.
+ *
+ * One rule for every client, because every client keeps it: {@link mayActOnRoleRecord} is the
+ * other.
+ */
+export function roleHeldBy(
+  info: RoleInfo | undefined,
+  sessionID: string,
+  clientInstanceID: string | undefined
+): boolean {
+  if (info === undefined || info.holder !== sessionID || info.handed_back === true) return false;
+  const holding = namedProcess(info.client_instance_id);
+  return holding === undefined || holding === namedProcess(clientInstanceID);
+}
+
+/**
+ * Whether this process may act on a persisted role record — a transcript's role claim entry, a
+ * channel server's role file — that `writer` names the writer of, given whether this process
+ * holds a role already (`holdsRole`).
+ *
+ * A record this process wrote is acted on as it always was, and so is one written before the
+ * record named its writer: that build was one process per transcript and per state directory. A
+ * record another process wrote is acted on only while this process holds no role. Two processes
+ * read one record whenever a second client resumes a live session's id — which is how a copy's
+ * release ended the live process's role for hours (dispatch://INFRA-783) — and the holder is
+ * not the one to decide that from a record it did not write: with no role to lose it asks, and
+ * the listener decides the claim on the two processes rather than this side guessing.
+ */
+export function mayActOnRoleRecord(
+  writer: string | undefined,
+  clientInstanceID: string | undefined,
+  holdsRole: boolean
+): boolean {
+  const wrote = namedProcess(writer);
+  if (wrote === undefined || wrote === namedProcess(clientInstanceID)) return true;
+  return !holdsRole;
 }
 
 export type SubscribeInput = {
@@ -363,6 +443,20 @@ export function newClientInstanceID(): string {
 export type UnsubscribeInput = {
   readonly sessionID: string;
   readonly topics: readonly string[];
+  /**
+   * The client instance handing these interests back: the same id its registration carries
+   * ({@link SubscribeInput.clientInstanceID}). The listener frees only the role claims that
+   * name this process, and never forces one from another, so a second process that resumed
+   * this session id keeps the role it holds. A release that names no process frees a claim
+   * that names none, and marks one it cannot free handed back, which stops that claim's
+   * renewal and frees the role a live window and up to one reap interval later. A role lane
+   * topic whose claim the release did not free stays on the session's record, because that
+   * topic is the interest half of a claim that still stands and the record's role topics are
+   * what a deregistration of the session expands into the claims it frees; the answer names
+   * the topics that actually left it. Omitted from the wire when absent, so an older listener
+   * sees an unchanged body.
+   */
+  readonly clientInstanceID?: string;
 };
 
 export function expandSubscriptionTopics(topics: readonly string[]): readonly string[] {
@@ -451,6 +545,17 @@ export type SetRoleInput = {
    * client instance keeps the role. Sent only with `soft`.
    */
   readonly previousSessionID?: string;
+  /**
+   * The process making this claim: the same id its registration carries
+   * ({@link SubscribeInput.clientInstanceID}). The listener records it on the
+   * claim as the role's holder, and where the role is already held under this
+   * claimant's own session id it decides on that standing claim alone: the
+   * claim is granted where it names the very process holding it, granted once
+   * nobody has renewed that claim inside the live window, and otherwise
+   * refused 409 naming the holder. Omitted from the wire when absent, so an
+   * older listener sees an unchanged body.
+   */
+  readonly clientInstanceID?: string;
 };
 
 export type SetRoleResult =
@@ -904,6 +1009,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         {
           session_id: input.sessionID,
           topics: expandSubscriptionTopics(input.topics),
+          // The process handing the interests back, omitted when the caller names none so an
+          // older listener sees an unchanged body. The listener frees the role claims naming
+          // this process and no others, and forces none.
+          ...(input.clientInstanceID === undefined
+            ? {}
+            : { client_instance_id: input.clientInstanceID }),
         },
         { actingSession: input.sessionID }
       );
@@ -1006,19 +1117,30 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       );
     },
     setRole: async (input) => {
-      // `soft` and `previous_session_id` are omitted from the wire unless set,
-      // so an older listener sees an unchanged hard-claim request. The listener
-      // decides a soft claim against a live predecessor by the instance id each
+      // `soft`, `previous_session_id` and `client_instance_id` are omitted from
+      // the wire unless set, so an older listener sees an unchanged hard-claim
+      // request. The claim's own `client_instance_id` is the process it is made
+      // for: the listener records it on the claim, and weighs a claim under the
+      // holder's own session id against the standing claim's. A soft claim
+      // against a live predecessor is still decided by the instance id each
       // side's registry entry carries (`SubscribeInput.clientInstanceID`).
       const soft = input.soft === true;
       const previous = soft ? (input.previousSessionID ?? "") : "";
-      const body: { session_id: string; role: string; soft?: true; previous_session_id?: string } =
-        {
-          session_id: input.sessionID,
-          role: input.role,
-          ...(soft ? { soft: true } : {}),
-          ...(previous === "" ? {} : { previous_session_id: previous }),
-        };
+      const body: {
+        session_id: string;
+        role: string;
+        soft?: true;
+        previous_session_id?: string;
+        client_instance_id?: string;
+      } = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...(soft ? { soft: true } : {}),
+        ...(previous === "" ? {} : { previous_session_id: previous }),
+        ...(input.clientInstanceID === undefined
+          ? {}
+          : { client_instance_id: input.clientInstanceID }),
+      };
       let raw: string;
       try {
         raw = await post("/v1/roles/set", body, { actingSession: input.sessionID });

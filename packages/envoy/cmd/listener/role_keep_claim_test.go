@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // The case of two drains at once - each kept copy reaches exactly one holder - is
@@ -61,8 +62,10 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 		}
 		// The holder gives the role up as this listener's forward fails, which is what ends
 		// the handover here: a handover whose holder is still live walks the lane again itself
-		// (drainKeptRole), and what this test is about is the lane one walk left behind.
-		if err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}); err != nil {
+		// (drainKeptRole), and what this test is about is the lane one walk left behind. The
+		// claim names no process, so the release is the forced one DELETE
+		// /v1/interests/<session_id> makes (store.RoleReleaseAuthority.Force).
+		if _, err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
 			t.Errorf("release %s's claim of %s: %v", holder, role, err)
 		}
 		return errors.New("the forward this listener ended on")

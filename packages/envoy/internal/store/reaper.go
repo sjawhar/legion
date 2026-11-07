@@ -140,14 +140,44 @@ type RoleClaimSweep struct {
 	Skipped int
 }
 
-// ReapRoleClaims removes claims whose holders did not re-register before the
-// session TTL elapsed. It is intentionally separate from Reap: the interest
-// reaper must not tear down a role during a listener restart grace window. A
+// ReapRoleClaims removes claims whose holders have stopped answering for them and did not
+// re-register before the session TTL elapsed. It is intentionally separate from Reap: the
+// interest reaper must not tear down a role during a listener restart grace window. A
 // claim this build cannot read (one stored under a key NATS refuses, too long or
 // outside its key alphabet, which bus.KeyValue.RefusesRead answers for the key
 // the scan handed over) no build can resolve or write again, so it is deleted
 // too; one it cannot delete either (a key outside the alphabet) is passed
 // over, uncounted, and the sweep goes on.
+//
+// What a pass weighs is the liveness of the session id a claim's holder registered under,
+// exactly as it did before a claim named the process holding it: a claim whose holder answered
+// for it less than liveWindow ago (RoleClaim.LastAnsweredAt, through
+// Registry.ClaimRenewedWithin) is kept, and one whose renewal has lapsed is kept while isAlive
+// reports its holder session alive and freed once that session is gone. That is the rule
+// dispatch://INFRA-392 settled, and it stands here unchanged for a claim that names a process
+// (RoleClaim.ClientInstanceID) and a claim that names none alike: a holder that has stopped
+// answering keeps its role, and the paths that need a live holder report an unresponsive one
+// rather than taking the role from it.
+//
+// The one thing that moves a claim past a live holder session is the hand-back mark
+// (RoleClaim.HandedBack): a marked claim whose own renewal has lapsed is freed whatever isAlive
+// says. Nothing can move that renewal again, since no registration renews a marked claim
+// (renewRoleClaim), so the lapse is final rather than a holder briefly out of touch. The mark
+// is what makes freeing it safe where a session id would not be: it is the holder's own word
+// that it gave the role up, written by a release only that holder's session could make
+// (Registry.releaseReadRoleClaim, over a claim naming a process that release did not name), and
+// a second process that resumed the session id cannot write it, because such a release states
+// an instance and a release that states one frees the claims of that process and marks nothing.
+//
+// A marked claim is freed one live window after its last renewal and not at once, and that
+// window is load-bearing: a holder an older client's hand-back marked wrongly claims the role
+// again at its next heartbeat and has it back, the record that grant writes carrying no mark
+// (SetRoleWithPrevious). The window must stay longer than a heartbeat.
+//
+// Only a claim neither rule keeps is released (releaseReadExpiredRoleClaim, which weighs
+// sessionTTL, the restart grace, and reads the renewal no second time: this pass has read it
+// already, over the very claim it hands on). The renewal and the mark are read off the record
+// the scan carried, so no test costs the pass a bucket call of its own.
 //
 // Every bucket call the pass makes after its scan - each release, and the delete of a key this
 // build cannot read - waits no longer than ctx (bus.Bounded), which is the reaper loop's own
@@ -177,7 +207,8 @@ type RoleClaimSweep struct {
 // role's undecodable record, failed delete or failed release costs that one role: it is logged
 // in a line of its own, counted in Skipped, and the pass goes on. This reaper is the backstop
 // for the claim a deregistration left standing - the one its role claim view had not been
-// delivered when the session left, which releaseAllRoleClaims leaves here - and a pass that ends
+// delivered when the session left, which releaseAllRoleClaims leaves here, and the one that
+// deregistration was not authorised to free (RoleReleaseAuthority) - and a pass that ends
 // at the first transient failure is no backstop at the role count that made the view miss the
 // claim: one failure would leave every role after it unswept until the next interval, and a
 // failure that lasts would leave them unswept for as long as it does. A role counted Skipped for
@@ -208,7 +239,7 @@ type RoleClaimSweep struct {
 // pass's one scan: the release is handed the claim that scan carried
 // (releaseReadExpiredRoleClaim) rather than reading it again, because a pass runs over the whole
 // bucket on every interval.
-func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool, sessionTTL time.Duration) (RoleClaimSweep, error) {
+func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool, sessionTTL, liveWindow time.Duration) (RoleClaimSweep, error) {
 	claims, err := r.roleClaimsUntil(ctx)
 	if err != nil {
 		return RoleClaimSweep{}, err
@@ -239,7 +270,10 @@ func (r *Registry) ReapRoleClaims(ctx context.Context, isAlive func(string) bool
 			continue
 		}
 		claim := scanned.Claim
-		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
+		if claim.HolderSessionID == "" || r.ClaimRenewedWithin(claim, liveWindow) {
+			continue
+		}
+		if !claim.HandedBack && isAlive(claim.HolderSessionID) {
 			continue
 		}
 		release, err := r.releaseReadExpiredRoleClaim(ctx, role, claim, sessionTTL)
@@ -275,12 +309,21 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 	})
 }
 
-// StartRoleClaimReaper expires role holders that fail to re-register after a
-// listener restart. It is independent of interest reaping because a role is a
-// point-to-point route rather than a general subscription. It runs until ctx ends, and the
-// channel it returns is closed once it has returned, as StartReaper's is. Each pass logs what it
-// reaped beside what it skipped, since only a reaper whose failures are visible from its own line
-// can be read as the backstop it is (RoleClaimSweep).
+// StartRoleClaimReaper expires role holders that stop answering for their claims and fail to
+// re-register after a listener restart. It is independent of interest reaping because a role is
+// a point-to-point route rather than a general subscription. It runs until ctx ends, and the
+// channel it returns is closed once it has returned, as StartReaper's is. Each pass keeps a
+// claim renewed inside liveWindow, a lapsed claim no hand-back marked whose holder session
+// isAlive reports alive, and a restored claim inside sessionTTL (ReapRoleClaims), and logs
+// what it reaped beside what it skipped, since only a reaper whose failures are visible from
+// its own line can be read as the backstop it is (RoleClaimSweep).
+//
+// isAlive is given the holder session id of every claim whose renewal has lapsed, and it
+// decides each of them but one: a claim its holder handed back (RoleClaim.HandedBack) is freed
+// one live window after its last renewal though that session answers, because the mark is the
+// holder's own word that it gave the role up and no registration renews a marked claim. A
+// holder that is merely out of touch keeps its role, which is what every other reader of a
+// session's state says too.
 //
 // A pass that skipped anything logs that line at WARN, because a pass goes on past the failures
 // that once ended it with an ERROR: a sweep that read nothing it swept - every role failed, the
@@ -304,9 +347,9 @@ func (r *Registry) StartReaper(ctx context.Context, live func(sessionID string) 
 // (bus.KeyValue.ReadStreamState) while this loop runs on, which is the outage an operator must
 // see. What makes a failed pass an ordered shutdown is that this loop's ctx has ended, so that
 // is what the level reads.
-func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
+func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL, liveWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
-		sweep, err := r.ReapRoleClaims(ctx, isAlive, sessionTTL)
+		sweep, err := r.ReapRoleClaims(ctx, isAlive, sessionTTL, liveWindow)
 		if err != nil {
 			if ctx.Err() != nil {
 				r.logger().Info("role claim reaper cycle ended with its loop",

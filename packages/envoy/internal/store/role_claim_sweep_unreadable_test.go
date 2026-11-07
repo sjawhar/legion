@@ -149,7 +149,7 @@ func TestTheDeregistrationsFallbackSummarizesTheClaimsItCannotReadInOneLinePerCl
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s) over a bucket whose every other claim is a record this build cannot decode: %v, want both of its own claims released and no error", session, err)
 		}
 		if wrote := logLines(logs, undecodableLine); wrote != 1 {
@@ -204,7 +204,7 @@ func TestTheDeregistrationsFallbackSummarizesTheClaimsItCannotReadInOneLinePerCl
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s) over a bucket holding claims of both classes it cannot read: %v, want both of its own claims released and no error", session, err)
 		}
 

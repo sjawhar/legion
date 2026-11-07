@@ -60,7 +60,13 @@ func raceConditionalClaim(t *testing.T, role, seed, winner, claimant string) (*R
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
 	required := read.Revision
-	_, err = reg.SetRoleWithPrevious(context.Background(), claimant, "example-host", role, "", false, &required)
+	_, err = reg.SetRoleWithPrevious(context.Background(), RoleClaimRequest{
+		SessionID:        claimant,
+		MachineID:        "example-host",
+		ClientInstanceID: roleClaimInstance,
+		Role:             role,
+		IfClaimRevision:  &required,
+	})
 	if racing.updates == 0 {
 		t.Fatalf("the conditional claim never reached a conditional update, so it never raced")
 	}
@@ -96,9 +102,10 @@ func TestAConditionalClaimThatLosesTheConditionalWriteIsAMismatchNotAStoreFailur
 	}
 }
 
-// The same race whose winner names the claimant itself. An unconditional claim reads that as the
-// concurrent success it is (TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess); a
-// conditional one is still refused, because the revision its caller sequenced on is gone. The
+// The same race whose winner names the claimant's own session. A claim with no precondition
+// reads that as its own concurrent success where the winner names its process too
+// (TestSetRoleSoftTreatsSameProcessCASConflictAsConcurrentSuccess); a conditional one is still
+// refused, whichever process won, because the revision its caller sequenced on is gone. The
 // session now holds the role, so its record keeps the role's topic.
 func TestAConditionalClaimLostToAClaimOfItsOwnSessionIsStillAMismatch(t *testing.T) {
 	const (

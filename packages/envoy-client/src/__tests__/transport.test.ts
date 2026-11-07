@@ -7,7 +7,10 @@ import {
   type DeliveryAnswer,
   EnvoyApiError,
   EnvoySendUnconfirmedError,
+  mayActOnRoleRecord,
   newClientInstanceID,
+  type RoleInfo,
+  roleHeldBy,
   UNRESPONSIVE_RULE,
 } from "../transport";
 
@@ -264,6 +267,35 @@ describe("EnvoyClient", () => {
 
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/interests/unsubscribe");
     expect(await recorded.requests[0]?.json()).toEqual({ session_id: "ses_sender", topics: [] });
+  });
+
+  test("an unsubscribe names the releasing process, and omits the key without one", async () => {
+    const recorded = recordFetch([new Response("ok"), new Response("ok")]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.unsubscribe({
+      sessionID: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+      clientInstanceID: "0f8c2b1a4d6e7f90",
+    });
+    await client.unsubscribe({
+      sessionID: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+    });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+      client_instance_id: "0f8c2b1a4d6e7f90",
+    });
+    const unnamed = (await recorded.requests[1]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined: a release naming no process frees no claim, and an
+    // older listener sees an unchanged body.
+    expect(Object.hasOwn(unnamed, "client_instance_id")).toBe(false);
+    expect(unnamed).toEqual({
+      session_id: "ses_sender",
+      topics: ["notifications.agent.ses_sender"],
+    });
   });
 
   test("gets one session interest using the listener response shape", async () => {
@@ -704,6 +736,31 @@ describe("EnvoyClient", () => {
       session_id: "ses_child",
       role: "controller",
     });
+  });
+
+  test("a claim names the process making it, and omits the key without one", async () => {
+    const interest = { session_id: "ses_sender", machine_id: "host-a", dir: "/work", topics: [] };
+    const recorded = recordFetch([jsonResponse(interest), jsonResponse(interest)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.setRole({
+      sessionID: "ses_sender",
+      role: "controller",
+      soft: true,
+      clientInstanceID: "0f8c2b1a4d6e7f90",
+    });
+    await client.setRole({ sessionID: "ses_sender", role: "controller", soft: true });
+
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_sender",
+      role: "controller",
+      soft: true,
+      client_instance_id: "0f8c2b1a4d6e7f90",
+    });
+    const unnamed = (await recorded.requests[1]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined, so an older listener sees an unchanged body.
+    expect(Object.hasOwn(unnamed, "client_instance_id")).toBe(false);
+    expect(unnamed).toEqual({ session_id: "ses_sender", role: "controller", soft: true });
   });
 
   test("a 409 without the held-role shape stays a typed API error", async () => {
@@ -1400,6 +1457,30 @@ describe("EnvoyClient", () => {
     expect(recorded.requests[1]?.url).toBe("http://listener/v1/roles/legion-reviewer");
   });
 
+  test("a role lookup gives the holder's process, and parses an answer naming none", async () => {
+    const recorded = recordFetch([
+      jsonResponse({
+        role: "controller",
+        holder: "ses_holder",
+        last_seen: 42,
+        state: "live",
+        client_instance_id: "0f8c2b1a4d6e7f90",
+      }),
+      jsonResponse({ role: "controller", holder: "ses_holder", last_seen: 42, state: "live" }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const named = await client.getRole("controller");
+    const unnamed = await client.getRole("controller");
+
+    // The holder's process is what tells a caller that the role is held under its own session
+    // id by another process, which `setRole`'s 409 does not say.
+    expect(named.client_instance_id).toBe("0f8c2b1a4d6e7f90");
+    // A listener predating the field still parses: the caller reads no holding process.
+    expect(unnamed.client_instance_id).toBeUndefined();
+    expect(unnamed).toMatchObject({ role: "controller", holder: "ses_holder" });
+  });
+
   test("surfaces listener error text and expected fields without retrying a 400", async () => {
     const recorded = recordFetch([
       Response.json(
@@ -1591,5 +1672,83 @@ describe("newClientInstanceID", () => {
 
   test("mints a different id for each client instance", () => {
     expect(newClientInstanceID()).not.toBe(newClientInstanceID());
+  });
+});
+
+describe("roleHeldBy", () => {
+  /** A role lookup's 200 for `holder`, naming `instance` as the process whose claim stands. */
+  const answer = (holder: string, instance?: string): RoleInfo => ({
+    role: "legion-controller",
+    holder,
+    last_seen: 2,
+    state: "live",
+    ...(instance === undefined ? {} : { client_instance_id: instance }),
+  });
+
+  /** The same answer, with the hand-back mark the listener puts on a claim it could not free. */
+  const handedBack = (holder: string, instance?: string): RoleInfo => ({
+    ...answer(holder, instance),
+    handed_back: true,
+  });
+
+  test("the lookup names this session and this process", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(true);
+  });
+
+  test("a claim this very session id carries under another process is not this one's", () => {
+    expect(roleHeldBy(answer("ses_a", "another-process"), "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("a claim naming no process is read as this one's, absent or empty alike", () => {
+    expect(roleHeldBy(answer("ses_a"), "ses_a", "proc-one")).toBe(true);
+    expect(roleHeldBy(answer("ses_a", ""), "ses_a", "proc-one")).toBe(true);
+  });
+
+  test("a caller naming no process holds nothing a claim names a process for", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", undefined)).toBe(false);
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "")).toBe(false);
+    expect(roleHeldBy(answer("ses_a"), "ses_a", "")).toBe(true);
+  });
+
+  test("another session's hold, and the 404 that names no holder, are neither of them this one's", () => {
+    expect(roleHeldBy(answer("ses_other", "proc-one"), "ses_a", "proc-one")).toBe(false);
+    expect(roleHeldBy(undefined, "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("a claim marked handed back is no hold, even of the session and process it names", () => {
+    expect(roleHeldBy(handedBack("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(false);
+    expect(roleHeldBy(handedBack("ses_a"), "ses_a", "proc-one")).toBe(false);
+  });
+
+  test("an unmarked claim is still this one's, however the listener says it is unmarked", () => {
+    expect(roleHeldBy(answer("ses_a", "proc-one"), "ses_a", "proc-one")).toBe(true);
+    expect(
+      roleHeldBy({ ...answer("ses_a", "proc-one"), handed_back: false }, "ses_a", "proc-one")
+    ).toBe(true);
+    // A listener predating the field sends none, which reads as no mark.
+    expect(Object.hasOwn(answer("ses_a", "proc-one"), "handed_back")).toBe(false);
+  });
+});
+
+describe("mayActOnRoleRecord", () => {
+  test("a record this process wrote is acted on whether or not it holds a role", () => {
+    expect(mayActOnRoleRecord("proc-one", "proc-one", true)).toBe(true);
+    expect(mayActOnRoleRecord("proc-one", "proc-one", false)).toBe(true);
+  });
+
+  test("a record naming no writer is acted on as it always was, absent or empty alike", () => {
+    expect(mayActOnRoleRecord(undefined, "proc-one", true)).toBe(true);
+    expect(mayActOnRoleRecord("", "proc-one", true)).toBe(true);
+  });
+
+  test("a record another process wrote is acted on only while this one holds no role", () => {
+    expect(mayActOnRoleRecord("another-process", "proc-one", true)).toBe(false);
+    expect(mayActOnRoleRecord("another-process", "proc-one", false)).toBe(true);
+  });
+
+  test("a reader naming no process is another process than any record names one", () => {
+    expect(mayActOnRoleRecord("another-process", undefined, true)).toBe(false);
+    expect(mayActOnRoleRecord("another-process", "", true)).toBe(false);
+    expect(mayActOnRoleRecord("", "", true)).toBe(true);
   });
 });

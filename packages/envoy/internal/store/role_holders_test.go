@@ -182,13 +182,11 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool {
 		return servableView(reg)
 	})
-	if _, err := reg.SetRole("ses_c", "m1", "planner", false); err != nil {
-		t.Fatalf("SetRole: %v", err)
-	}
+	claimRoleAs(t, reg, "ses_c", "m1", "planner", roleClaimInstance)
 	if got := heldRoles(t, reg, "ses_c"); !slices.Equal(got, []string{"planner"}) {
 		t.Fatalf("a claim this registry wrote is not in its view as the write answers: %v", got)
 	}
-	if err := reg.Remove(context.Background(), "ses_c", []string{"notifications.role.planner"}); err != nil {
+	if _, err := reg.Remove(context.Background(), "ses_c", []string{"notifications.role.planner"}, releasedByItsProcess); err != nil {
 		t.Fatalf("release planner: %v", err)
 	}
 	if got := heldRoles(t, reg, "ses_c"); len(got) != 0 {
@@ -511,7 +509,8 @@ func TestAClaimWhoseRequestEndsDuringItsCleanupSucceedsAndLogsNoFailure(t *testi
 	interests := reg.watcher.KV()
 	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(&endingGetKeyValue{KeyValue: kv, key: oldSession, end: cancel}, interests.WatchHandle(), interests.Streams()), interestCache{reg})
 
-	if _, err := reg.SetRoleWithPrevious(ctx, newSession, "example-host", role, "", false, nil); err != nil {
+	claim := RoleClaimRequest{SessionID: newSession, MachineID: "example-host", ClientInstanceID: roleClaimInstance, Role: role}
+	if _, err := reg.SetRoleWithPrevious(ctx, claim); err != nil {
 		t.Fatalf("a claim that landed returned %v when its request ended during the cleanup, want success", err)
 	}
 	assertRoleHolder(t, reg, role, newSession)

@@ -377,12 +377,11 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
     },
   })
 
-  const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
-      client,
-      pluginVersion: "afe10b2f3e1b",
-    }),
-  )
+  const options = sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+    client,
+    pluginVersion: "afe10b2f3e1b",
+  })
+  const session = await startChannelSession(options)
 
   try {
     expect(subscribes).toEqual([
@@ -395,11 +394,18 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
       }),
     ])
     expect(setRoles).toEqual([
-      { sessionID: "ses_claude", role: "reviewer", soft: true, previousSessionID: "ses_claude" },
+      {
+        sessionID: "ses_claude",
+        role: "reviewer",
+        soft: true,
+        previousSessionID: "ses_claude",
+        clientInstanceID: options.clientInstanceID,
+      },
     ])
     expect(JSON.parse(await readFile(roleFile, "utf8"))).toEqual({
       session_id: "ses_claude",
       role: "reviewer",
+      client_instance_id: options.clientInstanceID,
     })
   } finally {
     await session.shutdown()

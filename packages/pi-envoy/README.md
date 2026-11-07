@@ -32,15 +32,41 @@ soft: it names the session it continues, which is a fork's or branch's parent, o
 this process last held the role under. The listener moves the role off that predecessor only
 when the predecessor has no live registration, when its live registration carries this extension
 instance's own client instance id, or when either side carries no instance id. A predecessor
-another process still runs keeps the role, and the claim is refused naming that holder. A refused
-session keeps running and stays registered, without the role: it does not claim again at each
-heartbeat, and it takes the role on its next session event once the holder is gone. Each
-extension instance mints its client instance id when it starts and sends it on every registration
-and on the deregistration at shutdown, where the listener removes the registration only while it
-carries the same id or none. The queues, deadlines and shared role state behind all of this are
-`src/registration-state.ts`, beside the extension's other `src/` modules: a queued task acts
-through a handle that refuses every step past the task's deadline, or once its session is no
-longer the open session.
+another process still runs keeps the role, and the claim is refused naming that holder. A claim
+of a role already held under this session's own id is decided on the standing claim rather than
+on the registration: the listener grants it to the process that claim names, grants it once
+nobody renewed the claim inside its live window, and otherwise refuses it naming this very
+session. A session refused a role another live session holds keeps running and stays registered,
+without the role: it does not claim again at each heartbeat, and it takes the role on its next
+session event once the holder is gone. A refusal naming this session's own id is never recorded
+as one of those, since it is that other process's standing claim, which the listener grants the
+moment that process stops renewing it: nothing is said, and the next heartbeat claims again.
+Each healthy heartbeat also re-asserts a role this session already holds, and confirms it only
+when the lookup names this session and this process and reports no hand-back; a re-assertion the listener refuses naming
+this session's own id is that same standing claim, so the role stays held here, nothing is
+recorded, nothing is said, and the next heartbeat asks again, while a refusal naming a different
+session ends the role here. A lookup that answers `handed_back` is a role this process does not
+hold, however exactly it names this session and this process: a client built before a release
+stated its process hands a role's lane topic back under this session id without being able to
+free the claim, and the listener marks the claim rather than freeing it, after which no
+registration renews it. The pass that reads the mark claims the role again at once, and that
+grant writes a fresh record with no mark, so a hold marked this way is back before the role
+claim reaper could free it. Each extension instance mints its client instance id when it starts
+and sends it on every registration, on every claim and release, and on the deregistration at
+shutdown, where the listener removes the registration only while it carries the same id or none.
+A registration also renews every role claim this session holds that names this same instance,
+whatever topics it carries and unless the listener has marked that claim handed back;
+a release frees only the claims naming it, so a second process that resumed
+this session's id neither ends this one's role nor outlasts it. A hand-back the listener could
+not make — a release its own holder's renewal beat under each of its three conditional deletes,
+which fails the route rather than reporting a release it did not make — is sent again by the
+next heartbeat, so the role is not left standing while this process's registrations renew its
+claim. The transcript's `envoy-role-claim` entry names the session claimed for and this process
+too: a release another process wrote on the same transcript ends no role here, and a claim
+another process wrote is pressed only while this process holds none. The queues, deadlines and
+shared role state behind all of this are `src/registration-state.ts`, beside the extension's
+other `src/` modules: a queued task acts through a handle that refuses every step past the
+task's deadline, or once its session is no longer the open session.
 
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
 registry. Each reported interest identifies whether it is `live`, `registry`, or `both`, so

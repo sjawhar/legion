@@ -865,6 +865,32 @@ async function bootPane(options: Parameters<typeof claimPane>[0]): Promise<Claim
 const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
   requests.filter((request) => request.path.startsWith("/legion/"));
 
+/** The Envoy client instance a recorded request list registered `sessionID` under: the
+ * `client_instance_id` the latest `/v1/interests/subscribe` for that session carried. pi-envoy
+ * mints one such id per extension instance and sends it on every registration, and a role claim
+ * now carries it too. A claim's process is pinned to the registration's rather than to a literal
+ * id, because a literal would pass while the session claimed its role under some other process —
+ * the very thing the claim's `client_instance_id` exists to stop. */
+function registeredClientInstance(requests: readonly DaemonRequest[], sessionID: string): string {
+  const registration = requests.findLast(
+    (request) =>
+      request.path === "/v1/interests/subscribe" &&
+      typeof request.body === "object" &&
+      request.body !== null &&
+      "session_id" in request.body &&
+      request.body.session_id === sessionID
+  );
+  const body = registration?.body;
+  const clientInstance =
+    typeof body === "object" && body !== null && "client_instance_id" in body
+      ? body.client_instance_id
+      : undefined;
+  if (typeof clientInstance !== "string") {
+    throw new Error(`no registration of ${sessionID} carrying a client instance id`);
+  }
+  return clientInstance;
+}
+
 describe("Legion OMP extension", () => {
   test("classifies controllers, root architects, sub-architects, phase workers, and ordinary sessions", () => {
     // The root architect's own issue key equals the tree's.
@@ -1177,12 +1203,19 @@ describe("Legion OMP extension", () => {
       },
     ]);
     // The Envoy role is the claim token, claimed after the registration issued it and before ready.
+    // The claim names the process making it: the client instance the pane's own registration
+    // carried, never a literal id, so a claim another process made under this session id would
+    // not match.
     const paths = pane.requests.map((request) => request.path);
+    const roleClaimBody = {
+      session_id: "ses_worker",
+      role: pane.claimToken,
+      client_instance_id: registeredClientInstance(pane.requests, "ses_worker"),
+    };
     const roleClaim = pane.requests.findIndex(
       (request) =>
         request.path === "/v1/roles/set" &&
-        JSON.stringify(request.body) ===
-          JSON.stringify({ session_id: "ses_worker", role: pane.claimToken })
+        JSON.stringify(request.body) === JSON.stringify(roleClaimBody)
     );
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
@@ -3856,11 +3889,18 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       },
     ]);
     const paths = controller.requests.map((request) => request.path);
+    // The claim names the process making it: the client instance this controller registered
+    // under, never a literal id, so a claim another process made under this session id would not
+    // match.
+    const roleClaimBody = {
+      session_id: "ses_controller",
+      role: controller.token,
+      client_instance_id: registeredClientInstance(controller.requests, "ses_controller"),
+    };
     const roleClaim = controller.requests.findIndex(
       (request) =>
         request.path === "/v1/roles/set" &&
-        JSON.stringify(request.body) ===
-          JSON.stringify({ session_id: "ses_controller", role: controller.token })
+        JSON.stringify(request.body) === JSON.stringify(roleClaimBody)
     );
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(controller.exits).toEqual([]);
@@ -5124,9 +5164,17 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
           request.body !== null &&
           "soft" in request.body
       );
+      // The re-assertion names the process making it: the client instance the pane registered its
+      // new session under, never a literal id — a claim the subagent's instance made would carry
+      // its own.
       expect(softClaims.at(-1)).toEqual({
         path: "/v1/roles/set",
-        body: { session_id: "ses_pane_second", role: controller.token, soft: true },
+        body: {
+          session_id: "ses_pane_second",
+          role: controller.token,
+          soft: true,
+          client_instance_id: registeredClientInstance(controller.requests, "ses_pane_second"),
+        },
       });
       expect(softClaims.map((request) => JSON.stringify(request.body))).not.toContainEqual(
         expect.stringContaining('"session_id":"ses_subagent"')
@@ -5284,12 +5332,20 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       claimRefused("POST /legion/v1/claims/register failed with 403: Invalid boot token"),
     ]);
 
+    // One soft claim, and it names the process that made it: the client instance the resumed
+    // process registered this session id under, never a literal id — the claim the first process
+    // made under that same id carries its own.
     expect(
       first.requests.filter(
         (request) =>
           request.path === "/v1/roles/set" &&
           JSON.stringify(request.body) ===
-            JSON.stringify({ session_id: "ses_controller_first", role: first.token, soft: true })
+            JSON.stringify({
+              session_id: "ses_controller_first",
+              role: first.token,
+              soft: true,
+              client_instance_id: registeredClientInstance(first.requests, "ses_controller_first"),
+            })
       )
     ).toHaveLength(1);
     const resumedConnections = natsConnections.slice(connectionsBeforeResume);

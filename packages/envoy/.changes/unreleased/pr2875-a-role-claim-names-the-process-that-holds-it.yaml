@@ -1,0 +1,58 @@
+kind: Fixed
+body: |-
+  A role claim now names the process that holds it and the moment that process last answered for
+  it (`client_instance_id` and `renewed_at`, both optional, so a claim an earlier build wrote is
+  read at its `claimed_at` and is never unreadable), so a second process that resumed a live
+  session's id can no longer take, release or outlast the role that session holds.
+
+  `POST /v1/roles/set` takes `client_instance_id`, and where the role is already held under the
+  claimant's own session id it decides on the standing claim rather than on the session record:
+  granted where the claim names that very process, granted where nobody renewed the claim inside
+  the listener's live window and the role claim view can answer, and otherwise refused `409`
+  naming the holder. That renewal arm is read only while the view answers, because nothing but a
+  registration renews a claim and a registration renews through that very view: while a listener
+  restart leaves the view refilling, the arm answers the bus-unavailable `503` with
+  `Retry-After: 1` naming it and claims nothing, so a refill longer than the live window hands
+  no live holder's role to a second process; a claim from the process the standing claim names
+  rests on no renewal and is granted through the refill. A hard claim is
+  unchanged, and the predecessor rule is unchanged, still reading the claimant's stored instance
+  where the request states none. `POST /v1/interests/subscribe` renews every claim the
+  registering session holds that names the registering process, whatever topics the registration
+  carries, and the first registration of that session stating any instance adopts a claim that
+  names none — any process of the session id, not only the one that took the role; one that
+  states no process renews the claims of its own session that name none and adopts none, so no
+  claim standing at a deploy ages out. A renewal that cannot run never fails the registration,
+  and the cost is one role-bucket write per heartbeat per role held.
+  `POST /v1/interests/unsubscribe`
+  takes `client_instance_id` and frees only the claims naming that process, freeing a claim that
+  names no process outright, while `DELETE /v1/interests/<session_id>` keeps its force and is
+  the one caller that forces. It answers in `removed` the topics that left the record rather
+  than the ones the request named, because a role lane topic whose claim it did not free stays
+  in the record: one interest record serves every process running under one session id, and that
+  topic is the interest half of a claim that still stands, written there by the grant. Such a
+  release, where it states no process, does not force and names that role's own lane topic, is a
+  hand-back, and it marks the claim it could not free (`RoleClaim.HandedBack`): no registration
+  renews a marked claim, so the role claim reaper frees the role at its first pass past the live
+  window — one live window plus up to one reap interval, about ten minutes with the shipped
+  defaults. That mark is the one thing that takes a role past a holder session that still
+  answers. What the reaper weighs otherwise is unchanged: a claim renewed inside the live window
+  is kept whatever its holder's record says, and an unmarked claim whose renewal has lapsed is
+  kept while that session reads short of `gone` and freed once it is gone, for a claim that
+  names a process and one that names none alike, so a holder that has stopped answering keeps
+  its role. `GET /v1/roles/<role>`
+  answers the holder's `client_instance_id` on the 200 and on a lapsed holder's 404, and
+  `handed_back` on both where the claim carries the mark. Every grant writes a fresh record, so
+  a grant to the process a marked claim names clears the mark.
+
+  A soft claim is written against the very claim record the route decided on, so two processes of
+  one session id claiming one unheld role in the same moment are no longer both granted it: the
+  route decided on one read of that record while the write weighed a second read of its own, and
+  each loser of that write read the winning claim as its own session's and answered 200. A record
+  replaced under such a claim is read again, the whole decision is made again on what stands, and
+  the claim is tried once more; a second mismatch is the same `409` naming the role, its holder and
+  `claim_revision` that a stated `if_claim_revision` gets. A claim that states its own
+  `if_claim_revision` keeps that meaning and is never decided again, and a hard claim that states
+  none carries no precondition at all, last-claim-wins.
+time: 2026-11-06T17:29:51.000000000Z
+custom:
+    Issue: pr2875

@@ -243,19 +243,59 @@ no event in the configured stream. It sends the client instance driving the sess
 (`clientInstanceID`: one Oh My Pi Envoy extension instance, one Claude Code channel-server
 process, minted once when that instance starts) as `client_instance_id`, omitted when the host
 has none so an older listener sees an unchanged body; the listener stores it on the session's
-registry entry. `getRole` returns a role holder with its last-seen timestamp,
-and `listSessions` accepts optional directory and title filters; its rows carry `plugin` and
-`plugin_version` when the session registered them.
+registry entry and renews with it every role claim this session holds that names that same
+process, so each registration is the holder's answer for the roles it holds. It renews every such
+claim the listener has not marked handed back, whatever topics the registration carries: what
+says a role was given up is the mark a hand-back leaves on a claim it could not free, and a
+marked claim is renewed by nobody. A registration that
+states no instance renews the claims of its own session that name no process, and adopts none, so
+a claim standing at a deploy is kept by a client that cannot say which process it is.
+`getRole` returns a role holder with its last-seen timestamp and, where the
+claim names a process, the `client_instance_id` of that process; a claim that names none leaves
+the field out, on the 200 as on a lapsed holder's 404. It also returns `handed_back` where the
+claim carries the listener's hand-back mark, on both answers and left out where it carries none.
+`listSessions` accepts optional directory
+and title filters; its rows carry `plugin` and `plugin_version` when the session registered them.
 
-A `setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
+`roleHeldBy(info, sessionID, clientInstanceID)` and `mayActOnRoleRecord(writer, clientInstanceID,
+holdsRole)` are exported beside `RoleInfo` as the two rules every client keeps over those ids:
+whether a role lookup's answer is this caller's own hold of the role — this session *and* this
+process, a claim naming no process read as this one's, and a claim the listener marked handed
+back no hold of anyone's — and whether a persisted role record, a
+transcript's claim entry or a channel server's role file, is this process's to act on, which a
+record another process wrote is only while this one holds no role. Both read an empty id as no
+process named, exactly as an absent one. The mark is why a holder an older client's hand-back
+reached claims its role again at its next heartbeat and has it back, the grant writing a fresh
+record that carries no mark, rather than reading the lookup as confirmation until the role claim
+reaper frees the role a live window and up to one reap interval later.
+
+`setRole` and `unsubscribe` take a `clientInstanceID` of their own, sent as `client_instance_id`
+and omitted from the wire when the caller states none: the listener records the claim's as the
+process holding the role, and frees on a release only the role claims naming the release's own,
+so a second process that resumed this session id can neither take the role nor hand it back, and
+a release naming no process frees no claim that names one, while it frees a claim that names
+none outright. `unsubscribe` answers in `removed` the topics that left the record rather than the
+ones it named: a role lane topic whose claim the release did not free stays in the record,
+because one interest record serves every process running under one session id and that topic is
+the interest half of a claim that still stands. Such a release,
+where it names that role's own lane topic, is a hand-back, and the listener marks the claim it
+could not free. A release the holder's own renewal beat under
+each of its three conditional deletes fails rather than answering success, so `unsubscribe`
+rejects and the caller sends the hand-back again rather than treating the role as given up. A
+`setRole` soft claim (`soft`) naming a predecessor (`previousSessionID`) takes the role from it
 only when that predecessor has no live registry entry, when its live entry carries this client
-instance's own instance id, or when either side carries no instance id; any other live holder
-keeps the role and is answered as `{claimed: false, holder}`. `unregisterSession({sessionID,
-clientInstanceID?})` deletes the session's registry entry: with an instance id the listener
-deletes it only when the entry carries the same id or none, so a departing client instance never
-deletes the registration a successor instance made under the same session id, and without one it
-deletes the entry as before. The answer says whether the entry stayed, and the call resolves
-`void` because no caller acts on it: a deregistering client has nothing to retry either way.
+instance's own instance id, or when either side carries no instance id. A soft claim of a role
+already held under the claimant's own session id is decided on the standing claim rather than on
+the session record: granted when that claim names this very process, granted when nobody renewed
+it inside the listener's live window, and otherwise `{claimed: false, holder}` naming that same
+session — which `getRole`'s `client_instance_id` tells apart from a different session holding
+the role. Any other live holder keeps the role and is answered as `{claimed: false, holder}`.
+`unregisterSession({sessionID, clientInstanceID?})` deletes the session's registry entry: with an
+instance id the listener deletes it only when the entry carries the same id or none, so a
+departing client instance never deletes the registration a successor instance made under the
+same session id, and without one it deletes the entry as before. The answer says whether the
+entry stayed, and the call resolves `void` because no caller acts on it: a deregistering client
+has nothing to retry either way.
 
 `replay` posts `POST /v1/replay` once, with no retry and a 10 s timeout, and returns the
 listener's answer in its wire shape; an error body's `code` (such as `REPLAY_UNAVAILABLE`) is on

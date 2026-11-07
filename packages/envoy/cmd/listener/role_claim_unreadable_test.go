@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
@@ -125,6 +127,43 @@ func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) 
 				t.Fatalf("an unreadable claim raised an exception: %s", message.Data)
 			} else if !errors.Is(err, nats.ErrTimeout) {
 				t.Fatalf("wait for an exception: %v", err)
+			}
+		})
+	}
+}
+
+// A record that carries no client instance id and no renewal is one an earlier build wrote, not
+// one this build cannot read: the lookup answers the holder it names, with none of the server
+// error above, and so does the bare session id that build also stored. A missing field is never
+// store.ErrMalformedRoleClaim.
+func TestARoleLookupReadsAClaimRecordThatNamesNoProcessAndNoRenewal(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	claimed := time.Now().UnixMilli()
+	for name, older := range map[string]struct{ role, holder, record string }{
+		"a structured claim an earlier build wrote": {
+			role:   "older-structured",
+			holder: "ses_older_structured",
+			record: fmt.Sprintf(`{"holder_session_id":"ses_older_structured","claimed_at":%d,"previous_session_id":""}`, claimed),
+		},
+		"the bare session id an earlier build stored": {
+			role:   "older-legacy",
+			holder: "ses_older_legacy",
+			record: "ses_older_legacy",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := sessions.Put(older.holder, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+				t.Fatalf("register %s: %v", older.holder, err)
+			}
+			if _, err := registryRoleKV(t, registry).Put(older.role, []byte(older.record)); err != nil {
+				t.Fatalf("store the claim record %q: %v", older.record, err)
+			}
+			recorder := httptest.NewRecorder()
+			roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+older.role, nil))
+			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"holder":"`+older.holder+`"`) {
+				t.Fatalf("GET /v1/roles/%s on the record %q: status %d %s, want 200 naming %s", older.role, older.record, recorder.Code, recorder.Body.String(), older.holder)
 			}
 		})
 	}

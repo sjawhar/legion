@@ -46,7 +46,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 			t.Fatalf("get the %d-byte session's interest: %v", len(sessionID), err)
 		}
 	}
-	if err := registry.Remove(context.Background(), "ses_elsewhere", nil); err != nil {
+	if _, err := registry.Remove(context.Background(), "ses_elsewhere", nil, releasedByItsProcess); err != nil {
 		t.Fatalf("remove a session while an unreadable claim is stored: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	if reaped, err := registry.Reap(func(sessionID string) (bool, error) { return isAlive(sessionID), nil }, 0); err != nil || reaped != 2 {
 		t.Fatalf("reap = %d, %v; want both earlier sessions' interests", reaped, err)
 	}
-	if _, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil {
+	if _, err := registry.ReapRoleClaims(context.Background(), isAlive, 0, 0); err != nil {
 		t.Fatalf("reap role claims: %v", err)
 	}
 	for bucket, want := range map[natsgo.KeyValue][]string{rawInterests: {"ses_live", rawOnlySession}, rawRoles: {"reviewer", rawOnlyRole}} {
@@ -138,7 +138,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 		return stored{bus.InterestBucket, sessionID, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID}, UpdatedAt: stale}}
 	}
 	claim := func(role, holder string) stored {
-		return stored{bus.RoleClaimBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale}}
+		return stored{bus.RoleClaimBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale, ClientInstanceID: roleClaimInstance}}
 	}
 	keys := func(t *testing.T, bucket natsgo.KeyValue) []string {
 		t.Helper()
@@ -165,7 +165,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	// role bucket; bad:role is stored first, so a sweep that stops there never reaches reviewer.
 	t.Run("removing a session skips a claim it cannot read", func(t *testing.T) {
 		registry, _, _ := open(t, claim("bad:role", "ses_leaving"), claim("reviewer", "ses_leaving"), interest("ses_leaving"))
-		if err := registry.Remove(context.Background(), "ses_leaving", nil); err != nil {
+		if _, err := registry.Remove(context.Background(), "ses_leaving", nil, releasedByItsProcess); err != nil {
 			t.Fatalf("remove a session while a claim is stored under bad:role: %v", err)
 		}
 		assertRoleHolder(t, registry, "reviewer", "")
@@ -176,7 +176,7 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 
 	t.Run("the role reaper skips a claim it cannot read or delete", func(t *testing.T) {
 		registry, _, rawRoles := open(t, claim("bad:role", "ses_gone"), claim("reviewer", "ses_live"), claim("planner", "ses_gone"))
-		if sweep, err := registry.ReapRoleClaims(context.Background(), isAlive, 0); err != nil || sweep.Reaped != 1 {
+		if sweep, err := registry.ReapRoleClaims(context.Background(), isAlive, 0, 0); err != nil || sweep.Reaped != 1 {
 			t.Fatalf("reap role claims = %+v, %v; want planner's, skipping bad:role", sweep, err)
 		}
 		if got, want := keys(t, rawRoles), []string{"bad:role", "reviewer"}; !slices.Equal(got, want) {

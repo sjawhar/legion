@@ -46,12 +46,19 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 	return confirmed
 }
 
-// withRoleClaimDrain gives d the delivery configuration a route runs a kept-lane drain on, as main
-// wires it: a config over d's stores with the dedupe cache and the attempt cache the drain judges
-// a forward against (beforeForward), startRoleForward(client) as the forward, a logger, a
-// delivered counter, the drain's kept-expired counter and the guards two drains of one role take
-// (roleKeepGuards). POST /v1/roles/set hands a claim's handover this config (runKeptRoleDrain),
-// so a test that claims a role through that route needs it.
+// withRoleClaimDrain gives d what POST /v1/roles/set needs beyond its stores, as main wires it.
+//
+// The delivery configuration a route runs a kept-lane drain on: a config over d's stores with
+// the dedupe cache and the attempt cache the drain judges a forward against (beforeForward),
+// startRoleForward(client) as the forward, a logger, a delivered counter, the drain's
+// kept-expired counter and the guards two drains of one role take (roleKeepGuards). POST
+// /v1/roles/set hands a claim's handover this config (runKeptRoleDrain), so a test that claims
+// a role through that route needs it.
+//
+// The route needs nothing of the live window here: it reads that window from d's own session
+// registry when it weighs a standing claim's renewal (roleSetHandler, through
+// session.SessionRegistry.Windows), so a test's route and its registry are held to one window
+// with nothing to keep in step by hand.
 func withRoleClaimDrain(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)

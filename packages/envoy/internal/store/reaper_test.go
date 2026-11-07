@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,287 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
+
+// storeRoleClaim stores claim under role through the bucket's own handle, which is how a case
+// seeds a record for a pass to read rather than claiming the role through the registry.
+func storeRoleClaim(t *testing.T, kv natsgo.KeyValue, role string, claim RoleClaim) {
+	t.Helper()
+	value, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatalf("encode %s's claim: %v", role, err)
+	}
+	if _, err := kv.Put(role, value); err != nil {
+		t.Fatalf("store %s's claim: %v", role, err)
+	}
+}
+
+// putRenewedRoleClaim stores role's claim for holder, naming instance as the process holding it
+// and answered as the moment that process last answered for the claim (RoleClaim.RenewedAt). It
+// is how a case seeds the first thing a pass weighs: a process that is still renewing its claim,
+// and one that has stopped.
+func putRenewedRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder, instance string, answered time.Time) {
+	t.Helper()
+	storeRoleClaim(t, kv, role, RoleClaim{
+		HolderSessionID:  holder,
+		ClaimedAt:        answered.UnixMilli(),
+		ClientInstanceID: instance,
+		RenewedAt:        answered.UnixMilli(),
+	})
+}
+
+// putHandedBackRoleClaim stores that same claim carrying the mark its holder's own release left
+// on it (RoleClaim.HandedBack), which is the one thing that frees a claim past a holder session
+// isAlive reports alive. It names a process because a hand-back marks no claim that names none:
+// such a claim its own session's release frees outright.
+func putHandedBackRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder, instance string, answered time.Time) {
+	t.Helper()
+	storeRoleClaim(t, kv, role, RoleClaim{
+		HolderSessionID:  holder,
+		ClaimedAt:        answered.UnixMilli(),
+		ClientInstanceID: instance,
+		RenewedAt:        answered.UnixMilli(),
+		HandedBack:       true,
+	})
+}
+
+// The seam the forward merge creates between the pass over the whole role bucket and the claim's
+// own renewal, held as one rule: a claim its holder still renews is kept, whatever else the pass
+// weighs. The pass reads both claims from its one scan of the bucket (roleClaimsUntil), so the
+// renewal it weighs is the record's own and costs it no read of its own. Both claims here are a
+// holder the session bucket has lost - isAlive answers false for every session - and the pass
+// frees exactly the one nobody has answered for inside the live window. The kept one is the
+// claim of a lane whose session id a second process resumed and then deregistered: the record is
+// gone and the lane is running, and the renewal is the only thing that says so.
+func TestARoleClaimPassKeepsAClaimItsHolderStillRenews(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, _ := coldRegistry(t, conn)
+	const (
+		renewing   = "legion-controller"
+		stopped    = "legion-reviewer"
+		holder     = "ses_gone_from_the_session_bucket"
+		liveWindow = time.Minute
+	)
+	raw := reg.roleKV.Legacy()
+	now := time.Now()
+	putRenewedRoleClaim(t, raw, renewing, holder, roleClaimInstance, now.Add(-liveWindow/2))
+	putRenewedRoleClaim(t, raw, stopped, holder, roleClaimInstance, now.Add(-2*liveWindow))
+
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+	if err != nil {
+		t.Fatalf("a pass over a renewing holder's claim: %v", err)
+	}
+	if want := (RoleClaimSweep{Reaped: 1}); sweep != want {
+		t.Fatalf("the pass = %+v, want %+v: the claim nobody answers for freed, the renewed one kept", sweep, want)
+	}
+	assertRoleHolder(t, reg, renewing, holder)
+	assertRoleHolder(t, reg, stopped, "")
+
+	// And a pass over the claim that was kept, asked again: the renewal is the whole of what
+	// keeps it, so a second pass over the very same record frees nothing either. The release
+	// behind the pass weighs no renewal of its own (releaseReadExpiredRoleClaim), which is why
+	// this is asked of the pass and not of it.
+	sweep, err = reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a second pass over the renewed claim = %+v, %v; want nothing freed: the holder still renews it", sweep, err)
+	}
+	assertRoleHolder(t, reg, renewing, holder)
+}
+
+// clockedColdRegistry is a cold registry whose clock starts at a fixed moment, with the role
+// bucket's own handle to seed claims through (putRenewedRoleClaim) and an advance that moves the
+// clock that far past that moment, as the renewal cases' fixture does (renewedRoleClaim). A pass
+// weighs a claim's renewal, and this registry's refusal to answer one, against this clock, so a
+// case moves time rather than waiting for it.
+func clockedColdRegistry(t *testing.T) (reg *Registry, roles natsgo.KeyValue, start time.Time, advance func(time.Duration)) {
+	t.Helper()
+	conn, cleanup := connectNATS(t)
+	t.Cleanup(cleanup)
+	reg, _ = coldRegistry(t, conn)
+	start = time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
+	var elapsed atomic.Int64
+	reg.now = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+	return reg, reg.roleKV.Legacy(), start, func(since time.Duration) { elapsed.Store(int64(since)) }
+}
+
+// The rule this change restores, over the very claim that made a wider rule look necessary: one
+// that names the process holding it, whose renewal has lapsed, and whose holder session is
+// still answering. It is kept. A session id is not the process that holds a role, but a holder
+// that has stopped answering losing its role is a behaviour change of its own, and what this
+// reaper frees and when is the rule dispatch://INFRA-392 settled - every reader of a session's
+// state tells an unresponsive holder from a gone one, and so does this pass.
+//
+// Once that holder session is gone the same lapsed claim is freed, which is the other half of
+// that rule: a row that held only the keeping would pass over a reaper that freed nothing.
+func TestAPassKeepsALapsedClaimThatNamesAProcessWhileItsHolderIsAlive(t *testing.T) {
+	const (
+		role       = "legion-controller"
+		holder     = "ses_out_of_touch_and_still_answering"
+		liveWindow = time.Minute
+	)
+	reg, raw, start, _ := clockedColdRegistry(t)
+	putRenewedRoleClaim(t, raw, role, holder, roleClaimInstance, start.Add(-2*liveWindow))
+
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(id string) bool { return id == holder }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a pass over a lapsed claim of a process whose holder session is alive = %+v, %v; want nothing freed: only a hand-back takes a role past a live holder", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, holder)
+
+	sweep, err = reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{Reaped: 1}) {
+		t.Fatalf("a pass over that same claim once its holder session is gone = %+v, %v; want the one claim freed", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
+
+// The one claim a pass frees though isAlive reports its holder session alive: one its holder
+// handed back (RoleClaim.HandedBack). The mark is the holder's own word that it gave the role
+// up, written by a release only that holder's session could make, so nothing renews the claim
+// again and the lapse is final rather than a process briefly out of touch. That is the defect
+// this issue closes: before the mark, the client that handed a role back went on renewing the
+// claim for as long as it ran, and the role never came free.
+//
+// The claim beside it is that same holder session's, as stale, and unmarked - and it is kept.
+// The two together are the whole of the rule: the mark moves a claim past a live holder, and
+// nothing else does.
+func TestAPassFreesALapsedClaimWhileItsHolderSessionIsStillAlive(t *testing.T) {
+	const (
+		marked     = "legion-reviewer"
+		unmarked   = "legion-controller"
+		holder     = "ses_handed_one_role_back_and_runs_on"
+		liveWindow = time.Minute
+	)
+	reg, raw, start, _ := clockedColdRegistry(t)
+	putHandedBackRoleClaim(t, raw, marked, holder, roleClaimInstance, start.Add(-2*liveWindow))
+	putRenewedRoleClaim(t, raw, unmarked, holder, roleClaimInstance, start.Add(-2*liveWindow))
+
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return true }, 0, liveWindow)
+	if err != nil {
+		t.Fatalf("a pass over a marked claim whose holder session is alive: %v", err)
+	}
+	if want := (RoleClaimSweep{Reaped: 1}); sweep != want {
+		t.Fatalf("the pass = %+v, want %+v: the marked claim freed though its holder session answers, the unmarked one kept", sweep, want)
+	}
+	assertRoleHolder(t, reg, marked, "")
+	assertRoleHolder(t, reg, unmarked, holder)
+}
+
+// A marked claim is freed one live window after its last renewal and not at once, and that
+// window is what the hand-back buys back for a holder it marked wrongly: an older client's
+// release hands a role back that its holder still wants, and the holder claims the role again
+// at its next heartbeat, the fresh record carrying no mark. So the window must stay longer than
+// a heartbeat, and a pass inside it keeps the marked claim.
+//
+// isAlive answers false throughout, so nothing but the claim's own renewal can be keeping it:
+// the same pass a window later frees it.
+func TestAPassKeepsAMarkedClaimWhoseRenewalIsStillInsideTheWindow(t *testing.T) {
+	const (
+		role       = "legion-controller"
+		holder     = "ses_marked_by_an_older_clients_hand_back"
+		liveWindow = time.Minute
+	)
+	reg, raw, start, advance := clockedColdRegistry(t)
+	putHandedBackRoleClaim(t, raw, role, holder, roleClaimInstance, start.Add(-liveWindow/2))
+	gone := func(string) bool { return false }
+
+	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a pass over a marked claim renewed %s ago = %+v, %v; want nothing freed: the mark frees a claim once its renewal has lapsed and not before",
+			liveWindow/2, sweep, err)
+	}
+	assertRoleHolder(t, reg, role, holder)
+
+	advance(liveWindow)
+	sweep, err = reg.ReapRoleClaims(context.Background(), gone, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{Reaped: 1}) {
+		t.Fatalf("a pass a live window later = %+v, %v; want the marked claim freed", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
+
+// The same rule over the claim an earlier build wrote, which names no process: it is kept while
+// isAlive reports its holder session alive and freed once that session is gone, exactly as the
+// claim that names one is. Such a claim has no renewal of its own until its holder's first
+// registration renews it, if that client states no process, or adopts it, if it states one, and
+// at a deploy the moment it was claimed can be any age at all - so a pass that weighed the
+// renewal alone would free every role standing at a deploy.
+func TestAPassKeepsALapsedClaimThatNamesNoProcessWhileItsHolderIsAlive(t *testing.T) {
+	const (
+		role       = "legion-controller"
+		holder     = "ses_holding_a_claim_from_an_earlier_build"
+		liveWindow = time.Minute
+	)
+	reg, raw, start, _ := clockedColdRegistry(t)
+	putRenewedRoleClaim(t, raw, role, holder, "", start.Add(-2*liveWindow))
+
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(id string) bool { return id == holder }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a pass over a lapsed claim that names no process, whose holder is alive = %+v, %v; want nothing freed", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, holder)
+
+	sweep, err = reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{Reaped: 1}) {
+		t.Fatalf("a pass over that same claim once its holder session is gone = %+v, %v; want the one claim freed", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
+
+// The restart grace is untouched by the rule above it. A registry that restored a claim at its
+// own start gives that claim one sessionTTL before it can be freed, whatever the claim's renewal
+// says, so a holder that was there before the restart has that long to register again
+// (releaseReadExpiredRoleClaim). The claim here names a process, its renewal lapsed long before
+// the restart and its holder session is gone, which is exactly the claim a pass frees on sight;
+// past the grace the same pass frees it.
+func TestTheRestartGraceOfARestoredClaimStillHolds(t *testing.T) {
+	const (
+		role       = "legion-controller"
+		holder     = "ses_held_the_role_before_the_restart"
+		liveWindow = time.Minute
+		sessionTTL = 2 * time.Minute
+	)
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	raw, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: 1, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	start := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
+	putRenewedRoleClaim(t, raw, role, holder, roleClaimInstance, start.Add(-2*liveWindow))
+	var elapsed atomic.Int64
+	reg, err := Open(conn, WithReplicas(1), WithClock(func() time.Time { return start.Add(time.Duration(elapsed.Load())) }))
+	if err != nil {
+		t.Fatalf("open a registry over the stored claim: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ready, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ready); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	gone := func(string) bool { return false }
+
+	elapsed.Store(int64(sessionTTL - time.Second))
+	sweep, err := reg.ReapRoleClaims(context.Background(), gone, sessionTTL, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{}) {
+		t.Fatalf("a pass %s into the restart grace = %+v, %v; want nothing freed: the holder has one session TTL to register again",
+			sessionTTL-time.Second, sweep, err)
+	}
+	assertRoleHolder(t, reg, role, holder)
+
+	elapsed.Store(int64(sessionTTL))
+	sweep, err = reg.ReapRoleClaims(context.Background(), gone, sessionTTL, liveWindow)
+	if err != nil || sweep != (RoleClaimSweep{Reaped: 1}) {
+		t.Fatalf("a pass once the restart grace is spent = %+v, %v; want the one claim freed", sweep, err)
+	}
+	assertRoleHolder(t, reg, role, "")
+}
 
 // logLine returns the first line of logs carrying msg, for a test that holds what one line says.
 func logLine(t *testing.T, logs *lockedBuffer, msg string) string {
@@ -77,7 +359,7 @@ func TestTheRoleClaimReaperGoesPastAClaimItCouldNotRead(t *testing.T) {
 		t.Fatalf("store a record this build cannot decode under %s: %v", unreadable, err)
 	}
 
-	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0)
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, 0)
 	if err != nil {
 		t.Fatalf("a pass over a record it cannot decode: %v, want the pass to go on", err)
 	}
@@ -124,7 +406,7 @@ func TestTheRoleClaimReaperGoesPastAClaimItCouldNotRelease(t *testing.T) {
 	refusal := errors.New("nats: the bus refused the delete")
 	countRoleBucketCalls(t, reg, &sweepRoleKeyValue{failDelete: map[string]error{undeletable: refusal}})
 
-	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0)
+	sweep, err := reg.ReapRoleClaims(context.Background(), func(string) bool { return false }, 0, 0)
 	if err != nil {
 		t.Fatalf("a pass over a claim whose release fails: %v, want the pass to go on", err)
 	}
@@ -218,7 +500,7 @@ func TestTheRoleClaimReaperEndsThePassWhenItsContextEnds(t *testing.T) {
 	passCtx, endPass := context.WithCancel(context.Background())
 	defer endPass()
 	deletes := failRoleClaimDeletesAndEndTheContext(t, reg, endPass)
-	sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0)
+	sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0, 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a pass whose context ended under it = %+v, %v; want it to end with the context's error", sweep, err)
 	}
@@ -238,7 +520,7 @@ func TestTheRoleClaimReaperEndsThePassWhenItsContextEnds(t *testing.T) {
 	loopCtx, endLoop := context.WithCancel(context.Background())
 	defer endLoop()
 	failRoleClaimDeletesAndEndTheContext(t, reg, endLoop)
-	done := reg.StartRoleClaimReaper(loopCtx, func(string) bool { return false }, 10*time.Millisecond, 0)
+	done := reg.StartRoleClaimReaper(loopCtx, func(string) bool { return false }, 10*time.Millisecond, 0, 0)
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
@@ -295,7 +577,7 @@ func TestTheRoleClaimReaperEndsThePassWhenItsContextEndsOnAKeyItCannotRead(t *te
 	passCtx, endPass := context.WithCancel(context.Background())
 	defer endPass()
 	deletes := failRoleClaimDeletesAndEndTheContext(t, reg, endPass)
-	sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0)
+	sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0, 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a pass whose context ended under its delete of an unreadable key = %+v, %v; want it to end with the context's error", sweep, err)
 	}
@@ -405,7 +687,7 @@ func TestTheRoleClaimReaperAnswersAtItsContextsEndWhileItsDeleteOfAKeyItCannotRe
 	}
 	answers := make(chan passAnswer, 1)
 	go func() {
-		sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0)
+		sweep, err := reg.ReapRoleClaims(passCtx, func(string) bool { return false }, 0, 0)
 		answers <- passAnswer{sweep: sweep, err: err}
 	}()
 	select {
@@ -467,7 +749,7 @@ func TestTheRoleClaimReaperLogsAPassThatFailedUnderALiveLoopAtError(t *testing.T
 	loopCtx, endLoop := context.WithCancel(context.Background())
 	defer endLoop()
 	const cycleFailed = "role claim reaper cycle failed"
-	done := reg.StartRoleClaimReaper(loopCtx, func(string) bool { return false }, 10*time.Millisecond, 0)
+	done := reg.StartRoleClaimReaper(loopCtx, func(string) bool { return false }, 10*time.Millisecond, 0, 0)
 	waitFor(t, 30*time.Second, func() bool { return logLines(logs, cycleFailed) > 0 })
 	line := logLine(t, logs, cycleFailed)
 	endLoop()
@@ -590,7 +872,7 @@ func TestABusOutageUnderAReaperPassCostsNoPerRoleLineAndReapsEveryClaim(t *testi
 	}
 
 	outage := failRoleClaimGets(t, reg)
-	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0)
+	sweep, err := reg.ReapRoleClaims(context.Background(), gone, 0, 0)
 	if err != nil {
 		t.Fatalf("a pass over %d claims whose bus refuses every read of a key = %+v, %v; want it to finish, since it makes no such read", outageRoleClaims, sweep, err)
 	}

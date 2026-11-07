@@ -13,14 +13,17 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// claims is a ClaimStore in memory: holder is the claim every read answers, revision the role
-// bucket revision it was read at, readErr fails every read, and reads counts them. It has no
-// release and no write of any kind, as the interface it implements has none.
+// claims is a ClaimStore in memory: holder is the claim every read answers, instance the client
+// instance that claim names as the holder's process, handedBack the hand-back mark it carries,
+// revision the role bucket revision it was read at, readErr fails every read, and reads counts
+// them. It has no release and no write of any kind, as the interface it implements has none.
 type claims struct {
-	holder   string
-	revision uint64
-	readErr  error
-	reads    int
+	holder     string
+	instance   string
+	handedBack bool
+	revision   uint64
+	readErr    error
+	reads      int
 }
 
 func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
@@ -28,7 +31,7 @@ func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
 	if c.readErr != nil {
 		return store.RoleClaim{}, c.readErr
 	}
-	claim := store.RoleClaim{HolderSessionID: c.holder}
+	claim := store.RoleClaim{HolderSessionID: c.holder, ClientInstanceID: c.instance, HandedBack: c.handedBack}
 	if c.holder != "" {
 		claim.Revision = c.revision
 	}
@@ -225,6 +228,99 @@ func TestResolveHolderReportsTheRevisionOfTheClaimItRead(t *testing.T) {
 		}
 		if resolution.State != roles.Live || resolution.ClaimRevision != 0 || bucket.reads != 0 {
 			t.Fatalf("resolution %+v after %d claim reads, want live at revision 0 with no claim read", resolution, bucket.reads)
+		}
+	})
+}
+
+// HolderClientInstanceID is the process the claim names as its holder, which GET /v1/roles/<role>
+// answers beside the holder's session id so a client can see that a role is held under its own
+// session id by another process. It is the claim's own field on a live holder and on a lapsed
+// one alike, empty for a claim that names no process - one an earlier build wrote, or one whose
+// claimant stated none - and empty for a claim read from a firstHolder copy, which names a
+// holder and nothing else whatever the store holds.
+func TestResolveHolderReportsTheProcessTheClaimNames(t *testing.T) {
+	const instance = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+	held := sessions{
+		Windows: roles.Windows{Live: time.Minute, Horizon: time.Hour},
+		entries: map[string]session.SessionEntry{"ses_live": registered(time.Second), "ses_stalled": registered(30 * time.Minute)},
+	}
+	for _, tc := range []struct {
+		name   string
+		claims *claims
+		state  roles.State
+		want   string
+	}{
+		{"a live holder's process", &claims{holder: "ses_live", instance: instance}, roles.Live, instance},
+		{"a lapsed holder's process", &claims{holder: "ses_stalled", instance: instance}, roles.Lapsed, instance},
+		{"a claim that names no process", &claims{holder: "ses_live"}, roles.Live, ""},
+		{"no claim at all", &claims{}, roles.Unclaimed, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, held, "reviewer")
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if resolution.State != tc.state || resolution.HolderClientInstanceID != tc.want {
+				t.Fatalf("resolution %+v, want %s held by the process %q", resolution, tc.state, tc.want)
+			}
+		})
+	}
+	t.Run("a holder read from a firstHolder copy", func(t *testing.T) {
+		bucket := &claims{holder: "ses_live", instance: instance}
+		resolution, err := roles.ResolveHolderFrom(context.Background(), bucket, func(string) (string, error) {
+			return "ses_live", nil
+		}, held, "reviewer")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if resolution.State != roles.Live || resolution.HolderClientInstanceID != "" || bucket.reads != 0 {
+			t.Fatalf("resolution %+v after %d claim reads, want live naming no process with no claim read", resolution, bucket.reads)
+		}
+	})
+}
+
+// HolderHandedBack is the hand-back mark the claim carries, which GET /v1/roles/<role> answers
+// as handed_back so a client sees that the holder gave the role back and that nothing is
+// renewing the claim any more. Nothing here releases a claim, so the mark reads the same on a
+// live holder and on a lapsed one; a claim read from a firstHolder copy carries false whatever
+// the store holds, as its process does, since the copy names a holder and nothing else.
+func TestResolveHolderReportsTheHandBackMarkTheClaimCarries(t *testing.T) {
+	const instance = "4f1c2a9e8b7d6c5a4f1c2a9e8b7d6c5a"
+	held := sessions{
+		Windows: roles.Windows{Live: time.Minute, Horizon: time.Hour},
+		entries: map[string]session.SessionEntry{"ses_live": registered(time.Second), "ses_stalled": registered(30 * time.Minute)},
+	}
+	for _, tc := range []struct {
+		name   string
+		claims *claims
+		state  roles.State
+		want   bool
+	}{
+		{"a live holder that handed the role back", &claims{holder: "ses_live", instance: instance, handedBack: true}, roles.Live, true},
+		{"a lapsed holder that handed the role back", &claims{holder: "ses_stalled", instance: instance, handedBack: true}, roles.Lapsed, true},
+		{"a claim nobody handed back", &claims{holder: "ses_live", instance: instance}, roles.Live, false},
+		{"no claim at all", &claims{}, roles.Unclaimed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, held, "reviewer")
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if resolution.State != tc.state || resolution.HolderHandedBack != tc.want {
+				t.Fatalf("resolution %+v, want %s with the hand-back mark %t", resolution, tc.state, tc.want)
+			}
+		})
+	}
+	t.Run("a holder read from a firstHolder copy", func(t *testing.T) {
+		bucket := &claims{holder: "ses_live", instance: instance, handedBack: true}
+		resolution, err := roles.ResolveHolderFrom(context.Background(), bucket, func(string) (string, error) {
+			return "ses_live", nil
+		}, held, "reviewer")
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if resolution.State != roles.Live || resolution.HolderHandedBack || bucket.reads != 0 {
+			t.Fatalf("resolution %+v after %d claim reads, want live carrying no mark with no claim read", resolution, bucket.reads)
 		}
 	})
 }
