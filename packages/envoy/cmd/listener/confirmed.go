@@ -217,8 +217,8 @@ type roleSend struct {
 	d      *listenerDeps
 	item   contracts.Envelope
 	// expectsReply is the expects_reply this send's answers write (expectsReplyAnswer, api.go):
-	// the request's own dialect, which is the envelope's value for every request but one that
-	// wrote the old string "none". The envelope the holder is forwarded is untouched by it.
+	// the request's own bytes, whichever of the field's spellings it wrote. The envelope the
+	// holder is forwarded is untouched by it, and carries the parsed value.
 	expectsReply json.RawMessage
 	role         string
 	// keep is the request's keep field as the route read it, true when it set none: whether

@@ -51,6 +51,9 @@ func TestParseExpectsReplyRefusesAnythingElseByNamingTheVocabulary(t *testing.T)
 	}{
 		{name: "true", raw: `true`},
 		{name: "another word", raw: `"later"`},
+		// The Go constant's value is this package's own name for wanting no reply, never a word
+		// the wire carries, so a sender writing it is refused like any other unknown token.
+		{name: "the Go name for no reply", raw: `"no-reply"`},
 		{name: "the empty string", raw: `""`},
 		{name: "a number", raw: `2`},
 		{name: "an object", raw: `{"expects":"reply"}`},
