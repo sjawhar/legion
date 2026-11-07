@@ -131,12 +131,12 @@ func TestTheBootsResumeMintsNoAssignment(t *testing.T) {
 	}
 }
 
-// A production check's look starts the implementer after the close, on work that is no phase: the
-// issue has no phase to hand out, the report is held to the check and its look instead, and the
-// start mints no assignment. So the implementer's claim goes on serving whatever assignment its
-// last phase gave it, and nothing of the check is weighed against a phases row.
+// A production check's look starts the role that works it after the close, on work that is no
+// phase: the issue has no phase to hand out, the report is held to the check and its look
+// instead, and the start mints no assignment. So that role's claim goes on serving whatever
+// assignment its last phase gave it, and nothing of the check is weighed against a phases row.
 func TestAProductionChecksLookMintsNoAssignment(t *testing.T) {
-	rig := childCheckRig(t, "")
+	rig := childCheckRig(t)
 	starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start")
 	if len(starts) == 0 {
 		t.Fatal("no start for the check's first look")

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -42,19 +41,11 @@ type envoyEnvelope struct {
 	TraceID        string `json:"trace_id"`
 }
 
-// serverStartedSubject is the one subject Dispatch announces its server fleet's build on (not an
-// issue's): the daemon's third durable filters on it (OpenConsumers), and decodeMessage matches it
-// whole.
-const serverStartedSubject = "notifications.dispatch.server.started"
-
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
-// repository is a nil Fact, whatever subject carried it. deploys are the project's deploy workflows
-// (ConsumerSpec.Deploys): a workflow run of any other workflow is a nil Fact, its repository read
-// under the deployment's repository equivalence (renames, ConsumerSpec.Renames). Dispatch's
-// announcement of its fleet's build is matched before the issue subjects, which it is not one of.
-func decodeMessage(subject, project string, repositories []ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, data []byte) (decodedMessage, error) {
+// repository is a nil Fact, whatever subject carried it.
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -72,11 +63,6 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 			return decodedMessage{}, fmt.Errorf("the listener wake subject has envelope source %q", envelope.Source)
 		}
 		fact, err = decodeListenerWake(envelope.EventID, envelope.Payload)
-	case subject == serverStartedSubject:
-		if envelope.Source != "dispatch" {
-			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
-		}
-		fact, err = decodeServerStarted(envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
@@ -91,7 +77,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, de
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, unread, err = decodeGitHubFact(subject, repositories, deploys, renames, envelope.Payload)
+		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
@@ -141,24 +127,6 @@ func (e envoyEnvelope) factID() string {
 		return e.DedupeKey
 	}
 	return e.EventID
-}
-
-// decodeServerStarted decodes Dispatch's server.started: the build commit every live Dispatch
-// server process serves, announced once each time that commit changes (ServerStarted), which the
-// workflow compares against the open production checks. An announcement naming no commit — which
-// Dispatch never makes, since a fleet with an unstamped build has no build to name — is no fact,
-// not poison: there is nothing to compare, and the daemon's own boot covers its own build.
-func decodeServerStarted(payload string) (Fact, error) {
-	var started struct {
-		Commit string `json:"commit"`
-	}
-	if err := json.Unmarshal([]byte(payload), &started); err != nil {
-		return nil, fmt.Errorf("decode Dispatch server.started payload: %w", err)
-	}
-	if started.Commit == "" {
-		return nil, nil
-	}
-	return ServerStarted{Commit: started.Commit}, nil
 }
 
 // legionWakeSubject is the one subject the Envoy listener reports a wake of a released pod on,
@@ -373,27 +341,6 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		}
 		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number,
 			Mark: event.mark(), Actor: dispatch.Actor(event.Actor)}, nil
-	case "issue.deployed":
-		var deployed struct {
-			Repo        string `json:"repo"`
-			Number      int    `json:"number"`
-			RunID       int64  `json:"run_id"`
-			CompletedAt string `json:"completed_at"`
-		}
-		if err := json.Unmarshal(event.Payload, &deployed); err != nil {
-			return nil, fmt.Errorf("decode Dispatch issue.deployed payload: %w", err)
-		}
-		if deployed.Repo == "" {
-			return nil, fmt.Errorf("Dispatch issue.deployed payload has no repo")
-		}
-		if deployed.Number <= 0 {
-			return nil, fmt.Errorf("Dispatch issue.deployed payload has no positive integer number")
-		}
-		completedAt, err := time.Parse(time.RFC3339, deployed.CompletedAt)
-		if err != nil {
-			return nil, fmt.Errorf("Dispatch issue.deployed payload has no RFC 3339 completed_at: %w", err)
-		}
-		return IssueDeployed{Issue: event.IssueKey, Repo: deployed.Repo, Number: deployed.Number, RunID: deployed.RunID, CompletedAt: completedAt.UTC()}, nil
 	case "ask.opened":
 		ask, err := decodeAskPayload(event, unread)
 		if err != nil {
@@ -651,7 +598,7 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, payload string) (Fact, []string, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
 		return nil, nil, nil
@@ -683,8 +630,6 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys 
 		fact, err = decodePush(repository, raw)
 	case "checks":
 		fact, err = decodeChecks(subject, repository, raw)
-	case "workflow":
-		fact = decodeWorkflowRun(repository, deploys, renames, raw)
 	}
 	// Comments, and every other kind, route to the current role but do not change the durable
 	// workflow record.
@@ -824,55 +769,6 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Failing: failed, Cancelled: cancelled}, nil
 }
 
-// decodeWorkflowRun reads a workflow run's envelope (Envoy's `workflow_run` payload): the completion
-// of a run of one of deploys (DeployOf) is a WorkflowRunCompleted, and every other action, a run of
-// any other workflow, or a completion that names no positive run id and attempt (decimal strings,
-// as Envoy writes GitHub's numbers), no workflow path or no branch, is no fact. Only a deploy's run
-// can wake a production check (workflow's deployRunCompleted), so any other is acknowledged without
-// a transaction, and a repository whose CI runs many workflows costs the daemon nothing for them. A
-// malformed run is acknowledged rather than poison: it can wake nothing, and the next run's
-// envelope is read on its own.
-func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, renames ghrepo.Renames, raw map[string]json.RawMessage) Fact {
-	if action, _ := rawString(raw, "action"); action != "completed" {
-		return nil
-	}
-	path, _ := rawString(raw, "path")
-	if _, ok := DeployOf(deploys, renames, repository.String(), path); !ok {
-		return nil
-	}
-	runID, ok := rawPositiveDecimal(raw, "run_id", 64)
-	if !ok {
-		return nil
-	}
-	attempt, ok := rawPositiveDecimal(raw, "run_attempt", 32)
-	if !ok {
-		return nil
-	}
-	branch, _ := rawString(raw, "head_branch")
-	if path == "" || branch == "" {
-		return nil
-	}
-	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch}
-}
-
-// DeployOf is the deploy of deploys whose workflow a run of repo at path is: its repository is
-// repo, compared as renames compares two names — as GitHub compares names, without case, and a
-// configured rename's two names as one repository, so a `deploys:` entry naming the repository as
-// it was matches a run on the one it moved to — and its workflow file is path exactly. A project
-// names a repository's workflow once, the configured renames included (config's readDeploys and
-// checkDeployRenames, which refuses two entries a rename makes one repository), so at most one
-// matches. It is the one matching rule the decoder's filter and the workflow's wake
-// (deployRunCompleted) share.
-func DeployOf(deploys []config.Deploy, renames ghrepo.Renames, repo, path string) (config.Deploy, bool) {
-	at := slices.IndexFunc(deploys, func(deploy config.Deploy) bool {
-		return renames.Same(deploy.Repo.String(), repo) && deploy.Workflow == path
-	})
-	if at < 0 {
-		return config.Deploy{}, false
-	}
-	return deploys[at], true
-}
-
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
 	number, numberOK := rawNumber(raw, "number")
 	action, actionOK := rawString(raw, "action")
@@ -974,18 +870,8 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 
 // decimalDigits is a number as Envoy writes GitHub's numeric fields into a payload: decimal digits
 // alone, with none of the sign or base prefix strconv would otherwise accept. rawNumber holds a
-// number written as a string to it, and rawPositiveDecimal every number it reads.
+// number written as a string to it.
 var decimalDigits = regexp.MustCompile(`^[0-9]+$`)
-
-// rawPositiveDecimal reads a positive integer of at most bits bits written as a decimal string.
-func rawPositiveDecimal(raw map[string]json.RawMessage, key string, bits int) (int64, bool) {
-	text, ok := rawString(raw, key)
-	if !ok || !decimalDigits.MatchString(text) {
-		return 0, false
-	}
-	value, err := strconv.ParseInt(text, 10, bits)
-	return value, err == nil && value > 0
-}
 
 // rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
 // and ok is false only when the field holds anything else, which is taken as the zero time too.

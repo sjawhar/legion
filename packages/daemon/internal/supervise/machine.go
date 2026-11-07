@@ -143,6 +143,11 @@ type Claim struct {
 	// backs the worker's turn. Empty is a claim that has retired no confirmed task of an
 	// assignment, which every claim of a daemon upgraded in place is until its role's next start.
 	ServingAssignmentID string
+	// ServingCheckLook is the production check look of the last confirmed delivery this claim
+	// retired, the look side of ServingGeneration: what ServingCheck answers with once no delivery
+	// backs the worker's turn. The zero value is a claim that has retired no confirmed task of a
+	// look, which is every claim whose last task was a phase's.
+	ServingCheckLook CheckLook
 	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
@@ -981,8 +986,10 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 // three sources serving reads are read for it.
 //
 // An operator's task belongs to no run and answers for none of them: it carries generation 0.
+// The older work an unread task's run could be mistaken for is a run this claim was left
+// serving, and nothing else (serving's rule 3).
 func (c Claim) ServingRun() uint64 {
-	return serving(c.Pending, deliveredRun, c.ServingGeneration)
+	return serving(c.Pending, deliveredRun, c.ServingGeneration, c.ServingGeneration != 0)
 }
 
 // ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
@@ -990,36 +997,91 @@ func (c Claim) ServingRun() uint64 {
 // carries that run, where each entry that hands this role a task carries an assignment of its own.
 // A task of no assignment answers for none of them: an operator's own, a resume, a production
 // check's look, and every task a daemon older than the assignment delivered — so a resumed
-// worker's in-flight completion is never refused for an assignment it was never given.
+// worker's in-flight completion is never refused for an assignment it was never given. The older
+// work an unread task's assignment could be mistaken for is an assignment this claim was left
+// serving, and nothing else: a worker whose last task carried none — a resume, a look, a
+// pre-assignment daemon's delivery — is on its first assignment still, and the fallback is what
+// lets it complete.
 func (c Claim) ServingAssignment() string {
-	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID)
+	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID, c.ServingAssignmentID != "")
 }
 
-// deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
-// picks between, named so the accessors read as one rule applied twice rather than two rules.
-func deliveredRun(d Delivery) uint64        { return d.Generation }
-func deliveredAssignment(d Delivery) string { return d.Assignment }
+// ServingCheck is the production check look of the task this claim's worker took, and the zero
+// CheckLook for a claim that has taken none that carried one. It is what says which kind of
+// completion a turn reports: a worker whose live assignment is a check look reports on that look
+// (api/handoff.go, checkReport), and every other worker reports a phase completion. The look is
+// the one the task was given, not whichever look the check has reached, so a report of a look the
+// check has left is held to it and refused by the engine (CHECK_LOOK_NOT_OPEN).
+//
+// A task of a phase is the one task that takes a look back rather than leaving it: a worker
+// handed phase work again — a root reopened inside its linger, whose check still stands — is back
+// in the workflow, and the completion of that phase is no report on production. Every other task
+// of no look (an operator's own, a resume) leaves the look the claim is serving alone, as it
+// leaves the run and the assignment.
+//
+// The look is the one field whose fallback (serving's rule 3) is held to more than its own
+// retired value: a look an unread task carries is taken only by a claim that has served nothing
+// at all. A claim records no look until a look's task is given to it, so a tester in the middle
+// of its testing run reads the zero look while its run and its assignment answer the testing
+// task; held to the look alone, the fallback would hand that tester a look it has not begun to
+// serve, and its testing verdict — pass or fail, which a check report also names — would close
+// the check with nobody having looked at production. The look, the run and the assignment are
+// one serving, not three. The cost is a look whose own turn starts after the daemon's wait for
+// it: that turn counts as the agent's own, its report is refused, and the task is re-sent once
+// the turn ends (noTurn keeps the mark, sendPending sends it again), so the next turn confirms
+// it and reports. The look's own bound (workflow.CheckLookBound, two hours) is the backstop
+// under that, and a refusal the agent sees beats a silent false pass.
+func (c Claim) ServingCheck() CheckLook {
+	retired := c.ServingCheckLook
+	if c.Pending != nil && c.Pending.Phase != "" {
+		retired = CheckLook{}
+	}
+	return serving(c.Pending, deliveredCheckLook, retired, c.servedAnything())
+}
+
+// servedAnything is whether this claim's worker has taken any task at all — a run, an assignment
+// or a look — which is what older work means for the look alone (ServingCheck). Only that
+// accessor reads it: the retire writes what a confirmed delivery leaves behind, and a confirmed
+// delivery is taken by serving's first rule, before any question of older work.
+func (c Claim) servedAnything() bool {
+	return c.ServingGeneration != 0 || c.ServingAssignmentID != "" || c.ServingCheckLook != (CheckLook{})
+}
+
+// deliveredRun, deliveredAssignment and deliveredCheckLook are what a delivery carries of each:
+// the three values serving picks between, named so the three accessors read as one order of
+// sources with a guard of their own rather than three rules.
+func deliveredRun(d Delivery) uint64          { return d.Generation }
+func deliveredAssignment(d Delivery) string   { return d.Assignment }
+func deliveredCheckLook(d Delivery) CheckLook { return d.CheckLook }
 
 // serving picks what a claim's worker is on — the run for ServingRun, the assignment for
-// ServingAssignment — from the three sources both read, in this order. carried is what the pending
-// delivery holds of it, and retired what the claim was left serving (ServingGeneration,
-// ServingAssignmentID); the zero value of either is a task, or a claim, that answers for none of
-// them. The precedence lives here once, so a later fix to it — the DeliveredAt fallback, say —
-// cannot land on one of the two and miss the other.
+// ServingAssignment, the production check look for ServingCheck — from the three sources all
+// three read, in this order. carried is what the pending delivery holds of it, and retired what
+// the claim was left serving (ServingGeneration, ServingAssignmentID, ServingCheckLook); the zero
+// value of any of them is a task, or a claim, that answers for none of them. The order of the
+// three sources lives here once, and each caller supplies what counts as older work for the
+// field it is asking about (servedOlder, below).
 //
 //  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
 //     runs one turn at a time.
 //  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
-//     worker goes on working that run and that assignment — a tester waiting on CI, a merger
-//     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
-//     no delivery behind it.
-//  3. Otherwise, for a claim that has served none at all, a task it holds that the agent may
-//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
-//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
-//     nothing; a worker on its first task would otherwise have its completion refused. This
-//     cannot be mistaken for older work, because there is none this claim served. A task the
-//     agent refused is not one it read, and carries no such mark.
-func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T) T {
+//     worker goes on working that run, that assignment and that look — a tester waiting on CI, a
+//     merger waiting on a person, a checking agent between a look's start and its report — until
+//     another delivery carrying one replaces it. A notice's turn has no delivery behind it.
+//  3. Otherwise, for a claim that has served no older work this value could be mistaken for, a
+//     task it holds that the agent may have read. Oh My Pi's own agent_start names no prompt, so
+//     a turn that starts after the daemon's wait for it is indistinguishable from a turn of the
+//     agent's own and confirms nothing; a worker on its first task would otherwise have its
+//     completion refused. A task the agent refused is not one it read, and carries no such mark.
+//
+// What counts as older work is servedOlder, which each caller answers for what it is guarding
+// against, because the three fields are not zero on the same claims: for the run and the
+// assignment it is that field's own retired value, since a claim left serving neither has taken
+// no task that carried one; for the look it is anything the claim has served at all
+// (Claim.servedAnything), since a claim in the middle of a phase run records no look, and a look
+// held to its own retired value alone would be handed to that worker while its run and its
+// assignment answer the phase task.
+func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T, servedOlder bool) T {
 	var none T
 	if pending == nil {
 		return retired
@@ -1031,7 +1093,7 @@ func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired 
 	if !pending.ConfirmedAt.IsZero() {
 		return value
 	}
-	if retired == none && !pending.DeliveredAt.IsZero() {
+	if !servedOlder && !pending.DeliveredAt.IsZero() {
 		return value
 	}
 	return retired
