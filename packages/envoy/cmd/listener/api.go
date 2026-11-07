@@ -2105,7 +2105,25 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// first registration of the session holding it. A registration stating no process
 		// renews nothing, since an absent instance names no process to match. The write is
 		// the registration's last, so a renewal never costs the records above it.
-		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID)); err != nil {
+		//
+		// What it renews is read from the interest record this registration has just written
+		// (item.Topics), not from the topics the request carried: the record is what a claim
+		// writes its lane topic onto (POST /v1/roles/set) and what a hand-back removes it from
+		// (POST /v1/interests/unsubscribe), while a client registers the subjects it opened and
+		// opens none for a role lane. A role whose lane topic the record no longer names is left
+		// unrenewed and freed by the role claim reaper one live window later, which is how a
+		// hand-back that freed no claim - one from a client built before a release named its
+		// process - still gives the role up (store.Registry.RenewRoleClaims).
+		//
+		// A registration that carried no topics at all states nothing about the lanes its
+		// session follows, so it renews every claim its process holds, as every registration did
+		// before: the renewal is handed no topics for it, and the record it wrote is not read as
+		// a hand-back of the roles the session holds.
+		renewedTopics := item.Topics
+		if len(body.Topics) == 0 {
+			renewedTopics = nil
+		}
+		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID), renewedTopics); err != nil {
 			switch {
 			case errors.Is(err, store.ErrRoleViewNotReady):
 				logger.Info("listener subscribe renewed no role claim: the role claim view cannot answer yet",

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -46,9 +47,15 @@ func newRoleClaimRenewalRig(t *testing.T) *roleClaimRenewalRig {
 	}
 }
 
-// seed stores claim as role's record and waits for the role claim view to give its holder that
-// role: the view is where the renewal takes the roles it renews from, so a case that did not wait
+// seed stores claim as role's record, leaves role's lane topic on its holder's interest record,
+// and waits for the role claim view to give its holder that role.
+//
+// The view is where the renewal takes the roles it renews from, so a case that did not wait
 // would be asking whether a renewal happened before the registration could know of the claim.
+// The lane topic is on the record because a claim puts it there (POST /v1/roles/set writes the
+// holder's topic), and the renewal renews a role only while the registering session's record
+// still names it: a claim seeded without the record its claim would have left is a holder that
+// has handed the role back, which is the case of its own below.
 func (r *roleClaimRenewalRig) seed(role string, claim store.RoleClaim) store.RoleClaim {
 	r.t.Helper()
 	record, err := json.Marshal(claim)
@@ -57,6 +64,9 @@ func (r *roleClaimRenewalRig) seed(role string, claim store.RoleClaim) store.Rol
 	}
 	if _, err := r.roleKV.Put(role, record); err != nil {
 		r.t.Fatalf("store %s's claim: %v", role, err)
+	}
+	if _, err := r.registry.Upsert(store.Interest{SessionID: claim.HolderSessionID, MachineID: "test-machine"}, []string{contracts.RoleTopicPrefix + role}); err != nil {
+		r.t.Fatalf("register %s's interest in %s's lane: %v", claim.HolderSessionID, role, err)
 	}
 	waitFor(r.t, 5*time.Second, fmt.Sprintf("%s's claim to reach the role claim view", role), func() bool {
 		held, err := r.registry.RolesHeldBy(claim.HolderSessionID)

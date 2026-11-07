@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -204,4 +207,153 @@ func TestARefusedReleaseLeavesTheStoredClaimAtItsOwnRevision(t *testing.T) {
 	if after := storedRoleClaim(t, reg, role); after != before {
 		t.Fatalf("the claim is now %+v, want it exactly as it stood, %+v", after, before)
 	}
+}
+
+// racingEachDeleteKeyValue runs a hook before each of the first racedDeletes conditional deletes
+// reaches the bucket, so the claim each one is conditional on can be moved under it. It is the
+// wrapper a release that sends more than one delete needs, where racingDeleteKeyValue (kv_test)
+// hooks the first delete alone and answers an error of its own: the hook's own writes go through
+// this wrapper too and are not hooked again, and every delete is the real one, so the loss it
+// suffers is the server's rather than one this wrapper invented.
+type racingEachDeleteKeyValue struct {
+	natsgo.KeyValue
+
+	deletes      int
+	racedDeletes int
+	beforeDelete func()
+}
+
+func (kv *racingEachDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) error {
+	kv.deletes++
+	if kv.deletes <= kv.racedDeletes {
+		kv.beforeDelete()
+	}
+	return kv.KeyValue.Delete(key, opts...)
+}
+
+// raceReleaseWith lands the write wins makes against role under each of the first races
+// conditional deletes a release sends, which is the race a release meets between its read of the
+// claim and the delete conditional on the revision that read returned. It returns the wrapper,
+// whose count of deletes is how many the release sent in all.
+func raceReleaseWith(t *testing.T, reg *Registry, role string, races int, wins func()) *racingEachDeleteKeyValue {
+	t.Helper()
+	racing := &racingEachDeleteKeyValue{KeyValue: reg.roleKV.Legacy(), racedDeletes: races, beforeDelete: wins}
+	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
+	return racing
+}
+
+// The defect this guards: pi-envoy sends its registration outside the task queue a queued task
+// hands a role back in, so the holder's own renewal lands between the release's read of the
+// claim and its conditional delete. The delete loses that condition, and a release that read
+// nats.ErrKeyExists as "a claim written since is kept" freed nothing and answered success,
+// leaving the role with the very process that gave it up. A renewal moves RenewedAt and nothing
+// a release weighs, so the release reads the claim again, finds the same session and the same
+// process, and deletes the revision that renewal left.
+//
+// The administrator's forced release takes the same path, over the same renewal.
+//
+// The release names the role's own lane topic, which is the hand-back a client sends: a
+// deregistration of every interest at once would reach the claim twice, through the record's
+// topics and then through the role claim view (Registry.releaseAllRoleClaims), and the second
+// pass - which reads the claim again for its own reasons - would free what the first one lost.
+func TestAReleaseThatRacesItsOwnHoldersRenewalFreesTheClaim(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_released_under_renewal"
+	)
+	for name, authority := range map[string]RoleReleaseAuthority{
+		"the holder's own process":           releasedByItsProcess,
+		"the administrator's forced release": {Force: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+			racing := raceReleaseWith(t, reg, role, 1, func() {
+				if err := reg.renewRoleClaim(context.Background(), role, holder, roleClaimInstance); err != nil {
+					t.Errorf("the holder's renewal that wins the race: %v", err)
+				}
+			})
+
+			if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, authority); err != nil {
+				t.Fatalf("hand %s's role back under its own renewal: %v", holder, err)
+			}
+
+			if racing.deletes != 2 {
+				t.Fatalf("the release sent %d conditional deletes, want two: the one the renewal beat and the one at the revision it left", racing.deletes)
+			}
+			assertRoleHolder(t, reg, role, "")
+			if claim := storedRoleClaim(t, reg, role); claim.Revision != 0 {
+				t.Fatalf("the claim stands at revision %d, want none: the release read the renewal and deleted it", claim.Revision)
+			}
+		})
+	}
+}
+
+// A claim another claimant landed under the release's read is not the claim the release was
+// authorised over, and it is left exactly as that claimant wrote it: the release frees nothing,
+// as it frees nothing of a claim it never authorised, and reports no failure - the session is
+// removing its interests either way. The row covers both ways another claim can read: another
+// session, and the same session id under a second process.
+func TestAReleaseThatRacesAnotherClaimantFreesNothing(t *testing.T) {
+	const (
+		role    = "legion-controller"
+		holder  = "ses_released_under_claim"
+		another = "ses_winning_claimant"
+	)
+	for name, winner := range map[string]struct {
+		session  string
+		instance string
+	}{
+		"another session's claim":                {session: another, instance: roleClaimSecondInstance},
+		"a second process under the holder's id": {session: holder, instance: roleClaimSecondInstance},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+			racing := raceReleaseWith(t, reg, role, 1, func() {
+				claimRoleAs(t, reg, winner.session, "example-host", role, winner.instance)
+			})
+
+			if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess); err != nil {
+				t.Fatalf("hand %s's role back under another claim: %v", holder, err)
+			}
+
+			if racing.deletes != 1 {
+				t.Fatalf("the release sent %d conditional deletes, want one: a claim that is not the one read is never deleted", racing.deletes)
+			}
+			assertRoleHolder(t, reg, role, winner.session)
+			if claim := storedRoleClaim(t, reg, role); claim.ClientInstanceID != winner.instance {
+				t.Fatalf("the standing claim names the process %q, want the winner's %q", claim.ClientInstanceID, winner.instance)
+			}
+		})
+	}
+}
+
+// The bound: a claim renewed under every one of the release's deletes is left standing rather
+// than looped on, and the release says so rather than answering success. Three deletes is the
+// whole of what one release sends (roleClaimReleaseAttempts), because the loop runs inside an
+// HTTP handler and a process registering in a tight loop must not hold a deregistration for as
+// long as it keeps writing.
+func TestAReleaseLeavesAClaimRenewedUnderEveryDeleteStanding(t *testing.T) {
+	const (
+		role   = "legion-controller"
+		holder = "ses_released_under_every_renewal"
+	)
+	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
+	racing := raceReleaseWith(t, reg, role, roleClaimReleaseAttempts, func() {
+		if err := reg.renewRoleClaim(context.Background(), role, holder, roleClaimInstance); err != nil {
+			t.Errorf("the holder's renewal that wins the race: %v", err)
+		}
+	})
+
+	err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess)
+
+	if err == nil {
+		t.Fatalf("the release of a claim renewed under every delete answered success, want the failure that says the claim is still held")
+	}
+	if !strings.Contains(err.Error(), role) {
+		t.Fatalf("the release failed with %v, want an error naming the role %s it left standing", err, role)
+	}
+	if racing.deletes != roleClaimReleaseAttempts {
+		t.Fatalf("the release sent %d conditional deletes, want the %d it is bounded at", racing.deletes, roleClaimReleaseAttempts)
+	}
+	assertRoleHolder(t, reg, role, holder)
 }

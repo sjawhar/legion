@@ -467,6 +467,16 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string,
 	return r.releaseReadRoleClaim(ctx, sessionID, role, claim, release)
 }
 
+// roleClaimReleaseAttempts is how many conditional deletes one release of one claim sends before
+// it leaves the claim standing: the first, and two more over a claim its own holder renewed under
+// the one before. Two further attempts are chosen because each renewal that costs an attempt is
+// one registration of the holder, which a client sends once a heartbeat interval, so three
+// deletes cover a hand-back racing far more registrations than one request's budget can ever
+// meet; and the attempts must be bounded at all because the loop runs inside an HTTP handler, so
+// a process registering in a tight loop would otherwise hold the release - and the
+// deregistration behind it - for as long as it kept writing.
+const roleClaimReleaseAttempts = 3
+
 // releaseReadRoleClaim deletes the claim a read of role has just returned, as RoleClaim decoded
 // it, when release authorises freeing it from sessionID (RoleReleaseAuthority.frees), so a
 // caller that has read the claim already releases it without reading it again. A zero revision
@@ -479,25 +489,58 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string,
 // The delete is conditional on the revision read and waits no longer than ctx (bus.Bounded). A
 // delete ctx abandoned may still land after this answer, and that is safe: it deletes only the
 // revision it read, the claim this release authorised, and a claim written since is kept.
+//
+// A delete that lost that condition (nats.ErrKeyExists) met a record written since the read, and
+// the two writers it could have met are told apart by reading the claim again rather than by
+// answering success to both: a claim still naming the same session and the same process is the
+// holder's own renewal, which moves RenewedAt and nothing a release weighs
+// (Registry.renewRoleClaim), so the release sends its delete again at the revision that renewal
+// left, up to roleClaimReleaseAttempts deletes in all; any other record is another claim, which
+// this release frees nothing of, as it frees nothing of a claim it never authorised. That is the
+// race a client hands a role back in: pi-envoy registers outside its task queue while a queued
+// task unsubscribes the role's topic, so the registration's renewal and the hand-back's delete
+// overlap, and a lost delete answered as success left the role with the process that gave it up.
+//
+// A claim renewed under every attempt is left standing and fails the release, naming the role:
+// the caller asked to free a claim this release authorises and it is still held, and a release
+// that could not free it must not report that it did. A read of the claim that did not answer
+// fails it the same way, since the release cannot tell which record it met.
 func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role string, claim RoleClaim, release RoleReleaseAuthority) error {
 	if claim.Revision == 0 || !release.frees(claim, sessionID) {
 		return nil
 	}
-	epoch := r.roleViewEpoch()
-	roles := r.roles()
-	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
-		return struct{}{}, roles.Delete(role, nats.LastRevision(claim.Revision))
-	})
-	if !answered {
-		return fmt.Errorf("release role %s's claim held by %s: %w", role, sessionID, err)
+	for attempt := 1; ; attempt++ {
+		epoch := r.roleViewEpoch()
+		roles := r.roles()
+		revision := claim.Revision
+		_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
+			return struct{}{}, roles.Delete(role, nats.LastRevision(revision))
+		})
+		switch {
+		case !answered:
+			return fmt.Errorf("release role %s's claim held by %s: %w", role, sessionID, err)
+		case err == nil:
+			r.forgetRoleHolder(role, revision, epoch)
+			return nil
+		case errors.Is(err, nats.ErrKeyNotFound):
+			return nil
+		case !errors.Is(err, nats.ErrKeyExists):
+			return err
+		case attempt == roleClaimReleaseAttempts:
+			return fmt.Errorf("release role %s's claim held by %s: the claim was renewed under each of this release's %d conditional deletes and is left standing", role, sessionID, roleClaimReleaseAttempts)
+		}
+		stood := claim
+		if claim, err = r.RoleClaim(ctx, role); err != nil {
+			return fmt.Errorf("re-read role %s's claim held by %s: %w", role, sessionID, err)
+		}
+		// Only a renewal of the very claim this release was authorised over is followed to its
+		// new revision. A record gone, one naming another session, and one naming another
+		// process - the adoption of a claim that named none included - are each another claim
+		// than the one read, and this release frees none of them.
+		if claim.Revision == 0 || claim.HolderSessionID != stood.HolderSessionID || claim.ClientInstanceID != stood.ClientInstanceID {
+			return nil
+		}
 	}
-	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
-		return err
-	}
-	if err == nil {
-		r.forgetRoleHolder(role, claim.Revision, epoch)
-	}
-	return nil
 }
 
 // RenewRoleClaims stamps the moment clientInstanceID's process last answered on every claim
@@ -506,6 +549,25 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 // it from POST /v1/interests/subscribe, the registration every client repeats while it runs. The
 // roles it renews are the ones the role claim watcher's copy names (RolesHeldBy), so the set
 // costs no bucket scan, and each renewal reads and writes that role's own record.
+//
+// topics is the registering session's interest record as that registration left it, and a role
+// whose lane topic (contracts.RoleTopicPrefix + role) the record no longer names is not renewed:
+// a client that hands a role back removes that topic (Registry.Remove), so the hand-back stops
+// the renewal even where it freed no claim, and the role claim reaper frees the role one live
+// window later. Without that condition a client whose release states no process - one built
+// before a release named one - would hand a role back and go on renewing the claim for as long
+// as its process ran, since the claim view names it the holder however its record reads. A claim
+// taken through POST /v1/roles/set writes that lane topic onto the holder's record, and a
+// registration merges its topics into the record rather than replacing them (Registry.Upsert),
+// so a holder renews its claim without ever registering the lane topic itself, which no client
+// does (packages/pi-envoy registers the subjects it opened, and opens none for a role lane).
+//
+// An empty topics is a registration that stated no topics at all, which says nothing about the
+// lanes its session still follows, and it renews every claim its process holds, as a registration
+// did before the condition above: the condition reads a hand-back out of a list of topics, and a
+// client that sends no list has handed nothing back. Without that arm such a client would lose
+// every role it holds one live window after it started, trading a bug bounded by the oldest
+// client's lifetime for one that is not.
 //
 // A registration that states no process (an empty clientInstanceID) renews nothing: an absent
 // instance names no process, so it matches no claim, and a claim naming none is adopted by the
@@ -521,7 +583,7 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 // Each bucket call waits no longer than ctx (bus.Bounded): the route passes its request's own
 // context. A write ctx abandoned may still land after this answer, which is safe - it is
 // conditional on the revision it read and renews that claim alone.
-func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string) error {
+func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanceID string, topics []string) error {
 	if clientInstanceID == "" {
 		return nil
 	}
@@ -531,6 +593,9 @@ func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanc
 	}
 	var failures []error
 	for _, role := range roles {
+		if len(topics) > 0 && !slices.Contains(topics, contracts.RoleTopicPrefix+role) {
+			continue
+		}
 		if err := r.renewRoleClaim(ctx, role, sessionID, clientInstanceID); err != nil {
 			failures = append(failures, err)
 		}
