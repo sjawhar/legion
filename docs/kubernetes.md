@@ -1717,13 +1717,14 @@ The daemon's boot log, and every orphan sweep after it, names each pod still on 
 this daemon as the older release until its update round replaces the pod` (`warnPodDrift` in `internal/runtime/sandbox/sandbox.go`).
 The same log names each pod running as a ServiceAccount other than `runtime.kubernetes.pod.service_account`
 — `sandbox runtime: <sandbox> runs as ServiceAccount <account>, the configured ServiceAccount is
-<account>; its agents hold that identity until the pod is relaunched` (`accountDrift`, warned by the same function)
+<account>; its agents hold that identity until the pod is replaced — by its update round where a round covers the pod, by the next launch of one of its roles where none does` (`accountDrift`, warned by the same function)
 — one warning per Sandbox per kind of drift, so a pod holding both is named twice.
-A pod runs as the account it was created with for its whole life, and no update round answers that drift, so changing `service_account` reaches a running pod only through the next launch of any of its roles (`accountDrift` in `relaunch.go`), which replaces the pod and interrupts the roles live in it once: they end with the pod and resume in the new one, as a moved worker stream already makes them (below).
+A pod runs as the account it was created with for its whole life, so changing `service_account` reaches a running pod only by replacing it, and which replacement that is follows the pod's kind (`accountDrift` in `relaunch.go`, `roundCovers` in `drift.go`):
+a pod an update round covers — every issue pod — is replaced by that round, which asks every worker in it to push its work before the pod is ended, and a pod no round covers — the project controller's — by the next launch of any of its roles, which interrupts the roles live in it once: they end with the pod and resume in the new one, as a moved worker stream already makes them (below).
 Its agents hold the old account's identity until then.
-That replacement is outside the one exemption a stale-plugin install has: such a launch keeps a pod that has merely drifted, and replaces one running as another account, since no install can move the account.
+The one exemption a stale-plugin install has no longer decides the account; the pod's kind does: such a launch keeps a pod a round covers for the account as for every other drift, and replaces a pod no round covers for the account whatever it is installing, since no round will ever come for such a pod.
 The daemon-launched controller's pod is in scope for both warnings, and for the account's replacement, which happens only when the controller's process is being started anyway.
-An unset `service_account` is read as the namespace's `default` on both sides, so a deployment that names none keeps a pod running as `default` and replaces one running as any other account.
+An unset `service_account` is read as the namespace's `default` on both sides, so a pod running as `default` under a deployment that names none has not drifted at all.
 The boot action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and trigger nothing.
 
 An issue pod on another image is replaced by its own update round (INFRA-484, [The disk dies with its pod](#the-disk-dies-with-its-pod)):
@@ -1745,8 +1746,8 @@ So an operator moving the controller onto a new image suspends its claim and res
 A launch replaces a pod other roles of its issue still run in only when the pod cannot run the launching role as a pod created now would and no worker in it can be asked to push first (`movedInPod`, `internal/runtime/sandbox/addresses.go`):
 it runs the layout before one container, one launcher container per role, or its launchers dial a worker stream other than the one a pod created now is handed and never redial it.
 A pod the launch finds suspended, ended, with a failed init container, with a disk of the shape before the pod-owned disk, or whose launcher Secret no longer binds it is replaced too.
-A pod running as a ServiceAccount other than the configured one is replaced by a launch too, whatever kind of pod it is: the account is fixed for the pod's life, so no update round and no stale-plugin install can move it (`accountDrift`).
-Everything else a running pod cannot be changed to carry — its image, its pod kind's reservation, the operator's volumes and mounts, the disk size, a role's overlays, the secrets broker's enrollment and the session store
+A pod running as a ServiceAccount other than the configured one is replaced by a launch only where no round covers that pod, the project controller's (`accountDrift`, `roundCovers`): the account is fixed for the pod's life, and no round will ever come for such a pod.
+Everything else a running pod cannot be changed to carry — its image, its pod kind's reservation, the operator's volumes and mounts, the disk size, a role's overlays, the secrets broker's enrollment and the session store, and the ServiceAccount it runs as wherever a round covers the pod
 — is drift, and the update round replaces the pod for it ([The disk dies with its pod](#the-disk-dies-with-its-pod)).
 The launch's replacement ends those roles' processes wherever their turns stood, and that end is the daemon's act, not theirs (LEGION-729);
 a round's replacement runs this same path, but only once no role of the pod is in a turn at all.
@@ -2021,7 +2022,7 @@ the role's shim runs the start wrapper, `/bin/sh -c '<start script>' legion-star
 `<n>` is the setup command's word count, 0 with none), whose install step runs `bun add --backend=copyfile --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or URL source is handed to `bun add` as written;
 `--backend=copyfile` because the issue's bun install cache and the generation directory now share the issue's volume, where bun would otherwise hardlink the installed files out of that cache and an in-place edit of either would corrupt the other for the life of the volume) into a fresh generation directory, `$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/legion/scratch/state/<role>/legion-plugins/g<N>/`), checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals the daemon's own (exiting 1 before `exec`, printing `legion plugins: @sjawhar/pi-legion@<v> declares daemon API contract <got>; this daemon requires <want>` when it does not), and then `exec "$@"`s into Oh My Pi, which starts with `--extension <gen dir>/node_modules/@sjawhar/pi-envoy --extension <gen dir>/node_modules/@sjawhar/pi-legion` in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 A pod replaced for any other reason in the same relaunch
-— a suspended Sandbox, a lost launcher binding, a failed init container, a moved address, a pod running as another ServiceAccount
+— a suspended Sandbox, a lost launcher binding, a failed init container, a moved address, a pod no round covers running as another ServiceAccount
 — installs nothing: it comes up on the configured image, whose copies the boot gate already holds to the daemon's contract.
 An issue pod merely running another image is replaced by no relaunch at all, stale-plugin or not:
 it is drift, and the update round replaces it once every worker in it has pushed ("Pinning a release that drops what a running pod still uses" above).
@@ -2103,7 +2104,7 @@ runtime:
       issue: { memory: 32Gi, memory_request: 19Gi }   # every issue pod: Burstable, reserves 19Gi, may use 32Gi
       controller: { cpu: 2, memory: 8Gi }  # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
-      service_account: legion-worker
+      service_account: <the ServiceAccount this deployment's pods run as>
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
       volumes: [...]
       volume_mounts: [...]
@@ -3946,7 +3947,7 @@ each answers for a different verb — creating a Sandbox, creating a pod, `exec`
 Two costs are shared and are the reason a role cleans up after itself rather than waiting for a deadline.
 One quota covers that whole namespace and is shared with the team's builds, so a workload left running is charged against both:
 measured on 2026-10-25, the namespace's quota for Jobs counted `requests.cpu` 4 for each of these workloads while it existed, 48 with twelve at once, and was back at 0 once the last of them was deleted.
-And every project's agents hold the one identity (`legion-worker`), so a password written into a Job is readable by every other agent, and any of them may delete any workload there.
+And every project's pods run as the account that project's configuration names (`service_account`), so the agents of every project that names the same account hold one identity: a password written into a Job is readable by every other agent of that identity, and any of them may delete any workload there.
 The other half is reach: the ingress rule admits the namespace Legion's pods run in rather than an identity, naming no pod and no port, so every pod there
 — every project's agents, with a Kubernetes credential or without one
 — reaches a labelled workload at its Service name, and the password in the Job, which every holder of the identity can read, is the only lock on it.
@@ -4102,9 +4103,10 @@ Every end of an issue pod is therefore the end of that pod's disk, and the ends 
 
 - **a launch replaces the pod**, because it cannot run the launching role as a pod created now would and no worker in it can be asked to push first:
   it runs the layout before one container, or its launchers dial a worker stream a pod created now is not handed and never redial it.
-  A pod the launch finds suspended, ended, with a failed init container, with a role's launcher Secret that no longer binds it, running as another ServiceAccount, or on a Sandbox of the disk shape before this release is replaced too ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk)).
-  The account is the one kind of drift no round answers, since a pod runs as the account it was created with for its whole life, so a change of `runtime.kubernetes.pod.service_account` costs every live issue pod its disk at the next launch of one of its roles:
-  a deployment moving its pods to another account drains its trees first, or accepts that each pod's unpushed work goes with it;
+  A pod the launch finds suspended, ended, with a failed init container, with a role's launcher Secret that no longer binds it, or on a Sandbox of the disk shape before this release is replaced too ([Pinning a release that drops what a running pod still uses](#pinning-a-release-that-drops-what-a-running-pod-still-uses), [Cutting over to the pod-owned disk](#cutting-over-to-the-pod-owned-disk)).
+  The account the pod runs as is not one of those, though it is fixed for the pod's life: a round covers every issue pod, so a change of `runtime.kubernetes.pod.service_account` is answered by each pod's own update round, the end below, which asks every worker in it to push, rescues whatever the disk still holds and only then replaces the pod.
+  Such a change therefore costs no issue pod its unpushed work, and a deployment moving its pods to another account need not drain its trees by hand first.
+  It still costs the identity: until its round has replaced it a pod's agents hold the identity the old account grants, so an old account is deleted only once no live pod of it is left, and how fast a fleet moves is what `pod_update_max_open_rounds` and `pod_update_rounds_per_minute` bound, each round also waiting for every running turn in its pod to end (below);
 
 - **an update round replaces the pod**, once every worker in it has pushed its work and answered, and the daemon's own push check has found nothing on the disk its remote lacks or has pushed what it found to a rescue branch (below).
   A live pod whose configuration has merely drifted is never replaced where it is found, because that would end every role's turn in it and delete the disk with everything unpushed on it;
@@ -5161,7 +5163,7 @@ each issue's pod (every role of it alike) and the image probe's.
   it ends one lease after its pod's renewer stops, or at once when someone revokes that login on Dispatch's machine-login page by its **Credential** id (the broker's operate page, "The renew token check", gives the query that finds it), never by its machine name.
 
 - The daemon logs in as the service `legion-daemon`, and its pods run as the ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when unset, above).
-  A broker configured with that account for `legion-daemon`, such as `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as `legion-worker`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no other session (the broker's concepts page, "Owner and tier").
+  A broker configured with that account for `legion-daemon`, such as `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:<the account the pods run as>`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no other session (the broker's concepts page, "Owner and tier").
   When the daemon's pods run as several accounts, the setting names each in a `legion-daemon=` entry of its own.
   The broker refuses to start with a namespace's `default` account in `BROKER_SERVICES`, since every pod there that names no account runs as it, so pods that receive service-owned secrets name a dedicated account.
   The daemon's own ServiceAccount, which logs in, is a different account from its pods', and it is named in `BROKER_SERVICE_LOGINS`, not `BROKER_SERVICES`;
@@ -5512,7 +5514,7 @@ The controller is the one Legion session a person talks to.
 
 Under either mode a controller reads its daemon's resolved settings
 — `max_fix_attempts`, `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential, credential source and credential file path left out
-— from `read_state`'s `settings` (contract 35, LEGION-791), never from the ConfigMap in `legion-system`, which `legion-worker` may not read.
+— from `read_state`'s `settings` (contract 35, LEGION-791), never from the ConfigMap in `legion-system`, which the account the project's pods run as may not read.
 
 ### Controller liveness
 
