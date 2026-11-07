@@ -23,9 +23,10 @@ export async function tick(ms: number, step = 500): Promise<void> {
 
 /** Moves the fake clock `ms` on in one jump, letting every promise the move released run, and
  *  then runs a second round that advances nothing: for a wait that crosses one timer of the
- *  product, where no part of the span needs a round of its own. That second round is what lets a
- *  zero-delay follow-up fire inside the wait - the retry a failed write schedules, which the
- *  retry row of `useDwell.test.tsx` holds the product to. */
+ *  product, where no part of the span needs a round of its own. The second round fires, inside
+ *  the same wait, whatever the first round's continuations scheduled at zero delay, so a product
+ *  that should wait a timer of its own but follows up at once is caught: the retry row of
+ *  `useDwell.test.tsx` fails if a failed write is retried without a new dwell. */
 export async function jump(ms: number): Promise<void> {
   await tick(ms, Math.max(ms, 1));
 }

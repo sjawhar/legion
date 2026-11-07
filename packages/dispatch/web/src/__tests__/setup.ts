@@ -37,8 +37,8 @@ GlobalRegistrator.register();
 // The suite's slowest test, `row-configurations.test.ts`'s "no row runs twice in one
 // configuration", reads 13.83 s loaded. 30 s is the round number above twice that reading, and it
 // is kept as small as that rule allows, because every hung test costs the whole budget on CI as
-// well as in a pod. dispatch://INFRA-1405 sets this same budget for its own loaded rows: the
-// overlap is intended, and whichever branch merges second keeps one copy of the line.
+// well as in a pod. dispatch://INFRA-1405 sets this same budget for its own loaded rows; the
+// overlap is intended.
 jest.setTimeout(30_000);
 
 // Testing Library reads the document as it loads, so it must load after
