@@ -38,6 +38,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -755,7 +756,7 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 // unanswered reaches github.com.
 func repositoriesGitHub(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
 		parts := strings.Split(rest, "/")
 		if r.Method != http.MethodGet || !isRepository || len(parts) != 2 {
@@ -764,9 +765,7 @@ func repositoriesGitHub(t *testing.T) string {
 			return
 		}
 		_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 // stop cancels the daemon and requires it to return cleanly.

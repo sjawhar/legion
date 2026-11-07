@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -28,11 +29,7 @@ import (
 // requires nothing. While failing is set, the rulesets read answers 502.
 func rulesetsStandIn(t *testing.T, failing *atomic.Bool, requires string) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
 			w.Write([]byte(`{"number":86,"base":{"ref":"main"}}`))
@@ -47,9 +44,7 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool, requires string) *httpt
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // mergeableStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it: pull
@@ -57,11 +52,7 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool, requires string) *httpt
 // rulesets require pr-checks-result and whose branch protection requires nothing.
 func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
 			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":` + state + `}`))
@@ -72,9 +63,7 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // seedUnjudgedRound records a round as a live tree had one before the daemon read required sets:
@@ -280,11 +269,7 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 // workflow runs are what runs answers when asked, a JSON array.
 func requiredWorkflowStandIn(t *testing.T, runs func() string) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
 			w.Write([]byte(`{"number":86,"base":{"ref":"main"}}`))
@@ -304,9 +289,7 @@ func requiredWorkflowStandIn(t *testing.T, runs func() string) *httptest.Server 
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // reviewRuns is the head's workflow runs: the required review workflow's run 37 at attempt, with

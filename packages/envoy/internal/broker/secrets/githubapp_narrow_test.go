@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/githubtest"
 	"github.com/sjawhar/envoy/internal/logtest"
 )
 
@@ -45,7 +46,7 @@ type narrowingGitHub struct {
 func newNarrowingGitHub(t *testing.T) *narrowingGitHub {
 	t.Helper()
 	g := &narrowingGitHub{answer: asGitHubAnswers, revokeStatus: http.StatusNoContent}
-	g.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.server = githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		g.requests++
 		answer, headers, revokeStatus := g.answer, g.headers, g.revokeStatus
@@ -80,8 +81,7 @@ func newNarrowingGitHub(t *testing.T) *narrowingGitHub {
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-	}))
-	t.Cleanup(g.server.Close)
+	}})
 	return g
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -435,15 +435,11 @@ type checkGitHub struct {
 func newCheckGitHub(t *testing.T, merge, status string, code int) *checkGitHub {
 	t.Helper()
 	g := &checkGitHub{merge: merge, status: status, code: code}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Token: "outbox-token", Record: func(r *http.Request) {
 		g.mu.Lock()
 		g.reads = append(g.reads, r.URL.Path+"?"+r.URL.RawQuery)
 		g.mu.Unlock()
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/42":
 			_, _ = io.WriteString(w, `{"number":42,"merged":true,"merge_commit_sha":"`+g.merge+`"}`)
@@ -455,12 +451,9 @@ func newCheckGitHub(t *testing.T, merge, status string, code int) *checkGitHub {
 			}
 			_, _ = io.WriteString(w, `{"status":"`+g.status+`","ahead_by":1,"behind_by":0,"files":[]}`)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

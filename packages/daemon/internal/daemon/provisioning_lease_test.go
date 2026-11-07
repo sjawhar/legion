@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 )
 
 // provisioningTokenRequest is one installation token request a provisioning mint made: the
@@ -80,7 +80,7 @@ func provisioningStandIn(t *testing.T, installations ...provisioningInstallation
 		byID[installation.id] = installation
 	}
 	github := &provisioningGitHub{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/app/installations":
 			discovered := make([]string, 0, len(installations))
@@ -106,11 +106,9 @@ func provisioningStandIn(t *testing.T, installations ...provisioningInstallation
 		case strings.HasPrefix(r.URL.Path, "/users/"):
 			fmt.Fprint(w, `{"id":42}`)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
+	}})
 	github.tokens = appauth.New(config.GitHubApps{
 		Implement: config.GitHubApp{AppID: "1", PrivateKey: privatePEM},
 		Review:    config.GitHubApp{AppID: "2", PrivateKey: privatePEM},

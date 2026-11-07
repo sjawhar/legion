@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -36,11 +37,7 @@ func pullRequestStandIn(t *testing.T, head string, updated time.Time, listed *at
 	t.Helper()
 	pull := `{"number":86,"state":"open","html_url":"https://github.com/acme/widgets/pull/86","body":"Dispatch: CAPTURE-1",` +
 		`"base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"` + head + `","repo":{"full_name":"acme/widgets"}},"updated_at":"` + updated.Format(time.RFC3339) + `","mergeable":true}`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch strings.ToLower(r.URL.Path) {
 		case "/repos/acme/widgets/pulls":
 			if r.URL.Query().Get("state") != "open" || r.URL.Query().Get("head") != "" {
@@ -61,9 +58,7 @@ func pullRequestStandIn(t *testing.T, head string, updated time.Time, listed *at
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // headReads is how many facts of kind the pass applied from its own reads of GitHub.
@@ -441,12 +436,9 @@ func passPull(number int, branch, head, state string, updated time.Time, more st
 // answers. Every request is counted in reads.
 func lostStandIn(t *testing.T, pulls map[int]string, open string, reads *pathReads) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Record: func(r *http.Request) {
 		reads.add(r.URL.Path)
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		if number, ok := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/pulls/"); ok {
 			if n, err := strconv.Atoi(number); err == nil && pulls[n] != "" {
 				w.Write([]byte(pulls[n]))
@@ -467,9 +459,7 @@ func lostStandIn(t *testing.T, pulls map[int]string, open string, reads *pathRea
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // recordSnapshot is every row the workflow keeps of the issues it records - the issues, their
@@ -985,12 +975,9 @@ func (g *activityGitHub) moved(head string, updated time.Time, activity ...strin
 
 func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Serve(t, githubtest.Spec{Token: "outbox-token", Record: func(r *http.Request) {
 		g.reads.add(r.URL.Path)
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		pull := passPull(86, "legion/CAPTURE-1", g.head, "open", g.updated, "")
@@ -1017,9 +1004,7 @@ func (g *activityGitHub) serve(t *testing.T) *httptest.Server {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // reviewAppRuntime is requiredRuntime whose workflow knows the review App by reviewAppLogin, as a

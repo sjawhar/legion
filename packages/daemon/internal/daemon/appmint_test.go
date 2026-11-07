@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
@@ -72,7 +72,7 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 	}
 	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	standIn := &gitHubStandIn{discoveries: map[string]int{}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/app/installations":
 			app := jwtIssuer(t, r)
@@ -90,11 +90,9 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 		case strings.HasPrefix(r.URL.Path, "/users/"):
 			fmt.Fprint(w, `{"id":42}`)
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
+	}})
 	return appauth.New(config.GitHubApps{
 		Implement: config.GitHubApp{AppID: "1", PrivateKey: privatePEM},
 		Review:    config.GitHubApp{AppID: "2", PrivateKey: privatePEM},

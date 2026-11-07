@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -67,15 +67,13 @@ func newDeployGitHub(t *testing.T, merge string) *deployGitHub {
 		"status": "completed", "conclusion": "success", "html_url": "https://github.com/acme/widgets/actions/runs/901/attempts/2",
 		"run_started_at": deployMerged.Add(-10 * time.Minute).Format(time.RFC3339), "head_repository": map[string]any{"full_name": "acme/widgets"},
 	}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Token: "outbox-token", Record: func(r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		g.reads = append(g.reads, r.URL.Path+"?"+r.URL.RawQuery)
-		if r.Header.Get("Authorization") != "Bearer outbox-token" {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
+	}, Handle: func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/42":
 			merged := strconv.Quote(deployMerged.Format(time.RFC3339))
@@ -110,12 +108,9 @@ func newDeployGitHub(t *testing.T, merge string) *deployGitHub {
 			}
 			fmt.Fprintf(w, `{"total_count":%d,"jobs":[%s]}`, total, strings.Join(g.pages[page-1], ","))
 		default:
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			githubtest.Unexpected(t, w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

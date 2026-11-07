@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -77,7 +77,7 @@ type renameCall struct {
 func newRenameGitHub(t *testing.T, answers func(body string) string) *renameGitHub {
 	t.Helper()
 	g := &renameGitHub{answers: answers}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		call := renameCall{bearer: r.Header.Get("Authorization")}
 		if parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/repos/"), "/", 3); r.URL.Path != "/graphql" && len(parts) >= 2 {
@@ -97,11 +97,8 @@ func newRenameGitHub(t *testing.T, answers func(body string) string) *renameGitH
 		g.mu.Lock()
 		g.calls = append(g.calls, call)
 		g.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, g.answers(string(body)))
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

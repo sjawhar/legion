@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 )
 
 // fakeBroker is a token_command that answers as `agent-secrets <NAME> [--github-owner O
@@ -95,7 +96,7 @@ type fakeTokenGitHub struct {
 }
 
 func (g *fakeTokenGitHub) serve(t *testing.T) *httptest.Server {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		auth := r.Header.Get("Authorization")
@@ -128,9 +129,7 @@ func (g *fakeTokenGitHub) serve(t *testing.T) *httptest.Server {
 			t.Errorf("token mode asked GitHub %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 func tokenModeManager(server *httptest.Server, broker fakeBroker, now *time.Time, stderr *bytes.Buffer) *Manager {

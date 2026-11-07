@@ -995,6 +995,7 @@ jobs:
               # counts its testdata among what this job reads.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/fixtureenv/*'
+              - 'packages/envoy/internal/githubtest/*'
               - 'packages/envoy/internal/logtest/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testpg/*'
@@ -1086,6 +1087,7 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
+              - 'packages/envoy/internal/githubtest/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testwait/*'
               # The step takes the memory tag's test list from this script at run time.
@@ -1095,6 +1097,7 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - *dispatch_command_tests
+              - 'packages/envoy/internal/githubtest/*'
               - 'packages/envoy/internal/testnats/*'
               - 'packages/envoy/internal/testwait/*'
               # The step takes the multiprocess tag's test list from this script at run time.

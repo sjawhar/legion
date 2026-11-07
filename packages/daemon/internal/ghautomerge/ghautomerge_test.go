@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
@@ -73,7 +73,7 @@ func submitted(verb, pullTitle string) string {
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		var request struct {
@@ -85,7 +85,6 @@ func (g *github) serve(t *testing.T) string {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.Contains(request.Query, "disablePullRequestAutoMerge"):
 			g.mutations = append(g.mutations, fmt.Sprintf("disable %v", request.Variables["id"]))
@@ -201,9 +200,7 @@ func (g *github) serve(t *testing.T) string {
 			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,%s"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
 				g.autoMergeOK, state, titleField, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 // Disarm turns off what would merge the pull request without a person, by the pull request's state

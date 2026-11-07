@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 )
 
 // repositoryGitHub is GitHub's REST API answering GET /repos/acme/widgets with defaultBranch, or
@@ -31,10 +31,9 @@ type repositoryGitHub struct {
 func newRepositoryGitHub(t *testing.T, defaultBranch string) *repositoryGitHub {
 	t.Helper()
 	g := &repositoryGitHub{status: http.StatusOK, defaultBranch: defaultBranch}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	g.url = githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/repos/acme/widgets" {
-			t.Errorf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
+			githubtest.Unexpected(t, w, r)
 			return
 		}
 		g.reads.Add(1)
@@ -54,9 +53,7 @@ func newRepositoryGitHub(t *testing.T, defaultBranch string) *repositoryGitHub {
 			fullName = "acme/widgets"
 		}
 		_, _ = io.WriteString(w, `{"full_name":"`+fullName+`","default_branch":"`+branch+`"}`)
-	}))
-	t.Cleanup(server.Close)
-	g.url = server.URL
+	}})
 	return g
 }
 

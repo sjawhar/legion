@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
@@ -23,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -941,7 +941,7 @@ func blockersDatabase(t *testing.T) string {
 func blockersGitHub(t *testing.T) string {
 	t.Helper()
 	const head = "c0ffee0123456789abcdef0123456789abcdef01"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Server(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
 		parts := strings.SplitN(rest, "/", 3)
 		if !isRepository || len(parts) < 2 {
@@ -966,9 +966,7 @@ func blockersGitHub(t *testing.T) string {
 			t.Logf("the GitHub stand-in answered 404 to %s %s", r.Method, r.URL.Path)
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server.URL
+	}})
 }
 
 // scratchDispatchClient is the test's own client of the scratch Dispatch server; the daemon has
