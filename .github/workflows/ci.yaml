@@ -1148,6 +1148,12 @@ jobs:
               - 'packages/envoy/going/testdata/**'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
+              # The dashboard's tsc program compiles @legion/envoy-client's sources through the
+              # workspace's "bun" export condition, and its e2e helpers import
+              # test/fake-dispatch, so check-ts-filters.sh holds this filter to both
+              # (dispatch's own filter names them for the browser suite).
+              - 'packages/envoy-client/src/**'
+              - 'packages/envoy-client/test/**'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
             # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
