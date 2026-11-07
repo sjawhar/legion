@@ -1,4 +1,8 @@
-## What the withheld capability is, and what it is not
+# What the withheld capability is, and what it is not
+
+Part of `skill://legion-worker`, read from `skill://legion-worker/references/tools.md` before you
+unpack, extract or install anything the worker image does not carry. Every path it cites is in
+cybermonklabs/legion.
 
 The withheld row reads `installs or configures its own dependencies in the pod: Legion owns its
 dependencies` (`packages/daemon/internal/capabilities/capabilities.go`, ruling
@@ -60,7 +64,8 @@ What each shape leaves resolving:
 - A pinned runner run: nothing. `uvx --from httpie@3.2.4 http --version` leaves a cache entry
   addressed by that coordinate and that version, which the next command reaches only by writing the
   same pin; no `PATH`, no interpreter and no library search of any other process changes. That is
-  the sanctioned side, and it is the side the forms below are on.
+  the sanctioned side, and it is the side the runner forms of
+  `skill://legion-worker/references/tools.md` are on.
 - A repository's own dependency set: nothing either, which is why the caches are provisioned at
   all. `uv sync` or `bun install` in your workspace materialises what that project already
   declares, into that project's own directory, which a process reaches by asking for that project
@@ -132,7 +137,8 @@ issue pod, on the issue's own disk, by the issue's roles together.
 `packages/dispatch` is proved in the pod by driving the specs it touches, one spec a command
 (`bun run e2e -- e2e/<one spec file>`); the whole browser suite runs in CI's `dispatch` job on the
 pull request. One spec needs the same stack as all of them: a Postgres with pgvector. On a digest
-carrying `legion-testpg`, use the pod's own server ("The database your tests use", above) and
+carrying `legion-testpg`, use the pod's own server
+(`skill://legion-worker/references/tools.md#the-database-your-tests-use`) and
 unpack nothing. On a digest without it, the way
 that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
 issue's volume — the five packages and the start sequence are in

@@ -14,10 +14,10 @@ limit, and one command that fills it ends every role's turn, not only yours.
 In the pod you compile and test the packages your change touches, build the program a check of
 your issue drives (`go build ./cmd/legion`), vet the module you changed (`go vet -tags e2e ./...`,
 which compiles and runs no test), and, in a package whose tests need Postgres, run only the tests
-your change touches by name (`go test -run`). Go's race detector needs cgo, which the image turns
-off, so prefix it: `CGO_ENABLED=1 go test -race -count=1 -run '<TestName>' ./internal/<package>/`
-(the worker image sets `CGO_ENABLED=0` and installs gcc, in
-`packages/daemon/docker/worker.Dockerfile`).
+your change touches by name (`go test -run`). To run Go's race detector, prefix the command with
+`CGO_ENABLED=1`: `CGO_ENABLED=1 go test -race -count=1 -run '<TestName>' ./internal/<package>/`.
+The worker image sets `CGO_ENABLED=0` and carries gcc (both in
+`packages/daemon/docker/worker.Dockerfile`), and Go refuses `-race` without cgo.
 
 A whole module's or whole package's test run goes to CI on the pull request, where a job of that
 pull request runs it: `go test ./...`, a whole Postgres-backed package such as
@@ -33,24 +33,28 @@ heavy run goes where your deployment's instructions say.
 - Give every Postgres variable a test reads `$LEGION_TEST_PG_DSN`, your pod's own server:
   `LEGION_TEST_PG_DSN`, `DISPATCH_TEST_DATABASE_URL` and `BROKER_TEST_DATABASE_URL`. Most suites
   make and drop one of their own per test on that server — a database through `internal/testpg`,
-  a schema through `internal/broker/store/storetest`'s `URL` — so your roles share it. Two instead
-  migrate the database their URL names, and take one of their own from the next bullet:
-  `packages/envoy/internal/broker/store` (`store_test.go` opens what `BROKER_TEST_DATABASE_URL`
-  names and migrates it; one run left 24 tables) and `packages/envoy/internal/dispatch/store`
-  (`openTestStore` in its `store_test.go`; one whole run left 99), each measured on 2026-11-06 in
-  an empty database.
+  a schema through `internal/broker/store/storetest`'s `URL` — so your pod's roles can share the
+  server. Two write the database the URL itself names instead, and take a database of their own
+  from the next bullet's `createdb` line: `packages/envoy/internal/broker/store`, whose
+  `store_test.go` helpers call `Open(ctx, testDatabaseURL(t))` and then `Migrate` on the database
+  `BROKER_TEST_DATABASE_URL` names, and `packages/envoy/internal/dispatch/store`, whose
+  `openTestStore` (in its `store_test.go`) opens the database `DISPATCH_TEST_DATABASE_URL` names
+  and whose tests migrate it. Measured on 2026-11-06, each against an empty database of its own:
+  one run of the first left 24 tables there, and one run of the second, whole, left 99.
 - Anything that migrates into the database its DSN names, rather than making one per test, needs
   a database of your own, because a sibling role writing the same one collides with you: the
   Dispatch browser suite's `DATABASE_URL`, which resets what it is given, and the stage scripts'
   `LEGION_E2E_PG_DSN`, which a daemon's `postgres_dsn` becomes and migrates Legion's schema into.
   Make one and point the variable at it:
   `createdb -h 127.0.0.1 -p 5433 -U legion_test "e2e_$(date +%s)"`.
-  The DSN's own database is your login's and writable, so this rule keeps two roles out of it, not
-  the server; `packages/daemon/internal/daemon` is the third case, its `TestMain` taking one
-  database for the package's run through `internal/testpg`. Empty the served database by dropping
-  your own schemas and your own objects in `public`, never `public` itself: `vector` goes with it
-  and your login cannot put it back, since `ensure` installs it only at a database's creation.
-- The server is empty in every new pod and dies with it.
+  The DSN's own database is owned by your login and writable, so what keeps two roles out of it is
+  this rule rather than the server. `packages/daemon/internal/daemon` is the third case, whose
+  `TestMain` takes one database for the package's run through `internal/testpg`.
+  Empty the served database by dropping your own suite's schemas and your own objects in `public`,
+  never `public` itself: `vector` goes with it, your login may not create it again, and
+  `ensure` only ever installs it at a database's creation.
+- The server is empty in every new pod and dies with it. Every database made from `template1`
+  has pgvector.
 - `LEGION_TEST_PG_DSN` set and the connection refused: that is not yours to repair. Starting the
   server is the roles container's launcher's job — it runs `legion-testpg ensure` before any role
   starts and again every 15 seconds — so wait about that interval and try again. Never start a
@@ -66,8 +70,9 @@ heavy run goes where your deployment's instructions say.
   database the DSN names, owned by that role. That
   server lives in your generation: it dies when your generation ends, which takes a sibling
   role's connections and databases with it mid-test, and the next `ensure` of either role finds
-  the same cluster on disk and serves it again. With no
-  `legion-testpg` either, stand up one with the harness below (**The worked case**) and set the DSN.
+  the same cluster on disk and serves it again. With no `legion-testpg` either, stand up one with
+  the harness of `skill://legion-worker/references/withheld-capability.md` (**The worked case**)
+  and set the DSN.
 
 ## Reading a shared database
 
@@ -174,23 +179,23 @@ So that writable `$HOME`, and the issue's disk, are where an install for yoursel
 the mechanics the answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an
 extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not — Debian's
 `/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no
-extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
-section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
-`$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
-pod's disk rather than the issue's volume — the placement `roleEnvironment`
-(`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
-extraction is the harness's: onto the issue's volume, and exported around its own commands and no
-further (the Dispatch e2e stack, below, is the worked case). For everything the image does not
-carry, the one documented step is a pinned run through one of the three package runners it does
-— plus `uv run --with` when what you need is a library rather than a command — and a tool
-no runner reaches is an image change ("When no runner reaches it", below).
+extraction prefix is on. What rules such an attempt out is not the unpacking: it is the test of
+`skill://legion-worker/references/withheld-capability.md#the-test-where-it-lands-and-what-it-leaves-resolving`,
+and an extraction under `$HOME` fails that test's first condition whatever you scope it to,
+because `/home/legion` is the pod's disk rather than the issue's volume — the placement
+`roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes
+off. The sanctioned extraction is the harness's: onto the issue's volume, and exported around its
+own commands and no further (the Dispatch e2e stack of that reference is the worked case). For
+everything the image does not carry, the one documented step is a pinned run through one of the
+three package runners it does — plus `uv run --with` when what you need is a library rather than
+a command — and a tool no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
 
 What the withheld row says, the three artefacts that draw the line between it and a pinned runner
 form, and the worked harness case are in
-`skill://legion-worker/references/withheld-capability.md`, moved there whole so this guide stays
-under Oh My Pi's spill threshold.
+`skill://legion-worker/references/withheld-capability.md`: read it before you unpack, extract or
+install anything the image does not carry.
 
 ## The three pinned runner forms
 
@@ -396,8 +401,9 @@ to its role topic), with the tool, what your phase needs it for, and the runner 
 ruled out. What is not the step is improvising a CLI for your own convenience — a vendored binary,
 a hand-rolled substitute, or an extraction prefix dropped on your own `PATH`: the architect decides
 whether the image change is work to schedule. An extraction a harness builds for its own runs is
-not improvising and is not what this rules out (the Dispatch e2e stack, above): the two cases part
-on "The test: where it lands, and what it leaves resolving", which the convenience case fails.
+not improvising and is not what this rules out (the Dispatch e2e stack of
+`skill://legion-worker/references/withheld-capability.md`): the two cases part on its test,
+"The test: where it lands, and what it leaves resolving", which the convenience case fails.
 
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
@@ -583,8 +589,9 @@ something to count.
   `go test -count=1 -timeout 40m ./internal/workflow/` runs whole in the pod, with no docker
   panic.
 - **The rest, by package**, for a named run the pod does make. A Postgres unpacked from Debian
-  packages (the harness under **The worked case**) has only the `C`, `C.utf8` and `POSIX`
-  locales, so its default collation is byte order, and `internal/dispatch/api`'s
+  packages (the harness under **The worked case** of `withheld-capability.md`) has only the
+  `C`, `C.utf8` and `POSIX` locales, so its default collation is byte order, and
+  `internal/dispatch/api`'s
   `TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves` refuses such a database
   by its own message. The pod's own `legion-testpg` server is made with ICU `en-US`, so that
   test runs there, as it does in CI's `envoy-go` job, whose Postgres has `en_US.utf8`.

@@ -217,7 +217,7 @@ E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are y
 So `apt` cannot write a system prefix in an unprivileged container.
 Unpacking a package's files by hand is a separate question
 — it works for some tools and not for others (the extraction item below)
-— and what rules it out is not the unpacking but the test the role's own skill states, in `skills/legion-worker/references/tools.md` under "What the withheld capability is, and what it is not":
+— and what rules it out is not the unpacking but the test the role's own skill states, in `skills/legion-worker/references/withheld-capability.md`, "What the withheld capability is, and what it is not":
 an extraction under that writable `$HOME` is outside the sanctioned form whatever a role scopes it to, and so is a client left where the role's later commands and its subagents resolve it, which is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`).
 A test harness's own prefix on the issue's disk, reached by an absolute path or through a `PATH` its own script exports around its own commands, passes that test and is the role's own business
 — which is how the Dispatch browser suite's rootless Postgres with pgvector is stood up in a pod today.
@@ -252,7 +252,7 @@ Each item below names an option and its measurement, then the verdict on it.
   `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on
 
   **rejected as the way to get these five clients onto a role's `PATH`**:
-  that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for.
+  that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/withheld-capability.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for.
   The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way
 
 - `runtime.kubernetes.setup`, the operator-set command run before each role's agent starts — it runs on every start of every role, six times per issue
