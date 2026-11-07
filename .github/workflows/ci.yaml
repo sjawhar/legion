@@ -1054,6 +1054,11 @@ jobs:
               - '.github/workflows/ci.yaml'
               # The install step runs it, so a change to it must re-run this job.
               - '.github/scripts/playwright-deps-current.sh'
+              # The apt list the install step installs, so a change to it must re-run this job.
+              - '.github/playwright-apt-packages.txt'
+              # The key step runs it for the apt archive cache's key, so a change to it must
+              # re-run this job.
+              - '.github/scripts/apt-archive-cache-key.sh'
               - *bun_install
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
@@ -1072,9 +1077,6 @@ jobs:
               # And @legion/broker-client with it, which that CLI's own closure holds
               # (ci_job_reads.py's envoy_client_dep).
               - 'packages/broker-client/**'
-              # e2e/__tests__/delivery-live-probe.test.ts:6-9 and local-instance-support.test.ts:2-5
-              # import @legion/envoy-client/test/fake-dispatch.
-              - 'packages/envoy-client/test/**'
               - 'packages/envoy-client/bin/dispatch.ts'
               # The Dispatch server the browser tests start (e2e/run-server.sh:135), on the socket
               # scripts/e2e/lib/held-port.py holds (run-server.sh:37).
@@ -1148,10 +1150,12 @@ jobs:
               - 'packages/envoy/going/testdata/**'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
-              # The dashboard's tsc program compiles @legion/envoy-client's sources through the
-              # workspace's "bun" export condition, and its e2e helpers import
-              # test/fake-dispatch, so check-ts-filters.sh holds this filter to both
-              # (dispatch's own filter names them for the browser suite).
+              # The dashboard's tsc program compiles @legion/envoy-client's sources, and its e2e
+              # helpers' test/fake-dispatch with them, through the workspace's "bun" export
+              # condition, so check-ts-filters.sh holds this filter to both. The two suites that
+              # import it, e2e/__tests__/delivery-live-probe.test.ts:6-9 and
+              # local-instance-support.test.ts:2-5, run in this job's test step and in no other,
+              # so that read is this gate's (ci_job_reads.py's dispatch_ui).
               - 'packages/envoy-client/src/**'
               - 'packages/envoy-client/test/**'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
@@ -2002,7 +2006,7 @@ jobs:
       # pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
       # The fuzz and property counts follow the lane. A pull-request run takes the reduced counts
-      # below; every other lane — a merge group, a push to main — takes the empty string, which
+      # below; every other lane — a merge group, a dispatched run — takes the empty string, which
       # every reader treats as unset (classify's run_fuzz_test.go and sender_fuzz_test.go, the
       # daemon's keptPropertyEnv), so the full counts live in the Go source alone and the queue
       # still runs them. sender_fuzz_test.go's own count is 2,000 histories of each order already,
@@ -2721,11 +2725,10 @@ jobs:
     #
     # The install step has one reading at its present package set, not a distribution: 30 s, in
     # job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. A distribution at that set can
-    # be read from main's jobs of this name. The apt archive cache's three steps came after that
+    # be read from main's jobs of this name. The apt archive cache's two steps came after that
     # window too, so the "every other step summed" row holds none of them. In that job the restore
     # missed, and the key and restore steps took under a second each. A restore that hits reads
-    # about 114 MB from the Actions cache, and the save, which runs only on a push to main whose
-    # restore missed, has no reading yet.
+    # about 114 MB from the Actions cache, which has no reading yet.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
@@ -2807,27 +2810,15 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ format('playwright-{0}-', runner.os) }}
-      # The key the apt archive cache below is read under, computed here because a step
-      # expression cannot read the runner's own environment.
+      # The key the apt archive cache below is read under, computed by
+      # .github/scripts/apt-archive-cache-key.sh because a step expression cannot read the
+      # runner's own image environment, and by a script because ci-caches.yaml's apt-debs job,
+      # which saves the entry, computes the same key the same way.
       - id: apt-debs-key
         name: Compute the apt archive cache key
         run: |
-          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
-          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
-          [ -n "$version" ] || {
-            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
-              "cannot name the Playwright version"
-            exit 1
-          }
-          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
-          for name in ImageOS ImageVersion; do
-            [ -n "${!name}" ] || {
-              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
-                "the image"
-              exit 1
-            }
-          done
-          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+          key=$(.github/scripts/apt-archive-cache-key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
       # No restore-keys: a partial match would hand the install the .deb files of another
       # Playwright version or another image, which apt would fetch again anyway.
       - id: apt-debs
@@ -2837,14 +2828,18 @@ jobs:
           key: ${{ steps.apt-debs-key.outputs.key }}
       # This step installs the system packages itself instead of through `playwright install
       # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
-      # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
-      # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
-      # lib/coreBundle.js. Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456:
-      # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
-      # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
-      # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
-      # them fetched 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left
-      # out of the list, so there is no reduced set beside it and no split to measure.
+      # pinned list is .github/playwright-apt-packages.txt, read below with its blank lines and
+      # `#` comments dropped: ci-caches.yaml's apt-debs job downloads that same file to fill the
+      # archive cache this step seeds itself from, and one file is what holds the set it fetches
+      # and the set this installs to each other. That file's own header says what the list is -
+      # Playwright's ubuntu24.04-x64 list exactly, the union of the `tools`, `chromium`,
+      # `firefox` and `webkit` entries of that table in playwright-core's lib/coreBundle.js.
+      # Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456: Playwright's 79
+      # names and gstreamer1.0-tools resolve, with their dependencies, to 182 packages and
+      # 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27 not upgraded.`
+      # and `Need to get 114 MB of archives.`), and the `apt-get update` before them fetched
+      # 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left out of the
+      # list, so there is no reduced set beside it and no split to measure.
       #
       # `step_tools` below is the one package this step installs that Playwright's list does not
       # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
@@ -2985,9 +2980,10 @@ jobs:
       # image was built, and an entry is written once and never replaced, so a package that changes
       # under one key is fetched on every run until the key moves. No job of this workflow writes
       # the entry, for the reason the browsers' restore above gives: filling a cache on a push to
-      # main is ci-caches.yaml's work, and until a job there fills this family every run restores
-      # nothing under its key and fetches the whole set, which is the cold case every bound and
-      # budget above is read at.
+      # main is ci-caches.yaml's work, and its apt-debs job is what fills this family there. So a
+      # run whose key is in the cache restores the archives and the download below finds them on
+      # disk, and the whole set is fetched only on a miss - an image roll, a Playwright bump or an
+      # eviction - which is the cold case every bound and budget above is read at.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2996,20 +2992,13 @@ jobs:
         timeout-minutes: 22
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
-          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
-          libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
-          libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
-          libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
-          libgstreamer-plugins-base1.0-0 libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0
-          libharfbuzz0b libhyphen0 libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4
-          libnss3 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9
-          libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7 libwebpdemux2 libwoff1
-          libx11-6 libx11-xcb1 libx264-164 libxcb-shm0 libxcb1 libxcomposite1 libxcursor1
-          libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxml2 libxrandr2 libxrender1
-          libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # The pinned list, out of .github/playwright-apt-packages.txt with that file's `#`
+          # header and its blank lines dropped, which is the expression ci-caches.yaml's apt-debs
+          # job reads it with too. The step's working-directory is packages/dispatch, so the file
+          # is reached through $GITHUB_WORKSPACE, the checkout root GitHub sets, as the list check
+          # at the end of this step reaches its script.
+          packages=$(grep -vE '^[[:space:]]*(#|$)' \
+            "$GITHUB_WORKSPACE/.github/playwright-apt-packages.txt")
           # gstreamer1.0-tools holds the gst-inspect-1.0 the decoder guard below runs, and is no
           # name of Playwright's list. It is out of `packages` because `packages` is the list the
           # check at the end of the step holds against Playwright's own.
@@ -3086,19 +3075,12 @@ jobs:
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
           sudo apt-get install -y --no-install-recommends $apt_list
-          # What apt has now, kept under $HOME for whichever push-to-main workflow comes to fill
-          # this family: no job of this workflow writes an Actions cache entry, so until one
-          # saves from here this copy goes unused. apt's archive directory is root's and the
-          # cache action runs as the runner user, so the copies change hands.
-          shopt -s nullglob
-          kept=(/var/cache/apt/archives/*.deb)
-          shopt -u nullglob
-          mkdir -p "$HOME/apt-archives"
-          [ "${#kept[@]}" -eq 0 ] || {
-            sudo cp "${kept[@]}" "$HOME/apt-archives/"
-            sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
-          }
-          echo "apt archives: seeded ${#seeded[@]} .deb files, keeping ${#kept[@]}"
+          # The .deb files apt fetched are not kept: nothing in this workflow saves a cache
+          # entry, and the fill is ci-caches.yaml's apt-debs job, which downloads the same list
+          # on a push to main rather than reading a pull request's runner, so a copy of them
+          # under $HOME here would be read by nobody. This is where main's #2868 put one, under
+          # the push-gated save this pull request's rule 10 removed with the push.
+          echo "apt archives: seeded ${#seeded[@]} .deb files"
           # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
           # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
           # single call with five names would report on the first alone. Each element is written
@@ -3976,7 +3958,7 @@ jobs:
         run: RACE_MEM_LIMIT_KB=8388608 ../../.github/scripts/race_memory.py go test -json -race -count=1 -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
-      - name: Report ci-ok when this is the run's last job
+      - name: Report ci-ok when this job decides a merge-group run
         if: always()
         uses: ./.github/actions/ci-ok-report
         with:
@@ -4036,8 +4018,9 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # go-envoy, restored only: its modules are the envoy module's, but this job builds the
-      # document service's test binary, not the listener and natsd the family's saving jobs build,
-      # so it saves none.
+      # document service's test binary, not the listener and natsd of
+      # .github/workflows/ci-caches.yaml's envoy job, which is what fills this family, so it
+      # saves none.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

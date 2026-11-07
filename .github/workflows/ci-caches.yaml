@@ -15,11 +15,11 @@ name: CI caches
 # Five Go families, each one a restore step of ci.yaml names, keyed on the Go version the
 # family's own module installs: go-notices (lint's notices step), go-daemon (typecheck, test and
 # pi-legion), go-envoy (dispatch, dispatch-browser-multiprocess, envoy-go-checks,
-# envoy-go-race-docs, listener-server-change, envoy-e2e-local and envoy-session-stall),
-# go-envoy-test (envoy-go) and go-envoy-infra (envoy-infra-go). One job per Go setup, since the
-# key carries the version that module's go.mod names: the daemon's go.mod for go-daemon and for
-# go-notices, which lint installs the daemon's Go for; the envoy module's for go-envoy and
-# go-envoy-test; the infra module's for go-envoy-infra. Each family is first looked up
+# envoy-go-race-docs, envoy-go-docs-finalizers, listener-server-change, envoy-e2e-local and
+# envoy-session-stall), go-envoy-test (envoy-go) and go-envoy-infra (envoy-infra-go). One job per
+# Go setup, since the key carries the version that module's go.mod names: the daemon's go.mod for
+# go-daemon and for go-notices, which lint installs the daemon's Go for; the envoy module's for
+# go-envoy and go-envoy-test; the infra module's for go-envoy-infra. Each family is first looked up
 # (`lookup-only`, and no `restore-keys`: the question is whether that exact key exists, and the
 # answer downloads nothing), and only a miss runs the build the ci.yaml job runs and saves what
 # it left in the module cache and the build cache. A family whose key is already there builds
@@ -27,20 +27,24 @@ name: CI caches
 # families it fills the smaller one first, so the entry that carries the other's objects too is
 # the one that was large already.
 #
-# The sixth entry is no Go family: the Playwright browsers ci.yaml's dispatch job restores, which
-# the browsers job below fills. Its key is bun.lock's hash, since the lockfile pins the Playwright
-# version that decides the browsers' revisions, so that entry is refreshed when the pin moves
-# rather than when Go is bumped; it is looked up, filled on a miss and saved as the Go families
-# are.
+# Two entries are no Go family, both of ci.yaml's dispatch job, and both looked up, filled on a
+# miss and saved as the Go families are. The Playwright browsers, which the browsers job below
+# fills: its key is bun.lock's hash, since the lockfile pins the Playwright version that decides
+# the browsers' revisions, so that entry is refreshed when the pin moves rather than when Go is
+# bumped. The .deb archives of the apt list that job's Playwright install needs, which the
+# apt-debs job below fills: its key names that same Playwright version and the runner image, so
+# that entry is refreshed by a Playwright bump or an image roll, and both jobs compute it with
+# one script, .github/scripts/apt-archive-cache-key.sh, so the save's key cannot drift from the
+# restore's.
 #
 # go-docs is not here: docs-pages.yaml saves it on this same push, from the build job it shares
 # with ci.yaml's docs job. The Bun cache is not here either: .github/actions/setup-bun reads and
 # writes it on main, and five workflows that run there call it.
 
 # A push to main is what writes the default branch's cache scope; workflow_dispatch fills a family
-# by hand, after a Go bump, a Playwright bump or an eviction. No `paths:`: a key holds a Go
-# version or bun.lock's hash, not a file list, so what the push touched decides nothing, and a
-# run whose keys are all there is seconds.
+# by hand, after a Go bump, a Playwright bump, an image roll or an eviction. No `paths:`: a key
+# holds a Go version, bun.lock's hash, or a Playwright version and a runner image, not a file
+# list, so what the push touched decides nothing, and a run whose keys are all there is seconds.
 on:
   push:
     branches: [main]
@@ -95,17 +99,20 @@ jobs:
           lookup-only: true
 
       # What typecheck and test build: the vet behind the e2e tag, the test binary of every
-      # package, and the race build of the four packages test runs under the detector, whose
-      # objects are cache entries of their own. The test binaries are compiled and never run
-      # (`go test -c -o /dev/null` links each one and writes nothing): running them would want
-      # tmux, jj, Oh My Pi, uv, container images and a Postgres service, and the build cache this
-      # entry holds is what a compile leaves.
+      # package, and the race build of the three packages test runs under the detector, whose
+      # objects are cache entries of their own. Those three are the list
+      # .github/scripts/ci_job_reads.py's DAEMON_RACE_PACKAGES holds, which check-ci-filters.sh
+      # holds ci.yaml's two steps to, so a package that joins or leaves the detector there is the
+      # side this command follows. The test binaries are compiled and never run (`go test -c -o
+      # /dev/null` links each one and writes nothing): running them would want tmux, jj, Oh My Pi,
+      # uv, container images and a Postgres service, and the build cache this entry holds is what
+      # a compile leaves.
       - name: Build what typecheck and test build of the daemon module
         if: steps.go-daemon.outputs.cache-hit != 'true'
         run: |
           go vet -tags e2e ./...
           go test -c -o /dev/null ./...
-          go test -c -o /dev/null -race ./internal/daemon/ ./internal/record/ ./internal/sessionproxy/ ./internal/launcher/
+          go test -c -o /dev/null -race ./internal/daemon/ ./internal/sessionproxy/ ./internal/launcher/
         working-directory: packages/daemon
 
       - if: steps.go-daemon.outputs.cache-hit != 'true'
@@ -309,3 +316,91 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+
+  # The .deb files of the apt list ci.yaml's dispatch job installs before its browser suite,
+  # .github/playwright-apt-packages.txt: with their dependencies, 182 packages and 114 MB of
+  # archives, measured in job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. That job
+  # seeds apt's archive directory from the entry and installs out of it, so a hit costs it no
+  # download at all; the family exists because that download is the one unbounded cost of its
+  # install step, the step whose whole retry budget is written for the case where the mirror is
+  # slow. The fill is here and not there because the save has to write the default branch's cache
+  # scope: a save on a pull request or in a merge group lands in that run's own scope, which the
+  # next pull request cannot read.
+  #
+  # ubuntu-24.04 because the key names ImageOS and ImageVersion: the entry holds the package
+  # versions that image's indexes resolve, so a fill from another image writes a key no dispatch
+  # run ever reads. No setup-bun and no setup-go either - the key script reads bun.lock as text,
+  # and apt needs neither - so the checkout is all this job sets up.
+  apt-debs:
+    runs-on: ubuntu-24.04
+    # The arithmetic, from the two readings ci.yaml's install step is bounded by: at 186 kB/s,
+    # the slowest package download a green dispatch job of its window met (job 127238648049),
+    # the list's 114 MB need 613 s, and at 233 kB/s, the slowest `apt-get update` of that window
+    # (job 127357441704), the 13.0 MB of indexes need 56 s. Copying the archives out of apt's
+    # directory took 1.1 s in job 128209099649. Uploading the 114 MB entry has no reading yet
+    # and is estimated at 120 s. 613 + 56 + 1.1 + 120 = 790 s, rounded up to 20 min. The apt
+    # calls below carry no bound and no second origin of their own, unlike the install step's:
+    # a fill that meets a slower mirror than those two ends on this budget, and the next push
+    # to main fills the family again.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The very script ci.yaml's dispatch job computes the key with, so the save below writes
+      # the key that job's restore reads: a key that drifted would make every restore there miss
+      # and nothing would fail, the job just fetching the whole 114 MB set again on every run.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          key=$(.github/scripts/apt-archive-cache-key.sh)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
+          lookup-only: true
+
+      # The same file the dispatch job's install reads, with the same expression: its `#` header
+      # and its blank lines dropped, and $packages left unquoted on purpose, to split into words.
+      # `-d` downloads and unpacks nothing, which is all this job wants: it fills the directory
+      # that job seeds apt from, and installs none of it. gstreamer1.0-tools is not asked for
+      # here, as it is no name of the list and the key does not name it either.
+      - name: Download the .deb files the dispatch job's install needs
+        if: steps.apt-debs.outputs.cache-hit != 'true'
+        run: |
+          # The runner image preconfigures Google's chrome-stable apt source, whose index
+          # intermittently fails `apt-get update` with a hash-sum mismatch; the dispatch job's
+          # install drops it for that reason, and an update that fails here leaves the family
+          # empty until the next push.
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          packages=$(grep -vE '^[[:space:]]*(#|$)' .github/playwright-apt-packages.txt)
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -d $packages
+          # apt's archive directory is root's and the cache action runs as the runner user, so
+          # the copies change hands, as the dispatch job's own keeping of them does it.
+          shopt -s nullglob
+          fetched=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          # An entry is written once and never replaced, so an empty one would hold this key for
+          # as long as the Playwright pin and the image stand, and every dispatch run under it
+          # would restore nothing and fetch the whole set. A download that left no .deb file is
+          # therefore this job's failure, not an entry to save.
+          [ "${#fetched[@]}" -gt 0 ] || {
+            echo "::error::apt fetched no .deb file for the pinned list, so there is nothing to" \
+              "keep under this key; the entry is not written"
+            exit 1
+          }
+          mkdir -p "$HOME/apt-archives"
+          sudo cp "${fetched[@]}" "$HOME/apt-archives/"
+          sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          echo "apt archives: keeping ${#fetched[@]} .deb files"
+
+      - if: steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
