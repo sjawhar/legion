@@ -260,6 +260,29 @@
       "state": "suspended"
     }
   ],
+  "wakesWaiting": [
+    {
+      "claim": "legion-legion-legion-207-implementer",
+      "issue": "LEGION-207",
+      "role": "implementer",
+      "kind": "plugin-task",
+      "dueAt": "2026-09-22T09:17:56Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-architect",
+      "issue": "LEGION-208",
+      "role": "architect",
+      "kind": "catch-up",
+      "dueAt": "2026-09-22T09:18:03Z"
+    },
+    {
+      "claim": "legion-legion-legion-208-planner",
+      "issue": "LEGION-208",
+      "role": "planner",
+      "kind": "launch",
+      "dueAt": "2026-09-22T09:18:11Z"
+    }
+  ],
   "controllerLocator": {
     "runtime": "kubernetes",
     "external": true,
@@ -543,6 +566,8 @@
     "launch_failure_limit": 4,
     "prompt_failure_limit": 5,
     "prompt_retire_limit": 3,
+    "worker_wakes_per_minute": 12,
+    "worker_wake_burst": 2,
     "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
     "nats_urls": [
       "nats://xxxxx@nats.internal.example:4222",

@@ -166,6 +166,11 @@ func pendingID(p *Delivery) string {
 // because its root had no architect to hear it never wedges the claim: the start of the root's
 // next run, retrying on its backoff, is what releases it, and the refusal that start is answered
 // with is over once the architect's turn on the held task has ended and the delivery retired.
+//
+// Of a task an operator gave the claim, which carries no id of its own and no outbox row
+// (operatorDelivery), neither thing accepted above can be true, so the refusal below is exactly
+// a claim that holds a pending delivery. That is the condition runParkedLaunchNow reads before
+// it runs a parked launch for such a task, so nothing runs for one this refuses.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
@@ -229,11 +234,28 @@ func (c Claim) openRoundHoldsTask() bool {
 // delivery's — except for a root architect's task of a run, which no turn of the agent's own is
 // ever taken for, since it may be a task nobody has sent at all (asksRoot).
 //
-// Two states hand the claim nothing and hold the task instead of dropping it: a claim holding a
-// suspension (holdSuspension), and a claim that has answered its open update round
-// (answeredOpenRound, opened by openPodUpdate). Starting the worker of an answered round on a
-// task it is about to lose would waste both the turn and the work. PodUpdateEnded releases that
-// task once the round is over (endPodUpdate).
+// Three states hand the claim nothing and hold the task instead of dropping it: a claim holding a
+// suspension (holdSuspension), a claim that has answered its open update round
+// (answeredOpenRound, opened by openPodUpdate), and a claim whose launch waits its turn in the
+// wake pacing over the process this send would reach (launchWaits). Starting the worker of an
+// answered round on a task it is about to lose would waste both the turn and the work, and so
+// would starting the worker of a process the next turn replaces: that launch lets the process go
+// (launchNow), and the task it had just begun would be retired as served at the turn it never
+// finished (settle, retirePending). Such a claim is decided as a claim whose launch is in flight,
+// which is what it is — the gate left its state alone only so that a restart would not find a
+// live process recorded launching — so its deliveries wait here exactly as a launching claim's
+// are queued (deliverLater), and go at the ready of the process the launch starts.
+// PodUpdateEnded releases the round's held task once the round is over (endPodUpdate), and the
+// wake's turn is where the launch takes the other back.
+//
+// One task never waits on that third hold: an operator's own, which runs the launch the pacing
+// holds before the row that queues it is reached (runParkedLaunchNow). A person is waiting on
+// that task and the paced turn is tens of minutes away in a wave, so the claim this sees is one
+// whose launch has run: it is launching over the process that launch let go, and the task is
+// queued for the process it started, which is where every task held here goes. A task the claim
+// refuses is no such task — a claim already holding a delivery answers it "a delivery is already
+// pending" and no launch runs for it (queue) — and the send this refusal makes first reaches the
+// hold with the launch still waiting, so the task the claim is holding stays for that turn.
 //
 // An ask of a round whose pod the claim's process no longer runs in is dropped here rather than
 // sent (Claim.LeftPodRound), the way the round's own end drops one (dropUpdateTask): the worker
@@ -242,8 +264,9 @@ func (c Claim) openRoundHoldsTask() bool {
 // below, and both leave through the answer every drop of a delivery gives the mark armed for it
 // (answerAskFirstAfterDrop, which dropUpdateTask makes of its own).
 func (m *Machine) sendPending(ctx context.Context) error {
-	// A claim holding a suspension is handed nothing (holdSuspension).
-	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
+	// A claim holding a suspension is handed nothing (holdSuspension), and neither is one whose
+	// paced launch is about to replace the process a send would reach (launchWaits).
+	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil || m.launchWaits() {
 		return nil
 	}
 	// A claim that answered its open update round is handed nothing until the round ends.
@@ -707,19 +730,28 @@ const outOfMemoryTask = "Your pod ran out of memory. Kubernetes ended the contai
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
+//
+// The wait for the prompt's result ends with that same write (awaitingResult), after it rather
+// than before: while the task stands confirmed, the wait is what keeps the turn that ends next
+// from being taken for this prompt's (resultPending), and settle retires a confirmed task of a
+// ready or idle claim the moment nothing is waiting on a result for it (turnOver). Ending the
+// wait for a take-back that did not land would leave a claim whose task is confirmed, whose
+// prompt is over as far as this machine is concerned, and whose next settlement retires a task
+// no turn ever finished. A take-back that did land leaves the task unconfirmed, which settle
+// retires in no state at all.
 func (m *Machine) interrupted(ctx context.Context, why string, outOfMemory bool) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
-	m.awaitingResult = ""
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted, next.OutOfMemory = rotateTaskID(p.ID), time.Time{}, true, outOfMemory
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
 		return err
 	}
 	*p = next
+	m.awaitingResult = ""
 	return nil
 }
 
@@ -772,7 +804,10 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // holds it, so what it established — not confirmed, and not read when taken back unread — holds at
 // once, whether or not the write recording it lands. Only the new id waits for the write, so the
 // claim's id is always one the store holds; a write that fails leaves the delivery unsaved, and
-// settle writes it again under the id it kept (saved).
+// settle writes it again under the id it kept (saved). Ending the wait for the prompt's result
+// before that write is safe here, where interrupted ends it after its own: this clears
+// ConfirmedAt in memory first, so the claim a failed write leaves is one settle reads as a task
+// still waiting rather than as a turn that is over (turnOver, resultPending).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	m.awaitingResult = ""

@@ -92,14 +92,20 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 53's production check
+number is the one `DaemonAPIVersion` declares, last bumped by contract 54's production check
 (INFRA-809: the project's `projects.<KEY>.production_check`, `off` or `tester` and `tester` by
 default, decides whether a merge that closes an issue opens a check and who works it; the
 `check` object of `GET /legion/v1/state` gains `role`, the role the check recorded when it
 opened, and its `nextWakeAt` is when the next look is due — the time the checking agent named
 for itself, the retry of a look nobody reported, or the check's own bound where neither stands;
 `handoff_complete` gains `wakeAt`, which a `pending` report on a look that is not the check's
-last must carry and no other report may), after contract 52's pane issue key
+last must carry and no other report may), after contract 53's wake pacing
+(`GET /legion/v1/state` carries `wakesWaiting`, the wakes the daemon's pacing holds until their
+turn, an array that is never null and is empty at every moment outside a restart, a re-admission
+wave or a plugin wave; a strict reader before 53 refuses a state carrying the key, empty as surely
+as naming a wake, so a caller from a pod below 53 is served the state without the key, as is a
+caller from a pod whose claims the daemon cannot read, which may be a pod at 53 — which is why the
+schema declares it optional), after contract 52's pane issue key
 (`LEGION_ISSUE_TRAILER`, the issue the pane stamps into its commits when
 `projects.<KEY>.commit_issue_trailer_repos` names the repository it works; each runtime sets the
 name itself and owns it, and this entry's claim boot reads that variable and never `LEGION_ISSUE`),

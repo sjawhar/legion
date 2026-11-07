@@ -1381,6 +1381,10 @@ projects:
 gates:
   design: "${design_gate:-off}"
 admission_cap: $admission_cap
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+# restart_daemon writes this file afresh, so every daemon of the run reads it.
+worker_wakes_per_minute: 0
 # The close of tree 1 — the merge of its pull request, with nothing of its tree left in the
 # workflow — begins its linger: done's first
 # production-check look and its suspension and the smoke main's cleanup all run in it, as does

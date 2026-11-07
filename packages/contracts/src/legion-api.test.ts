@@ -1562,6 +1562,59 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
+// The wakes the pacing holds (contract 53): the golden names one of each kind the daemon paces,
+// in claim order, and a state outside a wave carries an empty list rather than none. The key is
+// not required: a daemon at this contract leaves it off the state it serves a caller whose pod's
+// plugin is older than 53, and the one it serves a caller whose pod's claims it cannot read at
+// all, which may be a pod at this contract (`api.stateFor`, `withoutWakesWaiting`). So a body
+// without the key parses, and a reader of it learns nothing about which wakes wait rather than
+// losing the whole state; what is refused is a wake with no kind at all.
+test("the state golden names the wakes the pacing holds, and the key may be absent", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.wakesWaiting).toEqual([
+    {
+      claim: "legion-legion-legion-207-implementer",
+      issue: "LEGION-207",
+      role: "implementer",
+      kind: "plugin-task",
+      dueAt: "2026-09-22T09:17:56Z",
+    },
+    {
+      claim: "legion-legion-legion-208-architect",
+      issue: "LEGION-208",
+      role: "architect",
+      kind: "catch-up",
+      dueAt: "2026-09-22T09:18:03Z",
+    },
+    {
+      claim: "legion-legion-legion-208-planner",
+      issue: "LEGION-208",
+      role: "planner",
+      kind: "launch",
+      dueAt: "2026-09-22T09:18:11Z",
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).wakesWaiting).toEqual([]);
+
+  const stripped = fixture("state.json") as Record<string, unknown>;
+  delete stripped.wakesWaiting;
+  const served = LegionStateResponse.safeParse(stripped);
+  expect(served.success).toBeTrue();
+  expect(served.data?.wakesWaiting).toBeUndefined();
+
+  const unnamed = fixture("state.json") as { wakesWaiting: unknown[] };
+  unnamed.wakesWaiting = [
+    {
+      claim: "legion-legion-legion-207-implementer",
+      issue: "LEGION-207",
+      role: "implementer",
+      kind: "",
+      dueAt: "2026-09-22T09:17:56Z",
+    },
+  ];
+  expect(LegionStateResponse.safeParse(unnamed).success).toBeFalse();
+});
+
 // The daemon's resolved legion.yaml (contract 35): the golden carries the file's `max_fix_attempts`
 // and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
 // Stage 3 state carries the defaults, the two typed keys are positive integers, the rest rides

@@ -294,6 +294,9 @@ gates:
   design: root-issues
 admission_cap: 2
 review_round_cap: 3
+# The wake pacing off (INFRA-976): this proof starts many roles and waits on bounded times, and at
+# the default of 8 wakes a minute every wake after the first would spend those waits queueing.
+worker_wakes_per_minute: 0
 # The production check's bound (14 days by default) must come due inside the run, since its wake,
 # the check's last look, is production-check-bound's proof; and after the look the first look's own
 # wake_at starts, since a look open at the bound defers the bound by the look's own two-hour bound:
