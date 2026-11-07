@@ -318,6 +318,21 @@ func waitingWakes(t *testing.T, d *daemon) []api.WakeWaiting {
 	return waiting
 }
 
+// wakesGone names every wake of before that after no longer holds, with the state and tree of the
+// claim it belonged to: what a row that counted the queue wrong says about which wake left.
+func wakesGone(t *testing.T, d *daemon, before, after []api.WakeWaiting) string {
+	t.Helper()
+	gone := make([]string, 0, len(before))
+	for _, wake := range before {
+		if slices.ContainsFunc(after, func(w api.WakeWaiting) bool { return w.Claim == wake.Claim }) {
+			continue
+		}
+		c := d.claim(wake.Claim)
+		gone = append(gone, fmt.Sprintf("%s(state=%s,tree=%s)", wake.Claim, c.State, c.Tree))
+	}
+	return strings.Join(gone, " ")
+}
+
 // awaitWave waits until the whole wave has reserved its turn: one wake out at once, which the
 // burst lets through, and the rest waiting in the state. It returns the queue, earliest first.
 //
@@ -1032,14 +1047,22 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	d := startWaveDaemon(t, cfg, clock, rt, logged, nil)
 
 	waiting := awaitWave(t, d, waveSize+len(workers))
-	// The trees the two workers stand in. An operator's close ends the whole tree: the route
-	// closes the root claim and then stops every other claim of it (api's closeTree, reaching
-	// treeOthers), and a retirement clears that claim's waiting wake (supervise's letGo). So a
-	// close of a tree that holds a worker takes two wakes, and the roots this test decides on are
-	// the ones that are alone in their trees.
-	workerTrees := make([]string, 0, len(workers))
+	// The roots of the trees the two workers stand in. An operator's close ends the whole tree:
+	// the route closes the root claim and then stops every other claim of it (api's closeTree,
+	// reaching treeOthers), and a retirement clears that claim's waiting wake (supervise's
+	// letGo). So a close of a tree that holds a worker takes two wakes, and the roots this test
+	// decides on are the ones that are alone in their trees.
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerRoots := make([]claim.Token, 0, len(workers))
 	for _, worker := range workers {
-		workerTrees = append(workerTrees, d.claim(worker).Tree)
+		root, err := claim.NewToken(project, d.claim(worker).Tree, claim.RoleArchitect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workerRoots = append(workerRoots, root)
 	}
 	promised := map[claim.Token]time.Time{}
 	roots := make([]claim.Token, 0, waveSize)
@@ -1052,7 +1075,7 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 			}
 			continue
 		}
-		if slices.Contains(workerTrees, d.claim(wake.Claim).Tree) {
+		if slices.Contains(workerRoots, wake.Claim) {
 			continue
 		}
 		roots = append(roots, wake.Claim)
@@ -1116,16 +1139,8 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 	}
 	after := waitingWakes(t, d)
 	if len(after) != len(waiting)-3 {
-		left := make([]string, 0, len(waiting)-len(after))
-		for _, wake := range waiting {
-			if slices.ContainsFunc(after, func(w api.WakeWaiting) bool { return w.Claim == wake.Claim }) {
-				continue
-			}
-			c := d.claim(wake.Claim)
-			left = append(left, fmt.Sprintf("%s(state=%s,tree=%s)", wake.Claim, c.State, c.Tree))
-		}
 		t.Fatalf("%d wakes wait after the three events, want %d: the suspend of %s, the stop of %s and the close of %s took their own claims' wakes and no others; the wakes that left are %s",
-			len(after), len(waiting)-3, drained, stopped, closed, strings.Join(left, " "))
+			len(after), len(waiting)-3, drained, stopped, closed, wakesGone(t, d, waiting, after))
 	}
 	for _, wake := range after {
 		if wake.Claim == drained || wake.Claim == stopped || wake.Claim == closed {
@@ -1184,7 +1199,7 @@ func TestEveryEventOnAWaitingClaimIsDecidedWhileTheWakesStillWait(t *testing.T) 
 // workers' trees out of the roots it decides on because a close there would take a second claim's
 // wake with the root's, and nothing else in the suite asserts that a closed tree's other claims
 // lose their paced wakes.
-func TestAnOperatorsCloseOfATreeTakesTheWakeOfItsWorkerAsWellAsItsRoots(t *testing.T) {
+func TestAnOperatorsCloseOfATreeTakesTheWakesOfItsRootAndItsWorker(t *testing.T) {
 	cfg := waveConfig(t)
 	waveClaims(t, cfg, claim.RoleArchitect, func(i int, _ claim.Token) supervise.Claim { return unfinishedLaunch(t, i) })
 	// Two claims of the wave that are not their trees' roots: the close below ends one of them
@@ -1251,16 +1266,8 @@ func TestAnOperatorsCloseOfATreeTakesTheWakeOfItsWorkerAsWellAsItsRoots(t *testi
 
 	after := waitingWakes(t, d)
 	if len(after) != len(waiting)-2 {
-		left := make([]string, 0, len(waiting))
-		for _, wake := range waiting {
-			if slices.ContainsFunc(after, func(w api.WakeWaiting) bool { return w.Claim == wake.Claim }) {
-				continue
-			}
-			c := d.claim(wake.Claim)
-			left = append(left, fmt.Sprintf("%s(state=%s,tree=%s)", wake.Claim, c.State, c.Tree))
-		}
 		t.Fatalf("%d wakes wait after the close of the tree of %s, want %d: the close takes the wakes of that root and of its worker %s and no others; the wakes that left are %s",
-			len(after), architect, len(waiting)-2, worker, strings.Join(left, " "))
+			len(after), architect, len(waiting)-2, worker, wakesGone(t, d, waiting, after))
 	}
 	for _, wake := range after {
 		if wake.Claim == architect || wake.Claim == worker {
