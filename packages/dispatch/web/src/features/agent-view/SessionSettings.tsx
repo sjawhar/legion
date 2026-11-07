@@ -14,11 +14,13 @@ import { inputClasses, textMutedOnCanvas } from "../../theme/classes";
 import type { SessionSettingsView } from "./conversation";
 import type { SwitchRequest } from "./use-session-switch";
 
-/** A header picker: a native `<select>`, as the composer's "Send as" control is. A long model id
- *  is clipped on screen only (the option's value, which a pick sends, is the whole id), so the
- *  header never runs wider than a phone. A held picker (`aria-disabled`, `useKeySteps`) looks
- *  disabled through the `refused:` variant (`styles.css`). */
-const selectClasses = `min-h-8 max-w-56 min-w-0 truncate rounded-lg px-2 py-1 text-xs refused:opacity-50 ${inputClasses(false)}`;
+/** A picker in the row under the message box: a native `<select>`, as the delivery control is. A
+ *  long model id is clipped on screen only (the option's value, which a pick sends, is the whole
+ *  id), so the picker never runs wider than a phone, and `shrink-0` keeps it at that width while
+ *  the directory beside it takes what is left and shortens (INFRA-812, R6). A held picker
+ *  (`aria-disabled`, `useKeySteps`) looks disabled through the `refused:` variant
+ *  (`styles.css`). */
+const selectClasses = `min-h-8 max-w-56 min-w-0 shrink-0 truncate rounded-lg px-2 py-1 text-xs refused:opacity-50 ${inputClasses(false)}`;
 
 /** The values a picker offers: the session's list, with the current value added when the list
  *  lacks it (a fallback model can be one the session does not list), so the picker always shows
@@ -161,7 +163,10 @@ export function SessionSettings({
           pending={pending}
         />
       ) : model === undefined ? null : (
-        <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
+        <span
+          className={`${pillClassName("label")} max-w-56 shrink-0`}
+          data-testid="agent-session-model"
+        >
           <TruncatedText className="min-w-0" title={model}>
             {model}
           </TruncatedText>
@@ -250,7 +255,10 @@ function ThinkingControl({
   );
   if (thinking === null) {
     return (
-      <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-session-thinking">
+      <span
+        className={`shrink-0 whitespace-nowrap text-xs ${textMutedOnCanvas}`}
+        data-testid="agent-session-thinking"
+      >
         no adjustable thinking
       </span>
     );
@@ -258,7 +266,7 @@ function ThinkingControl({
   if (!offered) {
     return (
       <span
-        className={pillClassName("label")}
+        className={`${pillClassName("label")} shrink-0`}
         data-testid="agent-session-thinking"
         title="Thinking level"
       >

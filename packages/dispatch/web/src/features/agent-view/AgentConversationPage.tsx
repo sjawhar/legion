@@ -6,7 +6,9 @@ import { Link } from "react-router-dom";
 import { agentMessageRequest, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import type { Message } from "../../api/types";
+import { ContextRing } from "../../components/ContextRing";
 import { PinButton } from "../../components/PinButton";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -30,6 +32,7 @@ import { SendStoppedError } from "../writes/keyed-write";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { sessionCommands, sessionSettingsView } from "./conversation";
+import { MessageBoxHelp } from "./MessageBoxHelp";
 import { SessionSettings } from "./SessionSettings";
 import { type SwitchRequest, switchCommand, useSessionSwitch } from "./use-session-switch";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
@@ -108,6 +111,9 @@ export function AgentConversationPage({
   // the page, and a pick the session does not advertise would be refused.
   const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
   const mode = picked !== null && modes.includes(picked) ? picked : (modes[0] ?? "aside");
+  // Which panel of the footer row stands open, since both open upwards over the transcript from
+  // the same corner: one at a time, as a `MultiSelect`'s host holds its list.
+  const [panel, setPanel] = useState<"context" | "help" | null>(null);
   // The slash commands the composer completes (LEGION-394). The session runs typed input only
   // from a Send or an Aside, so a BTW, a side question it answers, offers none; nor does a
   // session that sent no list, whose host cannot run typed input.
@@ -190,7 +196,10 @@ export function AgentConversationPage({
   // screen and the document never scrolls.
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-conversation">
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <header
+        className="flex flex-wrap items-center gap-x-3 gap-y-1"
+        data-testid="agent-view-header"
+      >
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/agents">
           ← Agents
         </Link>
@@ -199,18 +208,6 @@ export function AgentConversationPage({
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>
           <AgentName kind="static" sessionId={sessionId} storedTitle={undefined} />
         </h1>
-        <PinButton
-          label={pinned ? `Unpin ${label}` : `Pin ${label}`}
-          onClick={() => writePin(sessionId, !pinned)}
-          pinned={pinned}
-          title={pinned ? "Unpin agent" : "Pin agent"}
-        />
-        <SessionSettings
-          onPick={onPick}
-          pending={switchPending}
-          status={sessionSwitch.status}
-          view={settings}
-        />
         <span
           className="flex items-center gap-1.5"
           title={`Connection to the session's conversation: ${presence.label}`}
@@ -224,35 +221,13 @@ export function AgentConversationPage({
             {presence.label}
           </span>
         </span>
-        {agent === undefined ? (
-          <span className={`text-xs ${textMutedOnCanvas}`}>
-            Not in the live session list — it may have ended.
-          </span>
-        ) : (
-          <span className={`min-w-0 truncate text-xs ${textMutedOnCanvas}`}>
-            {agent.host} · {agent.dir}
-          </span>
-        )}
-        <label className={`ml-auto flex items-center gap-2 text-xs ${textMutedOnCanvas}`}>
-          Send as
-          <select
-            aria-label="Delivery mode"
-            className={`min-h-8 rounded-lg px-2 py-1 text-xs ${inputClasses(false)}`}
-            onChange={(event) => setPicked(event.target.value as MessageDeliveryMode)}
-            value={mode}
-          >
-            {modes.map((candidate) => (
-              <option key={candidate} value={candidate}>
-                {MODE_LABELS[candidate]}
-              </option>
-            ))}
-          </select>
-        </label>
+        <PinButton
+          label={pinned ? `Unpin ${label}` : `Pin ${label}`}
+          onClick={() => writePin(sessionId, !pinned)}
+          pinned={pinned}
+          title={pinned ? "Unpin agent" : "Pin agent"}
+        />
       </header>
-      <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-        Live from the session: its turns are relayed while this page is open and are not stored.
-        Messages sent to it through Dispatch, and its Dispatch replies, are kept.
-      </p>
       {stored.isError ? (
         <p className={`mt-2 text-sm ${dangerText}`}>
           Could not load your messages with this session.
@@ -304,6 +279,81 @@ export function AgentConversationPage({
           viewer={viewer?.kind === "user" ? viewer.login : undefined}
         />
       </ErrorBoundary>
+      {/* The one row under the message box (R6): what a message is delivered as, where the
+          session runs, what it runs on, how full its window is, and the one question mark that
+          holds every rule this page used to print. The facts scroll sideways at a phone width
+          and wrap nowhere from `sm` up, so the row is one line on a laptop; the pickers hold
+          their width (`shrink-0`, `SessionSettings`) and the directory is the one part that
+          shortens. The ring and the question mark sit outside that scroller, so they keep the
+          box's right edge however far the facts scroll, and their panels open upwards from
+          here rather than inside a clipped scroller. */}
+      <div
+        className="mt-2 flex shrink-0 items-center gap-2 text-xs"
+        data-testid="agent-composer-footer"
+      >
+        <div
+          className="flex min-w-0 flex-1 flex-nowrap items-center gap-x-3 gap-y-1 overflow-x-auto sm:flex-wrap sm:overflow-x-visible"
+          data-testid="agent-composer-facts"
+        >
+          <select
+            aria-label="Delivery mode"
+            className={`min-h-8 shrink-0 rounded-lg px-2 py-1 text-xs ${inputClasses(false)}`}
+            data-testid="agent-delivery-picker"
+            onChange={(event) => setPicked(event.target.value as MessageDeliveryMode)}
+            value={mode}
+          >
+            {modes.map((candidate) => (
+              <option key={candidate} value={candidate}>
+                {MODE_LABELS[candidate]}
+              </option>
+            ))}
+          </select>
+          {agent === undefined ? (
+            <span className={`shrink-0 whitespace-nowrap ${textMutedOnCanvas}`}>
+              Not in the live session list — it may have ended.
+            </span>
+          ) : (
+            <>
+              <span
+                className={`shrink-0 whitespace-nowrap ${textMutedOnCanvas}`}
+                data-testid="agent-footer-machine"
+                title="The machine this session runs on"
+              >
+                {agent.host}
+              </span>
+              {/* The flex item the ellipsis applies to is the span inside, not this one
+                  (`packages/dispatch/AGENTS.md`): a flex container never draws one on its own
+                  text. `min-w-24` keeps a shortened directory readable, so the row scrolls at a
+                  phone width rather than cutting it to nothing. */}
+              <span
+                className={`flex min-w-24 flex-1 items-center truncate ${textMutedOnCanvas}`}
+                data-testid="agent-footer-dir"
+              >
+                <TruncatedText className="min-w-0 flex-1" title={agent.dir}>
+                  {agent.dir}
+                </TruncatedText>
+              </span>
+            </>
+          )}
+          <SessionSettings
+            onPick={onPick}
+            pending={switchPending}
+            status={sessionSwitch.status}
+            view={settings}
+          />
+        </div>
+        <span className="flex shrink-0 items-center gap-1">
+          <ContextRing
+            onOpenChange={(next) => setPanel(next ? "context" : null)}
+            open={panel === "context"}
+            usage={conversation.context}
+          />
+          <MessageBoxHelp
+            onOpenChange={(next) => setPanel(next ? "help" : null)}
+            open={panel === "help"}
+          />
+        </span>
+      </div>
     </div>
   );
 }

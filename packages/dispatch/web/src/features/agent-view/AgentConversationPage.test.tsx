@@ -1510,6 +1510,12 @@ function composer(): HTMLElement {
   return screen.getByTestId("agent-composer");
 }
 
+/** What the one line under the message box reads: the Send control's own words about the next
+ *  press, and nothing at rest (INFRA-812, R6). */
+function composerHint(): string {
+  return within(composer()).getByTestId("agent-composer-hint").textContent ?? "";
+}
+
 function composerInput(): HTMLTextAreaElement {
   return within(composer()).getByRole("textbox") as HTMLTextAreaElement;
 }
@@ -1621,8 +1627,9 @@ test("Enter sends while the session is mid-turn", async () => {
 
 // An empty box is the one thing that refuses Send, and Send says so: on its title, as its
 // accessible description, and on a line in the composer a reader without a pointer can see. It
-// stays focusable (aria-disabled, not disabled), and neither a click nor Enter sends. With text,
-// the line goes back to saying how to send.
+// stays focusable (aria-disabled, not disabled), and neither a click nor Enter sends. With text
+// the line reads nothing: how to send is a rule of the page, which the question mark under the
+// box holds (INFRA-812, R6), not a word about this press.
 test("with an empty box Send is refused, says why on screen, and sends nothing", async () => {
   const createAgentMessage = acceptSends();
   renderLiveView({
@@ -1641,19 +1648,30 @@ test("with an empty box Send is refused, says why on screen, and sends nothing",
     .map((id) => document.getElementById(id)?.textContent ?? "")
     .join(" ");
   expect(description).toBe("Type a message first.");
-  const shown = within(composer())
-    .getAllByText("Type a message first.")
-    .filter((line) => !line.classList.contains("sr-only"));
-  expect(shown).toHaveLength(1);
+  // At rest the reason is the button's own, where a screen reader reaches it; the line under the
+  // box prints nothing until a person tries (INFRA-812, R6).
+  expect(
+    within(composer())
+      .getAllByText("Type a message first.")
+      .filter((line) => !line.classList.contains("sr-only"))
+  ).toHaveLength(0);
+
   fireEvent.click(send);
   fireEvent.keyDown(input, { key: "Enter" });
   await Bun.sleep(50);
   expect(createAgentMessage).not.toHaveBeenCalled();
+  await waitFor(() =>
+    expect(
+      within(composer())
+        .getAllByText("Type a message first.")
+        .filter((line) => !line.classList.contains("sr-only"))
+    ).toHaveLength(1)
+  );
 
   type(input, "now with words");
   await waitFor(() => expect(sendButton().hasAttribute("aria-disabled")).toBe(false));
   expect(sendButton().hasAttribute("aria-describedby")).toBe(false);
-  expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
+  expect(composerHint()).toBe("");
   expect(within(composer()).queryByText("Type a message first.")).toBeNull();
 });
 
@@ -1751,7 +1769,7 @@ test("a send pressed while another is out waits its turn, and a refused one is r
   );
   type(composerInput(), "second");
   expect(sendButton().hasAttribute("aria-disabled")).toBe(false);
-  expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
+  expect(composerHint()).toBe("");
   fireEvent.keyDown(composerInput(), { key: "Enter" });
   await waitFor(() => expect(screen.getAllByTestId("agent-send-held")).toHaveLength(2));
   expect(createAgentMessage).toHaveBeenCalledTimes(1);
@@ -1868,7 +1886,7 @@ test("a pending switch holds its own session's Send, and a send out on another h
   type(composerInput(), "and then run the tests");
   expect(sendButton().disabled).toBe(true);
   expect(within(composer()).getByText(wait)).toBeTruthy();
-  expect(within(composer()).queryByText("Enter to send · Shift+Enter for a new line")).toBeNull();
+  expect(composerHint()).toBe(wait);
   fireEvent.keyDown(composerInput(), { key: "Enter" });
   await Bun.sleep(50);
   expect(createAgentMessage).toHaveBeenCalledTimes(1);
@@ -1917,7 +1935,7 @@ test("a pending switch holds its own session's Send, and a send out on another h
     )
   );
   expect(sendButton().disabled).toBe(false);
-  expect(within(composer()).getByText("Enter to send · Shift+Enter for a new line")).toBeTruthy();
+  expect(composerHint()).toBe("");
   await switchTo("Reviewer");
   expect(sendButton().disabled).toBe(false);
 });
@@ -2004,4 +2022,145 @@ test("the live view's header unpins the session, and the rail's row goes", async
     "false"
   );
   expect(putAgentState).toHaveBeenCalledWith(SESSION, { pinned: false }, keyedAttempt);
+});
+
+/** A `context` frame (INFRA-812): the two figures a session publishes about its window. */
+function contextFrame(seq: number, tokens: number, contextWindow: number): AgentStreamFrame {
+  return { contextWindow, kind: "context", seq, tokens, v: 1 };
+}
+
+/** The seven parts the one row under the message box carries (INFRA-812, R6), in the order a
+ *  reader meets them. */
+const FOOTER_PARTS = [
+  "agent-delivery-picker",
+  "agent-footer-machine",
+  "agent-footer-dir",
+  "agent-model-picker",
+  "agent-thinking-picker",
+  "agent-context-ring",
+  "agent-help",
+];
+
+/** Which of `FOOTER_PARTS` the row holds, in document order. */
+function footerParts(): string[] {
+  return [...screen.getByTestId("agent-composer-footer").querySelectorAll("[data-testid]")]
+    .map((part) => part.getAttribute("data-testid") ?? "")
+    .filter((id) => FOOTER_PARTS.includes(id));
+}
+
+// R6. The header says what the person is looking at - the way back, the session's name with its
+// running mark, whether the relay is live, and the pin - and nothing about how a message reaches
+// the session: the pickers, the machine and the directory are in the row under the message box,
+// and the paragraph that printed the relay's rules is off the page altogether.
+test("the live view's header holds the back link, the name, the live state and the pin, and nothing that moved", async () => {
+  await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  const header = screen.getByTestId("agent-view-header");
+  expect(within(header).getByRole("link", { name: "← Agents" })).toBeTruthy();
+  expect(within(header).getByRole("heading", { level: 1 }).textContent).toBe("Planner");
+  expect(within(header).getByText("Live")).toBeTruthy();
+  expect(within(header).getByRole("button", { name: "Pin Planner" })).toBeTruthy();
+
+  expect(within(header).queryAllByRole("combobox")).toEqual([]);
+  expect(within(header).queryByText(agent.host)).toBeNull();
+  expect(within(header).queryByText(agent.dir)).toBeNull();
+  expect(screen.queryByText(/relayed while this page is open/)).toBeNull();
+  // Each of them is still on the page: in the row under the box, where the ring joins them as
+  // soon as the session publishes its figures.
+  expect(footerParts()).toEqual(FOOTER_PARTS.filter((id) => id !== "agent-context-ring"));
+});
+
+// R6. One row under the message box carries everything a person reads about the session and acts
+// on it with, in one order, and it sits under the box rather than over the transcript. The
+// directory is the part that shortens, so it keeps its whole path on `title`.
+test("one row under the message box holds the delivery picker, the machine, the directory, both pickers, the ring and the question mark", async () => {
+  const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+  view.frame(contextFrame(3, 68_000, 200_000));
+  await waitFor(() => expect(screen.getByTestId("agent-context-ring")).toBeTruthy());
+
+  expect(footerParts()).toEqual(FOOTER_PARTS);
+  const row = screen.getByTestId("agent-composer-footer");
+  expect(within(row).getByTestId("agent-footer-machine").textContent).toBe(agent.host);
+  const dir = within(row).getByTestId("agent-footer-dir");
+  expect(dir.textContent).toBe(agent.dir);
+  expect(within(dir).getByTitle(agent.dir)).toBeTruthy();
+  expect(within(row).getByTestId("agent-context-share").textContent).toBe("34% of the window");
+  expect(
+    [
+      ...screen
+        .getByTestId("agent-conversation")
+        .querySelectorAll('[data-testid="agent-composer"], [data-testid="agent-composer-footer"]'),
+    ].map((part) => part.getAttribute("data-testid"))
+  ).toEqual(["agent-composer", "agent-composer-footer"]);
+});
+
+// R3, R6. The ring reports what the session said about its window, so a session that published
+// no `context` frame has no ring at all - never one drawn at zero - and one appears where it
+// belongs the moment the session publishes.
+test("the row has no context ring until the session publishes its context figures", async () => {
+  const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  expect(screen.queryByTestId("agent-context-ring")).toBeNull();
+  expect(within(screen.getByTestId("agent-composer-footer")).queryByText(/%/)).toBeNull();
+
+  view.frame(contextFrame(3, 120_000, 200_000));
+
+  await waitFor(() =>
+    expect(screen.getByTestId("agent-context-share").textContent).toBe("60% of the window")
+  );
+  expect(footerParts()).toEqual(FOOTER_PARTS);
+});
+
+// R6. The page prints no rule, so the question mark is where a person reads what `!` does, where
+// a command runs, and what this view keeps of the conversation. Both panels of the row open from
+// the same corner, so only one of them ever stands open, and Escape closes the one that does.
+test("the question mark under the box opens the help panel, which Escape closes", async () => {
+  const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+  view.frame(contextFrame(3, 68_000, 200_000));
+  await waitFor(() => expect(screen.getByTestId("agent-context-ring")).toBeTruthy());
+
+  fireEvent.click(screen.getByTestId("agent-context-ring"));
+  expect(screen.getByTestId("agent-context-popover")).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "What the message box does" }));
+
+  const panel = screen.getByRole("dialog", { name: "What the message box does" });
+  const said = panel.textContent ?? "";
+  expect(said).toContain("! at the start of a message runs the rest as a shell command");
+  expect(said).toContain("/ at the start of a message runs one of the session's own commands");
+  expect(said).toContain("A command runs nowhere else.");
+  expect(said).toContain("relayed while this page is open and are not stored");
+  expect(said).toContain("its Dispatch replies, are kept");
+  expect(screen.queryByTestId("agent-context-popover")).toBeNull();
+
+  fireEvent.keyDown(document, { key: "Escape" });
+
+  expect(screen.queryByTestId("agent-help-popover")).toBeNull();
+  expect(screen.getByTestId("agent-help").getAttribute("aria-expanded")).toBe("false");
+});
+
+// R6. The one line under the box belongs to Send: it reads nothing at rest, and says why a press
+// was refused once a person has made one. How to send is a rule of the page, and the page prints
+// none.
+test("the line under the message box reads nothing at rest and carries Send's refusal once a person presses it", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
+  });
+  const input = await modeSettled("steer");
+
+  expect(composerHint()).toBe("");
+
+  fireEvent.click(sendButton());
+
+  await waitFor(() => expect(composerHint()).toBe("Type a message first."));
+
+  type(input, "run the tests");
+
+  await waitFor(() => expect(composerHint()).toBe(""));
+
+  type(composerInput(), "");
+
+  expect(composerHint()).toBe("");
 });

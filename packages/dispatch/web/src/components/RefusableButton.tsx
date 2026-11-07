@@ -16,7 +16,8 @@ const LOOKS = {
  * (`refusalShownBy`), or, where no line on screen does, on a hidden one of the button's own. A
  * click on a refused button does nothing, a submit button's included, so the refusal holds
  * whatever the host's handler checks; a form's other ways to submit (Ctrl/Cmd+Enter) remain the
- * host's to refuse. Only `busy` - a press already in flight, which its label names - disables it
+ * host's to refuse. A host that keeps its line blank until a person tries takes that press as
+ * `onRefusedPress`. Only `busy` - a press already in flight, which its label names - disables it
  * outright.
  */
 export function RefusableButton({
@@ -26,6 +27,7 @@ export function RefusableButton({
   describedBy,
   look = "primary",
   onPress,
+  onRefusedPress,
   refusal,
   refusalShownBy,
   type = "button",
@@ -39,6 +41,8 @@ export function RefusableButton({
   readonly describedBy?: string;
   readonly look?: keyof typeof LOOKS;
   readonly onPress?: () => void;
+  /** Told of a press the refusal swallowed, for a host whose line reads nothing until then. */
+  readonly onRefusedPress?: () => void;
   /** Why the button cannot be pressed, or null while it can. */
   readonly refusal: string | null;
   /** The id of the line on screen that already says `refusal`. */
@@ -58,6 +62,7 @@ export function RefusableButton({
         onClick={(event) => {
           if (refusal !== null) {
             event.preventDefault();
+            onRefusedPress?.();
             return;
           }
           onPress?.();
