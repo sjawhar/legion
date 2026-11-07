@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `check-download-retry.sh`: every network fetch of this repository's CI retries at
-# R1's floor, one rule holds that retry, and the four exceptions R2 lists are the only sites
-# left bare (dispatch://INFRA-1545, R2).
+# R1's floor, an `apt-get update` fails rather than warns when an index read fails so that the
+# retry has something to retry, one rule holds that retry, and the four exceptions R2 lists are
+# the only sites left bare (dispatch://INFRA-1545, R2).
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs. Every fixture starts from the
@@ -363,13 +364,33 @@ root=$(fixture canonical-retry)
   echo 'FROM debian:trixie-slim AS build'
   printf '%s\n' "$CANONICAL"
   cat <<'DOCKER'
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 DOCKER
 } > "$root/packages/envoy/docker/Dockerfile"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
+
+echo "case: a Dockerfile's retried apt-get update that keeps apt's warning on a failed index"
+root=$(fixture dockerfile-apt-error-mode)
+{
+  echo 'FROM debian:trixie-slim AS build'
+  printf '%s\n' "$CANONICAL"
+  cat <<'DOCKER'
+    && retry 120 "apt-get update" apt-get update \
+    && retry 300 "apt-get install" apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+DOCKER
+} > "$root/packages/envoy/docker/Dockerfile"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the Dockerfile, the line and the option" \
+  "$(contains "$out" 'file=packages/envoy/docker/Dockerfile,line=5::.apt-get update. passes no .-o APT::Update::Error-Mode=any.')"
+check "says what goes wrong, not only what is missing" \
+  "$(contains "$out" 'the retry around it stops after one attempt having read no list')"
+check "names the install the unread list breaks" \
+  "$(contains "$out" 'has no installation candidate')"
 
 echo "case: a Dockerfile RUN with a retry loop of its own text"
 root=$(fixture other-retry)
@@ -496,13 +517,39 @@ jobs:
       - name: Install this proof's packages
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "apt's package lists" 95 -- sudo timeout 90 apt-get update
+          retry_fetch "apt's package lists" 95 -- \
+            sudo timeout 90 apt-get update -o APT::Update::Error-Mode=any
           retry_fetch "the proof's apt packages" 125 -- \
             sudo timeout 120 apt-get install -y --no-install-recommends -d $PACKAGES
           sudo apt-get install -y --no-install-recommends $PACKAGES
 YAML
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
+
+echo "case: a workflow's retried apt-get update that keeps apt's warning on a failed index"
+root=$(fixture apt-error-mode)
+cat > "$root/.github/workflows/case.yaml" <<'YAML'
+name: Case
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the packages
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "apt's package lists" 95 -- sudo timeout 90 apt-get update
+          retry_fetch "the packages" 125 -- \
+            sudo timeout 120 apt-get install -y --no-install-recommends -d $PACKAGES
+YAML
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file, the line, the step and the option" \
+  "$(contains "$out" "file=.github/workflows/case.yaml,line=9::.apt-get update. in step .Install the packages. passes no .-o APT::Update::Error-Mode=any.")"
+check "says what goes wrong, not only what is missing" \
+  "$(contains "$out" 'the retry around it stops after one attempt having read no list')"
+check "the retried install beside it is no problem of this rule" \
+  "$(contains "$out" '1 download(s) outside the one retry rule')"
 
 echo "case: a command that only answers about itself is no fetch"
 root=$(fixture versions)

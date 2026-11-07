@@ -186,11 +186,14 @@ WORKDIR /repo
 # attempt under a bound of its own. 120 s bounds an apt index read everywhere in this file, a few
 # megabytes from the Debian mirror, and a package set gets 300 s — except runtime-base's set,
 # whose own RUN says why it gets 600 s. `rm -rf` fetches nothing and stays bare.
+# Each `apt-get update` in this file also carries `-o APT::Update::Error-Mode=any`, which makes a
+# failed index read fail the command instead of warning and exiting 0: without it the retry has
+# nothing to retry. .github/scripts/check-download-retry.sh's rule 5 is the whole reason.
 # hadolint ignore=DL3008
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json bun.lock ./
@@ -325,12 +328,13 @@ ARG MISE_VERSION
 ARG MISE_SHA256
 ARG JJ_TOOL
 ARG GH_TOOL
-# Both fetches retry on this file's apt bounds, 120 s for the index read and 300 s for the set.
+# Both fetches retry on this file's apt bounds, 120 s for the index read and 300 s for the set,
+# and the index read carries this file's error-mode option.
 # hadolint ignore=DL3008
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 # The one fetch here is curl's, so it carries curl's own retry rather than the wrapper: 8 attempts
@@ -522,12 +526,13 @@ ARG YQ_VERSION
 ARG YQ_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
-# Both fetches retry on this file's apt bounds, 120 s for the index read and 300 s for the set.
+# Both fetches retry on this file's apt bounds, 120 s for the index read and 300 s for the set,
+# and the index read carries this file's error-mode option.
 # hadolint ignore=DL3008
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY packages/daemon/docker/language-servers/package.json packages/daemon/docker/language-servers/package-lock.json /opt/language-servers/
@@ -718,13 +723,14 @@ ARG PGDG_KEY_SHA256
 # ca-certificates and curl, the 300 s package set; the key is 4 KB of armored text and takes 60 s;
 # and the second install is this image's whole Debian set — Chromium, PostgreSQL 18 with pgvector,
 # gcc and the rest, hundreds of megabytes — which is why it alone takes 600 s. Everything else
-# here, the checksum of the key included, is local and stays bare.
+# here, the checksum of the key included, is local and stays bare. Both index reads carry this
+# file's error-mode option.
 # hadolint ignore=DL3008
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
     && install -d -m 0755 /etc/apt/keyrings \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends ca-certificates curl \
     && retry 60 "pgdg key" curl -fsSL -o /etc/apt/keyrings/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     && printf '%s  %s\n' "$PGDG_KEY_SHA256" /etc/apt/keyrings/pgdg.asc > /tmp/pgdg-key.sha256 \
@@ -735,7 +741,7 @@ RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && retu
     && printf '%s\n' 'Package: *' 'Pin: origin apt.postgresql.org' 'Pin-Priority: 100' '' \
       'Package: postgresql* libpq5' 'Pin: origin apt.postgresql.org' 'Pin-Priority: 600' \
       > /etc/apt/preferences.d/pgdg \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 600 "apt-get install" apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-18 postgresql-18-pgvector postgresql-client python3 python3-yaml redis-tools socat sqlite3 unzip util-linux wget \
     && rm -rf /var/lib/apt/lists/* /var/lib/postgresql /etc/postgresql \
       /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem \

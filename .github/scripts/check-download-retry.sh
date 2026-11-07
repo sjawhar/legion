@@ -79,7 +79,24 @@
 #      `RUN` iterating a list is how a Dockerfile writes what a script would write as a function.
 #   4. An attempt with no time bound is refused: a curl with no `--max-time`, or a retried fetch
 #      of any other verb that no `timeout` and no helper bounds.
-#   5. In Python, inside the heredoc of a *.sh under .github/scripts/, a read through
+#   5. An `apt-get update` carries `-o APT::Update::Error-Mode=any`. This is apt's `--fail`, and
+#      the reason is curl's: a fetch that reports success having fetched nothing. `apt-get update`
+#      exits 0 when every index fails to download — it prints `W: Failed to fetch … 504 Gateway
+#      Timeout` for each one and then `W: Some index files failed to download. They have been
+#      ignored, or old ones used instead.` — so a retry around it succeeds on its first attempt
+#      having read no list, and the `apt-get install` after it fails with `E: Package '…' has no
+#      installation candidate` against a list that will never name the package. That is a failure
+#      no further attempt can cure, which is what cost run 42375256920's `download-retry-images`
+#      job. The option turns each of those warnings into an error, so the command exits non-zero
+#      and the retry retries. It has existed since apt 2.1.10; the images here run apt 2.6
+#      (bookworm) and 2.9 (trixie), and the runner's own on Ubuntu 24.04.
+#
+#      Every `apt-get update` this check holds to the floor carries it, retried or not. The two
+#      sets are the same once the tree is green, since rule 1 and rule 3 retry every one of them;
+#      scoping the rule to the retried ones would differ only in handing an author who writes a
+#      bare `apt-get update` one refusal now and a second one after they add the retry. The sites
+#      an exception below removes are outside this rule as they are outside the rest.
+#   6. In Python, inside the heredoc of a *.sh under .github/scripts/, a read through
 #      `urllib.request` goes through check-ci-images.sh's `read_retrying`, which carries the floor
 #      in that check's own idiom — five attempts, waits of 10, 20, 40 and 80 seconds, each bounded
 #      by the read's own `timeout=30`. One definition, no copies, as the shell has.
@@ -101,9 +118,12 @@
 #   c. The apt phase of the Playwright step in ci.yaml's `dispatch` job, which
 #      dispatch://INFRA-1443 owns: its own `attempts()` loop, which switches origin after two
 #      attempts where the shared helper cannot, and the four calls that hand it `apt-get`, are
-#      exempt from rules 1 and 2 together. `playwright install-deps` is that same apt phase
-#      written as Playwright writes it, and is outside the verb list above for the same reason;
-#      the browser download beside it, `playwright install`, is a site like any other.
+#      exempt from rules 1 and 2 together, and from rule 5 with them, an exemption taking the
+#      whole verdict. Those calls carry `-o APT::Update::Error-Mode=any` all the same: rule 5's
+#      hole is a hole in that loop too, and one option is the whole fix. `playwright install-deps`
+#      is that same apt phase written as Playwright writes it, and is outside the verb list above
+#      for the same reason; the browser download beside it, `playwright install`, is a site like
+#      any other.
 #   d. The credentialed publish jobs of release.yaml, release-envoy-listener.yaml and
 #      release-envoy-infra.yaml. .github/scripts/check-release-credentials.sh pins the command set
 #      such a job may run, and a retry wrapper there is a change to that pinned shape. A job is
@@ -249,6 +269,8 @@ APT_SUBCOMMANDS = {"update", "install", "download", "upgrade", "dist-upgrade", "
                    "source", "build-dep", "reinstall"}
 APT_SIMULATE = {"-s", "--simulate", "--just-print", "--dry-run", "--no-act", "--recon"}
 APT_DOWNLOAD_ONLY = {"-d", "--download-only"}
+# What an `apt-get update` option has to say for rule 5 to be satisfied, the value of an `-o`.
+APT_ERROR_MODE = re.compile(r"apt::update::error-mode\s*=\s*any", re.IGNORECASE)
 # A command that answers about itself reads nothing from the network, whatever its verb.
 INFORMATIONAL = {"--version", "--help", "--usage"}
 MISE_SUBCOMMANDS = {"install", "use", "x", "exec", "up", "upgrade"}
@@ -656,6 +678,24 @@ def curl_options(words: list[str]) -> tuple[int | None, bool, bool, bool]:
     return retries, all_errors, bounded, fails
 
 
+def apt_error_mode(words: list[str]) -> bool:
+    """Whether this `apt-get update` fails when an index read fails, rather than warning and
+    exiting 0: `-o APT::Update::Error-Mode=any`, in any spelling apt takes for an option. Option
+    names are matched without regard to case, as apt reads them."""
+    for index, word in enumerate(words):
+        lowered = word.lower()
+        value = None
+        if lowered in ("-o", "--option"):
+            value = words[index + 1] if index + 1 < len(words) else None
+        elif lowered.startswith("-o"):
+            value = word[2:].lstrip("=")
+        elif lowered.startswith("--option="):
+            value = word.partition("=")[2]
+        if value and APT_ERROR_MODE.fullmatch(value.strip()):
+            return True
+    return False
+
+
 class Site:
     """One network fetch: where it is, what verb it uses, what retries it, and what it is in."""
 
@@ -904,7 +944,7 @@ for path in scripts:
             exempted.append(site)
             continue
         sites.append(site)
-    # Rule 5: a `urllib.request` read inside this script's Python goes through the one reader.
+    # Rule 6: a `urllib.request` read inside this script's Python goes through the one reader.
     _, heredocs = without_heredocs(EXPRESSION.sub("EXPR", text))
     indents: list[tuple[int, str]] = []
     for line, body in heredocs:
@@ -1017,6 +1057,18 @@ for site in sites:
                     ". Pass curl's own options, or wrap the call in `retry_fetch` from "
                     f"{HELPER}.")
         continue
+    if site.verb == "apt-get update" and not apt_error_mode(site.words):
+        problem(site.path, site.line,
+                f"{where} passes no `-o APT::Update::Error-Mode=any`, so a failed index read "
+                "leaves it reporting success. apt treats every index it could not fetch as a "
+                "warning (`W: Failed to fetch … 504 Gateway Timeout`, then `W: Some index files "
+                "failed to download. They have been ignored, or old ones used instead.`) and "
+                "exits 0, so the retry around it stops after one attempt having read no list, "
+                "and the `apt-get install` after it fails with `has no installation candidate` "
+                "against a package list that will never name the package — which no further "
+                "attempt can cure. The option makes each of those warnings an error, so the "
+                "command exits non-zero and the retry has something to retry. It is apt's "
+                "`--fail`.")
     if dockerfile:
         if site.retry != "retry":
             problem(site.path, site.line,

@@ -30,10 +30,13 @@ RUN set -eu; \
 # attempt under a bound of its own. 120 s for the index read, a few megabytes from the Debian
 # mirror; 300 s for the package set, which fetches and unpacks python3, make and g++. `rm -rf`
 # fetches nothing and stays bare. Every apt bound in this file is that pair, for that reason.
+# Each `apt-get update` in this file also carries `-o APT::Update::Error-Mode=any`, which makes a
+# failed index read fail the command instead of warning and exiting 0: without it the retry has
+# nothing to retry. .github/scripts/check-download-retry.sh's rule 5 is the whole reason.
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 
@@ -157,11 +160,12 @@ FROM ghcr.io/cybermonklabs/legion/ci@sha256:99c0b25c46d0214d5a2091092e7908907dca
 LABEL org.opencontainers.image.source=https://github.com/cybermonklabs/legion
 
 # The two apt fetches retry on the bounds the web stage's RUN sets, 120 s for the index and 300 s
-# for the package set; groupadd, useradd, mkdir and chown fetch nothing and stay bare.
+# for the package set, and the index read carries that RUN's error-mode option; groupadd,
+# useradd, mkdir and chown fetch nothing and stay bare.
 RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
   [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
   sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
-    && retry 120 "apt-get update" apt-get update \
+    && retry 120 "apt-get update" apt-get update -o APT::Update::Error-Mode=any \
     && retry 300 "apt-get install" apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r envoy && useradd -r -g envoy envoy \

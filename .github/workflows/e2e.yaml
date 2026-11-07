@@ -155,8 +155,12 @@ jobs:
           # 120 s for the package download: a proof installs one package of
           # .github/e2e-scripts.json (postgresql-client or tmux), a few MB against that step's
           # 51.4 MB, and at the slowest green package rate of the same window, 186 kB/s, even
-          # 10 MB needs 54 s.
-          retry_fetch "apt's package lists" 95 -- sudo timeout 90 apt-get update
+          # 10 MB needs 54 s. The index read carries `-o APT::Update::Error-Mode=any`, which
+          # makes a failed index read fail the command instead of warning and exiting 0: without
+          # it retry_fetch has nothing to retry
+          # (.github/scripts/check-download-retry.sh's rule 5 is the whole reason).
+          retry_fetch "apt's package lists" 95 -- \
+            sudo timeout 90 apt-get update -o APT::Update::Error-Mode=any
           # Each word is one package name of .github/e2e-scripts.json.
           # The download is the half that retries; the unpack after it takes no network, so an
           # attempt the bound kills never stops a dpkg run part way (ci.yaml's Playwright step

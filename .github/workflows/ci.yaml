@@ -2375,7 +2375,10 @@ jobs:
       # five seconds above it and backstops the sudo alone. 90 s for the index read, which is the
       # bound ci.yaml's Playwright step derives for these indexes, and 120 s for one package of a
       # few megabytes. The unpack after the download takes no network and stays bare, so an
-      # attempt the bound kills never stops a dpkg run part way.
+      # attempt the bound kills never stops a dpkg run part way. The index read carries
+      # `-o APT::Update::Error-Mode=any`, which makes a failed index read fail the command
+      # instead of warning and exiting 0: without it retry_fetch has nothing to retry.
+      # .github/scripts/check-download-retry.sh's rule 5 is the whole reason.
       - name: Install tmux
         # Its own retry arithmetic, so an exhausted phase fails this step by name rather than
         # being cut part way by the job: the index read's 5 x 95 + 150 = 625 s and the package
@@ -2383,7 +2386,8 @@ jobs:
         timeout-minutes: 24
         run: |
           . .github/scripts/ci-retry.sh
-          retry_fetch "apt's package lists" 95 -- sudo timeout 90 apt-get update
+          retry_fetch "apt's package lists" 95 -- \
+            sudo timeout 90 apt-get update -o APT::Update::Error-Mode=any
           retry_fetch "tmux" 125 -- \
             sudo timeout 120 apt-get install -y --no-install-recommends -d tmux
           sudo apt-get install -y --no-install-recommends tmux
@@ -3354,7 +3358,12 @@ jobs:
           [ "${#seeded[@]}" -eq 0 ] || sudo cp "${seeded[@]}" /var/cache/apt/archives/
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
-          attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
+          # Both index reads of this step carry `-o APT::Update::Error-Mode=any`: this loop is
+          # dispatch://INFRA-1443's and R2 excepts it from the retry rule, but it has the same
+          # hole that rule closes, and one option is the whole fix
+          # (.github/scripts/check-download-retry.sh's rule 5 is the reason).
+          attempts 2 "apt-get update" sudo timeout 90 \
+            apt-get update -o APT::Update::Error-Mode=any || {
             echo "::error::apt-get update failed twice, so no package list was read;" \
               "the apt mirror is the suspect"
             exit 1
@@ -3386,7 +3395,8 @@ jobs:
             # attempt that uses them. Where that read fails the attempt still runs: the lists on
             # disk may still name files this origin serves, and an attempt is worth more here
             # than a tidy exit.
-            attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
+            attempts 1 "apt-get update for the fallback origin" sudo timeout 90 \
+              apt-get update -o APT::Update::Error-Mode=any ||
               echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
             attempts 1 "the package download from the fallback origin" sudo timeout 300 \
               apt-get install -y --no-install-recommends -d $apt_list || {
