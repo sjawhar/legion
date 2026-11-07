@@ -364,15 +364,21 @@ test("a view block whose page moves to a document that never loads is sent nothi
 }) => {
   await seedViewProject();
   // The document's own response is what never ends: its head and its body go, its script runs,
-  // and `load` waits on a body that never closes. An earlier form of this row hung a trailing
-  // `<img>` instead, which WebKit never fetched, so the document finished there and the row
-  // proved nothing in the one engine it most needed to (dispatch://INFRA-682, R5). Nothing here
-  // asks the engine for anything but to parse what arrived.
+  // and `load` waits on a body that never closes. Two earlier forms of this row failed in
+  // WebKit and the trace of each said why (dispatch://INFRA-682, R5). The first hung a trailing
+  // `<img>`, which WebKit never requested, so the document finished there. The second streamed
+  // this body unpadded: WebKit's trace shows it did request `/stuck` and held the answer open
+  // for 41.9 s with no body length, so the navigation committed - but it ran no script, because
+  // an HTML parser reading a streamed response waits for a buffer's worth before it parses at
+  // all. The padding below is that buffer, so the script is parsed and run from the first flush
+  // in every engine; nothing here asks an engine for anything but to parse what it was sent.
   const stuckPage =
     '<!doctype html><html lang="en"><body><p>Still loading.</p><script>' +
     'addEventListener("message", () => { new Image().src = "/probe/message.png"; });' +
     'new Image().src = "/probe/alive.png";' +
-    "</script></body></html>";
+    "</script>" +
+    `<!--${"padding so a streaming parser flushes this far. ".repeat(400)}-->` +
+    "</body></html>";
   const recorder = await startRecordingOrigin();
   recorder.serveUnfinished("/stuck", stuckPage);
   const alice = await asUser(browser, "alice");
