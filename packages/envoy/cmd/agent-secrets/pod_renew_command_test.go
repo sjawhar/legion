@@ -35,9 +35,10 @@ func TestThePrintedRenewalCommandRunsFromAnOutDirectory(t *testing.T) {
 	token := fakePodToken(t, testPodAccount, testPodUID)
 	tokenFile := writePodToken(t, token)
 	broker, calls := servePodBroker(t, "enrollment-of-the-pod")
-	// A directory a shell would split without quoting, so a command that pasted the path raw
-	// would name another directory and find no key.
-	out := filepath.Join(t.TempDir(), "key dir")
+	// A directory a shell would split without quoting, and whose apostrophe a single-quoted
+	// word has to close, escape and reopen (shellWord): a command that pasted the path raw, or
+	// quoted it naively, names another directory and finds no key.
+	out := filepath.Join(t.TempDir(), "key d'ir")
 
 	// The environment every command here runs in: this process's, with every AGENT_SECRETS_*
 	// and XDG_* variable dropped before the ones below are set. Dropping rather than overriding
@@ -89,8 +90,12 @@ func TestThePrintedRenewalCommandRunsFromAnOutDirectory(t *testing.T) {
 		t.Fatalf("stderr %q names no renewal command", enrolErr.String())
 	}
 	command := strings.TrimSpace(found[1])
-	if !strings.Contains(command, "AGENT_SECRETS_KEY_DIR='"+out+"'") {
-		t.Fatalf("the printed command %q does not carry the key directory %q, shell-quoted", command, out)
+	// The shape of the line, never the path in it: the directory is shell-quoted, so one
+	// holding a space or an apostrophe is correctly printed unlike itself. That the variable
+	// names the directory this run wrote to is proved below by running the line, from a
+	// directory whose name a shell would split.
+	if !strings.HasPrefix(command, "AGENT_SECRETS_KEY_DIR=") {
+		t.Fatalf("the printed command %q does not begin with the key directory", command)
 	}
 
 	// The control: the same command with the key directory taken off it, which is what was

@@ -85,8 +85,11 @@ func TestEnrolAPodFromItsProjectedToken(t *testing.T) {
 		t.Fatalf("stdout = %q, want the enrollment id alone", stdout.String())
 	}
 	// The key directory is part of the command because renew reads AGENT_SECRETS_KEY_DIR and
-	// never --out; pod_renew_command_test.go runs the printed line to prove it.
-	for _, want := range []string{"AGENT_SECRETS_KEY_DIR=" + out, "renew --pod-token-file", tokenFile} {
+	// never --out. Only the shape of the line is read here, never the paths in it: both are
+	// shell-quoted, so a temporary directory holding a space or an apostrophe is correctly
+	// printed unlike itself. pod_renew_command_test.go runs the printed line from exactly such
+	// a directory, which is what proves it names the right one.
+	for _, want := range []string{"keep this lease alive with: AGENT_SECRETS_KEY_DIR=", "agent-secrets renew --pod-token-file "} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr %q does not name the next command's %q", stderr.String(), want)
 		}
