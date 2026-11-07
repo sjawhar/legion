@@ -3521,7 +3521,7 @@ jobs:
         run: go vet -tags pulumilive,natslive ./...
         working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
-        run: go test ./...
+        run: go test -count=1 ./...
         working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra against nats-server (natslive)
         # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
@@ -3533,7 +3533,7 @@ jobs:
         run: |
           for pkg in ./core ./seed ./gcp; do
             pattern=$(../../../.github/scripts/go-tagged-tests.sh natslive "$pkg")
-            go test -timeout 30m -tags natslive -run "$pattern" "$pkg"
+            go test -count=1 -timeout 30m -tags natslive -run "$pattern" "$pkg"
           done
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
@@ -3634,7 +3634,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
-        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+        run: go test -count=1 -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
@@ -3681,7 +3681,7 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       - name: Race-test the Dispatch API
-        run: go test -race -timeout 30m ./internal/dispatch/api/
+        run: go test -count=1 -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
 
       - name: Report ci-ok when this is the run's last job
