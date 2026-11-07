@@ -57,8 +57,8 @@ func parks(doc *crdt.Doc) bool {
 //
 // A log of one update is returned as stored: a compaction leaves the rows it folds as one update
 // holding their state, and a document's first update deletes nothing an earlier one inserted.
-func stateThrough(room string, version persistence.Version, updates updateSource, maxPending int) ([]byte, error) {
-	state, _, misread, err := fold(updates, maxPending)
+func stateThrough(ctx context.Context, room string, version persistence.Version, updates updateSource, maxPending int) ([]byte, error) {
+	state, _, misread, err := fold(ctx, updates, maxPending)
 	if err != nil {
 		return nil, err
 	}
@@ -74,10 +74,10 @@ func stateThrough(room string, version persistence.Version, updates updateSource
 // the fold's read-back check decoded when the state reads back, and otherwise - a log of one
 // update, which the fold returns as stored, or a log that does not fold, which is served merged -
 // the state decoded into a document with the store's pending queue, maxPending, as a room decodes
-// it. A state that does not decode is ErrDocumentUnloadable; a log holding no update is no
-// document.
-func documentThrough(room string, version persistence.Version, updates updateSource, maxPending int) (*crdt.Doc, error) {
-	state, readBack, misread, err := fold(updates, maxPending)
+// it, under the load slot ctx carries or one of its own (holdLoad). A state
+// that does not decode is ErrDocumentUnloadable; a log holding no update is no document.
+func documentThrough(ctx context.Context, room string, version persistence.Version, updates updateSource, maxPending int) (*crdt.Doc, error) {
+	state, readBack, misread, err := fold(ctx, updates, maxPending)
 	switch {
 	case err != nil:
 		return nil, err
@@ -93,6 +93,11 @@ func documentThrough(room string, version persistence.Version, updates updateSou
 	if len(state) == 0 {
 		return nil, nil
 	}
+	release, err := holdLoad(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	doc := newCappedDocumentCopy(maxPending)
 	if err := decodeStoredState(doc, state); err != nil {
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
@@ -142,20 +147,41 @@ const bufferedFolds = store.RoomsPoolSize
 // A buffered fold first takes one of the process's foldSlots, waiting within ctx, and gives it back
 // once use returns, so at most bufferedFolds hold their rows at once. The wait cannot close a
 // cycle: a waiter holds tx's connection, of the rooms pool or the compaction pool, but a holder of
-// a slot waits for nothing - it holds only its own transaction's connection while it reads the rows
-// and no connection at all while it folds them - so every holder gives its slot back.
-func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, rows int, bytes int64, what string, use func(updateSource) error) error {
+// a slot waits for nothing that waits for a slot - it holds only its own transaction's connection
+// while it reads the rows and no connection at all while it folds them, and the one thing it does
+// wait for, the load slot below, has no holder that takes a fold slot - so every holder gives
+// its fold slot back.
+//
+// A log of more than one update is read and folded under one slot of the pod's load concurrency
+// (loadSlots), the slot ctx carries - a room load's, whose fold is its first decode - or one of
+// this read's own, given back as it returns; use takes that ctx, so the fold's own decodes run
+// inside the same slot (fold, documentThrough). A log of one update takes none of its own: it is
+// returned as stored, and whoever decodes it takes the slot (documentThrough). The buffered
+// fold's slot is taken before the load slot, never the other way about, which is what keeps that
+// one wait out of a cycle (podLoadSlots).
+func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, rows int, bytes int64, what string, use func(context.Context, updateSource) error) error {
+	ctx, slot, release := withLoadSlot(ctx)
+	defer release()
 	commit := func() error {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit %s: %w", what, err)
 		}
 		return nil
 	}
+	cover := func() error {
+		if rows <= 1 {
+			return nil
+		}
+		return slot.take(ctx)
+	}
 	if bytes > p.foldBuffer() {
+		if err := cover(); err != nil {
+			return err
+		}
 		if p.beforeFold != nil {
 			p.beforeFold(room)
 		}
-		if err := use(storedUpdates(ctx, tx, room, version)); err != nil {
+		if err := use(ctx, storedUpdates(ctx, tx, room, version)); err != nil {
 			return err
 		}
 		return commit()
@@ -166,6 +192,9 @@ func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, vers
 		return ctx.Err()
 	}
 	defer func() { <-p.foldSlots }()
+	if err := cover(); err != nil {
+		return err
+	}
 	updates := make([][]byte, 0, rows)
 	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
 		updates = append(updates, update)
@@ -179,7 +208,7 @@ func (p *PgVersioned) foldRead(ctx context.Context, tx pgx.Tx, room string, vers
 	if p.beforeFold != nil {
 		p.beforeFold(room)
 	}
-	return use(memoryUpdates(ctx, updates))
+	return use(ctx, memoryUpdates(ctx, updates))
 }
 
 // foldBuffer is the most stored update bytes foldRead reads into memory: foldBufferBytes, or the
@@ -258,7 +287,11 @@ func memoryUpdates(ctx context.Context, updates [][]byte) updateSource {
 // queue of maxPending items, or a state that reads back otherwise. A log of one update is returned
 // as stored, with no document. The fold holds one document at once: its own, until it has encoded
 // the state, then the read-back's.
-func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Doc, misread error, err error) {
+//
+// Whoever read the updates took the load slot ctx carries (foldRead), and the read-back's decode
+// runs inside it. A fold under a context carrying no slot takes one of its own, given back as it
+// returns (holdLoad).
+func fold(ctx context.Context, updates updateSource, maxPending int) (state []byte, readBack *crdt.Doc, misread error, err error) {
 	var doc *crdt.Doc
 	apply := func(update []byte) error {
 		if doc == nil {
@@ -312,6 +345,11 @@ func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Do
 		}
 	}
 	doc = nil
+	release, err := holdLoad(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer release()
 	readBack, misread = readsBackOtherwise(state, made, maxPending)
 	return state, readBack, misread, nil
 }
@@ -382,11 +420,14 @@ type LoadedDocument struct {
 // foldBufferBytes and while it streams them inside it otherwise (foldRead), and noted once it has
 // read more than one row. Its document is the one Load's state decodes into (documentThrough), so
 // a read of it shows what a room load would. A history that does not decode is
-// ErrDocumentUnloadable.
+// ErrDocumentUnloadable. Its fold and decode share one slot of the pod's load concurrency, given
+// back as it returns the document to its caller.
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	ctx, _, done := withLoadSlot(ctx)
+	defer done()
 	var doc *crdt.Doc
-	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
-		doc, err = documentThrough(room, head, updates, p.maxPendingItems)
+	stamp, err := p.loadStored(ctx, room, func(ctx context.Context, head persistence.Version, updates updateSource) (err error) {
+		doc, err = documentThrough(ctx, room, head, updates, p.maxPendingItems)
 		return err
 	})
 	if err != nil {

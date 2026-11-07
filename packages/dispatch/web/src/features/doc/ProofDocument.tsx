@@ -70,6 +70,7 @@ import {
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
 import { createPendingWaiter } from "./pending-waiter";
+import { RefusedEditNotice } from "./RefusedEditNotice";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
@@ -233,6 +234,15 @@ export function ProofDocument({
   // the document it is about.
   const pendingWaiter = useMemo(() => createPendingWaiter(), []);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
+  // The server refused this browser's last edit, as one that would take the document past its size
+  // bound, one it could not merge quickly enough, one the document cannot take until it is
+  // rebuilt, or one typed against the history someone else's rebuild replaced: the close reason
+  // that says which, which RefusedEditNotice reads its sentence and its rebuild offer from. The
+  // edit is gone and the notice stays until the person dismisses it or rebuilds the document.
+  const [refusedEdit, setRefusedEdit] = useState<string | undefined>(undefined);
+  // The server is out of room for open documents: the connection keeps trying, and the edits it
+  // could not send wait in this browser.
+  const [busy, setBusy] = useState(false);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   // Whether the issue was closed when the current admission came. The server admits a socket
   // read-only for a closed issue as it does for a schema it does not serve, and a reload cannot
@@ -283,6 +293,9 @@ export function ProofDocument({
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
   const readmitRef = useRef<(() => void) | undefined>(undefined);
+  // Set while the editor effect runs: closes the live connection for a rebuild of the document and
+  // returns what admits the editor again once the rebuild has answered.
+  const suspendRef = useRef<(() => () => void) | undefined>(undefined);
   // A reading column offers no repair and no rebuild: it is not the document's page, and a
   // reader beside a list of questions has not come to mend a document. A blocked admission is
   // reported upward instead (`onUnavailable`), and the host - the Inbox's pane - falls back to
@@ -596,9 +609,14 @@ export function ProofDocument({
     // Sockets the server refused in a row, since this editor last synced or a repair re-admitted it.
     let refusals = 0;
     let refusalTimer: number | undefined;
+    // Counts the admissions begun and the suspensions for a rebuild: an admission whose read
+    // answers after a later one began, or after a suspension, opens nothing.
+    let admissions = 0;
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
+    setRefusedEdit(undefined);
+    setBusy(false);
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
@@ -716,15 +734,19 @@ export function ProofDocument({
         }
       };
     };
-    // Each admission - this mount, a socket the server refused as outside the Proof schema, and a
-    // blocked admission's re-admission - opens a connection only once its own fresh `/text` read
-    // succeeds, and that read alone decides: a browser editor normalizes a tree it cannot
-    // represent and writes the result back. A read that fails closes nothing already open, since
-    // only an admission opens anything, so a later refetch that fails - an outage during an
-    // artifact event's invalidation, say - leaves a connected editor and its unsent edits alone.
+    // Each admission - this mount, a socket the server refused as outside the Proof schema, an
+    // edit it refused (`onEditRefused`), a blocked admission's re-admission and the one after a
+    // rebuild the page asked for (`suspendRef`) -
+    // opens a connection only once its own fresh `/text` read succeeds, and that read alone
+    // decides: a browser editor normalizes a tree it cannot represent and writes the result back.
+    // A read that fails closes nothing already open, since only an admission opens anything, so a
+    // later refetch that fails - an outage during an artifact event's invalidation, say - leaves a
+    // connected editor and its unsent edits alone.
     // A blocked admission waits for the next successful read of the text, which a repair upload
     // or a rebuild brings about, and is admitted again (`readmitRef`).
     const admit = () => {
+      admissions += 1;
+      const attempt = admissions;
       const textRead = queryClient
         .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
         .then(
@@ -748,7 +770,7 @@ export function ProofDocument({
         );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
-          if (!mounted) {
+          if (!mounted || attempt !== admissions) {
             return;
           }
           if (block !== undefined) {
@@ -788,6 +810,24 @@ export function ProofDocument({
               }
               setConnection("connecting");
               refusalTimer = window.setTimeout(admit, delay);
+            },
+            onEditRefused: (reason) => {
+              if (!mounted) {
+                return;
+              }
+              // The refused edit's saved row is gone, but its text is still in this connection's
+              // document, which would send it again on any reconnect: the next admission builds
+              // the document afresh from the server, then replays the rows that are left.
+              teardown();
+              setBusy(false);
+              setRefusedEdit(reason);
+              setConnection("connecting");
+              admit();
+            },
+            onBusy: (waiting) => {
+              if (mounted) {
+                setBusy(waiting);
+              }
             },
             onStatus: (status) => {
               if (!failed) {
@@ -875,11 +915,32 @@ export function ProofDocument({
         .catch(reportLoadFailure);
     };
     admit();
+    // A rebuild of a document the server refused an edit as needing one replaces the history this
+    // connection's document holds, which a connection left open would hand back to the rebuilt
+    // room on its reconnect, to be refused for it in turn. So the connection closes before the
+    // rebuild is asked for, and the editor is admitted again from a fresh read once the rebuild
+    // has answered, whichever way: rebuilt, or refused and left as it was. The rows this browser
+    // had not sent stay saved, and the admission after a rebuild drops them as rows of a rebuilt
+    // document (pending-sync.ts).
+    suspendRef.current = () => {
+      admissions += 1;
+      window.clearTimeout(refusalTimer);
+      readmitRef.current = undefined;
+      teardown();
+      setBusy(false);
+      setConnection("connecting");
+      return () => {
+        if (mounted) {
+          admit();
+        }
+      };
+    };
 
     return () => {
       mounted = false;
       window.clearTimeout(refusalTimer);
       readmitRef.current = undefined;
+      suspendRef.current = undefined;
       teardown();
     };
   }, [
@@ -933,6 +994,28 @@ export function ProofDocument({
         <LandedWithoutAnswer what={`The version “${nameVersion.unanswered.variables}”`} />
       )}
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {refusedEdit === undefined ? null : (
+        <RefusedEditNotice
+          onDismiss={() => setRefusedEdit(undefined)}
+          onRebuild={() => {
+            const resume = suspendRef.current?.();
+            rebuild.mutate(undefined, {
+              onSuccess: () => setRefusedEdit(undefined),
+              onSettled: () => resume?.(),
+            });
+          }}
+          page={page}
+          reason={refusedEdit}
+          rebuildError={rebuild.isError ? rebuild.error : undefined}
+          rebuilding={rebuild.isPending}
+        />
+      )}
+      {busy ? (
+        <p role="status">
+          Dispatch is out of room for open documents right now. It keeps trying, and your edits wait
+          in this browser until they save.
+        </p>
+      ) : null}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">
           <p className={dangerText}>{repairError.message}</p>

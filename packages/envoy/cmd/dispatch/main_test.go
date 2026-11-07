@@ -7,18 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -1085,6 +1090,106 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(storetest.Main(m))
+}
+
+// The boot path sets the runtime's memory limit to 90% of what its provider reads: a container
+// limited to 4 GiB gives 3.6 GiB, the production pod's 32Gi gives 30.9 GB
+// (infra/gcp/dispatch_kube.go's appMemory, 32Gi in theorem-labs/agent-infra
+// dispatch/Pulumi.prod.yaml), and the boot line names both figures. A provider that reports no
+// limit, or finds no control group to read, leaves the runtime with none, and the boot line says
+// so.
+//
+// A second line names the memory bounds the document service derives from the limit the runtime
+// then holds (docs.BoundsForLimit), so an operator reads from the boot log what the pod's rooms,
+// cold reads and whole-document copies are held to; a process with no limit runs at the 4 GiB
+// calibration. The five figures that line names are every field of docs.MemoryBounds, so the row
+// below reads them from BoundsForLimit at the limit it expects rather than from constants of its
+// own: what this test holds is that the boot logs the bounds of the limit it took, named and
+// complete. TestTheBootLineNamesTheBoundsItsGoMemoryLimitGives holds those figures themselves to
+// the numbers, out of a real process.
+func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
+	// Either variable in the runner's environment would skip the provider (setGoMemoryLimit).
+	for _, variable := range []string{"GOMEMLIMIT", "AUTOMEMLIMIT"} {
+		t.Setenv(variable, "")
+		if err := os.Unsetenv(variable); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
+	const noLimitLine = "dispatch: no go memory limit set: no container memory limit readable"
+	calibration := boundsLine(3865470566)
+	for _, row := range []struct {
+		name     string
+		provider memlimit.Provider
+		limit    int64
+		line     map[string]any
+		bounds   map[string]any
+	}{
+		{"a container limited to 4 GiB", memlimit.Limit(4 << 30), 3865470566, map[string]any{
+			"level": "INFO", "msg": "dispatch: go memory limit set from the container's",
+			"container_limit_bytes": float64(4294967296), "go_memory_limit_bytes": float64(3865470566),
+		}, calibration},
+		{"a container limited to 32Gi, as the production pod is", memlimit.Limit(32 << 30), 30923764531, map[string]any{
+			"level": "INFO", "msg": "dispatch: go memory limit set from the container's",
+			"container_limit_bytes": float64(34359738368), "go_memory_limit_bytes": float64(30923764531),
+		}, boundsLine(30923764531)},
+		{"a container whose memory is not limited", func() (uint64, error) { return 0, memlimit.ErrNoLimit }, math.MaxInt64, map[string]any{
+			"level": "INFO", "msg": noLimitLine, "reason": memlimit.ErrNoLimit.Error(),
+		}, calibration},
+		{"a process in no control group", func() (uint64, error) { return 0, memlimit.ErrNoCgroup }, math.MaxInt64, map[string]any{
+			"level": "INFO", "msg": noLimitLine, "reason": memlimit.ErrNoCgroup.Error(),
+		}, calibration},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			// The runtime's own default, no limit, as a process boots with.
+			debug.SetMemoryLimit(math.MaxInt64)
+			var logged bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			held := setGoMemoryLimit(row.provider)
+
+			if got := debug.SetMemoryLimit(-1); got != row.limit {
+				t.Errorf("memory limit %d, want %d", got, row.limit)
+			}
+			if held != row.limit {
+				t.Errorf("the boot took the limit as %d, want the %d the runtime holds", held, row.limit)
+			}
+			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("logged %q, want the limit's line and the bounds'", logged.String())
+			}
+			for index, want := range []map[string]any{row.line, row.bounds} {
+				var line map[string]any
+				if err := json.Unmarshal([]byte(lines[index]), &line); err != nil {
+					t.Fatalf("decode %q: %v", lines[index], err)
+				}
+				delete(line, "time")
+				if !maps.Equal(line, want) {
+					t.Errorf("logged %v, want %v", line, want)
+				}
+			}
+		})
+	}
+}
+
+// boundsLine is the boot line the document service's memory bounds at limit make
+// (setGoMemoryLimit, docs.BoundsForLimit), as the JSON handler of the test above decodes it:
+// every figure a whole number, so each reads back as a float64. It names the five fields of
+// docs.MemoryBounds and nothing else, and the equality the test makes of whole maps is what
+// holds the line to naming no sixth figure and dropping none of these five.
+func boundsLine(limit int64) map[string]any {
+	bounds := docs.BoundsForLimit(limit)
+	return map[string]any{
+		"level": "INFO", "msg": "dispatch: the document service's memory bounds",
+		"go_memory_limit_bytes":     float64(bounds.Limit),
+		"room_budget_bytes":         float64(bounds.RoomBudget),
+		"document_read_cache_bytes": float64(bounds.DocumentReadCache),
+		"load_slots":                float64(bounds.LoadSlots),
+		"peer_write_queue_bytes":    float64(bounds.PeerWriteQueue),
+	}
 }
 
 func TestWriteBlockIDBackfillReportLabelsSkippedDocuments(t *testing.T) {

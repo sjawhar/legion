@@ -20,6 +20,10 @@ import (
 // holds it, a part several share once, and a map's slots at the load the map holds just after it
 // grows, so it overcounts by at most a quarter (maxWeightToHeap); a part counted for each sharer,
 // such as a row's cells counted for each cell, passes that.
+//
+// Each row is measured in a process of its own (measuredAlone): its collections walk the whole
+// heap of the process they run in, which inside the package's run took this test 94 s on this pod
+// on 2026-11-03, against 53 s on main's tree, with the same readings either way.
 func TestADocumentReadWeighsAboutTheHeapItHolds(t *testing.T) {
 	const minWeightToHeap, maxWeightToHeap = 0.97, 1.25
 	for _, shape := range []struct{ name, markdown string }{
@@ -30,6 +34,9 @@ func TestADocumentReadWeighsAboutTheHeapItHolds(t *testing.T) {
 		{"prose", prose()},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
+			if !measuredAlone(t) {
+				return
+			}
 			read, held := heldByDocumentRead(t, shape.markdown)
 			ratio := float64(read.weight) / float64(held)
 			t.Logf("weight %d B, heap held %d B (weight %.2fx the heap)", read.weight, held, ratio)

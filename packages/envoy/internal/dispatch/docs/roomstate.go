@@ -26,11 +26,25 @@ import (
 // holder releases the state through its own unlock, and ygo's OnUnloadDocument releases it when
 // the room is the last thing to go (releaseUnloadedRoom).
 //
-// What a release drops - the unrecorded marks' first sightings and their authors' departures, and
-// the closed flag - is what a restart drops too.
+// What a release drops - the unrecorded marks' first sightings and their authors' departures, the
+// writes that have logged leaving the document alone at the decode cap, and the closed flag - is
+// what a restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
+	// departedPeers is the browsers connected when ygo reported the room's last browser gone
+	// (settleLastPeer), each until its handler forgets it (removeConnection). ygo makes that report
+	// on the leaving browser's own socket (sjawhar/ygo v1.55.1-sami.1,
+	// provider/websocket/peer.go:715-721), before the handler that registered the browser returns
+	// and removes it from connected (ServeHTTP), and the settlement it owes runs there first, which
+	// takes seconds for a mebibyte; meanwhile connected still names browsers that have gone. The
+	// room budget's sweep counts a room whose connected browsers have all departed as one that will
+	// be closable (onlyDepartedLocked, sweepRooms), so an admission waits for it rather than being
+	// refused as though a browser held it. A browser authorized in the instant before the report
+	// and registered with ygo after it is counted departed too, so an admission can wait on its
+	// room until its deadline; the room is never closed for it, since connected still names it
+	// (unusedLocked). It is the browsers' own ygo ids; departed, below, is their users' logins.
+	departedPeers map[uint64]struct{}
 	// inflight is F (pending_authors.go): each browser edit's credit from the moment the room's
 	// update observer records it (creditContentChange) until the edit's append lands, keyed by its
 	// creditSeq. creditSeq is atomic so forkLive, which every document write calls, reads it for
@@ -77,6 +91,10 @@ type roomState struct {
 	shadow     *roomShadow
 	settle     *time.Timer
 	unrecorded map[pmdoc.MarkRef]time.Time
+	// pastDecodeCap names each server write outside applyLive that has logged leaving this room's
+	// document alone because the write would carry it past the decode cap (logPastDecodeCap), nil
+	// until one has.
+	pastDecodeCap map[string]struct{}
 	// departed is when each user whose browsers have all left this room lost the last of them,
 	// under both spellings a mark's `by` can carry (recordMarkAuthorDeparture). An unrecorded
 	// mark ages from its author's entry rather than from the sweep that last saw that author, so
@@ -217,10 +235,25 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 }
 
 // unlockState unlocks state, room's, forgetting it first when it holds nothing
-// (releaseIfUnusedLocked).
+// (releaseIfUnusedLocked). A loaded room whose state holds nothing may be one the room budget is
+// waiting to close, which the budget answers without its lock
+// (roomBudget.sweepsForCloses, watchesForCloses): while it is full, or an admission waits on it,
+// the room may be one the last sweep could not close that has just become closable, so it starts
+// a sweep, which closes the room and lowers the signal or admits the admission (sweepRooms,
+// roomBudget.kick). While any room is marked as opened over the budget, it may be that room, now
+// free of the work that opened it (closeIfOpenedOverBudget). Each takes the state again itself,
+// so it starts once the lock is released.
 func (s *Service) unlockState(room string, state *roomState) {
 	s.releaseIfUnusedLocked(room, state)
+	closable := s.budget.watchesForCloses() && !state.released && s.unusedLocked(state) && s.srv.GetDoc(room) != nil
 	state.mu.Unlock()
+	if !closable {
+		return
+	}
+	if s.budget.sweepsForCloses() {
+		s.budget.kick(room)
+	}
+	s.closeIfOpenedOverBudget(room)
 }
 
 // releaseIfUnused forgets room's state when it holds nothing (releaseIfUnusedLocked).
@@ -230,9 +263,11 @@ func (s *Service) releaseIfUnused(room string) {
 	}
 }
 
-// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
-// something still holds it, whose end releases it instead.
+// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its charge in the room
+// budget goes, whether or not its state goes with it, since the memory went with the room; and its
+// state goes too unless something still holds it, whose end releases it instead.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
+	s.budget.retire(room)
 	s.releaseIfUnused(room)
 }
 
@@ -250,6 +285,18 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 	s.forgetLocked(room, state)
 }
 
+// roomHoldsDocument reports whether ygo holds a room for the document: one it has loaded, or one
+// it is loading. A load in flight counts, and Rooms() is what reports it: the goroutine that owns
+// a load puts its placeholder under the room's name before it reads the store (sjawhar/ygo
+// v1.55.1-sami.1, provider/websocket/server.go:1744-1763), and GetDoc answers nothing for it
+// until the load's hook has returned. A caller that took such a room for no room at all - a
+// committed write's publish, which then applies its update nowhere (publishedWithoutARoom) -
+// would leave the room standing behind the update the store took while it loaded, and a room
+// behind the durable head is refused everything until it reloads (refuseRoomBehindHead).
+func (s *Service) roomHoldsDocument(room string) bool {
+	return s.srv.GetDoc(room) != nil || slices.Contains(s.srv.Rooms(), room)
+}
+
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
 // (lookUpState). Its one caller, releaseIfUnusedLocked, forgets only a state nothing holds
 // (unusedLocked), so no in-flight credit is on it. Its caller holds state.mu.
@@ -263,7 +310,7 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // registered in its place. The record has to go: it carries the failure, which every holder of it
 // still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
 //
-// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.55.1-sami.2,
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.55.1-sami.7,
 // provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's
@@ -328,10 +375,56 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		len(state.parked) == 0
 }
 
+// holdingLocked names what holds state's room open, for the sweep's line over a budget past its
+// limit: the first of the things unusedLocked reads that is not clear, in that order, and "the
+// room is gone" where ygo no longer holds one. It is the one reading that says why a sweep over
+// a full budget closed nothing, which is the difference between a room a browser is editing and
+// one whose own work has not landed yet (INFRA-179). Its caller holds state.mu.
+func (s *Service) holdingLocked(state *roomState) string {
+	switch {
+	case state.liveWriter != nil:
+		return "a writer"
+	case state.settling != 0:
+		return "a settlement running"
+	case s.isSettleTimerArmed(state.settle):
+		return "a settlement armed"
+	case state.unsettled:
+		return "unsettled work"
+	case state.failed != nil:
+		return "a failed room"
+	case len(state.connected) != 0 && !state.onlyDepartedLocked():
+		return "a browser connected"
+	case len(state.connected) != 0:
+		return "a browser gone whose handler has not forgotten it"
+	case state.pendingUpdates != 0:
+		return "updates not yet appended"
+	case state.durableAppends.Load() != 0:
+		return "a durable append"
+	case len(state.inflight) != 0:
+		return "an apply in flight"
+	case len(state.parked) != 0:
+		return "parked bytes"
+	}
+	return "the room is gone"
+}
+
 // parkedBytes is one commit's parked bytes and the cursor of the room instance that took them.
 type parkedBytes struct {
 	update []byte
 	cursor *roomCursor
+}
+
+// onlyDepartedLocked is whether every browser state names as connected has departed
+// (departedPeers): true with none connected, and true for a room whose last browser ygo has
+// reported gone while the handlers of its browsers have not yet returned to forget them. Its
+// caller holds state.mu.
+func (state *roomState) onlyDepartedLocked() bool {
+	for id := range state.connected {
+		if _, gone := state.departedPeers[id]; !gone {
+			return false
+		}
+	}
+	return true
 }
 
 // queueUpdateClass records what the room's update observer read off one update, for the

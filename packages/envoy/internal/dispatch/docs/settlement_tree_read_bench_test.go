@@ -34,7 +34,7 @@ func BenchmarkSettlementTreeRead(b *testing.B) {
 		name := fmt.Sprintf("%dKiB", size>>10)
 		service := &Service{}
 		b.Run(name+"/state", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				var state []byte
@@ -47,7 +47,7 @@ func BenchmarkSettlementTreeRead(b *testing.B) {
 			}
 		})
 		b.Run(name+"/tree", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				var err error
@@ -58,7 +58,7 @@ func BenchmarkSettlementTreeRead(b *testing.B) {
 			}
 		})
 		b.Run(name+"/lock/state", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				doc := replica.hold()
@@ -70,7 +70,7 @@ func BenchmarkSettlementTreeRead(b *testing.B) {
 			}
 		})
 		b.Run(name+"/lock/tree", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				doc := replica.hold()

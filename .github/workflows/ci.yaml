@@ -1072,6 +1072,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
               - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              # The long-edited document the decode-cap and rebuild drives replay (INFRA-179).
+              - 'packages/envoy/internal/dispatch/docs/testdata/**'
               - 'packages/envoy/internal/dispatch/duty/*'
               - 'packages/envoy/internal/dispatch/events/*'
               - 'packages/envoy/internal/dispatch/identity/*'
@@ -1151,6 +1153,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/delivery/**'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              # The long-edited document the decode-cap and rebuild drives replay (INFRA-179).
+              - 'packages/envoy/internal/dispatch/docs/testdata/**'
               - 'packages/envoy/internal/dispatch/duty/*'
               - 'packages/envoy/internal/dispatch/embed/*'
               - 'packages/envoy/internal/dispatch/embedqueue/*'

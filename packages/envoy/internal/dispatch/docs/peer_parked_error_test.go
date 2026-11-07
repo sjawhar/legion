@@ -2,11 +2,14 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 type parkedErrorStore struct {
@@ -19,6 +22,17 @@ func (p *parkedErrorStore) AppendParkedUpdate(_ context.Context, _ string, updat
 	return persistence.Version(len(p.rows)), nil
 }
 
+// A peer update that parks is durable before ygo answers the browser, and an update the room
+// refuses leaves nothing behind to store.
+//
+// The valid row is main's case: a successor whose predecessor the room lacks parks whole, the
+// hook stores what it parked from the peer's own update hook (storeParked) before the apply
+// returns, and a restart that replays the stored row and then the predecessor reads the text
+// both edits make. The truncated row is this change's: the hook reads nothing of the frame
+// itself any more, so the apply runs and ygo's own decoder refuses a cut delete set, rolling the
+// whole apply back on the bounded document every room keeps (keepReplica, newRoomScans,
+// reearth/ygo#340). The room is left holding none of what that frame had integrated or parked,
+// so it parks nothing and stores nothing, and the hook answers 4413 DOC_UPDATE_REFUSED.
 func TestAPeerApplyErrorStillStoresWhatTheRoomParked(t *testing.T) {
 	for _, cut := range []bool{false, true} {
 		name := "valid"
@@ -38,13 +52,16 @@ func TestAPeerApplyErrorStillStoresWhatTheRoomParked(t *testing.T) {
 			}
 
 			store := &parkedErrorStore{}
-			service := &Service{srv: newRoomServer(websocket.NewServer()), persistence: store}
+			// Calibrated bounds, since the hook weighs each update against them before the room
+			// takes it (weighPeerUpdate): a service with none refuses every apply.
+			service := calibratedService()
+			service.srv, service.persistence = newRoomServer(websocket.NewServer()), store
 			state := newRoomState()
 			state.unsettled = true
 			service.rooms.Store("r", state)
 			room := newDocumentCopy()
 			room.Transact(typeParagraph(room, "seed"))
-			replica := service.keepReplica(room, room.OpenUpdateLog(), nil)
+			replica := service.keepReplica(room, room.OpenUpdateLog(), nil, nil)
 			instance := &roomInstance{}
 			replica.classify = func(logged crdt.LoggedUpdate, seq uint64, changed bool, asks func() map[string]struct{}) (bool, bool, bool) {
 				return service.classifyDrained("r", instance, logged, seq, changed, asks)
@@ -54,13 +71,25 @@ func TestAPeerApplyErrorStillStoresWhatTheRoomParked(t *testing.T) {
 					service.observeRoomUpdates("r", replica)
 				}
 			})
-			err := service.onPeerUpdate(websocket.PeerUpdateInfo{Room: "r", Doc: room}, func() error {
+			applied := false
+			err := service.onPeerUpdate(websocket.PeerUpdateInfo{Room: "r", Doc: room, Update: update}, func() error {
+				applied = true
 				return crdt.ApplyUpdateV1(room, update, nil)
 			})
-			if cut && err == nil {
-				t.Fatal("truncated delete set was accepted")
+			if cut {
+				var refusal *websocket.PeerClose
+				if !errors.As(err, &refusal) || refusal.Code != contracts.DocumentTooLargeCloseCode ||
+					refusal.Reason != contracts.DocumentUpdateRefusedCloseReason || !applied {
+					t.Fatalf("the truncated delete set was answered %v (the apply ran %t), want it run and refused %d %q",
+						err, applied, contracts.DocumentTooLargeCloseCode, contracts.DocumentUpdateRefusedCloseReason)
+				}
+				if room.PendingStats().Items != 0 || len(state.parked) != 0 || len(store.rows) != 0 {
+					t.Fatalf("the refused frame left %d parked items, %d parked rows owed and %d stored, want none of each",
+						room.PendingStats().Items, len(state.parked), len(store.rows))
+				}
+				return
 			}
-			if !cut && err != nil {
+			if err != nil {
 				t.Fatal(err)
 			}
 			if room.PendingStats().Items == 0 {

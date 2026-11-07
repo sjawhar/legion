@@ -48,8 +48,11 @@ const (
 type Peer struct {
 	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it.
 	Doc *crdt.Doc
-	// Answers carries the content of each sync step 2 the room sends, once Doc holds it. One that
-	// arrives while sixteen are waiting to be read is dropped.
+	// Answers carries the whole of each answer the room makes to a sync step 1, once Doc holds
+	// it: the room answers with Update frames of about 64 KiB each and then one sync step 2
+	// carrying only what no Update could (sjawhar/ygo v1.55.1-sami.3), and what arrives here is
+	// those frames merged, which is byte for byte what the one sync step 2 of before carried.
+	// An answer that arrives while sixteen are waiting to be read is dropped.
 	Answers <-chan []byte
 	// Awareness carries the entries of each awareness update the room sends, in order, once
 	// AwarenessStates holds them. One that arrives while sixty-four are waiting to be read is
@@ -67,6 +70,9 @@ type Peer struct {
 	writes sync.Mutex
 	// auth carries the room's answers to Authenticate.
 	auth chan authReply
+	// answering is the reader's own: the Update frames of the answer it is reading, merged into
+	// the sync step 2 that ends that answer (applySync). Nothing else touches it.
+	answering [][]byte
 	// mu guards the fields below it.
 	mu sync.Mutex
 	// awareness is every client the room has sent a state of, a client that left included, as
@@ -77,9 +83,11 @@ type Peer struct {
 	// clocks is the clock of the last state SetAwareness sent for each client.
 	clocks map[uint64]uint64
 	scope  string
-	// endedAt and closeCode are written by the reader before Ended closes, and read after.
-	endedAt   time.Time
-	closeCode int
+	// endedAt and closed are written by the reader before Ended closes, and read after.
+	endedAt time.Time
+	// closed is the close frame the room ended the connection with, nil for one that ended
+	// otherwise.
+	closed *gws.CloseError
 }
 
 // AwarenessEntry is one client's state in an awareness update: its client id, its clock, and its
@@ -319,12 +327,21 @@ func (p *Peer) EndedAt() time.Time {
 	return p.endedAt
 }
 
+// Closed is the close frame the room ended the connection with - its code and reason - or nil
+// for a connection that ended without one. It waits for the connection to end.
+func (p *Peer) Closed() *gws.CloseError {
+	<-p.Ended
+	return p.closed
+}
+
 // CloseCode is the websocket close code the connection ended with: the room's close frame's, 1006
 // for a connection that dropped without one, or 0 for one this side closed (Close). It waits for
 // Ended.
 func (p *Peer) CloseCode() int {
-	<-p.Ended
-	return p.closeCode
+	if closed := p.Closed(); closed != nil {
+		return closed.Code
+	}
+	return 0
 }
 
 // read applies every sync frame the room sends and answers its sync step 1, keeps every awareness
@@ -334,8 +351,9 @@ func (p *Peer) read(answers chan<- []byte, awareness chan<- []AwarenessEntry) {
 	for {
 		_, message, err := p.connection.ReadMessage()
 		if err != nil {
-			if closed := (*gws.CloseError)(nil); errors.As(err, &closed) {
-				p.closeCode = closed.Code
+			var closed *gws.CloseError
+			if errors.As(err, &closed) {
+				p.closed = closed
 			}
 			return
 		}
@@ -373,7 +391,13 @@ func (p *Peer) read(answers chan<- []byte, awareness chan<- []AwarenessEntry) {
 }
 
 // applySync applies one sync message the room sent and answers its sync step 1, handing answers
-// the content of a sync step 2 once Doc holds it.
+// the whole of each answer to a sync step 1 once Doc holds it.
+//
+// A room's answer is a series since sjawhar/ygo v1.55.1-sami.3: Update frames of about 64 KiB
+// each and then one sync step 2 carrying only what no Update could. The Update frames are kept
+// in answering and merged into the sync step 2 that ends the answer, so what reaches answers is
+// byte for byte what the one sync step 2 of before carried; a reader that took the last message
+// alone would read the remainder rather than the state. Only the reader touches answering.
 func (p *Peer) applySync(payload []byte, answers chan<- []byte) error {
 	kind, content, err := ygsync.ReadSyncMessage(payload)
 	if err != nil {
@@ -388,9 +412,22 @@ func (p *Peer) applySync(payload []byte, answers chan<- []byte) error {
 			return err
 		}
 	}
+	if kind == ygsync.MsgUpdate {
+		p.answering = append(p.answering, append([]byte(nil), content...))
+		return nil
+	}
 	if kind == ygsync.MsgSyncStep2 {
+		answer := content
+		if len(p.answering) > 0 {
+			merged, err := crdt.MergeUpdatesV1(append(p.answering, content)...)
+			if err != nil {
+				return err
+			}
+			answer = merged
+		}
+		p.answering = nil
 		select {
-		case answers <- content:
+		case answers <- answer:
 		default:
 		}
 	}

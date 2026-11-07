@@ -183,6 +183,12 @@ func (s *Service) tryCompaction(ctx context.Context, room string, retrying bool)
 	}
 	switch result.outcome {
 	case compactCompacted:
+		// The room, where this server holds it, is tracked at the bytes its updates have come
+		// to since its load, which run above the state it holds; a fold of its whole stored
+		// history is the state itself, read without encoding the document (rebaseRoomState).
+		if result.wholeState > 0 {
+			s.rebaseRoomState(room, result.wholeState)
+		}
 		return compactionAttempt{try: tryCompacted, check: check, deleted: result.deleted}
 	case compactDropped, compactBusy:
 		return compactionAttempt{try: tryLater, check: check}

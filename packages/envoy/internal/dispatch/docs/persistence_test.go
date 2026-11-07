@@ -22,7 +22,18 @@ import (
 // when that is already non-zero, and becomes non-zero when the tests passed and a service is
 // still alive. The fix such a run asks for is a t.Cleanup on the test the report names, shutting
 // down the service that test built.
+//
+// The package's tests run in one process, and many of them drive a room's load from inside a
+// write's fork read, through a hook of the service's (afterForkRead) or a store that loads the
+// room inside the read it answers (roomDuringColdReadStore): a nesting no pod makes, where a
+// browser's load is a goroutine of its own that simply waits for the write's fork to be dropped.
+// A write holds a slot of the pod's load concurrency for its fork's whole life (loadSlots), and
+// at the calibration the pod has one (MemoryBounds.LoadSlots), which such a nesting would
+// deadlock. So the binary runs with the production pod's sixteen; what the slots themselves
+// bound is weighed by MemoryBounds' own arithmetic and by the tests that swap in a concurrency
+// of their own (useLoadSlots).
 func TestMain(m *testing.M) {
+	podLoadSlots.Store(newLoadSlots(BoundsForLimit(productionGoMemoryLimitBytes).LoadSlots))
 	code := storetest.Main(m)
 	if reportLeakedServices() && code == 0 {
 		code = 1

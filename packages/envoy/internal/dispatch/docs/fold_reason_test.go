@@ -29,7 +29,7 @@ func TestAStoredLogThatDoesNotFoldIsRefusedNamingItsReasonOnce(t *testing.T) {
 		t.Fatal("the cut second row decoded, so nothing here is tested")
 	}
 
-	_, _, misread, err := fold(memoryUpdates(context.Background(), [][]byte{first, cut}), maxUpdateItems)
+	_, _, misread, err := fold(context.Background(), memoryUpdates(context.Background(), [][]byte{first, cut}), maxUpdateItems)
 	if err != nil {
 		t.Fatalf("fold the stored rows: %v", err)
 	}

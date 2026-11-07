@@ -22,7 +22,7 @@ import (
 // browsers for an open write's shadow when it counts as none (unchangedCredit). Nobody typed it,
 // so neither path may credit anyone.
 //
-// The first test here is the scenario itself, on the pinned ygo (v1.54.1-sami.3, which carries
+// The first test here is the scenario itself, on the pinned ygo (v1.55.1-sami.1, which carries
 // reearth/ygo #284): a browser deletes exactly the text another browser's bold run covers, which
 // leaves the markers covering nothing, and the room logs two updates for it - the browser's own
 // and the cleanup, committed with no origin. The cleanup takes no text away, so the room

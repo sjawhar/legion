@@ -16,6 +16,7 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
 
@@ -145,6 +146,11 @@ func TestARoomWhosePeersUpdatesReachItsPersistenceOutOfOrderSettlesBoth(t *testi
 	assertStoredOrder(t, service, artifactID)
 }
 
+// cutFrameClient writes the frame whose delete set the truncated row of
+// TestARoomsParkedOnlyCommitIsStoredAndReplaysFromItsLog cuts, a client of its own so the room
+// holding nothing of it says the refused frame left nothing behind.
+const cutFrameClient = 9
+
 // A peer's update that waits on an item the room lacks parks every byte the room kept, and changes
 // nothing, so ygo logs it with an empty Update and its bytes in LoggedUpdate.Parked but calls no
 // OnUpdate for it. Dispatch drains the log after the peer's apply (onPeerUpdate) and stores the
@@ -175,15 +181,31 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 		t.Fatal("the seeded document has no resident room")
 	}
 
-	writer := crdt.New(crdt.WithClientID(7))
-	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	// The editor's own shape: a paragraph under the document's fragment, which the peer update
+	// hook's allowance admits (peer_update.go), and a successor to it whose predecessor the room
+	// has not seen, so the room parks every byte of that successor.
+	writer := newDocumentCopy(crdt.WithClientID(7))
+	writer.Transact(typeParagraph(writer, "base"))
 	base := crdt.EncodeStateAsUpdateV1(writer, nil)
 	atBase := writer.StateVector()
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 4, " later", nil) })
+	writerText := firstText(writer.GetXmlFragment(fragmentName))
+	writer.Transact(func(txn *crdt.Transaction) { writerText.Insert(txn, 4, " later", nil) })
 	parked := crdt.EncodeStateAsUpdateV1(writer, atBase)
+	// The truncated row sends another client's frame first, its delete set cut: the hook reads
+	// nothing of the frame itself, so the apply runs, ygo refuses it, and the room's bounded
+	// document (keepReplica, newRoomScans) takes back everything that apply integrated or parked
+	// (reearth/ygo#340), so it leaves nothing parked and nothing to store. The valid frame behind
+	// it, which the rest of the test reads, is also what says the room had taken the cut one
+	// first: one socket, one order.
+	var cut []byte
 	if truncated {
-		parked = append(append([]byte(nil), parked[:len(parked)-1]...), 1, 42)
+		cutWriter := newDocumentCopy(crdt.WithClientID(cutFrameClient))
+		cutWriter.Transact(typeParagraph(cutWriter, "cut"))
+		atCut := cutWriter.StateVector()
+		cutText := firstText(cutWriter.GetXmlFragment(fragmentName))
+		cutWriter.Transact(func(txn *crdt.Transaction) { cutText.Insert(txn, 3, " later", nil) })
+		cut = crdt.EncodeStateAsUpdateV1(cutWriter, atCut)
+		cut = append(append([]byte(nil), cut[:len(cut)-1]...), 1, 42)
 	}
 
 	var updates atomic.Int64
@@ -191,6 +213,23 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	stored := storedUpdateCount(t, service.store, artifactID)
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
+	if truncated {
+		// ygo refuses the cut frame and the hook closes that browser 4413 (documentUpdateRefused),
+		// so it is sent on a socket of its own: its close is what says the room has taken it,
+		// before the valid frame the rest of the test reads is sent.
+		cutPeer := connectPeer(t, server.URL, artifactID, "mallory")
+		if err := cutPeer.Write(ygsync.EncodeUpdate(cut)); err != nil {
+			t.Fatalf("send the frame with the cut delete set: %v", err)
+		}
+		select {
+		case <-cutPeer.Ended:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the room left the browser whose cut frame it refuses connected")
+		}
+		if closed := cutPeer.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode {
+			t.Fatalf("the room ended the refused browser with %v, want %d", closed, contracts.DocumentTooLargeCloseCode)
+		}
+	}
 	peer := connectPeer(t, server.URL, artifactID, "alice")
 	if err := peer.Write(ygsync.EncodeUpdate(parked)); err != nil {
 		t.Fatalf("send the later update ahead of its predecessor: %v", err)
@@ -206,6 +245,9 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	}
 	if pending := room.PendingStats(); pending.Items == 0 {
 		t.Fatalf("the room parked no item after its later update: %+v", pending)
+	}
+	if after := storedUpdateCount(t, service.store, artifactID); after != stored+1 {
+		t.Fatalf("the room stored %d updates, want the %d it held and the one row its parked bytes make", after, stored)
 	}
 	if service.hasPendingUpdates(artifactID) || service.hasDurableAppend(artifactID) {
 		t.Fatal("the parked-only commit left the room counting a store write")
@@ -231,8 +273,16 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	if err := crdt.ApplyUpdateV1(restarted, base, nil); err != nil {
 		t.Fatalf("send the predecessor after restart: %v", err)
 	}
-	if got := restarted.GetText("t").ToString(); got != "base later" {
-		t.Fatalf("the restart then predecessor holds %q, want the parked successor too", got)
+	if got, err := renderDocument(restarted); err != nil || !strings.Contains(got, "base later") {
+		t.Fatalf("the restart then predecessor renders %q (%v), want the parked successor's text too", got, err)
+	}
+	if truncated {
+		if clock := room.StateVector()[cutFrameClient]; clock != 0 {
+			t.Fatalf("the room holds client %d at clock %d, want nothing of the frame whose delete set was cut", cutFrameClient, clock)
+		}
+		if clock := restarted.StateVector()[cutFrameClient]; clock != 0 {
+			t.Fatalf("the stored history holds client %d at clock %d, want nothing of the refused frame stored", cutFrameClient, clock)
+		}
 	}
 	// The stored-order check reads the stored parked edit as one awaiting its predecessor, not as
 	// a row stored out of order: nothing the store holds disagrees with what the room accepted.
@@ -261,8 +311,8 @@ func parkedOnlyCommitSurvivesReload(t *testing.T, truncated bool) {
 	if err := crdt.ApplyUpdateV1(reloaded, history.Update, nil); err != nil {
 		t.Fatalf("open the stored history: %v", err)
 	}
-	if got := reloaded.GetText("t").ToString(); got != "base later" {
-		t.Fatalf("the stored history holds %q, want %q", got, "base later")
+	if got, err := renderDocument(reloaded); err != nil || !strings.Contains(got, "base later") {
+		t.Fatalf("the stored history renders %q (%v), want the parked successor's text", got, err)
 	}
 	if pending := reloaded.PendingStats(); pending.Items != 0 {
 		t.Fatalf("the stored history still parks %+v once the predecessor is stored", pending)
@@ -301,15 +351,16 @@ func TestAPeerUpdateThatChangesTheRoomAndParksKeepsBothAcrossARestart(t *testing
 		t.Fatalf("load the seeded document's room: %v", err)
 	}
 
-	now := crdt.New(crdt.WithClientID(7))
-	nowText := now.GetText("a")
-	now.Transact(func(txn *crdt.Transaction) { nowText.Insert(txn, 0, "now", nil) })
+	// Both clients write the editor's own shape, a paragraph under the document's fragment, so
+	// the peer update hook's walk admits the frame that carries them (update_walk.go).
+	now := newDocumentCopy(crdt.WithClientID(7))
+	now.Transact(typeParagraph(now, "now"))
 	integrates := crdt.EncodeStateAsUpdateV1(now, nil)
-	other := crdt.New(crdt.WithClientID(8))
-	otherText := other.GetText("b")
-	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 0, "base", nil) })
+	other := newDocumentCopy(crdt.WithClientID(8))
+	other.Transact(typeParagraph(other, "base"))
 	predecessor := crdt.EncodeStateAsUpdateV1(other, nil)
 	atBase := other.StateVector()
+	otherText := firstText(other.GetXmlFragment(fragmentName))
 	other.Transact(func(txn *crdt.Transaction) { otherText.Insert(txn, 4, " later", nil) })
 	waits := crdt.EncodeStateAsUpdateV1(other, atBase)
 	mixed, err := crdt.MergeUpdatesV1(integrates, waits)
@@ -345,11 +396,15 @@ func TestAPeerUpdateThatChangesTheRoomAndParksKeepsBothAcrossARestart(t *testing
 	if err := crdt.ApplyUpdateV1(restarted, predecessor, nil); err != nil {
 		t.Fatalf("send the predecessor after the restart: %v", err)
 	}
-	if got := restarted.GetText("a").ToString(); got != "now" {
-		t.Fatalf("the restarted room's integrated edit = %q, want %q", got, "now")
+	rendered, err := renderDocument(restarted)
+	if err != nil {
+		t.Fatalf("render the restarted room: %v", err)
 	}
-	if got := restarted.GetText("b").ToString(); got != "base later" {
-		t.Fatalf("the restart then predecessor holds %q, want the parked edit too", got)
+	if !strings.Contains(rendered, "now") {
+		t.Fatalf("the restarted room renders %q, want the integrated edit's text", rendered)
+	}
+	if !strings.Contains(rendered, "base later") {
+		t.Fatalf("the restarted room renders %q, want the parked edit's text too", rendered)
 	}
 	assertStoredOrder(t, service, artifactID)
 }

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1129,7 +1130,15 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(published...)
+	// The write is durable here, so the caller is answered before the rooms are told. A publish
+	// opens a room the browsers of that document hold, which waits for the room budget's opening
+	// and for one of the pod's load slots, and under a burst of writes that is where the time
+	// goes: measured at 320 concurrent writes, one the server answered 200 took 1 m 6.19 s
+	// against its caller's 1 m deadline, and that caller read an error of its own and would send
+	// the edit again (INFRA-179). Telling the rooms afterwards loses nothing: the update is
+	// durable before it publishes, no browser holds a document no room holds, and the room that
+	// loads next reads the store (publishLiveWrite).
+	defer s.publish(published...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}
@@ -1945,4 +1954,168 @@ func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.runTestHookEverywhere(w, r, testHookCall{Hook: hookQuiesceDocuments})
+}
+
+// setRoomBudget sets the open documents' memory budget to the request's bytes, or restores the real
+// one for zero, and answers the budget it set. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser test can fill the budget with a few small documents
+// and drive the editor's handling of DOC_BUSY; the real-process drives use the real budget.
+func (s *server) setRoomBudget(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	var input struct {
+		Bytes int64 `json:"bytes"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Bytes < 0 {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest, "bytes is the budget in bytes, or 0 to restore the real one")
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]int64{"bytes": s.deps.Docs.SetRoomBudgetForTest(input.Bytes)})
+}
+
+// roomCharges answers what the room budget charges each room it holds a charge for, beside its own
+// used and limit: {charges: {room: bytes}, used, limit}. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a real-process drive can read which rooms the budget still
+// carries rather than inferring it from the lines a close logs. It acts on the process its call
+// lands on alone, charges nothing and closes nothing.
+func (s *server) roomCharges(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	charges, used, limit := s.deps.Docs.RoomChargesForTest()
+	WriteJSON(w, http.StatusOK, map[string]any{"charges": charges, "used": used, "limit": limit})
+}
+
+// artifactRoomLive answers whether the document's room is resident in this server, a read that
+// loads and rebuilds nothing. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
+// set, so a real-process drive can see that the room budget closed or refused a room.
+func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]bool{"live": s.deps.Docs.RoomLiveForTest(artifact.ID)})
+}
+
+// maxAdmissionHold is the longest a test may hold a document's next socket before its admission
+// (holdArtifactAdmission): two minutes, about the longest a browser of the room budget's burst of
+// fifty has measured waiting to be answered - 1m15.2s on 2026-11-01 with the pod to itself, and
+// 2m17.2s on 2026-11-03 beside another role's tests on it
+// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays).
+const maxAdmissionHold = 2 * time.Minute
+
+// holdArtifactAdmission makes the document's next socket wait the request's ms before its
+// admission, or takes back such a hold for zero (docs.Service.HoldNextAdmissionForTest).
+// Test-only: mounted by routes() only when Deps.TestHooksEnabled is set, so a browser test can keep
+// a document's first sync waiting as long as a browser in a burst waits for its room.
+func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	// The id is resolved before the body is read, as every other {id} route does: an id nothing
+	// carries answers 404 ARTIFACT_NOT_FOUND whatever the body says, which is the contract
+	// idRoutes names for this route (TestEveryResolvingIDRouteAnswersTheNotFoundItNames).
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var input struct {
+		MS int64 `json:"ms"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.MS < 0 || input.MS > maxAdmissionHold.Milliseconds() {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest, fmt.Sprintf("ms is how long the next socket waits, from 0 to %d", maxAdmissionHold.Milliseconds()))
+		return
+	}
+	wait := time.Duration(input.MS) * time.Millisecond
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	s.deps.Docs.HoldNextAdmissionForTest(artifact.ID, wait)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// refuseNextDocumentUpdate arms the document's room to refuse the next update a read-write
+// browser sends it as one whose walk it refuses (docs.Service.RefuseNextPeerUpdateForTest).
+// Test-only: mounted by routes() only when Deps.TestHooksEnabled is set, so a browser test can
+// drive 4413 DOC_UPDATE_REFUSED from the editor, which never sends content the walk refuses.
+func (s *server) refuseNextDocumentUpdate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	s.deps.Docs.RefuseNextPeerUpdateForTest(artifact.ID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// useUpScanTotal and tangleBeyondOneApply are the two document test hooks' handlers, each the
+// shared body below with one of docs.API's hooks. Each route names a method of its own rather
+// than a handler this file builds, so the static guards that read the routes table resolve the
+// handler behind every row (keyed_write_guard_test.go, copy_lock_test.go).
+func (s *server) useUpScanTotal(w http.ResponseWriter, r *http.Request) {
+	s.runDocumentTestHook(w, r, docs.API.UseUpScanTotalForTest)
+}
+
+func (s *server) tangleBeyondOneApply(w http.ResponseWriter, r *http.Request) {
+	s.runDocumentTestHook(w, r, docs.API.TangleBeyondOneApplyForTest)
+}
+
+// runDocumentTestHook answers a POST that runs run, one of docs.API's document test hooks, on the
+// request's artifact: the caller must be authenticated, the artifact must be a document
+// (NOT_DOCUMENT), and a hook that returns an error answers it as every handler answers one. run is
+// a method expression of docs.API, so the caller names the hook without reading Deps.Docs, which
+// routes() is called with unset (TestRoutesTablePinsEveryRegisteredRoute).
+// Test-only: the rows that mount its two callers are appended by routes() only when
+// Deps.TestHooksEnabled is set. They are the used-up row (docs.Service.UseUpScanTotalForTest,
+// which gives the document a stored history whose re-scan uses up a room's scan total, closing
+// its room first, so a browser test can drive the editor's handling of DOC_NEEDS_REBUILD and the
+// rebuild it offers without typing the 1,000,000 scans a real room takes) and the tangled row
+// (docs.Service.TangleBeyondOneApplyForTest, which gives it a stored history ending in a tangle
+// no one apply of a browser's may scan through, so a browser test can drive 4413 DOC_TOO_TANGLED
+// without making the tens of thousands of items at one place a browser would have to meet for an
+// honest apply to pass the scans one apply is allowed).
+func (s *server) runDocumentTestHook(w http.ResponseWriter, r *http.Request, run func(service docs.API, ctx context.Context, artifactID string) error) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	if err := run(s.deps.Docs, r.Context(), artifact.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

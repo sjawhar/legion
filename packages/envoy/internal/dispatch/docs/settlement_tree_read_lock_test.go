@@ -24,7 +24,7 @@ func TestTheSettlementTreeReadWalksTheReplicaUnderItsLock(t *testing.T) {
 	}
 	log := live.OpenUpdateLog()
 	defer log.Close()
-	replica := service.keepReplica(live, log, nil)
+	replica := service.keepReplica(live, log, nil, nil)
 	// A commit of its own gives the replica the room's state to follow: without it the tree read
 	// decodes the copy taken from the room itself (stateTree) and walks no replica at all.
 	typeIntoLastParagraph(t, live, "first ")

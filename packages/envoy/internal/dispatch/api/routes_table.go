@@ -121,6 +121,10 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/artifacts/{id}/versions":                          scopeProject,
 	"POST /api/v1/artifacts/{id}/edits":                             scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":              scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/hold-admission":              scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/refuse-next-update":          scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/used-up":                     scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/tangled":                     scopeProject,
 	"POST /api/v1/artifacts/{id}/_test/hold-persistence":            scopeProject,
 	"PUT /api/v1/artifacts/{id}/_test/live-write-pauses/{point}":    scopeProject,
 	"DELETE /api/v1/artifacts/{id}/_test/live-write-pauses/{point}": scopeProject,
@@ -183,6 +187,7 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
 	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
 	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
+	"POST /api/v1/artifacts/_test/room-budget":             scopeDeployment,
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
@@ -251,6 +256,11 @@ var idRoutes = map[string]idRoute{
 	// reads the row through loadArtifact, which answers ARTIFACT_NOT_FOUND.
 	"GET /api/v1/artifacts/{id}":                             {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/_test/outside-schema":       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"GET /api/v1/artifacts/{id}/_test/live":                  {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/hold-admission":       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/refuse-next-update":   {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/tangled":              {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
+	"POST /api/v1/artifacts/{id}/_test/used-up":              {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/approval-requests":          {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"GET /api/v1/artifacts/{id}/asks":                        {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
 	"POST /api/v1/artifacts/{id}/asks":                       {Kind: "artifact", NotFound: "ARTIFACT_NOT_FOUND"},
@@ -650,7 +660,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authAny, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authAny, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
-		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authAny, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authAny, "Rebuild a document's history into one fresh update: a history ygo cannot load, from its latest saved markdown or supplied {markdown}; a history so near the decode cap or the edit-scan total that every write is refused, from its own text or supplied markdown, closing its room in this server first, whose connected browsers drop their unsent edits; 409 DOCUMENT_LIVE for any other document live in this server, 409 DOCUMENT_LOADS for any other history that loads.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authAny, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread, and reviews every document that ask named.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/plan-reviews", authAny, "Record a plan review's approval of a plan version: {version}, on an issue's plan.md alone (409 NOT_PLAN_DOCUMENT otherwise). A plan is never sent to a person for approval, so POST /api/v1/artifacts/{id}/approval-requests refuses it with 409 PLAN_APPROVED_BY_REVIEW; a later plan version makes this approval stale, as a spec's goes stale.", s.createArtifactPlanReview},
@@ -695,17 +705,25 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/signins/{id}/revoke", authAny, "End one of the caller's own sign-ins: that machine trades no token for them again and every access token already minted under it ends, while their sign-ins on other machines keep working. A sign-in of anyone else is an unknown id.", s.revokeSignIn},
 		{http.MethodGet, "/api/v1/credentials/capabilities", authAny, "What the credential pages may offer against this deployment's secrets broker, relayed from the broker's own RFC 8414 metadata rather than from any Dispatch setting: machine_code_page says whether the broker still serves the device grant, so whether a machine ever prints a code for a person to type.", s.getCredentialCapabilities},
 	}
-	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks (the 1st, 2nd, 3rd
-	// and 5th below) act on every process serving the database, answering once each has
-	// (test_hooks_fanout.go); outside-schema (the 4th) writes the stored history, which every
-	// process reads, and the room, room-counter, persistence and live-write hooks and the
-	// slow-write arm (the last) each act on the process whose call they land on.
+	// The live-socket disconnect, live-socket rotate, quiesce and publish hooks act on every
+	// process serving the database, answering once each has (test_hooks_fanout.go);
+	// outside-schema, used-up and tangled write the stored history, which every process reads;
+	// and the room, room-budget, room-counter, live, hold-admission, refuse-next-update,
+	// persistence and live-write hooks and the slow-write arm each act on the process whose call
+	// they land on, so each runs only where its call lands.
 	if s.deps.TestHooksEnabled {
 		rows = append(rows,
 			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket on every process with 1012, as a restart does.", s.disconnectLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket on every process with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document on every process and finish the settlements in flight.", s.quiesceDocuments},
+			routeRow{http.MethodPost, "/api/v1/artifacts/_test/room-budget", authAny, "Test hook: set the open documents' memory budget to bytes (0 restores the real one), so a browser test can fill it.", s.setRoomBudget},
+			routeRow{http.MethodGet, "/api/v1/artifacts/_test/room-charges", authAny, "Test hook: what the room budget charges each room it holds a charge for, beside its own figures, {charges, used, limit}.", s.roomCharges},
 			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-admission", authAny, "Test hook: make the document's next socket wait ms before its admission, as a browser in a burst waits for its room (0 takes the hold back).", s.holdArtifactAdmission},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/refuse-next-update", authAny, "Test hook: make the document's room refuse the next update a read-write browser sends it, as it refuses one whose walk it refuses.", s.refuseNextDocumentUpdate},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/used-up", authAny, "Test hook: close the document's room and append a stored history whose re-scan uses up a room's scan total.", s.useUpScanTotal},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/tangled", authAny, "Test hook: close the document's room and append a tangle no one apply of a browser's may scan through.", s.tangleBeyondOneApply},
 			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authAny, "Test hook: publish one frame to a session's conversation viewers on every process.", s.publishAgentStreamFrame},
 			routeRow{http.MethodGet, "/api/v1/artifacts/_test/rooms", authAny, "Test hook: list the documents this process holds a room of.", s.listResidentRooms},
 			routeRow{http.MethodGet, "/api/v1/artifacts/{id}/_test/room-counters", authAny, "Test hook: count this process's room failures, lock-waiting compactions and room closes of a document, time its settlement resumptions of it, and read the awareness client entries its room holds now.", s.getRoomCounters},

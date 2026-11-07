@@ -12,7 +12,9 @@ import (
 
 // roomServer is the service's ygo server. Its CloseRoom shadows ygo's, so every close of a room
 // the service makes waits for each repair committing into the room (holdOpen) to hand its update
-// to the room's persistence, and holds off new repairs until the room is closed.
+// to the room's persistence, and holds off new repairs until the room is closed. Its Apply
+// shadows ygo's, so each Apply holds its room against the room budget's close while it is inside
+// its callback (closeUnused), and the room is looked at once the Apply has returned (applied).
 //
 // A settlement writes its repairs while it holds the document's advisory lock, and ygo hands a
 // commit's update to the room's persistence inside the commit. Were the room's persistence worker
@@ -45,6 +47,10 @@ type roomServer struct {
 	// gates holds a room's closeGate only while a close or a repair holds it or waits for it: the
 	// last of them to let go removes it (releaseGate), so no gate outlives the work on its room.
 	gates map[string]*closeGate
+	// applied is handed the room of each Apply once it has returned: the service's close of a room
+	// its own work opened over the room budget (Service.closeIfOpenedOverBudget). Nil looks at
+	// nothing.
+	applied func(room string)
 }
 
 // closeGate is a room's gate between the repairs committing into the room, which hold it shared,
@@ -54,6 +60,12 @@ type roomServer struct {
 type closeGate struct {
 	sync.RWMutex
 	holders int
+	// applies is held shared by each Server.Apply on the room for as long as it is inside its
+	// callback (roomServer.Apply), and taken exclusively, and only ever tried, by the room
+	// budget's close (closeUnused), so that close never takes the room out of the server while an
+	// Apply is writing it. A repair's Apply takes none of it (applyRepair): it holds the gate
+	// itself for the span its write needs (applySuppressed, holdOpen).
+	applies sync.RWMutex
 }
 
 func newRoomServer(server *websocket.Server) *roomServer {
@@ -62,7 +74,10 @@ func newRoomServer(server *websocket.Server) *roomServer {
 
 // CloseRoom closes room through ygo's CloseRoom once no repair is committing into it, holding
 // off every repair while it closes, and once no caller is inside it (closeWhenFree). A caller
-// inside its own Apply on room must not call it: it would wait for itself.
+// inside its own Apply on room must not call it: it would wait for itself, which is why the
+// service's eviction from inside an Apply's own callback (afterReadWarm) closes through
+// closeInstance instead. The closes that meet a healthy room an Apply may be writing, and that
+// wait for nothing, are the room budget's (closeUnused).
 func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.closeRoom(context.Background(), room, force)
 }
@@ -133,6 +148,83 @@ func (r *roomServer) closeHeld(room string, attempt func() error) error {
 	err := attempt()
 	if err == nil && r.afterClose != nil {
 		r.afterClose(room)
+	}
+	return err
+}
+
+// closeUnused is the room budget's close (sweepRooms, closeIfOpenedOverBudget) and the rebuild's
+// of the room whose history it replaces (Service.evictBeforeRebuild): CloseRoom unless a caller
+// is inside the room, when it closes nothing and answers false, for its caller to leave the room
+// pending as it leaves one a writer or a settlement holds (unusedLocked), or to refuse its
+// rebuild. before, for a caller that has work to do only once the close is certain - the
+// rebuild's invalidation of what the room's state has armed - runs under the hold and before the
+// close; nil for a caller with none. The close itself is one the service makes, so it goes
+// through closeHeld and runs the service's own close hooks with it.
+//
+// A caller inside the room is refused in two places. A Server.Apply inside its callback on the
+// room holds the gate's applies lock (roomServer.Apply), which this only tries, so a sweep that
+// meets one leaves the room without running before and without asking ygo at all. Every other
+// caller - a browser joining, a relay's Inject, an Apply that has not taken the hold yet - is
+// ygo's to refuse: its CloseRoom answers websocket.ErrRoomInUse while any of them is inside the
+// room (reearth/ygo#342), which is this same answer and not a failure, so the budget counts the
+// room still charged and sweeps it again rather than reporting an eviction that did not happen.
+// Only ygo's refusal comes after before has run, and the room it leaves standing is one before
+// has already made ready for a close that then did not happen, so its caller has that to undo:
+// the rebuild arms again the settlement its invalidation ended (evictBeforeRebuild,
+// invalidateForEviction) before it refuses its whole rebuild for its caller to retry
+// (RebuildDocument) rather than carrying on.
+//
+// It gives up rather than waits, so no apply ever waits for a close: a repair's apply waiting for
+// one would close the cycle through the room's persistence worker that the gate is there to break
+// (roomServer), and the service evicts from inside an apply's own callback (afterReadWarm). An
+// apply that has not taken the hold yet has not reached ygo's Apply either, so it loads the room
+// the close leaves rather than writing the one it took. The room is swept again once that apply
+// ends: roomServer.Apply hands it to applied, and Service.unlockState kicks the budget.
+func (r *roomServer) closeUnused(room string, before func()) (bool, error) {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	if !gate.applies.TryLock() {
+		return false, nil
+	}
+	defer gate.applies.Unlock()
+	if before != nil {
+		before()
+	}
+	gate.Lock()
+	defer gate.Unlock()
+	if err := r.closeHeld(room, func() error { return r.Server.CloseRoom(room, true) }); err != nil {
+		if errors.Is(err, websocket.ErrRoomInUse) {
+			return false, nil
+		}
+		return true, err
+	}
+	return true, nil
+}
+
+// Apply runs fn in room through ygo's Apply holding the room against the room budget's close
+// (closeGate.applies, closeUnused), then hands room to applied: a room the Apply loaded is
+// published once the Apply's load has returned, and some openers - a snapshot read, a live tree's
+// read, a warm-up - hold nothing of the room's state while they use it, so the end of their Apply
+// is the moment their use of it ends. The hold is released before applied, which can close the
+// room.
+func (r *roomServer) Apply(ctx context.Context, room string, fn func(doc *crdt.Doc, transact func(func(*crdt.Transaction)))) error {
+	gate := r.acquireGate(room)
+	gate.applies.RLock()
+	err := r.Server.Apply(ctx, room, fn)
+	gate.applies.RUnlock()
+	r.releaseGate(room, gate)
+	if r.applied != nil {
+		r.applied(room)
+	}
+	return err
+}
+
+// applyRepair is Apply for a repair committing into the room (applySuppressed), which holds the
+// close gate itself over the span its write needs (holdOpen) and must never wait for a close.
+func (r *roomServer) applyRepair(ctx context.Context, room string, fn func(doc *crdt.Doc, transact func(func(*crdt.Transaction)))) error {
+	err := r.Server.Apply(ctx, room, fn)
+	if r.applied != nil {
+		r.applied(room)
 	}
 	return err
 }

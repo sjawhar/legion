@@ -147,11 +147,12 @@ func (fixture *roomLoadFixture) run(b *testing.B) {
 		if _, err := adapter.LoadDoc(fixture.artifactID); err != nil {
 			b.Fatal(err)
 		}
-		state := service.takeLoadedState(fixture.artifactID)
-		if err := service.bootstrapLoadedState(fixture.artifactID, newDocumentCopy(), state); err != nil {
+		taken, _ := service.takeLoadedState(fixture.artifactID)
+		if err := service.bootstrapLoadedState(fixture.artifactID, newDocumentCopy(), taken.state); err != nil {
 			b.Fatal(err)
 		}
-		stateBytes = len(state)
+		taken.slot.release()
+		stateBytes = len(taken.state)
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(fixture.rows), "rows/op")

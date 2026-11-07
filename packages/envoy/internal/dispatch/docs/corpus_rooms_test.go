@@ -57,7 +57,9 @@ func driveCorpusRooms(t *testing.T, compare func(at corpusRoom)) (comparisons, d
 			t.Fatalf("load %s into a room: %v", name, err)
 		}
 		log := live.OpenUpdateLog()
-		replica := service.keepReplica(live, log, nil)
+		// A room whose load hands the replica no copy (keepReplica): the replica starts holding
+		// no state, which is the read path this drives before the room's first transaction.
+		replica := service.keepReplica(live, log, nil, nil)
 
 		compare(corpusRoom{service, replica, name, live, name + ": a room with no transaction"})
 		comparisons++

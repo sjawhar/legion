@@ -16,15 +16,47 @@ export interface PendingState {
   rebuiltAt: number | undefined;
   /** Whether this browser has an IndexedDB store for these edits. */
   stored: boolean;
+  /**
+   * Whether the rows this browser holds have waited longer than `UNSENT_NOTICE_MS` for the
+   * server to take one of its frames: the edits are saved here and have not reached Dispatch.
+   */
+  unsent: boolean;
 }
+
+/**
+ * How long the rows this browser holds may wait for the server to take one of its frames before
+ * a person is told the edits have not reached Dispatch. One frame's round trip on this pod is
+ * 31 ms at the median of a keystroke, 176 ms at the 90th percentile and 539 ms at the 99th, and
+ * no single frame a room sends is larger than 64 KiB, so two seconds is close to four of the
+ * slowest round trips and longer than the wait any one frame costs: typing never reaches it, and
+ * a handover or an acknowledgement that has stopped always does. The wait starts over every time
+ * the server takes a frame, so a person typing steadily is never named either.
+ */
+export const UNSENT_NOTICE_MS = 2_000;
 
 export interface PendingSync {
   /** Starts a fresh acknowledgement sequence for a newly opened socket. */
   socketOpened(): void;
   /** Counts a SyncStep2 or Update frame that actually reached the socket. */
   frameWritten(frame: Uint8Array): void;
-  /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
-  frameReceived(frame: Uint8Array): Promise<void>;
+  /**
+   * Pairs an incoming SyncStatus frame with the next counted sent frame, and reports the flag it
+   * read: whether the server applied the frame it acknowledges, and `undefined` for a frame that
+   * is no SyncStatus, one that does not parse and one this sync is destroyed for. It is the one
+   * parse of the frame, so a caller watching for the server to take a frame again reads it here
+   * (`connection.ts`, `onBusy`).
+   */
+  frameReceived(frame: Uint8Array): Promise<boolean | undefined>;
+  /**
+   * Deletes the saved row of the Update frame this socket's server last answered as not applied,
+   * once `restored` - this admission's restore (`synced`) - has settled, so the rows that restore
+   * replaced are gone before the document is rebuilt. The frame is taken when this is called, from
+   * the socket the server has just closed with `DOCUMENT_TOO_LARGE_CLOSE_CODE` after that answer:
+   * the edit would take the document past its size bound, so resending it can only earn the same
+   * refusal. A plain not-applied answer drops nothing, which is what keeps a read-only admission's
+   * rows.
+   */
+  dropRefused(restored: Promise<void>): Promise<void>;
   /**
    * Takes the current socket's admission as it authenticates: whether it is read-only decides from
    * then on whether a local update is a person's edit to store. Restoring and pruning the stored
@@ -62,6 +94,20 @@ export interface PendingSyncOptions {
 
 function equals(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+/**
+ * The flag of a SyncStatus frame: true when the server applied the frame it answers, false when it
+ * did not, and undefined for any other frame. Throws for a frame that does not parse.
+ */
+export function readSyncStatus(frame: Uint8Array): boolean | undefined {
+  const decoder = createDecoder(frame);
+  readField(decoder); // the document name
+  if (readVarUint(decoder) !== MessageType.SyncStatus) {
+    return undefined;
+  }
+  // The server writes the flag as a VarUint: 1 applied, 0 not applied.
+  return readVarUint(decoder) === 1;
 }
 
 function covers(
@@ -293,6 +339,19 @@ export function startPendingSync({
   let recordedThrough = 0;
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
+  let refused: SentFrame | undefined;
+  // Whether the rows this browser holds have waited out `UNSENT_NOTICE_MS` without the server
+  // taking a frame, and the timer that is counting that wait down.
+  let unsent = false;
+  let unsentWait: ReturnType<typeof setTimeout> | undefined;
+  /** Starts the wait over: the server has taken a frame, or this browser holds no row. */
+  const restartUnsentWait = (): void => {
+    if (unsentWait !== undefined) {
+      clearTimeout(unsentWait);
+      unsentWait = undefined;
+    }
+    unsent = false;
+  };
 
   const ready = store
     .catch((error: unknown) => {
@@ -333,18 +392,30 @@ export function startPendingSync({
         // asks for a fresh one as soon as it settles, whether the store takes the row or
         // refuses it (`record`).
         if (countedThrough !== recordedThrough) continue;
+        if (count === 0) {
+          // Everything this browser held has reached the server, so nothing is waiting.
+          restartUnsentWait();
+        } else if (!unsent && unsentWait === undefined) {
+          unsentWait = setTimeout(() => {
+            unsentWait = undefined;
+            unsent = true;
+            void report();
+          }, UNSENT_NOTICE_MS);
+        }
         const state: PendingState = {
           count,
           readOnly,
           rebuiltAt,
           stored: edits !== undefined,
+          unsent,
         };
         if (
           lastState === undefined ||
           lastState.count !== state.count ||
           lastState.readOnly !== state.readOnly ||
           lastState.rebuiltAt !== state.rebuiltAt ||
-          lastState.stored !== state.stored
+          lastState.stored !== state.stored ||
+          lastState.unsent !== state.unsent
         ) {
           lastState = state;
           onChange(state);
@@ -584,6 +655,17 @@ export function startPendingSync({
       const handled: PendingKey[] = [];
       const rerecorded: Promise<void>[] = [];
       for (const row of restored) {
+        // The admission this restore began for can turn read-only while it runs - the issue
+        // closed, and this socket was admitted again read-only. From then on no local update is
+        // a person's edit to store (`onUpdate`), so applying the rows left would record nothing
+        // in their place while `handled` still took them out of the store: the person's only
+        // copy of an edit, gone, with nothing sent and no word said. The rows left stay for the
+        // next writable admission, which this forgets having settled so that `synced` restores
+        // them rather than take the admission as one it has already answered.
+        if (readOnly !== admittedReadOnly) {
+          syncedReadOnly = undefined;
+          break;
+        }
         handled.push(row.key);
         if (addsParking(scratch, row.update)) {
           rebuiltAt = Math.min(rebuiltAt ?? row.at, row.at);
@@ -617,6 +699,7 @@ export function startPendingSync({
     socketOpened() {
       if (!destroyed) {
         sent = [];
+        refused = undefined;
       }
     },
     frameWritten(frame) {
@@ -646,30 +729,31 @@ export function startPendingSync({
     },
     async frameReceived(frame) {
       if (destroyed) {
-        return;
+        return undefined;
       }
-      let applied: boolean;
+      let applied: boolean | undefined;
       try {
-        const decoder = createDecoder(frame);
-        readField(decoder); // the document name
-        if (readVarUint(decoder) !== MessageType.SyncStatus) {
-          return;
-        }
-        // The server writes the flag as a VarUint: 1 applied, 0 not applied.
-        applied = readVarUint(decoder) === 1;
+        applied = readSyncStatus(frame);
       } catch (error) {
         console.error("Could not parse a document SyncStatus frame", error);
-        return;
+        return undefined;
+      }
+      if (applied === undefined) {
+        return undefined;
       }
       const entry = sent.shift();
       if (entry === undefined) {
         console.error("The document server acknowledged a frame this browser did not send.");
-        return;
+        return applied;
       }
       if (!applied) {
+        refused = entry;
         await Promise.all(recorded.map((record) => record.written));
-        return;
+        return applied;
       }
+      // The server took a frame of this browser's, so whatever is still saved here has not been
+      // waiting on a silent server: the wait starts over.
+      restartUnsentWait();
       try {
         if (entry.kind === "update") {
           await clearUpdate(entry);
@@ -678,6 +762,23 @@ export function startPendingSync({
         }
       } catch (error) {
         console.error("Could not clear an acknowledged pending document edit", error);
+      }
+      return applied;
+    },
+    async dropRefused(restored) {
+      const entry = refused;
+      refused = undefined;
+      await restored;
+      // A refused SyncStep2 carries every row at once and names none of them, so its rows stay:
+      // the rebuilt document replays each restored row as an Update of its own, and the one the
+      // server refuses then is the one dropped.
+      if (destroyed || entry?.kind !== "update") {
+        return;
+      }
+      try {
+        await clearUpdate(entry);
+      } catch (error) {
+        console.error("Could not drop a refused pending document edit", error);
       }
     },
     authenticated(nextReadOnly) {
@@ -693,6 +794,7 @@ export function startPendingSync({
         return;
       }
       destroyed = true;
+      restartUnsentWait();
       derived = [];
       doc.off("update", onUpdate);
       void ready.then((edits) => edits?.close());

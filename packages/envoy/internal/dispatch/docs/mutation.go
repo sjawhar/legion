@@ -17,7 +17,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -82,24 +81,29 @@ type liveOperation struct {
 // (ErrServiceUnavailable) and a context Join did not return (errUnjoined), then takes the
 // transaction's write to the document (joinLiveWrite) and brings that write's fork up to date with
 // the room (forkLive). The caller defers the operation's abandon once it is open.
-func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liveOperation, error) {
+//
+// It answers the context the rest of the operation runs under: ctx carrying the write's load
+// slot (liveWrite.carriedBy), so every decode and copy the operation makes - the decode-cap copy
+// of the room its fork was read from, above all (structsAfter) - covers that one slot rather
+// than take a second inside it. The fork's build took it already, for the fork's whole life.
+func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liveOperation, context.Context, error) {
 	if s.shuttingDown(artifactID) {
-		return liveOperation{}, ErrServiceUnavailable
+		return liveOperation{}, ctx, ErrServiceUnavailable
 	}
 	tx, joined := txFromContext(ctx)
 	if !joined {
-		return liveOperation{}, errUnjoined
+		return liveOperation{}, ctx, errUnjoined
 	}
 	ledger := ledgerFrom(ctx)
 	write, err := s.joinLiveWrite(ctx, ledger, artifactID)
 	if err != nil {
-		return liveOperation{}, err
+		return liveOperation{}, ctx, err
 	}
 	fork, err := s.forkLive(ctx, write)
 	if err != nil {
-		return liveOperation{}, err
+		return liveOperation{}, ctx, err
 	}
-	return liveOperation{tx: tx, write: write, fork: fork, read: write.forkRead}, nil
+	return liveOperation{tx: tx, write: write, fork: fork, read: write.forkRead}, write.carriedBy(ctx), nil
 }
 
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
@@ -159,11 +163,15 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // read cold; marginRoom is the room a margin write's fork was warm-built from, which its publish
 // tags the update against, and the zero pointer for every other write.
 func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, actor model.Actor, rendered renderedTree, contentChanged bool, rendering publishedRendering, marginRoom weak.Pointer[crdt.Doc]) error {
-	// Every write is refused when the live state it leaves could not be decoded, the one check
-	// that decodes a whole second copy of the document. The caller has let go of whatever tree it
-	// held from before the change, so the decode runs beside the fork and the tree the change left,
-	// not a third tree (LEGION-504).
-	if err := refuseUndecodable(op.fork); err != nil {
+	// Every write is refused when the live state its transaction would leave the room is past the
+	// decode cap, the one check that copies a whole document once the room's own struct total and
+	// what the transaction added to its fork pass the cap: the room's, or the fork's where no
+	// room is behind it (refuseUndecodable). The caller has let go of whatever tree it held from
+	// before the change, so the copy runs beside the fork and the tree the change left, not a
+	// third tree (LEGION-504). Only a room the total leaves within what the transaction adds of
+	// the cap is copied at all, for the one count, as the three server writes copy it
+	// (structsAfter).
+	if err := s.refuseUndecodable(ctx, op.write, op.fork, op.updates); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(op.updates)
@@ -259,7 +267,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error) error {
-	op, err := s.openLiveOperation(ctx, artifactID)
+	op, ctx, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
 	}
@@ -372,7 +380,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return err
 	}
 	// The tree before the write has served every use it has, so it is let go before the record's
-	// decode check (LEGION-504).
+	// decode-cap check (LEGION-504).
 	before, weighedFrom = pmdoc.ValidDocument{}, nil
 	// What the room's update observer can take in place of rendering the room after this update
 	// (publishedRendering): this operation's rendering and its layout, when its fork was read warm.
@@ -442,7 +450,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 // A marks-map Set always adds an item, so the write always changes the fork: unlike applyLive it
 // never answers websocket.ErrNoChanges. A panic in it is its error (recoverMutation), as there.
 func (s *Service) applyMargin(ctx context.Context, artifactID string, actor model.Actor, markID string, record map[string]any) error {
-	op, err := s.openLiveOperation(ctx, artifactID)
+	op, ctx, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
 	}
@@ -963,15 +971,22 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 }
 
 // loadTree is the tree of the document a socket's admission check reads (heldTree, else the stored
-// document decoded), with the durable state it decoded the document from, nil when this server
-// holds the document. A durable history that does not decode is ErrDocumentUnloadable and fails
-// the room, as ygo's own load of it would.
-func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *persistence.LoadResult, error) {
+// document decoded), with the durable state it read and that decode (loadDecodedHistory): the copy
+// and what its conflict scans passed, which the room's load takes for its scan total and its
+// replica (preloadedDocument, LoadDoc), so the admission's decode is the load's own. The preload is
+// nil when this server holds the document. A durable history that does not decode is
+// ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
+//
+// The read's fold, when the history holds several updates, and the decode run under one slot of
+// the pod's load concurrency (loadSlots), whose wait ends with ctx, the socket's request: one
+// that ends first answers ctx's error and holds no slot. The slot is given back once the copy
+// is the preload's, and before the room fails, whose eviction can wait.
+func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node, *preloadedDocument, error) {
 	tree, held, err := s.heldTree(ctx, artifactID)
 	if err != nil || held {
 		return tree, nil, err
 	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	history, err := loadDecodedHistory(ctx, s.persistence, artifactID, s.maxPendingItems, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
@@ -979,18 +994,17 @@ func (s *Service) loadTree(ctx context.Context, artifactID string) (*pmdoc.Node,
 		s.failRoom(artifactID, err)
 		return nil, nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
-	if len(loaded.Update) == 0 {
-		return nil, &loaded, nil
-	}
-	doc := newDocumentCopy()
-	if err := decodeStoredState(doc, loaded.Update); err != nil {
+	if history.refused != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
-		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", history.refused))
+		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, history.refused)
 	}
-	tree, err = treeOf(doc)
-	return tree, &loaded, err
+	if len(history.loaded.Update) == 0 {
+		return nil, &preloadedDocument{loaded: history.loaded}, nil
+	}
+	tree, err = treeOf(history.decoded.doc)
+	return tree, &preloadedDocument{loaded: history.loaded, decoded: history.decoded}, err
 }
 
 func renderTokenTree(tree *pmdoc.Node) (string, string, error) {
@@ -1761,8 +1775,27 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if _, err := s.joinRead(ctx, room); err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	if err := s.warmLiveDocument(ctx, room); err != nil {
-		return renderedTree{}, authorCapture{}, err
+	// The warm-up loads the room where none holds the document, and does so only while the room
+	// budget has an opening for it (roomBudget.openServerRoom): a burst of whole-text writes -
+	// an upload apiece to a document apiece - would otherwise load a room for each of them at
+	// once, each charged to a budget that refuses the server's own work nothing (roomBudget).
+	// Without an opening the version is taken from the stored document instead, which is the
+	// path a room behind the head already takes below (behind): the store holds every update,
+	// and a document no room holds has no in-flight credit of its own to list
+	// (withoutInflight). The opening is taken without waiting for one, since this runs inside
+	// the caller's write transaction and holds one of the shared pool's connections.
+	fromStore := false
+	if !s.roomHoldsDocument(room) {
+		if s.budget.openServerRoom(room) {
+			defer s.budget.closeServerRoom()
+		} else {
+			fromStore = true
+		}
+	}
+	if !fromStore {
+		if err := s.warmLiveDocument(ctx, room); err != nil {
+			return renderedTree{}, authorCapture{}, err
+		}
 	}
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
@@ -1788,14 +1821,16 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var read []byte
 	var point roomPoint
 	var readErr error
-	var behind bool
-	err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
-			behind = true
-			return
-		}
-		read, point, _, readErr = s.readPoint(room, live)
-	})
+	behind := fromStore
+	if !fromStore {
+		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
+				behind = true
+				return
+			}
+			read, point, _, readErr = s.readPoint(room, live)
+		})
+	}
 	if readErr != nil {
 		return renderedTree{}, authorCapture{}, readErr
 	}

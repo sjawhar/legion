@@ -16,6 +16,11 @@ import (
 const fragmentName = "prosemirror"
 const marksMapName = "marks"
 
+// retiredMapName is the root under which a rebuilt history lists the clients and clocks of the
+// history it replaced, so a browser still holding that history cannot hand it back (rebuiltSeed,
+// weighPeerUpdate). Only a rebuild writes it, and no rendering reads it.
+const retiredMapName = "retired"
+
 var (
 	ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 	ErrDocSchema       = errors.New("document is outside the Proof schema")
@@ -393,7 +398,7 @@ func renderFragmentMarkdown(fragment *crdt.YXmlFragment) (string, error) {
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (sjawhar/ygo v1.55.1-sami.2, crdt/yxml.go:351-367) - and nothing writes the
+// walk takes no lock (sjawhar/ygo v1.55.1-sami.7, crdt/yxml.go:351-367) - and nothing writes the
 // copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
@@ -404,7 +409,11 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is newCappedDocumentCopy at maxUpdateItems, for a decode that runs for no
-// instance with a cap of its own below it.
+// instance with a cap of its own below it: a snapshot or a write's fork of a room this server
+// holds, a room load's copy of its stored history, which becomes the room's replica
+// (decodeStoredCopy), or one update the store decodes alone - a browser's, which no document here
+// encoded (appendUpdate), and one whose header names no single client's item count
+// (refuseUpdateItemCap).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return newCappedDocumentCopy(maxUpdateItems, options...)
 }
@@ -420,7 +429,9 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // repairs and sweeps are local commits, which never clean up; a write's publish and a browser's
 // update reach the room as remote applies, and the cleanup either makes is stored), so a copy that
 // cleaned up would hold a state the room never held - and a compaction that folded such a copy
-// would store it. A write's fork commits its own writes locally, which never clean up.
+// would store it. A write's fork commits its own writes locally, which never clean up. The room's
+// load decodes its stored state the same way (bootstrapLoadedState), so the room and the copy its
+// load decoded hold the same state.
 func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(documentCopyOptions(maxPending, options...)...)
 }
@@ -432,6 +443,133 @@ func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc 
 func documentCopyOptions(maxPending int, options ...crdt.DocOption) []crdt.DocOption {
 	return append(options, crdt.WithMaxPendingItems(maxPending), crdt.WithFormatCleanup(false))
 }
+
+// roomWeighing is what the peer update hook reads of a resident room to weigh a browser's update
+// (weighPeerUpdate): the room's charge in the room budget, the clients its history retires, the
+// allowance of each apply in flight, its scan total, the bytes of the rendering its replica last
+// published and the bytes of state it is tracked at. The room's document lists it strongly
+// (roomListing, listResident), so the hook finds it with one map load, and it holds no reference
+// to that document, so listing it strongly keeps no evicted room's document alive.
+//
+// It is a record of its own, and not the replica's own fields, because a keystroke must make no
+// weak pointer strong. The collector blocks every weak-to-strong conversion from the moment mark
+// termination begins (runtime/mgc.go:1020, runtime/mheap.go:2406-2420), and a termination that
+// finds more marking to do returns with that block still up, so the conversions it parked wait out
+// the rest of the mark phase: two to four seconds on this pod's two processors at the 3.4 GB heap
+// goal a full room budget leaves. A keystroke that read the replica through the listing's weak
+// pointer waited exactly that: 2.96 s and 3.23 s in one run of cmd/dispatch's
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, where the same step's other
+// keystrokes were answered in 14 to 55 ms.
+type roomWeighing struct {
+	// retired is the clients the room's history lists as retired by the rebuild that seeded it,
+	// each with the clock it had reached (retiredClientsOf), read once at the room's load: only
+	// a rebuild writes them, a rebuild replaces a history no room holds (RebuildDocument), and
+	// the roots a browser's update may name refuse any change to them (peerAllowedRoots). Nil
+	// for a room never rebuilt.
+	retired map[crdt.ClientID]uint64
+	// budgets is the allowance of each of the hook's applies in flight and the roots they may
+	// name (roomApplies); scans is the room's scan total and the budget of each remote apply's
+	// scans (roomScans). Both are made by the room's load (keepReplica).
+	budgets *roomApplies
+	scans   *roomScans
+	// bytes is the size of the replica's latest published rendering, published beside it, for
+	// the peer update hook to load (Service.weighPeerUpdate): the byte bound's measure of the
+	// document. The hook runs on the peer's read loop, where taking the replica's mu would put
+	// every browser in the room behind its load (AGENTS.md:559-562), so the measurement travels
+	// as an atomic rather than under the lock the rendering itself is kept under. It is
+	// sizeUnmeasured while the room has no rendering to measure, which is a document outside the
+	// schema.
+	bytes atomic.Int64
+	// state is the bytes of encoded state the room is tracked at: what the stored state its load
+	// decoded came to, plus the bytes of each update its observer has drained since, re-based by
+	// a compaction that folds the room's whole stored history into one row (roomWeight,
+	// renderedReplica.chargeAdded, Service.rebaseRoomState). The budget charges the room by it,
+	// and the hook bounds what each apply may add by what is left of maxRoomStateBytes above it,
+	// both without ever encoding the document.
+	state atomic.Int64
+	// charge is the room's charge in the room budget, which the room's load stores once it has
+	// made it (chargeLoadedRoom) and nothing replaces; nil until then, and for a room no load
+	// charged, a test's.
+	charge atomic.Pointer[roomCharge]
+}
+
+// roomCharge is the room's charge in the room budget, nil for a document no room's load listed and
+// for a room no load charged.
+func (w *roomWeighing) roomCharge() *roomCharge {
+	if w == nil {
+		return nil
+	}
+	return w.charge.Load()
+}
+
+// retiredClients is the clients the room's history lists as retired, nil for a room never
+// rebuilt and for a document no room's load listed.
+func (w *roomWeighing) retiredClients() map[crdt.ClientID]uint64 {
+	if w == nil {
+		return nil
+	}
+	return w.retired
+}
+
+// applies is the allowance of each of the hook's applies in flight in the room, nil for a
+// document no room's load listed, which bounds nothing and runs each apply as it is.
+func (w *roomWeighing) applies() *roomApplies {
+	if w == nil {
+		return nil
+	}
+	return w.budgets
+}
+
+// roomScans is the room's scan total, nil for a document no room's load listed.
+func (w *roomWeighing) roomScans() *roomScans {
+	if w == nil {
+		return nil
+	}
+	return w.scans
+}
+
+// roomStateBytes is the bytes of encoded state the room is tracked at (state), and zero for a
+// document no room's load listed, which is tracked at nothing: the hook then bounds its applies
+// by the whole of maxRoomStateBytes, as it weighs such a room against the byte bound on the
+// update's own bytes alone.
+func (w *roomWeighing) roomStateBytes() int64 {
+	if w == nil {
+		return 0
+	}
+	return w.state.Load()
+}
+
+// size is the room's last published measurement - the bytes of its rendering - and whether it has
+// one; no measurement at all for a document no room's load listed. It takes no lock, so a caller
+// on the peer's read loop holds up nobody for it.
+//
+// It is never stale: the update observer publishes it with the rendering itself, so it is as
+// recent as the room's last update observer. It does not make the document bound a ceiling
+// (weighPeerUpdate).
+func (w *roomWeighing) size() (bytes int64, measured bool) {
+	if w == nil {
+		return 0, false
+	}
+	bytes = w.bytes.Load()
+	return bytes, bytes != sizeUnmeasured
+}
+
+// roomListing is what a room's document is listed under while it is resident (listResident,
+// keepReplica): the weighing the peer update hook reads, held strongly, and the replica the room's
+// reads walk (readLive), held weakly, so that the replica - a whole copy of the document - is
+// collected with the document and in the same cycle. A read does make that weak pointer strong
+// (replicaOf), and waits where the collector blocks the conversion; it then holds the replica's
+// lock and walks the whole document, which is not a keystroke.
+type roomListing struct {
+	weighing *roomWeighing
+	replica  weak.Pointer[renderedReplica]
+}
+
+// sizeUnmeasured is what bytes holds for a room whose document renders no markdown to measure: a
+// document outside the Proof schema, which the socket path refuses to open in the first place
+// (refuseOutsideSchema) and which a live document can still fall into between two renders. The
+// hook admits an update on such a room; the room's next render settles it.
+const sizeUnmeasured = -1
 
 // emptyUpdateV1 is the V1 encoding of no structs and no delete ranges. ygo logs it beside Parked
 // for a commit that kept only parked bytes, and calls no OnUpdate for that commit

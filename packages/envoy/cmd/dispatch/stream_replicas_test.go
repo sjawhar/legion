@@ -40,7 +40,7 @@ const reconcileWait = 30 * time.Second
 
 // repairedReconcileWait bounds the wait for the reconcile after a test has repaired what the
 // first run failed on. reconcileWait alone is not enough: the bus retries the hooks with a
-// backoff that reaches 30 s (maxBackoff, internal/bus/recovery.go:309), so a repair that lands
+// backoff that reaches 30 s (the bus's maxBackoff), so a repair that lands
 // just after a failed attempt waits that backoff out before the next attempt runs.
 const repairedReconcileWait = reconcileWait + 30*time.Second
 

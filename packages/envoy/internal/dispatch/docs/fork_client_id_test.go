@@ -37,7 +37,7 @@ func TestAFirstForkTracksTheClientIDItsHistoryLeavesIt(t *testing.T) {
 				service.persistence = &forkHistoryStore{update: crdt.EncodeStateAsUpdateV1(room, nil)}
 				fork, err = service.coldFork(context.Background(), write, 1)
 			} else {
-				fork, err = service.warmFork(write, room)
+				fork, err = service.warmFork(context.Background(), write, room)
 			}
 			if err != nil {
 				t.Fatal(err)

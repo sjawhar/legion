@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	authelia.com/provider/oauth2 v0.3.3
 	cloud.google.com/go/secretmanager v1.22.0
+	github.com/KimMachineGun/automemlimit v1.0.1
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/aws/aws-sdk-go-v2 v1.47.4
 	github.com/aws/aws-sdk-go-v2/config v1.33.10
@@ -121,6 +122,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pb33f/go-yaml v0.1.1 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.2 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pganalyze/pg_query_go/v6 v6.2.5 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
@@ -155,6 +157,47 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261012220534-4341edf3f941 // indirect
 )
 
-// The fork keeps the upstream module path; consume its published tag through a remote
-// versioned replacement. RELEASE_NOTES.md in the tagged fork lists its upstream fixes.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.2
+// The sjawhar/ygo fork keeps the upstream module path; consume its published tag through a
+// remote versioned replacement. The fork is upstream ygo v1.55.0, through upstream main
+// 510c2cf5, plus fixes, each carried until upstream ships it; RELEASE_NOTES.md in the tagged
+// fork lists every member with its upstream pull request. Thirteen wait in open upstream pull
+// requests: pre-integration refusals change nothing,
+// and a partly applied update relays the bytes the room integrated and parked (#340, which
+// replaces #334, #341, #344, #345, #352, #356 and #357); when a non-local transaction advances a
+// document's own client clock, the document takes a new client ID at commit, so every write fork
+// reads that ID after decoding its history (#340, breaking);
+// peer memory is bounded and dead peers close - a per-peer write queue byte budget
+// (Server.PeerWriteQueueBytes, which the document service sets to peerWriteQueueBytes), a failed
+// write or a server close ends the peer and drops its unread input, a joining peer gets the
+// room's state once, and a room an Apply, a relay Inject or a join is inside is not closed under
+// it, so CloseRoom answers ErrRoomInUse and a caller closes the room from inside its own Apply
+// with CloseRoomWithin (#342, which replaces #339, #343, #358 and #366); OnUpdate fires only for
+// a transaction that changes the document, after its GC, and carries only that transaction's
+// deletions (#350); garbage
+// collection and type encoding match Yjs (#347); undo and redo restore what Yjs restores (#359);
+// CloseRoom closes a browser that joins while it runs (#331); a document logs each commit's
+// update, and what the commit parked, in commit order under its own lock (UpdateLog,
+// LoggedUpdate.Parked, #332), against which the room's update observer measures each update; a
+// remote update's scans can be bounded (#333); a map-valued text format no longer panics with the
+// lock held (#335); a transaction names the shared types it changed and every shared type its
+// container (ChangedTypes and Parent, #336), so the room's update observer renders only the
+// top-level blocks an update touched; awareness reaches its sending peer and a read-only peer gets
+// a bounded empty awareness response, so an idle provider stays connected (#338);
+// Server.OnTokenAuthContext, OnTokenAuth with the connection's request context, which Dispatch
+// does not set (#351); and WithFormatCleanup and Doc.SetFormatCleanup, which turn off the format
+// cleanup a remote apply runs, so a copy that replays the room's commit log (newDocumentCopy) and
+// a room loading its stored history (bootstrapLoadedState) make no commit the room never made
+// (#369). Two await upstream pull requests: a per-apply scan budget stacked on #333, which
+// Dispatch sets on every room's documents (roomScans.budget), and Doc.Clone, retained from
+// v1.54.1-sami.4, which copies a document without encoding or decoding it: a write's fork of its
+// room is that room's replica cloned (warmFork, forkPoint). Server.OnPeerUpdate, upstream ygo
+// #304, is in upstream v1.55.0; the document service sets it to weigh each browser's update
+// (weighPeerUpdate).
+// v1.55.1-sami.7 adds what this branch's memory work is built on: Doc.StructCount, the per-apply
+// ApplyBudget (Decoded, Structs, Bytes) with its rollback, WithAllowedRoots as a containment rule
+// over everything an apply adds or deletes, RefusedUpdateError's counts, ParseUpdateMeta and
+// ErrPendingCap, which together replaced 899 lines of update decoder in this package
+// (dispatch://INFRA-179), and the linear state handover split this branch's write path needs. It
+// also brings sami.2's and sami.3's breaking changes with it: Content.Len answers uint64 and
+// Content.Splice takes one.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.55.1-sami.7

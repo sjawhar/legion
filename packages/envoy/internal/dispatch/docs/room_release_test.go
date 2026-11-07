@@ -219,7 +219,14 @@ func newRoomReleaseService(t *testing.T) (*Service, *store.Store) {
 // owes no settlement.
 func createDocuments(t *testing.T, database *store.Store, n int) []string {
 	t.Helper()
-	tree, err := pmdoc.Parse("Room cap probe.")
+	return createDocumentsHolding(t, database, n, "Room cap probe.")
+}
+
+// createDocumentsHolding is createDocuments with source's document in place of the paragraph: its
+// Proof state stored, and a first version holding its rendering.
+func createDocumentsHolding(t *testing.T, database *store.Store, n int, source string) []string {
+	t.Helper()
+	tree, err := pmdoc.Parse(source)
 	if err != nil {
 		t.Fatalf("parse seed document: %v", err)
 	}
@@ -412,6 +419,15 @@ func perDocumentStateProblems(service *Service) []string {
 			return true
 		})
 	}
+	// The room budget charges a document while ygo holds its room, as the room state is kept,
+	// and nothing at all once the room has retired: it reserves nothing before a load.
+	service.budget.mu.Lock()
+	for room, entry := range service.budget.rooms {
+		if len(entry.charges) > 0 && !live[room] {
+			problems = append(problems, fmt.Sprintf("the room budget charges document %s, which has no live room", room))
+		}
+	}
+	service.budget.mu.Unlock()
 	service.suppressMu.Lock()
 	suppressed := len(service.suppressed)
 	service.suppressMu.Unlock()

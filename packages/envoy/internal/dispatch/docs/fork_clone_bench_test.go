@@ -31,7 +31,7 @@ func BenchmarkWriteFork(b *testing.B) {
 		service := &Service{}
 		options := forkOptions(forkWriteClient)
 		b.Run(name+"/state", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				var state []byte
@@ -44,7 +44,7 @@ func BenchmarkWriteFork(b *testing.B) {
 			}
 		})
 		b.Run(name+"/clone", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				var fork *crdt.Doc
@@ -55,7 +55,7 @@ func BenchmarkWriteFork(b *testing.B) {
 			}
 		})
 		b.Run(name+"/lock/state", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				doc := replica.hold()
@@ -67,7 +67,7 @@ func BenchmarkWriteFork(b *testing.B) {
 			}
 		})
 		b.Run(name+"/lock/clone", func(b *testing.B) {
-			replica := benchmarkReplica(b, service, live)
+			replica := observedReplica(b, service, live, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				doc := replica.hold()

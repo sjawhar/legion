@@ -450,9 +450,9 @@ func (s *panickingRoomLoadStore) Load(ctx context.Context, room string) (persist
 // A load that panics is failed where the panic is met, on the load's own goroutine and before ygo
 // closes the room's barrier (LoadDoc), as the store's refusal and a history the room's document
 // cannot take are failed there (loadableHistory, bootstrapLoadedState). It was once left to whichever
-// caller's Apply met ygo's recovery of it (sjawhar/ygo v1.55.1-sami.2,
-// provider/websocket/server.go:2004-2023), and such a caller can answer for no load: ygo removes
-// the room and closes its barrier before any waiter wakes (server.go:2025-2034), so the record
+// caller's Apply met ygo's recovery of it (sjawhar/ygo v1.55.1-sami.7,
+// provider/websocket/server.go:2010-2029), and such a caller can answer for no load: ygo removes
+// the room and closes its barrier before any waiter wakes (server.go:2031-2040), so the record
 // under the room's name by the time that caller looks can be a later load's, and failing that
 // room would fail the room the later load is building, while dropping its record would leave its
 // instance holding none, so the versions appended while it ran would reach no cursor
@@ -548,11 +548,11 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	preload := func(t *testing.T) []byte {
 		t.Helper()
 		_, loaded, err := service.loadTree(context.Background(), artifactID)
-		if err != nil || loaded == nil || len(loaded.Update) == 0 {
+		if err != nil || loaded == nil || len(loaded.loaded.Update) == 0 {
 			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
 		}
-		service.preloads.Store(artifactID, &preloadedDocument{loaded: *loaded})
-		return loaded.Update
+		service.preloads.Store(artifactID, loaded)
+		return loaded.loaded.Update
 	}
 	loadRoom := func(t *testing.T, want string) []byte {
 		t.Helper()

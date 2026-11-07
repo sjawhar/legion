@@ -209,7 +209,7 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 // history that already parks something answers false, as does an update it cannot apply.
 func storedHistoryHolds(ctx context.Context, tx pgx.Tx, room string, head int64, update []byte, maxPending int) (bool, error) {
 	version := persistence.Version(head)
-	doc, err := documentThrough(room, version, storedUpdates(ctx, tx, room, version), maxPending)
+	doc, err := documentThrough(ctx, room, version, storedUpdates(ctx, tx, room, version), maxPending)
 	if err != nil || doc == nil {
 		return false, err
 	}

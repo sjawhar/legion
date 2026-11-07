@@ -62,6 +62,11 @@ type Ledger struct {
 	// flushes are the room updates this transaction stored ahead of its own appends, one flush
 	// per document (flushThrough), which its commit marks stored.
 	flushes []*RoomFlush
+	// forks is this transaction's slot of the pod's load concurrency, shared by every live write
+	// it opens and taken on the first (forkSlot, liveWrite.coverFork): one slot for all its
+	// forks, so a transaction writing two documents never waits for a slot a fork of its own
+	// holds.
+	forks *forkSlot
 }
 
 // ledgerAnnouncement is one document a transaction appended to and the last version it appended.
@@ -367,7 +372,21 @@ func flushCapture(flush *RoomFlush) roomCapture {
 // the commit returns, with its error and the states still locked; a capture with no state locks
 // nothing. A commit that fails marks nothing: the room's persistence stores the flushed updates
 // later.
+//
+// A commit whose caller has already gone is not made at all. The caller's context ends when its
+// client closes the connection, and `dispatch` closes at the deadline it gives every call
+// (packages/envoy-client/src/dispatch-http.ts, requestSignal): a write committed after that is
+// an edit the person was told had not landed and may send again, and the second send applies it
+// twice. pgx ends a commit whose context is already done, but the window it leaves is the whole
+// of the transaction's work before it, which under a loaded pod is where the time goes: measured
+// on a burst of 320 concurrent writes, the slowest applied write took 1 m 6.362 s against its
+// caller's 1 m deadline, and that caller read an error while the server answered 200
+// (INFRA-179). So the context is read here, once, immediately before the commit, where
+// everything the transaction waited for is behind it.
 func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roomCapture, ended func(error)) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("the caller ended before its write committed: %w", err)
+	}
 	sorted := slices.Clone(captures)
 	slices.SortStableFunc(sorted, func(a, b roomCapture) int { return strings.Compare(a.room, b.room) })
 	locked := make([]roomCapture, 0, len(sorted))
@@ -686,12 +705,40 @@ func (l *Ledger) ReadBackOf(artifactID, markdown string) *pmdoc.Node {
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.
 // Each update is already durable, so the room's own persistence of it is suppressed. A room that
 // cannot take its update is failed, and reloads the durable document on its next access.
+//
+// Every fork goes first, and with the last of them the transaction's grant of the copy-heap
+// bound (liveWrite.releaseFork). The transaction has committed, so its forks have served every
+// operation they will, and the publish reads only the updates and the renderings recorded beside
+// them. Holding them through the publish would hold a heavy document's fork and tree beside the
+// room the publish loads, which is what LEGION-504 cut; and holding the grant through it would
+// leave a holder of the bound waiting for a room load's own grant (onLoadDocument), a part of
+// the bound its own grant can keep from ever being free.
 func (l *Ledger) publish() {
+	for _, artifactID := range l.order {
+		l.live[artifactID].releaseFork()
+	}
 	for _, artifactID := range l.order {
 		if write := l.live[artifactID]; !write.finished {
 			l.service.publishLiveWrite(write)
 		}
 	}
+}
+
+// forkSlot is this transaction's slot of the pod's load concurrency, made on its first live
+// write (forks). A caller already holding one hands it over in ctx, and the transaction's forks
+// take that one rather than a second: a document socket's admission holds a slot from before
+// the budget weighs it until its room has loaded (ServeHTTP), and reads the document inside it,
+// so a fork made under that read would wait for a slot its own holder will not give back until
+// the read returns - at the calibration's one slot, for ever.
+func (l *Ledger) forkSlot(ctx context.Context) *forkSlot {
+	if l.forks == nil {
+		held, carried := ctx.Value(loadSlotKey{}).(*loadSlot)
+		if !carried {
+			held = newLoadSlot()
+		}
+		l.forks = &forkSlot{slot: held, carried: carried}
+	}
+	return l.forks
 }
 
 // fail fails the rooms a transaction wrote when its commit returned an error. The commit may

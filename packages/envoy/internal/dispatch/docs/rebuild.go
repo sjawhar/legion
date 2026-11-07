@@ -3,15 +3,22 @@ package docs
 import (
 	"context"
 	"fmt"
+	"strconv"
+
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // RebuildReport describes the durable history a rebuild replaced. SourceVersion is the artifact
-// version whose markdown the fresh document state holds - the latest saved one, with a closed
-// issue's ask states written into it (RebuildDocument), or the one a rebuild from supplied
-// markdown that changed the document wrote; Head is the new monotonic update version.
+// version the fresh document state was built from - the latest saved one, or the one a rebuild
+// from supplied markdown that changed the document wrote; a rebuild of a history that loads,
+// which is built from that history's own text, can hold edits newer than it that settlement has
+// not yet written, and a closed issue's rebuild holds the close's ask states (RebuildDocument).
+// Head is the new monotonic update version. ValidationError says why the history was rebuilt:
+// ygo's refusal of it, or how near a cap it stood.
 type RebuildReport struct {
 	Head               int64  `json:"head"`
 	RemovedCheckpoints int64  `json:"removed_checkpoints"`
@@ -21,33 +28,111 @@ type RebuildReport struct {
 	ValidationError    string `json:"validation_error"`
 }
 
-// RebuildDocument replaces a history ygo cannot load with one fresh update built from its latest
-// saved markdown, or supplied markdown, inside the transaction the context's ledger joined. It is
-// deliberately never a load fallback: a history that loads can contain unsettled edits newer than
-// its latest version and is refused unchanged.
+// smallestReplacementAdds is what the smallest replacement a write can make adds to a document's
+// struct total, as refuseUndecodable bounds a write's updates (updatesAdd): one character
+// replaced by another, the new item and the two items the delete and the insert can split off
+// between them.
+const smallestReplacementAdds = 3
+
+// nearACap reports whether doc, a document's decoded history or its live room, stands so near a
+// cap that it must be rebuilt, and why. Near the decode cap means a write's smallest replacement
+// would carry it past the cap: its struct total as a load decodes it (structCeiling) and
+// smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that
+// adds a struct, as it refuses the write of a document no room holds by the count of its fork, a
+// decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
+// its state (rescan) scans at least roomScanTotal less honestHandoffScans items, a state the
+// decode refuses counting as no answer.
 //
-// Every refusal comes before the first write: a room resident in this server or in another
-// envoy-dispatch process (a holds query, roomQueries.ask), a history that loads, a history another
-// rebuild or an append moved past the one this rebuild loaded (RebuildTx), a closed issue (for
-// supplied markdown, which changes the document), and markdown that is not a Proof document, drops
-// an open ask block, or introduces a block pointer at a block the attribute may not
-// name (refuseBlockPointers, against the latest version). Supplied markdown is caller text: it is
+// The struct total costs neither an encode nor a decode (crdt.Doc.StructCount). The scan test
+// encodes doc's state and decodes it afresh, a whole-document decode like any other, so the
+// check holds a slot of the pod's load concurrency (holdLoad) from before that encode until it
+// answers: its own where ctx carries none, as the check of a live room makes it
+// (RebuildDocument), and the caller's where ctx carries one (rebuildSource). A wait ctx ends is
+// its error, and no answer.
+func nearACap(ctx context.Context, doc *crdt.Doc) (why string, near bool, err error) {
+	release, err := holdLoad(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer release()
+	if structs := structCeiling(doc); structs+smallestReplacementAdds > maxUpdateItems {
+		return fmt.Sprintf("the document's live state holds %d structs, and a write's smallest replacement, %d more, would carry it past the %d ygo decodes in one update",
+			structs, smallestReplacementAdds, maxUpdateItems), true, nil
+	}
+	if scans, err := rescan(crdt.EncodeStateAsUpdateV1(doc, nil)); err == nil && scans+honestHandoffScans >= roomScanTotal {
+		return fmt.Sprintf("a re-scan of the document's live state scans %d items, within %d of the %d a room's history may scan",
+			scans, honestHandoffScans, roomScanTotal), true, nil
+	}
+	return "", false, nil
+}
+
+// RebuildDocument replaces a history no write can change with one fresh update, inside the
+// transaction the context's ledger joined: a history ygo cannot load, built afresh from its latest
+// saved markdown or supplied markdown; and a history that loads but stands so near the decode cap
+// or the scan total that every write to it is refused (nearACap), built from its own text or
+// supplied markdown. It is deliberately never a load fallback: a history that loads can contain
+// unsettled edits newer than its latest version, so one further from both caps than that is
+// refused unchanged, and one that is rebuilt keeps those edits, since what it is built from is its
+// own tree.
+//
+// A document near a cap cannot be grown by anyone: a write that adds a struct is refused, a
+// browser's edit is refused by the room's totals, and only a rebuild leaves it small. A write
+// that only deletes can land, since a delete range splits an item only where one of its ends
+// falls inside that item, so a range covering whole items splits none of them and adds no struct
+// (sjawhar/ygo v1.55.1-sami.7, crdt/yarray.go:829-846), and it leaves the state as large as it
+// was: the document's own text is what a trim shortens, not its history. Supplied markdown does
+// not widen this: a history further from both caps is refused with or without it, and is trimmed
+// by a write.
+//
+// Every refusal comes before the first write: a room resident in this server whose document is far
+// from both caps, a room resident in another envoy-dispatch process (a holds query,
+// roomQueries.ask), a history that loads and is not near a cap, a history another rebuild or an
+// append moved past the one this rebuild loaded (RebuildTx), a closed issue (for supplied
+// markdown, which changes the document), and markdown that is not a Proof document, drops an open
+// ask block, or introduces a block pointer at a block the attribute may not name
+// (refuseBlockPointers, against the latest version). Supplied markdown is caller text: it is
 // parsed as an upload is, and its rendering is weighed as a new document's is (SeedText). The
 // latest version is the server's own rendering of the document, read back as every stored
-// rendering is (pmdoc.ParseRendering), so a document whose version is past what one write may make
-// - stored before that bound, or grown past it by browser edits - still rebuilds. Supplied
+// rendering is (pmdoc.ParseRendering), so a document whose version is past what one write may
+// make - stored before that bound, or grown past it by browser edits - still rebuilds. Supplied
 // markdown that differs from the latest version is a document change, so the same transaction
 // writes its version, which moves the open approval request to it (writeVersionTx,
-// MoveApprovalAsk); the VersionResult is what the caller's artifact.version event names. A rebuild
-// of a closed issue's document from its latest version writes the close's ask states into the tree
-// it seeds, as the close's final sweep writes them into the issue's other documents
-// (closedIssueAskState), and marks the document owing the settlement those writes leave owed, so no
-// ask block the close withdrew reads open again once the rebuild commits. A failure anywhere rolls
-// the whole rebuild back with the transaction. The room refuses loads until that transaction ends
-// (Ledger.holdRebuild): a load before the commit would read the old history, and a second rebuild
-// would preflight against it. That is also why the close's states go into the seed rather than
-// through a live write after it (WriteIssueAskStates): such a write's fork is refused while the
-// rebuild holds the room, and would read the old history through the pool that owns loads.
+// MoveApprovalAsk); the VersionResult is what the caller's artifact.version event names. A
+// failure anywhere rolls the whole rebuild back with the transaction. The room refuses loads
+// until that transaction ends (Ledger.holdRebuild): a load before the commit would read the old
+// history, and a second rebuild would preflight against it.
+//
+// A document near a cap is one people are typing into when they are refused, so its room is
+// usually resident, and a refusal of every resident room would leave no way to rebuild it. Its
+// room is closed instead, through evictBeforeRebuild, which flushes what the room holds into the
+// stored history before it closes; the history this rebuild then reads holds every edit the room
+// took. A room a Server.Apply is inside its callback on is left open and the rebuild refused, so
+// no commit of the server's own lands beside the history this replaces.
+// The browsers connected to it reconnect, and once the rebuild commits they load the rebuilt
+// document and are closed as holders of the replaced history (below), dropping their unsent
+// edits. A resident room of a document far from both caps is refused with ErrDocumentLive, as
+// before: its document can be trimmed by a write.
+//
+// The fresh history lists the clients of the history it replaces, and the clock each had reached,
+// under retiredMapName (rebuiltSeed), and the room refuses an update carrying any of their structs
+// below that clock (weighPeerUpdate). A browser that held the document before the rebuild still
+// holds the old history, and when it reconnects, the room holding none of it, its whole-state
+// message hands all of it back: applied, the old document would sit beside the rebuilt one, every
+// block twice, and the old history's structs would carry the room back toward the cap. Refused
+// with DocumentTooLargeCloseCode and DocumentRebuiltCloseReason, the editor drops what it
+// sent and builds its document afresh from the rebuilt room, and drops its saved rows typed
+// against the old history as rows of a rebuilt document (pending-sync.ts, addsParking). Before this
+// list a rebuild of a history that cannot load had no such guard: the hook took the old history
+// back unless the struct total refused it, which a browser's own copy, whose deleted runs Yjs
+// merges, need not pass.
+//
+// A rebuild of a closed issue's document writes the close's ask states into the tree it seeds, as
+// the close's final sweep writes them into the issue's other documents (closedIssueAskState), and
+// marks the document owing the settlement those writes leave owed, so no ask block the close
+// withdrew reads open again once the rebuild commits. That is also why the close's states go into
+// the seed rather than through a live write after it (WriteIssueAskStates): such a write's fork is
+// refused while the rebuild holds the room, and would read the old history through the pool that
+// owns loads.
 func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -65,17 +150,38 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
 	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	//
-	// The other envoy-dispatch processes' rooms are asked the same through a holds query: a member
-	// that answers it holds a room of the document refuses the rebuild as this server's room does.
-	// A member that does not answer within the query's wait, or a room that loads there after it
-	// answered, is covered by room sync instead. RebuildTx replaces the whole history with one
-	// update at head+1 and announces it, so an instance over there finds its stored history
-	// replaced (historyReplaced): its catch-up closes and reloads the room
+	// The other envoy-dispatch processes' rooms are asked the same through a holds query below: a
+	// member that answers it holds a room of the document refuses the rebuild as this server's
+	// room does. A member that does not answer within the query's wait, or a room that loads
+	// there after it answered, is covered by room sync instead. RebuildTx replaces the whole
+	// history with one update at head+1 and announces it, so an instance over there finds its
+	// stored history replaced (historyReplaced): its catch-up closes and reloads the room
 	// (roomCatchUps.closeReplaced), and until then its settlement and its browser's append are
 	// refused (ErrRoomBehindHead) and lead to the same close, and the reload reads the rebuilt
 	// document.
-	if s.srv.GetDoc(artifactID) != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+	if live := s.srv.GetDoc(artifactID); live != nil {
+		// The check decodes the room's whole state, so it waits for its grant of the copy-heap
+		// bound within this request (nearACap): a wait this request ends leaves the rebuild to
+		// the caller's retry, as a close the server could not make does below.
+		_, near, err := nearACap(ctx, live)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+		}
+		if !near {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		}
+		// The loads its browsers make as they reconnect are refused until this transaction
+		// ends (refuseIfRebuilding), so the room stays closed while the history is replaced. A
+		// Server.Apply already inside its callback on the room is the one thing that close gives
+		// way to, since its commit would reach the store beside the history this rebuild
+		// replaces (evictBeforeRebuild); the rebuild is refused, and the caller retries.
+		closed, err := s.evictBeforeRebuild(artifactID)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: close document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+		}
+		if !closed {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is being written in this server; retry", ErrServiceUnavailable, artifactID)
+		}
 	}
 	answers, _, err := s.roomQueries.ask(ctx, tx, artifactID, roomQueryHolds)
 	if err != nil {
@@ -86,13 +192,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in another server process; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 		}
 	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	history, loaded, why, retired, err := s.rebuildSource(ctx, artifactID)
 	if err != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
-	}
-	validationErr := validateUpdate(loaded.Update, s.maxPendingItems)
-	if validationErr == nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+		return RebuildReport{}, VersionResult{}, err
 	}
 	// The owner row before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
@@ -106,14 +208,20 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		return RebuildReport{}, VersionResult{}, err
 	}
 	var tree *pmdoc.Node
-	if markdown == nil {
-		tree, err = uploadedInput(pmdoc.ParseRendering(latest.markdown))
-	} else {
+	switch {
+	case markdown != nil:
 		if !open {
 			return RebuildReport{}, VersionResult{}, ErrIssueClosed
 		}
 		tree, err = parseInput(*markdown)
+	case history != nil:
+		// The history loads, so its own tree is the document, with every edit settlement has not
+		// yet written into a version, its anchor marks and its typed blocks' state.
+		tree, err = treeOf(history)
+	default:
+		tree, err = uploadedInput(pmdoc.ParseRendering(latest.markdown))
 	}
+	history = nil
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -135,13 +243,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
-	// A closed issue's document shows its asks as the close left them, and the tree read from the
-	// latest version need not: settlement, which versions a document, runs on no closed issue, so
-	// that version can predate the close, and the close's live writes to the document either never
-	// reached it, its history not loading then, or are in the history this replaces. So the
-	// close's final sweep is written into the tree here (closedIssueAskState): every resolved ask's
-	// block and copy, and every answered ask's copy, from the rows as they stand under the issue's
-	// row this transaction holds, and every readable ask block with no ask row marked resolved. The
+	// A closed issue's document shows its asks as the close left them, and the tree this rebuild
+	// was built from - the history's own, or the latest version's - need not: settlement, which
+	// versions a document, runs on no closed issue, so that version can predate the close, and the
+	// close's live writes to the document either never reached it, its history not loading or
+	// standing at a cap then, or are in the history this replaces. So the close's final sweep is
+	// written into the tree here (closedIssueAskState): every resolved ask's block and copy, and
+	// every answered ask's copy, from the rows as they stand under the issue's row this
+	// transaction holds, and every readable ask block with no ask row marked resolved. The
 	// ask rows are taken before RebuildTx takes the document's advisory lock, the order the close's
 	// own write takes them in (WriteIssueAskStates). Once this transaction commits, the rebuilt
 	// document reads as the issue's other documents do.
@@ -176,7 +285,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, err
 		}
 	}
-	seed, err := encodeDocumentTree(tree)
+	seed, err := rebuiltSeed(tree, retired)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("seed rebuilt document tree: %w", err)
 	}
@@ -185,16 +294,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// history validated as one that cannot load: a second rebuild of the document on another
 	// process that loaded the same history waits on the owner row above until this one commits,
 	// then finds the head moved and is refused.
-	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, loaded.Version, seed)
+	report, err := s.persistence.RebuildTx(ctx, tx, artifactID, loaded, seed)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
 	report.SourceVersion = latest.Number
-	report.ValidationError = validationErr.Error()
+	report.ValidationError = why
 	if closedStates != nil {
 		// markdown is nil here: a closed issue refuses supplied markdown above. The seed differs
-		// from the latest version by the close's states, as each of the issue's documents the
-		// close wrote differs from its own, so it owes the settlement those writes leave owed
+		// from the tree it was built from by the close's states, as each of the issue's documents
+		// the close wrote differs from its own, so it owes the settlement those writes leave owed
 		// (markUpdateOwed): none runs while the issue is closed, and the one its reopen runs
 		// versions the document and indexes, as new open asks, the blocks marked resolved here
 		// with no ask row. RebuildTx holds the document's advisory lock, which the mark is ordered
@@ -233,4 +342,90 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	report.SourceVersion = written.version.Number
 	return report, VersionResult{Version: written.version, Wrote: true, Changes: written.changes}, nil
+}
+
+// rebuildSource is what a rebuild of artifactID starts from: the stored history decoded (nil for
+// one that does not decode), the version that history stood at, which RebuildTx replaces only
+// while the head is still it, why it must be rebuilt - how near a cap it stands (nearACap), or
+// the decode's refusal - and the clients it retires. A history that loads and stands near no cap
+// is ErrDocumentLoads. The read's fold, its decode (loadDecodedHistory) and the check's re-scan
+// of it run under one slot of the pod's load concurrency, whose wait ends with ctx, held here
+// rather than by the read, since the check runs inside it, and given back once the history is
+// the rebuild's.
+func (s *Service) rebuildSource(ctx context.Context, artifactID string) (*crdt.Doc, persistence.Version, string, map[crdt.ClientID]uint64, error) {
+	ctx, _, done := withLoadSlot(ctx)
+	defer done()
+	read, err := loadDecodedHistory(ctx, s.persistence, artifactID, s.maxPendingItems, nil)
+	if err != nil {
+		return nil, 0, "", nil, fmt.Errorf("%w: load document before rebuild: %v", ErrServiceUnavailable, err)
+	}
+	if read.refused != nil {
+		return nil, read.loaded.Version, read.refused.Error(), undecodableHistoryClients(read.loaded.Update), nil
+	}
+	// An empty history decodes into no document at all (decodeStoredCopy); what a rebuild of it
+	// starts from is the empty document a room's load of it would hold.
+	history := read.decoded.doc
+	if history == nil {
+		history = newCappedDocumentCopy(s.maxPendingItems)
+	}
+	why, near, err := nearACap(ctx, history)
+	if err != nil {
+		return nil, 0, "", nil, fmt.Errorf("%w: weigh document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+	}
+	if !near {
+		return nil, 0, "", nil, fmt.Errorf("%w: document %s", ErrDocumentLoads, artifactID)
+	}
+	return history, read.loaded.Version, why, historyClients(history), nil
+}
+
+// rebuiltSeed writes tree into a fresh document, as encodeDocumentTree does, with the retired
+// clients listed under retiredMapName, each its client id in decimal against the clock it had
+// reached, and returns the document's first durable update.
+func rebuiltSeed(tree *pmdoc.Node, retired map[crdt.ClientID]uint64) ([]byte, error) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.GetMap(marksMapName)
+	list := doc.GetMap(retiredMapName)
+	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		for client, clock := range retired {
+			list.Set(transaction, strconv.FormatUint(uint64(client), 10), int64(clock))
+		}
+		return pmdoc.Update(transaction, fragment, tree)
+	}); err != nil {
+		return nil, err
+	}
+	return crdt.EncodeStateAsUpdateV1(doc, nil), nil
+}
+
+// historyClients is what a rebuild of history, a history that loads, retires: every client its
+// state vector names, at the clock it reached, and every client the history itself listed as
+// retired by an earlier rebuild, so a browser holding any history the document has had is refused.
+func historyClients(history *crdt.Doc) map[crdt.ClientID]uint64 {
+	retired := retiredClientsOf(history)
+	if retired == nil {
+		retired = make(map[crdt.ClientID]uint64)
+	}
+	for client, clock := range history.StateVector() {
+		retired[client] = max(retired[client], clock)
+	}
+	return retired
+}
+
+// undecodableHistoryClients is what a rebuild of a history ygo cannot load retires: the clients
+// the header of its update names, each at the clock past its last struct, read without decoding
+// any content (crdt.ParseUpdateMeta). A browser holding such a history holds those clients, so
+// one retired client is enough to refuse it. A header that does not read at all retires none:
+// no clock of it can be trusted, and the rebuild replaces the history either way.
+//
+// Where the walk this replaced left a client's withheld clocks out, the header counts them: a
+// Skip is read as the client's own structs, so a client is retired at the end of its last
+// struct whether or not the history held every clock before it. That retires a browser at a
+// clock it may not have reached, which refuses it exactly as a clock it did reach would - the
+// rebuild replaced its history either way.
+func undecodableHistoryClients(update []byte) map[crdt.ClientID]uint64 {
+	_, to, err := crdt.ParseUpdateMeta(update)
+	if err != nil {
+		return nil
+	}
+	return to
 }

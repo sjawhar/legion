@@ -41,6 +41,18 @@ func headerIdentity(database *store.Store) identity.HeaderIdentity {
 	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
+// calibratedService is a service holding the calibration's memory bounds and nothing else: the
+// bounds a process that names no Go memory limit runs under (calibratedBounds), which is what
+// every figure this package measures was measured against. A test that drives one part of the
+// service - the peer update hook, a replica, the room budget - builds one of these and sets the
+// fields that part reads, where a test of the whole service builds New's (newTestService). The
+// bounds are sized here because the service is never built without them; the pod's load
+// concurrency is not the service's own, so a test that bounds it swaps in one of its own
+// (useLoadSlots).
+func calibratedService() *Service {
+	return &Service{memory: calibratedBounds}
+}
+
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
 	database := storetest.Open(t)

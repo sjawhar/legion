@@ -114,7 +114,7 @@ func compareForkReads(t *testing.T, at corpusRoom) int {
 	if err != nil {
 		t.Fatalf("%s: decode the read point's state: %v", at.stage, err)
 	}
-	got, gotPoint, gotRead, err := at.service.forkPoint(at.room, at.live, forkWriteClient, nil)
+	got, gotPoint, gotRead, err := at.service.forkPoint(context.Background(), at.room, at.live, forkWriteClient, nil)
 	if err != nil {
 		t.Fatalf("%s: fork the room: %v", at.stage, err)
 	}
@@ -208,7 +208,7 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 	}
 	log := live.OpenUpdateLog()
 	defer log.Close()
-	replica := service.keepReplica(live, log, nil)
+	replica := service.keepReplica(live, log, nil, nil)
 	// A commit of its own gives the replica the room's state to follow before the fork is read,
 	// so the fork clones the replica the update observer keeps rather than the copy a first read
 	// of a replica holding none starts it from (renderedReplica.atPoint).
@@ -218,7 +218,7 @@ func TestAClonedForkAndItsReplicaAreIndependent(t *testing.T) {
 		t.Fatal("the replica holds no state after the room's commit, so the fork below is no clone of it")
 	}
 
-	fork, _, _, err := service.forkPoint("room", live, forkWriteClient, nil)
+	fork, _, _, err := service.forkPoint(context.Background(), "room", live, forkWriteClient, nil)
 	if err != nil {
 		t.Fatalf("fork the room: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEveryForkLeavesTheWriteAuthoringUnderItsForksClientID(t *testing.T) {
 	}
 	log := live.OpenUpdateLog()
 	defer log.Close()
-	replica := service.keepReplica(live, log, nil)
+	replica := service.keepReplica(live, log, nil, nil)
 	// A commit of its own gives the replica the room's state to follow before the fork is read,
 	// so the fork clones the replica the update observer keeps rather than the copy a first read
 	// of a replica holding none starts it from (renderedReplica.atPoint).
@@ -294,7 +294,7 @@ func TestEveryForkLeavesTheWriteAuthoringUnderItsForksClientID(t *testing.T) {
 	// The room's own client, whose structs the state the clone copies already holds, so the
 	// clone must draw an id of its own rather than continue that client's clock.
 	write := &liveWrite{artifactID: "room", clientID: live.ClientID(), state: newRoomState()}
-	fork, err := service.warmFork(write, live)
+	fork, err := service.warmFork(context.Background(), write, live)
 	if err != nil {
 		t.Fatalf("fork the room: %v", err)
 	}

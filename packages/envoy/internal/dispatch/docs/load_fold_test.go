@@ -283,7 +283,7 @@ func TestABufferedFoldEndsWithItsContext(t *testing.T) {
 		defer cancel()
 		replay := memoryUpdates(ctx, rows)
 		applied := 0
-		state, err := stateThrough(artifactID, 3, func(use func([]byte) error) error {
+		state, err := stateThrough(ctx, artifactID, 3, func(use func([]byte) error) error {
 			return replay(func(update []byte) error {
 				applied++
 				if applied == 2 {
@@ -378,8 +378,10 @@ func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
 			if handed, err := adapter.LoadDoc(artifactID); err != nil || len(handed) != 0 {
 				t.Fatalf("LoadDoc handed ygo %d bytes (%v), want none", len(handed), err)
 			}
-			if kept := service.takeLoadedState(artifactID); !bytes.Equal(kept, stored.Update) {
-				t.Fatalf("LoadDoc kept %d bytes for the room's load hook, want the %d-byte stored state", len(kept), len(stored.Update))
+			taken, _ := service.takeLoadedState(artifactID)
+			taken.slot.release()
+			if !bytes.Equal(taken.state, stored.Update) {
+				t.Fatalf("LoadDoc kept %d bytes for the room's load hook, want the %d-byte stored state", len(taken.state), len(stored.Update))
 			}
 
 			if err := service.warmLiveDocument(ctx, artifactID); err != nil {

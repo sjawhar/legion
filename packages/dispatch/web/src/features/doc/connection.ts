@@ -1,5 +1,13 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
+import {
+  DOCUMENT_BUSY_CLOSE_CODE,
+  DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
+  DOCUMENT_REBUILT_CLOSE_REASON,
+  DOCUMENT_SCHEMA_CLOSE_CODE,
+  DOCUMENT_TOO_LARGE_CLOSE_CODE,
+  DOCUMENT_TOO_TANGLED_CLOSE_REASON,
+  DOCUMENT_UPDATE_REFUSED_CLOSE_REASON,
+} from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
@@ -34,6 +42,14 @@ export function pendingNotice(
     if (pending.count > 0) {
       return `${savedEdits(pending.count)} saved in this browser, not sent yet.`;
     }
+    return undefined;
+  }
+  // The socket is up and this admission can send, yet what this browser holds has sat there
+  // longer than a frame's round trip without the server taking one (`UNSENT_NOTICE_MS`): the
+  // handover or the acknowledgements have stopped. The person is told the edits are kept and
+  // still going out, which is what they can act on - keep the tab open - rather than why.
+  if (connection === "connected" && pending.unsent && pending.count > 0) {
+    return `${savedEdits(pending.count)} saved in this browser, not sent to Dispatch yet. Dispatch keeps trying.`;
   }
   return undefined;
 }
@@ -57,6 +73,38 @@ export function connectionLabel(
   return notice === undefined ? label : `${label} · ${notice}`;
 }
 
+/**
+ * The sentence the editor shows for an edit the server refused with
+ * `DOCUMENT_TOO_LARGE_CLOSE_CODE`, by the close's reason: an edit the server could not merge into
+ * the document quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), one the document cannot take
+ * until it is rebuilt (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`: its edit history has used up what the
+ * server lets it scan), one this browser typed against the history someone else's rebuild replaced
+ * (`DOCUMENT_REBUILT_CLOSE_REASON`), one holding content the document does not take
+ * (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`), or one that would make the
+ * document too large. Every one of them is permanent: the refused edit is dropped and the
+ * document re-read, so a reconnect cannot meet the same refusal again.
+ *
+ * The rebuilt document's notice promises no other edit is kept, because none typed against the
+ * replaced history is: the restore drops each of those rows and reports when they were saved
+ * (`pending-sync.ts`, `addsParking`). `RefusedEditNotice` offers a rebuild only for
+ * `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`, the one a rebuild helps; a rebuild of a document just
+ * rebuilt is answered 409.
+ */
+export function refusedEditNotice(reason: string): string {
+  switch (reason) {
+    case DOCUMENT_TOO_TANGLED_CLOSE_REASON:
+      return "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
+    case DOCUMENT_NEEDS_REBUILD_CLOSE_REASON:
+      return "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+    case DOCUMENT_REBUILT_CLOSE_REASON:
+      return "Someone else rebuilt this document, so the edits you had not sent could not be kept. Dispatch has reloaded the rebuilt document.";
+    case DOCUMENT_UPDATE_REFUSED_CLOSE_REASON:
+      return "Your last edit was not saved: it holds content this document does not take.";
+    default:
+      return "Your last edit was not saved: it would make this document larger than a Dispatch document may be. Your other edits are kept.";
+  }
+}
+
 export interface DocumentConnection {
   readonly awareness: Awareness;
   readonly doc: Doc;
@@ -71,6 +119,25 @@ export interface ConnectionCallbacks {
    * schema. The connection has stopped reconnecting; a fresh read decides what comes next.
    */
   onOutsideSchema(): void;
+  /**
+   * Fires when the server refused this browser's edit with `DOCUMENT_TOO_LARGE_CLOSE_CODE`, with
+   * the close's reason: the edit would take the document past its size bound, the server could
+   * not merge it quickly enough (`DOCUMENT_TOO_TANGLED_CLOSE_REASON`), the document must be
+   * rebuilt before it can take it (`DOCUMENT_NEEDS_REBUILD_CLOSE_REASON`), the edit was typed
+   * against a history someone else's rebuild replaced (`DOCUMENT_REBUILT_CLOSE_REASON`), or it
+   * holds content the document does not take (`DOCUMENT_UPDATE_REFUSED_CLOSE_REASON`). The
+   * connection has stopped reconnecting and the refused edit's saved row is gone; the refused
+   * text is still in this connection's document, so the host rebuilds it from a fresh read rather
+   * than let a reconnect send it again.
+   */
+  onEditRefused(reason: string): void;
+  /**
+   * Fires `true` when the server closed the socket because the memory it keeps for open documents
+   * is full (`DOCUMENT_BUSY_CLOSE_CODE`), and `false` once it applies a frame from this browser
+   * again. The provider keeps reconnecting by itself, and the edits it could not send stay in this
+   * document and in the browser's saved rows until a socket takes them.
+   */
+  onBusy(waiting: boolean): void;
   onStatus(state: ConnectionState): void;
   /** Reports browser-held edits as IndexedDB changes or this admission's restore completes. */
   onPending(state: PendingState): void;
@@ -123,6 +190,14 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     // Whether any admission has been handed to the pending sync: the first one's restore ends in
     // the host's `onSynced`.
     let announced = false;
+    // This admission's restore of the browser's saved rows; a refused edit is dropped after it.
+    let restored: Promise<void> = Promise.resolve();
+    // The server last closed a socket for want of room, and has applied nothing from this browser
+    // since. `busyCloses` counts those closes, so an applied answer clears `busy` only when no
+    // busy close came after the answer arrived: the pending sync answers once its saved row is
+    // cleared, which is asynchronous, and a close that lands meanwhile is the newer word.
+    let busy = false;
+    let busyCloses = 0;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
     // after the provider exists; the explicit `websocket.connect()` is deliberately last.
@@ -150,6 +225,13 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       }
     };
+    // Nothing here ends a socket that waits for its room. The server answers the upgrade only
+    // once it has admitted the browser and loaded the document, which a burst has kept a browser
+    // waiting 21.4 s for on the copy bound alone (doc.e2e.ts holds one 25 s). Until the first
+    // frame arrives the provider is `connecting`: its `messageReconnectTimeout` check (30 s) skips
+    // a socket that is not connected or has received nothing, and its retry has no `timeout`
+    // (@hocuspocus/provider 2.15.3, dist/hocuspocus-provider.esm.js:1676,1692,1903-1914). Any
+    // timeout added to this path must outlast that wait, or the reconnect queues the browser again.
     const websocket = new HocuspocusProviderWebsocket({
       WebSocketPolyfill,
       connect: false,
@@ -165,19 +247,21 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     // only as `isSynced` changes, which a close resets, and `authenticated` once per Authenticated
     // frame, which the server sends once in answer to the one token each socket sends. So this
     // hands the pending sync one admission per socket, and `synced()` takes a repeated one as a
-    // no-op all the same.
+    // no-op all the same. Each admission's restore is kept as `restored`, which a refusal of this
+    // browser's edit waits for before it drops the refused row (`dropRefused`).
     const notifyAdmitted = () => {
       if (!provider.isSynced || !provider.isAuthenticated) {
         return;
       }
-      const restoring = sync?.synced().catch((error: unknown) => {
+      const restoring = Promise.resolve(sync?.synced()).catch((error: unknown) => {
         console.error("Could not restore this document's pending browser edits", error);
       });
+      restored = restoring;
       if (announced) {
         return;
       }
       announced = true;
-      void restoring?.then(() => {
+      void restoring.then(() => {
         if (!destroyed) {
           callbacks.onSynced();
         }
@@ -195,18 +279,53 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         notifyAdmitted();
       },
       onClose: ({ event }) => {
-        // Hocuspocus answers every other close by reconnecting. This one is the server's decision
-        // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
-        // the host reads it again.
-        if (event.code === DOCUMENT_SCHEMA_CLOSE_CODE) {
-          provider.disconnect();
-          callbacks.onOutsideSchema();
+        // Hocuspocus answers every other close by reconnecting, which is what the transient
+        // `DOCUMENT_BUSY_CLOSE_CODE` wants: the server is out of room for open documents, and a
+        // later attempt finds what it has freed, so the edits it refused wait to go with it. The
+        // other two are the server's decision about the document itself, so the provider stops:
+        // a document outside the Proof schema the host reads again, and an edit past the
+        // document's size bound, one the server could not merge quickly enough, one the document
+        // cannot take until it is rebuilt and one typed against a history someone else's rebuild
+        // replaced, is dropped before the host rebuilds the document without it.
+        switch (event.code) {
+          case DOCUMENT_SCHEMA_CLOSE_CODE:
+            provider.disconnect();
+            callbacks.onOutsideSchema();
+            break;
+          case DOCUMENT_TOO_LARGE_CLOSE_CODE:
+            // The refused frame is taken now: the provider's own close handler, which runs first,
+            // has already started a reconnect that this disconnect ends.
+            void Promise.resolve(sync?.dropRefused(restored)).then(() => {
+              if (!destroyed) {
+                callbacks.onEditRefused(event.reason);
+              }
+            });
+            provider.disconnect();
+            break;
+          case DOCUMENT_BUSY_CLOSE_CODE:
+            busyCloses += 1;
+            if (!busy) {
+              busy = true;
+              callbacks.onBusy(true);
+            }
+            break;
         }
       },
       onMessage: ({ event }) => {
-        if (event.data instanceof ArrayBuffer) {
-          void sync?.frameReceived(new Uint8Array(event.data));
+        if (!(event.data instanceof ArrayBuffer)) {
+          return;
         }
+        // The pending sync parses the frame, which is the one parse of it: it answers whether the
+        // server applied the frame it acknowledges, and `undefined` for anything else. It answers
+        // after it has cleared the acknowledged row, so a busy close that arrived meanwhile -
+        // after this frame, as the socket delivered them - keeps the notice up.
+        const closesBefore = busyCloses;
+        void Promise.resolve(sync?.frameReceived(new Uint8Array(event.data))).then((applied) => {
+          if (busy && applied === true && busyCloses === closesBefore) {
+            busy = false;
+            callbacks.onBusy(false);
+          }
+        });
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       // The provider sets `isSynced` before it reports a change: `true` once the socket's

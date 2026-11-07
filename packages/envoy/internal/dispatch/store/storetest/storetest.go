@@ -33,6 +33,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -125,15 +126,40 @@ func Main(m *testing.M) int {
 
 // dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
 // together share one checkpoint.
+//
+// It retries, because the drop races the backends of the pools the test closed. `with (force)`
+// terminates whatever is still connected, and a role without pg_signal_backend is refused that
+// by the server ("permission denied to terminate process") rather than told the database is
+// busy: measured on this repository's own pod, where the test role holds no such grant and 13
+// of a package's databases would not drop while every test in it passed. A backend the pool
+// closed is reaped within milliseconds, so the plain drop a moment later succeeds; the force is
+// kept for the first attempt, where it is the fastest answer for a role that may terminate.
 func dropDatabase(name string) {
 	shared.drops.Go(func() {
-		if _, err := shared.admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			shared.dropMu.Lock()
-			shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
-			shared.dropMu.Unlock()
+		var err error
+		for attempt := range dropAttempts {
+			statement := "drop database " + name
+			if attempt == 0 {
+				statement += " with (force)"
+			}
+			if _, err = shared.admin.Exec(context.Background(), statement); err == nil {
+				return
+			}
+			time.Sleep(dropRetryWait)
 		}
+		shared.dropMu.Lock()
+		shared.dropFails = append(shared.dropFails, fmt.Sprintf("drop isolated database %s: %v", name, err))
+		shared.dropMu.Unlock()
 	})
 }
+
+// dropAttempts and dropRetryWait bound dropDatabase's wait for the backends of a closed pool to
+// be reaped: ten attempts a quarter of a second apart, so a drop waits at most about 2.5 s and
+// every isolated database of a package drops in parallel.
+const (
+	dropAttempts  = 10
+	dropRetryWait = 250 * time.Millisecond
+)
 
 // prepare opens the admin pool and migrates the template every Open clones.
 func prepare(raw string) error {
