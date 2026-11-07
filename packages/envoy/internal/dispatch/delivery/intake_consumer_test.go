@@ -607,13 +607,14 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 // and the other stands by, whenever the two binds happen to land. It makes no awaitPushBound
 // call between the two binds: the window such a wait covers up is what this test is about.
 //
-// What is in that window: the refusal bindDurableConsumer relies on is the client's, and nats.go
-// refuses a bind only once ConsumerInfo reports PushBound, which the server sets a goroutine hop
-// after the first subscriber's SUB lands. bindDurableConsumer releases the durable's consumer
-// lease before it subscribes, so inside that hop nothing excludes the second binder and the
-// server hands it the binding too. Two processes then deliver every message of that durable
-// twice -- two GitHub fetches and two writes per event, each pair racing the other -- and each
-// of them stops polling, so neither ever learns of the other ("Nothing rebinds a bound intake").
+// What is in that window: nats.go refuses a bind only once ConsumerInfo reports PushBound, which
+// the server sets a goroutine hop after the first subscriber's SUB lands. Before the bind held
+// the durable's consumer lease across its subscribe and until the server confirmed PushBound, it
+// gave that lease back before it subscribed and relied on the client's refusal, so inside that
+// hop nothing excluded the second binder and the server handed it the binding too. Two processes
+// then delivered every message of that durable twice -- two GitHub fetches and two writes per
+// event, each pair racing the other -- and each of them stopped polling, so neither ever learned
+// of the other ("Nothing rebinds a bound intake").
 //
 // Two subtests, because the window is reached two ways and a fix has to close both: the second
 // process polling a moment behind the first (durableBindInterval ticks that drifted together),
@@ -622,19 +623,19 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 // why every client here is opened with the subtest's own t.
 //
 // Both start from settledDurable, the state every bind poll after the first is made in, because
-// nothing in front of the subscribe is part of the window: a reconciliation this process still
-// owes -- its consumer lease and its configuration lookup, two Postgres round trips and one
-// JetStream one -- delays the second subscribe past the hop and hides the window without closing
-// it. A standby polls every durableBindInterval and reconciles once per consumerReconcileInterval,
-// so fourteen of its fifteen polls are the subscribe alone, and those are the polls that can land
-// inside the hop.
+// a reconciliation this process still owes -- its consumer lease and its configuration lookup,
+// two Postgres round trips and one JetStream one -- delays the second subscribe past the hop and
+// would hide the window without closing it. A standby polls every durableBindInterval and
+// reconciles once per consumerReconcileInterval, so fourteen of its fifteen polls owe no
+// reconciliation, and those are the polls that could land inside the hop.
 //
-// Measured against the bind as it stands, twice, 50 runs of each subtest under -race in one
-// two-CPU pod: "at once" had both processes holding the durable in 50 of the 50 and then in 49
-// of the 50, "back to back" in 0 of the 50 and then in 2 of the 50. So "at once" is the subtest
-// that fails today every time, and "back to back" reaches the same window now and then -- a
-// second subscribe that waits on one JetStream lookup of its own is usually, not always, late
-// enough on a loopback server, and nothing in the code makes it late at all.
+// Measured against the bind before it held the lease across its subscribe, twice, 50 runs of each
+// subtest under -race in one two-CPU pod: "at once" had both processes holding the durable in 50
+// of the 50 and then in 49 of the 50, "back to back" in 0 of the 50 and then in 2 of the 50. So
+// "at once" is the subtest that failed every time then, and "back to back" reached the same
+// window now and then -- a second subscribe that waits on one JetStream lookup of its own is
+// usually, not always, late enough on a loopback server, and nothing in that code made it late at
+// all.
 func TestTwoProcessesPollingOneDurableNeverBothBindIt(t *testing.T) {
 	t.Run("back to back", func(t *testing.T) {
 		pool, ctx := deliveryTestPool(t)
@@ -694,10 +695,10 @@ const standbyTakeOverBound = 10 * time.Second
 // TestAHolderThatStopsIsReplacedWithinTheBoundTheCodeStates holds the other half of the durable's
 // single binding, the half that makes it worth having: once the process holding it goes away, the
 // standby takes the durable over, and does it inside standbyTakeOverBound. This is the regression
-// lock on the hand-over -- it passes against the bind as it stands -- so that a fix which moves
-// the subscribe under the durable's consumer lease, and holds that lease until the server
-// confirms PushBound, is measured against the speed the standby has now rather than only against
-// the exclusion it is being given.
+// lock on the hand-over -- it passed against the bind before the subscribe moved under the
+// durable's consumer lease -- so that the bind, which now holds that lease until the server
+// confirms PushBound, is measured against the speed the standby had then and not only against
+// the exclusion it was given.
 func TestAHolderThatStopsIsReplacedWithinTheBoundTheCodeStates(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	leases := deliveryTestLeases(t, pool)
@@ -1013,10 +1014,10 @@ func subscribeIdle(client *bus.Client) func() (*natsgo.Subscription, func(), err
 // the two bind throttles that carry it, one per process.
 //
 // It is the state a standby is in for fourteen of its fifteen polls (durableBindInterval against
-// consumerReconcileInterval), and the only one in which a bind poll is the subscribe alone: with
-// a reconciliation still owed, the consumer lease and the configuration lookup in front of the
-// subscribe delay it past the window this is set up for, which hides that window rather than
-// closing it.
+// consumerReconcileInterval), and the only one in which a bind poll owes no reconciliation: with
+// one still owed, the consumer lease and the configuration lookup in front of the subscribe would
+// delay it past the window this is set up for, which would hide that window rather than close
+// it.
 func settledDurable(t *testing.T, client *bus.Client) (*bindThrottle, *bindThrottle) {
 	t.Helper()
 	wanted := deliveryConsumerConfig()

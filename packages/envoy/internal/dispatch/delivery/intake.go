@@ -51,7 +51,8 @@ type Intake struct {
 	// (StartIntakes).
 	settings *SettingsCache
 	// leases is the pool bind takes this durable's consumer lease on (consumerLease), so that one
-	// process at a time reconciles this durable's configuration (bindDurableConsumer).
+	// process at a time reconciles this durable's configuration and subscribes to it
+	// (bindDurableConsumer).
 	leases duty.Leases
 	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
 	// how recently it said it was standing by for it (bindThrottle).
@@ -320,7 +321,10 @@ const standbyConsumerHeldMessage = "dispatch delivery: NATS consumer held by ano
 const standbyConsumerMissingMessage = "dispatch delivery: NATS consumer not created yet; standing by"
 
 // standbyLeaseHeldMessage is what a poll says when it could not take the durable's consumer
-// lease: another process is inside this durable's bind pass, and this one stands by.
+// lease: another process is inside this durable's bind pass, and this one stands by. A take that
+// Postgres refused ends the same way, after duty.Exclusive has logged the refusal at ERROR
+// ("dispatch duty: take the lease"), since Exclusive does not tell its caller which of the two
+// it was.
 //
 // All three are declared here, and in one place, because bindThrottle.reportStandby throttles on
 // message equality: two copies of one sentence that drift by a character are two throttled lines
@@ -364,10 +368,11 @@ var durablePushBound = func(ctx context.Context, js natsgo.JetStreamContext, nam
 	return info.PushBound, nil
 }
 
-// consumerLease names the lease one durable's consumer reconciliation runs under: one process at
-// a time reads that durable's configuration and corrects it. Two processes -- two builds during a
-// rolling update, each re-running the reconciliation on every bind poll -- would otherwise
-// reconcile one durable against each other, the second undoing what the first had just done.
+// consumerLease names the lease one durable's bind attempt runs under (bindDurableConsumer): one
+// process at a time reads that durable's configuration, corrects it and subscribes to it. Two
+// processes -- two builds during a rolling update, each re-running the reconciliation on every
+// bind poll -- would otherwise reconcile one durable against each other, the second undoing what
+// the first had just done, and two polling at once would both take its push binding.
 //
 // The name carries the durable because that, and only that, is what the exclusion is about: two
 // processes over one durable. One name over both delivery durables coupled two independent
@@ -377,7 +382,7 @@ var durablePushBound = func(ctx context.Context, js natsgo.JetStreamContext, nam
 // the delivery consumer create Dispatch leaves only that intake unbound"). A denied AddConsumer
 // draws no reply at all, so the create blocks for the client's whole JetStream MaxWait -- 10 s
 // (internal/bus/nats.go, nats.MaxWait) -- and the lease is held for every second of it. A pass
-// that failed is deliberately left unthrottled (bindDurableConsumer records no pass then), so the
+// that failed is deliberately left unthrottled (bindLeasedDurable records no pass then), so the
 // events intake took the lease again on its next durableBindInterval poll and held it for another
 // 10 s, round after round:
 //
@@ -399,15 +404,18 @@ type bindOutcome int
 const (
 	// bindFailed is an attempt that got nowhere and says nothing about who holds the durable: the
 	// lookup, the create, the update or the subscribe failed, and the failure is logged at ERROR;
+	// or the server never reported the subscription bound, which is logged at WARN and given up;
 	// or ctx ended before the subscribe, which a stopping process does not make, and which says
 	// nothing. The zero value, so an outcome nothing set is never read as a bind.
 	bindFailed bindOutcome = iota
 	// bindBound is this process holding the durable's push binding, with its subscription live.
 	bindBound
-	// bindStandby is NATS refusing the bind for a reason that is about the durable rather than
-	// about this process: another process is bound to it (consumerHeldElsewhere), or it does not
-	// exist yet (natsgo.ErrConsumerNotFound, the leased reconciliation not having created it).
-	// Neither is an error: the caller polls on, and binds once the durable is free and there.
+	// bindStandby is the durable not being this process's to bind on this poll, for a reason
+	// that is about the durable rather than about this process: another process is bound to it
+	// (the server reports it PushBound, or NATS refuses the bind, consumerHeldElsewhere), it does
+	// not exist yet (natsgo.ErrConsumerNotFound, the leased reconciliation not having created
+	// it), or another process is inside its bind pass (standbyLeaseHeldMessage). None is an
+	// error: the caller polls on, and binds once the durable is free and there.
 	bindStandby
 )
 
@@ -511,6 +519,10 @@ func (in *Intake) bind(ctx, stopping context.Context) bindOutcome {
 // The invariant: one process subscribes to a delivery durable at a time, and no process subscribes
 // to one the server already reports bound. What excludes the second subscriber is this durable's
 // own consumer lease (consumerLease), which pg_try_advisory_lock makes exclusive, and not NATS.
+// It holds among processes of this release: a process of an earlier release running beside it
+// during a rolling deploy still subscribes outside the lease, and a holder whose NATS connection
+// drops and comes back is subscribed again by nats.go itself (internal/bus/recovery.go), outside
+// this function.
 // The "consumer is already bound" refusal (consumerHeldElsewhere) is the client's own, made only
 // once ConsumerInfo reports PushBound, and the server sets PushBound a goroutine hop after the
 // first subscriber's SUB lands: a bind that gave the lease back before it subscribed left that hop
@@ -540,8 +552,8 @@ func (in *Intake) bind(ctx, stopping context.Context) bindOutcome {
 // the only window the lease was ever taken in, plus one on each poll that gets past this read
 // with the durable there and free -- the whole hand-over window after a holder dies. Only such a
 // poll goes on to the leased pass, which reads the durable again: the state can have changed
-// while this process waited for the lease, and the process it waited for is the likeliest one to
-// have bound it.
+// between this read and the take, and a process that held the lease until a moment ago is the
+// likeliest one to have bound it.
 //
 // The configuration reconciliation (reconcileDurableConsumer) runs in that same leased pass, so
 // one process at a time reconciles a durable -- two builds during a rolling update do not
@@ -601,9 +613,10 @@ func bindDurableConsumer(ctx, stopping context.Context, client *bus.Client, leas
 	}
 	// Not the "held by another process" line above, and deliberately a different sentence: that
 	// one means the server reports the durable bound to a subscriber, while this one means only
-	// that another process is inside this durable's bind pass right now. That pass may well end
-	// with the durable still free -- its reconciliation failed, its own subscribe was refused --
-	// and this process binds it on its next poll.
+	// that this poll did not get the durable's lease -- another process is inside this durable's
+	// bind pass right now, or Postgres refused the take, which duty.Exclusive has logged at ERROR.
+	// Either way the durable may well still be free -- the other pass's reconciliation failed,
+	// its own subscribe was refused -- and this process binds it on its next poll.
 	throttle.reportStandby(name, standbyLeaseHeldMessage)
 	return nil, bindStandby
 }
@@ -653,8 +666,8 @@ func bindLeasedDurable(ctx, stopping context.Context, client *bus.Client, thrott
 		return nil, bindFailed
 	}
 	// Read again under the lease: the read in front of the lease was made before this process
-	// waited for it, and the process it waited for is the likeliest one to have bound the durable
-	// meanwhile. A poll whose reconciliation was due made no such read at all.
+	// took it, and a process that held it until a moment ago is the likeliest one to have bound
+	// the durable meanwhile. A poll whose reconciliation was due made no such read at all.
 	if outcome, decided := standbyForDurable(stopping, client.JS(), throttle, name); decided {
 		return nil, outcome
 	}
@@ -734,14 +747,12 @@ func awaitDurablePushBound(ctx context.Context, js natsgo.JetStreamContext, name
 // Its caller runs it under that durable's consumer lease (consumerLease), so one process at a
 // time is in here for one durable.
 //
-// PushBound is read once, by the ConsumerInfo immediately before the delete, and that read now
-// settles the question for the whole pass: every subscribe in this package is made under this
-// same lease (bindDurableConsumer), by a pass that reads PushBound again after taking it, so no
-// process can bind the durable between that read and the delete. The window this paragraph once
-// described -- a process whose own reconciliation was skipped subscribing meanwhile and having
-// its durable deleted under it -- is closed by that, and the read is kept close to the delete
-// because the pass's first read is two round trips back and the holder it reported may have gone
-// away since.
+// PushBound is read once, by the ConsumerInfo immediately before the delete, and that read
+// settles the question for the whole pass among processes of this release: each of them
+// subscribes only under this same lease (bindDurableConsumer), by a pass that reads PushBound
+// again after taking it, so none of them can bind the durable between that read and the delete.
+// The read is kept close to the delete because the pass's first read is two round trips back
+// and the holder it reported may have gone away since.
 //
 // Every JetStream call runs under ctx, each within the JetStream context's own request timeout
 // while ctx carries no deadline: bindDurableConsumer passes its caller's stop deadline.
@@ -766,9 +777,10 @@ func reconcileDurableConsumer(ctx context.Context, js natsgo.JetStreamContext, w
 		// (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
 		//
 		// Re-read the durable immediately before the delete: the read above is two round trips
-		// back, and a process that skipped this reconciliation binds without taking the lease,
-		// so the durable can have been bound since. The ack floor comes from this read for the
-		// same reason -- it is the last thing the durable acknowledged before the delete.
+		// back, and the holder it reported may have gone away since -- or, during a rolling
+		// deploy, a process of an earlier release, which binds without taking the lease, may have
+		// bound it. The ack floor comes from this read for the same reason -- it is the last
+		// thing the durable acknowledged before the delete.
 		//
 		// That fresh read is the only thing that decides whether another process is bound to
 		// this durable: one question, answered once, by the read closest to the delete, so the
