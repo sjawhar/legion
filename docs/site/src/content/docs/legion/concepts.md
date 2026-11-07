@@ -42,10 +42,12 @@ One Legion deployment can work issues across several GitHub repositories, under 
 with exactly one repository per issue — never two. A change that spans repositories is a parent
 issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
 Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
-owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
-wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
-the same bundle through a credential helper keyed the same way, so a push to another owner's
-repository is refused there, not merely discouraged.
+repository alone, and read-only tokens for every other repository the project maps. Its gh bundle
+holds one directory per owner and, under the issue's own owner, one more per other repository
+served there; `legion gh`, the `gh` wrapper every pane and pod runs, reads the repository's own
+directory where the bundle holds one and the owner's otherwise, and `git` reaches the same bundle
+through a credential helper that picks a directory the same way, so a push to any other repository
+is refused there, not merely discouraged.
 
 ## The controller
 

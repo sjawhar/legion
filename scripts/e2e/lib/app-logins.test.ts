@@ -227,21 +227,23 @@ describe("app-logins.ts", () => {
     holdsNoToken(stderr);
   });
 
-  test("a token command runs as the daemon runs it: no NATS seed, stdin closed, owner and read-only set empty", async () => {
-    // An unset variable prints `unset`, so a set-empty owner and read-only flag print nothing.
+  test("a token command runs as the daemon runs it: no NATS seed, stdin closed, owner, repositories and read-only set empty", async () => {
+    // An unset variable prints `unset`, so a set-empty owner, repository list and read-only flag
+    // each print nothing.
     const probe =
       // biome-ignore lint/suspicious/noTemplateCurlyInString: a shell parameter expansion, not a template
-      'printf "%s|%s|%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "${LEGION_GITHUB_OWNER-unset}" "${LEGION_GITHUB_READ_ONLY-unset}" "$(cat)" >&2; exit 4';
+      'printf "%s|%s|%s|%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "${LEGION_GITHUB_OWNER-unset}" "${LEGION_GITHUB_REPOS-unset}" "${LEGION_GITHUB_READ_ONLY-unset}" "$(cat)" >&2; exit 4';
     const { code, stderr } = await run(config(app("101", probe), app("202")), {
       NATS_NKEY_SEED: "pane-seed",
       NATS_DAEMON_NKEY_SEED: "daemon-seed",
       NATS_NKEY_SEED_FILE: "/seed-file",
       LEGION_GITHUB_OWNER: "leaked-owner",
+      LEGION_GITHUB_REPOS: "leaked-repo",
       LEGION_GITHUB_READ_ONLY: "1",
     });
     expect(code).toBe(1);
     expect(stderr).toBe(
-      "||/seed-file|||app-logins: the implement App (app_id 101): github_apps.implement.token_command failed (exit 4): ||/seed-file|||"
+      "||/seed-file||||app-logins: the implement App (app_id 101): github_apps.implement.token_command failed (exit 4): ||/seed-file||||"
     );
   });
 
@@ -505,7 +507,7 @@ ${then}`;
 const line = (stdout: string, prefix: string) =>
   (stdout.split("\n").find((l) => l.startsWith(prefix)) ?? "").slice(prefix.length);
 const tokenCommand = (name: string) =>
-  `agent-secrets ${name} --ttl 12h --reason=legion-live-proof-github-app-token \${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} \${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$${name}"'`;
+  `agent-secrets ${name} --ttl 12h --reason=legion-live-proof-github-app-token \${LEGION_GITHUB_OWNER:+--github-owner "$LEGION_GITHUB_OWNER"} \${LEGION_GITHUB_REPOS:+$(printf ' --github-repo %s' $LEGION_GITHUB_REPOS)} \${LEGION_GITHUB_READ_ONLY:+--github-read-only} -- sh -c 'printf %s "$${name}"'`;
 
 describe("lib/github-apps.sh", () => {
   const proveBoth = `require_app_inputs implement review
@@ -606,7 +608,7 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     }
   });
 
-  test("app_token_command prints the broker client's command, its owner and read-only words left to the daemon's sh", async () => {
+  test("app_token_command prints the broker client's command, its owner, repository and read-only words left to the daemon's sh", async () => {
     const { code, stdout, stderr } = await githubApps(
       appInputs,
       `require_app_inputs implement review
@@ -617,7 +619,7 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
     expect(line(stdout, "command ")).toBe(tokenCommand("IMPLEMENT_APP"));
   });
 
-  test("the token command asks agent-secrets for the owner and read-only flag the daemon names, and prints the release", async () => {
+  test("the token command asks agent-secrets for the owner, repositories and read-only flag the daemon names, and prints the release", async () => {
     const argvLog = join(dir, "argv-command");
     const cases: [Record<string, string>, string][] = [
       [
@@ -629,11 +631,23 @@ printf 'command %s\\n' "$(app_token_command "$implement_app_secret")"`
         'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
+        { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_REPOS: "legion" },
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion -- sh -c printf %s "$IMPLEMENT_APP"',
+      ],
+      [
+        {
+          LEGION_GITHUB_OWNER: "Acme-Org",
+          LEGION_GITHUB_REPOS: "legion nats-server",
+          LEGION_GITHUB_READ_ONLY: "1",
+        },
+        'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-repo legion --github-repo nats-server --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
+      ],
+      [
         { LEGION_GITHUB_OWNER: "Acme-Org", LEGION_GITHUB_READ_ONLY: "1" },
         'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token --github-owner Acme-Org --github-read-only -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
       [
-        { LEGION_GITHUB_OWNER: "", LEGION_GITHUB_READ_ONLY: "" },
+        { LEGION_GITHUB_OWNER: "", LEGION_GITHUB_REPOS: "", LEGION_GITHUB_READ_ONLY: "" },
         'IMPLEMENT_APP --ttl 12h --reason=legion-live-proof-github-app-token -- sh -c printf %s "$IMPLEMENT_APP"',
       ],
     ];

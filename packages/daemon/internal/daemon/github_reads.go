@@ -154,7 +154,7 @@ func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullReq
 // the outbox rows' alike. The mint failure is returned bare, so each caller says in its own
 // words what it was minting the token for.
 func implementClient(ctx context.Context, tokens appauth.Tokens, githubAPI string, repository ghrepo.Repository) (githubrest.Client, error) {
-	lease, err := tokens.Token(ctx, appauth.Implement, repository.Owner())
+	lease, err := tokens.Token(ctx, appauth.Implement, repository)
 	if err != nil {
 		return githubrest.Client{}, err
 	}

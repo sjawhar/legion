@@ -59,11 +59,12 @@ func TestDocumentOwnerReadsServeARowWithNoProject(t *testing.T) {
 	if owner.Project != "" || owner.IssueKey != nil || !open {
 		t.Errorf("lockArtifactOwner = %#v open %t, want no project, no issue, open", owner, open)
 	}
-	payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, commentID)
+	payloads, err := loadAnchorRefreshedCommentPayloads(ctx, tx, []string{commentID})
 	if err != nil {
-		t.Fatalf("loadAnchorRefreshedCommentPayload: %v", err)
+		t.Fatalf("loadAnchorRefreshedCommentPayloads: %v", err)
 	}
+	payload := payloads[commentID]
 	if payload.ProjectKey != "" || payload.ArtifactName != "document.md" || payload.ID != commentID {
-		t.Errorf("loadAnchorRefreshedCommentPayload = project %q name %q comment %q, want no project", payload.ProjectKey, payload.ArtifactName, payload.ID)
+		t.Errorf("loadAnchorRefreshedCommentPayloads = project %q name %q comment %q, want no project", payload.ProjectKey, payload.ArtifactName, payload.ID)
 	}
 }

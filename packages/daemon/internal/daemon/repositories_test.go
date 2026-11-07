@@ -683,10 +683,10 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	}
 }
 
-// A tmux pane adopted after a restart holds its write token for the owner of the repository its
-// claim's issue works, the owner its launch was minted for: its record's repository's, or, for an
-// issue the workflow does not record, the project's default's. A token no claim holds is refused.
-func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
+// A tmux pane adopted after a restart holds its write token for the repository its claim's issue
+// works, the one its launch was minted for: its record's, or, for an issue the workflow does not
+// record, the project's default. A token no claim holds is refused.
+func TestAnAdoptedPanesRepositoryIsTheOneItsIssueWorks(t *testing.T) {
 	ctx := context.Background()
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION", ghrepo.Renames{}),
@@ -713,14 +713,14 @@ func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
 		}
 		return issue, nil
 	}
-	owner := claimRepositoryOwner(issueOf, w.issueRepository)
-	want := map[string]string{"LEGION-2": "zeta", "LEGION-9": "Acme"}
+	repository := claimRepository(issueOf, w.issueRepository)
+	want := map[string]string{"LEGION-2": "zeta/tools", "LEGION-9": "Acme/Widgets"}
 	for token, issue := range issues {
-		if got, err := owner(ctx, token); err != nil || got != want[issue] {
-			t.Errorf("the write owner of %s = %q, %v; want %q", token, got, err, want[issue])
+		if got, err := repository(ctx, token); err != nil || got.String() != want[issue] {
+			t.Errorf("the repository of %s = %q, %v; want %q", token, got, err, want[issue])
 		}
 	}
-	if got, err := owner(ctx, claim.ControllerToken("legion")); err == nil {
-		t.Errorf("the write owner of a token no claim holds = %q, want a refusal", got)
+	if got, err := repository(ctx, claim.ControllerToken("legion")); err == nil {
+		t.Errorf("the repository of a token no claim holds = %q, want a refusal", got)
 	}
 }
