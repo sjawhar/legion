@@ -545,10 +545,11 @@ func TestIntakeDrainsABacklogPublishedBeforeItBinds(t *testing.T) {
 }
 
 // TestASecondProcessStandsByForADurableAnotherHolds: two envoy-dispatch processes serve one NATS,
-// and the durable admits one of them (NATS refuses the second binder of a push consumer). The
-// second is a standby, not a failure: bindDurableConsumer reports bindStandby, logs nothing at
-// ERROR, says once which process holds the durable, and binds as soon as the holder's
-// subscription goes away -- which is how a dead process's delivery work is picked up.
+// and the durable admits one of them: what admits one binder is this durable's own Postgres
+// consumer lease (consumerLease, taken in bindDurableConsumer), not NATS. The second is a
+// standby, not a failure: bindDurableConsumer reports bindStandby, logs nothing at ERROR, says
+// once which process holds the durable, and binds as soon as the holder's subscription goes
+// away -- which is how a dead process's delivery work is picked up.
 func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
