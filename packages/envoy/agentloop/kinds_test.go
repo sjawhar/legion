@@ -101,8 +101,9 @@ func TestOpenAIChatSendsEffortOffAsNone(t *testing.T) {
 
 // An openai-chat run asking for a Final object sends that schema as the Chat Completions API's
 // json_schema response format, rather than the bare json_object the provider falls back to, and
-// outside OpenAI's strict mode, which refuses schemas this package serves. A run that asks for no
-// object sends no response_format at all.
+// in OpenAI's strict mode, so the reply is constrained as it is generated: every Final schema is
+// held to the subset strict mode compiles before the call is made. A run that asks for no object
+// sends no response_format at all.
 func TestOpenAIChatSendsTheFinalSchemaAsAJSONSchemaResponseFormat(t *testing.T) {
 	t.Parallel()
 	s := newStandIn(t, chatStream("stop", chatUsage{Prompt: 2, Completion: 3}, finalAnswer))
@@ -138,8 +139,8 @@ func TestOpenAIChatSendsTheFinalSchemaAsAJSONSchemaResponseFormat(t *testing.T) 
 	if !sameJSON(t, body.Format.Schema.Schema, []byte(finalSchema)) {
 		t.Errorf("the call's response_format schema is %s, want the request's %s", body.Format.Schema.Schema, finalSchema)
 	}
-	if body.Format.Schema.Strict {
-		t.Errorf("the call's response_format is %s, want strict false: the package checks the reply against the schema itself",
+	if !body.Format.Schema.Strict {
+		t.Errorf("the call's response_format is %s, want strict true: the schema binds the reply as it is generated",
 			responseFormatOf(t, got[0]))
 	}
 

@@ -209,10 +209,16 @@ func languageModel(req Request, client *http.Client) (provider.LanguageModel, pr
 	}
 }
 
-// finalOutput is Request.Final as the SDK's output: the last reply is validated against the
-// schema and read back as the object itself. A schema the SDK refuses is a request the loop
-// cannot run.
+// finalOutput is Request.Final as the SDK's output: the schema is held to the strict
+// structured-output subset both providers enforce (strict.go), and the last reply is validated
+// against it and read back as the object itself. A schema outside that subset, or one the SDK
+// refuses, is a request the loop cannot run: no model call is made. The check runs here, before
+// the run's first call, because the SDK sends a schema on as it is written and a provider that
+// cannot compile a constraint drops it silently.
 func finalOutput(final json.RawMessage) (aisdk.Output, error) {
+	if err := strictFinal(final); err != nil {
+		return nil, fmt.Errorf("agentloop: the request's final schema: %w", err)
+	}
 	s, err := schema.SchemaFromJSON(final)
 	if err != nil {
 		return nil, fmt.Errorf("agentloop: the request's final schema: %w", err)
@@ -700,13 +706,15 @@ func openaiOptions(effort string) openai.OpenAIResponsesOptions {
 }
 
 // chatOptions is a Chat Completions call at the model's reasoning effort, with a Final reply's
-// schema sent as it is rather than in OpenAI's strict mode: strict mode refuses schemas that are
-// valid JSON Schema, a oneOf at the root or a property left out of required among them, and this
-// package reads the reply back against the schema itself, raising FaultMalformed where it does
-// not fit, so strict mode would turn requests the model can serve into requests it refuses and
-// buy no check the run does not already make.
+// schema sent as response_format.json_schema in OpenAI's strict mode, so the reply is
+// constrained as it is generated rather than only checked afterwards. Strict mode refuses a
+// schema outside the subset it compiles — a property left out of required and a union at the
+// root among them — and every Final schema is held to that subset before the first call
+// (strict.go), so the schemas this package serves are the schemas strict mode takes. The reply
+// is still read back against the schema itself, raising FaultMalformed where it does not fit:
+// an endpoint that speaks the Chat Completions protocol is not always OpenAI.
 func chatOptions(effort string) openaicompatible.OpenAIOptions {
-	strict := false
+	strict := true
 	return openaicompatible.OpenAIOptions{
 		ReasoningEffort:  openaiEffort(effort),
 		StrictJSONSchema: &strict,

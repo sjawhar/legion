@@ -1,0 +1,31 @@
+kind: Fixed
+body: |-
+  `agentloop` now holds `Request.Final` to the structured-output subset both providers enforce,
+  before the run's first model call, instead of passing a caller's schema through as given. A
+  schema a provider cannot compile into the grammar it generates against is not refused on
+  arrival: it rides to the model and binds nothing, and the reply is whatever the model writes —
+  measured against the Messages API on 2026-11-07, a reply form whose one optional property had
+  the type `["string","null"]` ran a one-sentence answer to the whole output token bound, and the
+  same question under a strict form stopped at 77 output tokens with the object. `Run` now
+  answers such a request with an error naming the JSON path of the node at fault and what is
+  wrong with it — `agentloop: the request's final schema: properties.needs: optional property
+  (not in required)` — and makes no call. The rule, which the package's documentation states in
+  full: every object lists each of its properties in `required` and carries
+  `additionalProperties: false`, no node takes a union (`anyOf`, `oneOf`, `allOf`, `not`, or a
+  type array such as `["string","null"]`), an array says what its items are, a `$ref` names a
+  place in the same schema and never leads back into itself, and the only other keywords a node
+  may carry are `type`, `enum`, `format`, `$defs`, `definitions`, `title` and `description` —
+  anything else, `minLength`, `maximum`, `pattern` and `minItems` among them, is refused by name,
+  because the SDK strips those out of the schema and writes them into the node's description,
+  where they are prose to the model. The check reaches every property, every array's items and
+  every definition.
+
+  Because every Final schema is now inside that subset, an `openai-chat` run sends the schema in
+  OpenAI's strict mode — `response_format.json_schema` with `strict: true`, where it sent
+  `strict: false` before — so on every protocol the schema binds the reply as it is generated
+  rather than only being checked after it. The package still reads each reply back against the
+  schema itself and raises the malformed fault where it does not fit, since an endpoint that
+  speaks a vendor's protocol is not always that vendor.
+time: 2026-11-07T12:00:00.000000000Z
+custom:
+    Issue: INFRA-204

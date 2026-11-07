@@ -64,9 +64,56 @@
 // reads that reply back against the schema itself: a reply that does not fit is FaultMalformed.
 // The schema also rides to the provider, where the protocol says: in output_config.format on
 // anthropic-messages and azure-anthropic, as the Responses API's text format on
-// openai-responses, and on openai-chat as response_format.json_schema without the provider's
-// strict mode, because the package checks the reply against the schema itself and strict mode
-// refuses schemas that are valid JSON Schema.
+// openai-responses, and on openai-chat as response_format.json_schema with the provider's
+// strict flag set. On every protocol the schema therefore binds the reply as it is generated,
+// and the package's own read of the reply is the second check, which an endpoint that speaks a
+// vendor's protocol without being that vendor still needs.
+//
+// # The Final schema is held to the strict subset
+//
+// A provider enforces a schema by compiling it into the grammar it generates against, and both
+// of them compile a documented subset of JSON Schema and no more. A schema outside that subset
+// is not always refused on arrival: Anthropic's output_config.format takes one, enforces what
+// it can of it and says nothing about the rest, so a constraint it cannot compile is a
+// constraint the caller believes in and the model never sees. Measured against the Messages API
+// on 2026-11-07, a schema whose one optional property had the type ["string","null"] rode in
+// output_config.format and bound nothing, and the reply ran to the output token bound repeating
+// itself; OpenAI's strict mode, which this package now asks for, would have answered the same
+// schema with a 400 in the middle of the run. Run therefore checks Request.Final before its
+// first model call and answers a schema that is not strict with an error naming the JSON path
+// of the node at fault and what is wrong with it — agentloop: the request's final schema:
+// properties.needs: optional property (not in required) — rather than making the call. The
+// rule, which is the two providers' subsets intersected, reading
+// https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
+// and https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas:
+//
+//   - The root is an object, and so is every node: each carries one type, named by a string;
+//     a type array, such as ["string","null"], is a union and is refused.
+//   - anyOf, oneOf, allOf, not, if, then and else are refused wherever they appear. OpenAI's
+//     strict mode refuses all but anyOf outright and refuses an anyOf at the root; Anthropic
+//     counts every anyOf and every type array against a cap of sixteen union parameters per
+//     request, at exponential compilation cost.
+//   - Every object carries additionalProperties: false and lists every one of its properties in
+//     required. An optional property is the defect above; OpenAI's strict mode refuses one
+//     outright, and Anthropic caps them at twenty-four per request.
+//   - An array says what its items are. How many items it holds is not a Final schema's to say:
+//     Anthropic enforces no array constraint but a minItems of 0 or 1, and the SDK takes
+//     minItems out of the schema before the call either way.
+//   - The keywords a node may carry are type, properties, required, additionalProperties, items,
+//     enum, format, $ref, $defs, definitions, title and description. Anything else — minLength,
+//     maximum, multipleOf, pattern, minItems, uniqueItems, const, a keyword a later draft adds —
+//     is refused by name. A keyword the provider's grammar does not take does not fail the call:
+//     the SDK's Anthropic provider strips every one of those out of the schema and writes it
+//     into the node's description, which is prose to the model and binds nothing. An enum holds
+//     plain values only, and a format is one of date, date-time, duration, email, hostname,
+//     ipv4, ipv6, time and uuid, which is Anthropic's list without uri, which OpenAI's does not
+//     carry.
+//   - A $ref names a place in this schema, carries nothing but a title or a description beside
+//     itself, and never leads back to a node the walk is already inside: Anthropic serves no
+//     recursive schema and loads no external $ref.
+//
+// The check reaches every node: each property, an array's items, and every member of $defs and
+// definitions, whether or not a $ref names it.
 //
 // # Bounds
 //
