@@ -1,13 +1,18 @@
 package intake
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -90,11 +95,18 @@ func (h *heldOnce) releaseAfter(t *testing.T, wait time.Duration) {
 func publishHeldBacklog(t *testing.T, js jetstream.JetStream) {
 	t.Helper()
 	for i := range heldBacklog {
-		key := fmt.Sprintf("CAPTURE-%d", 300+i)
-		publish(t, js, "notifications.dispatch.issue."+key+".issue.updated", envelopeJSON(t, fmt.Sprintf("held-%d", i+1), "dispatch",
-			fmt.Sprintf(`{"id":%d,"issue_key":%q,"seq":1,"notify":true,"type":"issue.updated","actor":{"kind":"user","id":"someone"},`+
-				`"payload":{"key":%q,"status":"backlog","title":"a held event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, i+1, key, key)))
+		publishIssueEvent(t, js, fmt.Sprintf("CAPTURE-%d", 300+i), i+1)
 	}
+}
+
+// publishIssueEvent publishes one Dispatch issue event on the Dispatch durable's subject, naming
+// issue key under the event id `held-<id>`: the backlog's events one at a time, and the one event
+// a row that drives a single message through the daemon needs.
+func publishIssueEvent(t *testing.T, js jetstream.JetStream, key string, id int) {
+	t.Helper()
+	publish(t, js, "notifications.dispatch.issue."+key+".issue.updated", envelopeJSON(t, fmt.Sprintf("held-%d", id), "dispatch",
+		fmt.Sprintf(`{"id":%d,"issue_key":%q,"seq":1,"notify":true,"type":"issue.updated","actor":{"kind":"user","id":"someone"},`+
+			`"payload":{"key":%q,"status":"backlog","title":"a held event","parent":null,"rank":"A","labels":[],"resolved_repo":"sjawhar/legion"}}`, id, key, key)))
 }
 
 // The fix: the first fact of a backlog is held for three acknowledgement windows, and JetStream
@@ -234,4 +246,313 @@ func TestAFactHeldPastItsAcknowledgementWindowIsDeliveredTwiceWithNoProgressSign
 		t.Errorf("JetStream delivered %d messages for a backlog of %d with no progress signal, want more than the backlog: nothing held the redelivery off",
 			info.Delivered.Consumer, heldBacklog)
 	}
+}
+
+// What the three rows below prove together is Acceptance A2 of dispatch://INFRA-1530: the progress
+// signal stops the moment the handler it was reporting for ends, it stops before the message's one
+// terminal call so a nak keeps the retry it asked for, and a handler that never ends is cut at
+// HandlerLimit with its message naked and delivered again.
+
+// progressEvery is the keeper's interval in the row that drives it directly. It is short because
+// that row waits out three of them and nothing else: the interval the daemon uses is a third of
+// AckWait, which is the one caller's business, not this function's.
+const progressEvery = 20 * time.Millisecond
+
+// countedProgress is a delivery that counts the progress signals made for it and passes each one
+// to the message it wraps, so a row can tell a tick the keeper made before stop() returned from
+// one it made after.
+type countedProgress struct {
+	jetstream.Msg
+	mu      sync.Mutex
+	signals int
+}
+
+func (c *countedProgress) InProgress() error {
+	c.mu.Lock()
+	c.signals++
+	c.mu.Unlock()
+	return c.Msg.InProgress()
+}
+
+func (c *countedProgress) reported() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.signals
+}
+
+// The first claim, on keepInProgress itself: once stop() has returned, no tick is in flight. The
+// row drives the keeper directly rather than through a consumer loop, since that is all the
+// function needs — a delivery, an interval and the stop it hands back. The delivery is real, and
+// fetched rather than consumed, so the signals counted here are signals the server took.
+func TestTheProgressSignalStopsWhenItsHandlerEnds(t *testing.T) {
+	js, stream := testJetStream(t)
+	publishIssueEvent(t, js, "CAPTURE-310", 1)
+	consumer, err := stream.CreateOrUpdateConsumer(context.Background(), jetstream.ConsumerConfig{
+		Durable:       "progress-stop",
+		FilterSubject: "notifications.dispatch.issue.>",
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		// Far longer than the row runs: a redelivery would hand the row a second message and say
+		// nothing about the keeper.
+		AckWait: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("create the row's consumer: %v", err)
+	}
+	message, err := consumer.Next()
+	if err != nil {
+		t.Fatalf("fetch the row's message: %v", err)
+	}
+
+	counted := &countedProgress{Msg: message}
+	stop := keepInProgress(context.Background(), counted, progressEvery, slog.New(slog.NewTextHandler(&lockedBuffer{}, nil)))
+	// A wait that fails leaves the keeper running, so the row ends it either way.
+	defer stop()
+	testwait.Eventually(t, "the keeper has reported the message in progress", func() bool { return counted.reported() > 0 })
+
+	stop()
+	stopped := counted.reported()
+	// Three intervals: a keeper still running would have ticked three times over by now, and one
+	// tick is enough to fail the row.
+	time.Sleep(3 * progressEvery)
+	if after := counted.reported(); after != stopped {
+		t.Errorf("the keeper reported the message in progress %d more times after stop() returned, want none: stop returns only once its goroutine has ended, so no tick can still be in flight",
+			after-stopped)
+	}
+}
+
+// progressSignal is the acknowledgement-protocol payload a progress signal carries, nats.go's
+// ackProgress (jetstream/message.go).
+const progressSignal = "+WPI"
+
+// watchProgressSignals answers how many messages the daemon's client reported in progress within a
+// span, by watching the subject every acknowledgement of this server is published on. The wire is
+// the only place a tick shows: nothing in the daemon's log says one was made, the consumer's info
+// keeps no count of them, and the message's own state is the same either way. Every consumer of
+// the server shares the subject, which costs the row that uses this nothing: it drives one
+// message.
+func watchProgressSignals(t *testing.T, js jetstream.JetStream) func(from, until time.Time) int {
+	t.Helper()
+	var mu sync.Mutex
+	var made []time.Time
+	subscription, err := js.Conn().Subscribe("$JS.ACK.>", func(signal *nats.Msg) {
+		if string(signal.Data) != progressSignal {
+			return
+		}
+		mu.Lock()
+		made = append(made, time.Now())
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("watch the acknowledgement subject: %v", err)
+	}
+	// The connection this subscription is on is the test server's, which testJetStream closes when
+	// the test ends, so a failure to unsubscribe here is that close and not the row's business.
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	return func(from, until time.Time) int {
+		mu.Lock()
+		defer mu.Unlock()
+		count := 0
+		for _, at := range made {
+			if !at.Before(from) && !at.After(until) {
+				count++
+			}
+		}
+		return count
+	}
+}
+
+// nakFailure is the line nakResolve writes at warn just before it naks a message whose handler
+// returned an error (handleMessage's "retryable intake processing failure").
+const nakFailure = "retryable intake processing failure"
+
+// heldNak is the daemon's log with that one line held, which is how the row below widens the
+// window between a handler's end and its message's nak. In the daemon that window is microseconds
+// wide, so a keeper that outlived its handler would have to be caught inside it by luck; held for
+// longer than the keeper's own interval, the window holds a tick of such a keeper with certainty,
+// and holds none of a keeper stopped before the terminal call. It holds the nak named by holdsNak
+// and no other, so the row's other retry measures the delay the nak asked for with nothing of the
+// row's own added to it.
+type heldNak struct {
+	buffer lockedBuffer
+	hold   time.Duration
+
+	mu    sync.Mutex
+	naks  int
+	from  time.Time
+	until time.Time
+}
+
+// holdsNak is which of the row's naks is held: the second, so the first retry is the one measured.
+const holdsNak = 2
+
+func (h *heldNak) Write(p []byte) (int, error) {
+	written, err := h.buffer.Write(p)
+	if !bytes.Contains(p, []byte(nakFailure)) {
+		return written, err
+	}
+	h.mu.Lock()
+	h.naks++
+	holding := h.naks == holdsNak
+	if holding {
+		h.from = time.Now()
+	}
+	h.mu.Unlock()
+	if !holding {
+		return written, err
+	}
+	time.Sleep(h.hold)
+	h.mu.Lock()
+	h.until = time.Now()
+	h.mu.Unlock()
+	return written, err
+}
+
+// window is when the held nak's line was held from and until; both are zero until it has been.
+func (h *heldNak) window() (time.Time, time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.from, h.until
+}
+
+// The second claim, end to end: the keeper stops before the message's one terminal call, so the
+// nak keeps the delay it asked for. A tick that landed after a nak would reset the server's
+// redelivery timer — nats-server's processNak keeps the entry in o.pending with a timestamp that
+// expires after the nak's delay, and progressUpdate resets it to now — and the retry the nak asked
+// for would become a whole AckWait.
+//
+// So the row measures that retry. It also watches the signals themselves, because the retry alone
+// would not catch the fault this row is here for: a stop() left to a defer after the terminal
+// call. nats.go marks a message acknowledged for a nak and refuses every later signal for it
+// (ErrMsgAlreadyAckd, jetstream/message.go), so a keeper that outlives the nak publishes nothing
+// and the retry stands anyway — on that client. What such a keeper does do is report the message
+// in progress between its handler's end and the nak, which is where the row looks, and the one
+// thing between the two the row can hold is the line nakResolve writes there (heldNak).
+func TestTheProgressSignalStopsBeforeTheNakThatKeepsItsDelay(t *testing.T) {
+	pool := migratedPool(t)
+	js, stream := testJetStream(t)
+	progress := watchProgressSignals(t, js)
+
+	// The keeper ticks every third of AckWait, so a hold of a third and a bit covers a whole
+	// interval whenever it starts.
+	spec := consumerSpec(&lockedBuffer{})
+	spec.AckWait, spec.NakDelay = 2*time.Second, 50*time.Millisecond
+	// The row is the nak's, not the limit's: no handler here runs long enough to be cut.
+	spec.HandlerLimit = time.Minute
+	held := &heldNak{hold: spec.AckWait/3 + 100*time.Millisecond}
+	spec.Logger = slog.New(slog.NewTextHandler(held, nil))
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	publishIssueEvent(t, js, "CAPTURE-320", 1)
+
+	var mu sync.Mutex
+	var entered []time.Time
+	// The fact fails its first two deliveries and applies on the third, so the row ends on an
+	// acknowledgement rather than retrying for ever.
+	defer runConsumers(t, consumers, handlerFunc(func(_ context.Context, _ pgx.Tx, _ Fact) (Result, error) {
+		mu.Lock()
+		entered = append(entered, time.Now())
+		delivery := len(entered)
+		mu.Unlock()
+		if delivery <= holdsNak {
+			return Result{}, errors.New("a fact this row's handler refuses, so consumeMessage naks its message")
+		}
+		return Result{}, nil
+	}))()
+
+	testwait.Eventually(t, "the refused fact retried twice and then applied", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(entered) > holdsNak
+	})
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+
+	mu.Lock()
+	retry := entered[1].Sub(entered[0])
+	mu.Unlock()
+	// The margin: the delay the nak asked for is a fortieth of AckWait, and a late tick would make
+	// this retry a whole AckWait. A quarter of AckWait is five times the delay, which a loaded
+	// runner's scheduling does not cross, and four times under the window a late tick would cost.
+	if retry > spec.AckWait/4 {
+		t.Errorf("the naked fact was delivered again after %s, want nearer its %s nak delay than its %s acknowledgement window: a progress signal after the nak reset the server's redelivery timer",
+			retry, spec.NakDelay, spec.AckWait)
+	}
+	from, until := held.window()
+	if from.IsZero() || until.IsZero() {
+		t.Fatalf("the row held no nak line, so nothing widened the window a keeper that outlived its handler would tick in")
+	}
+	if signals := progress(from, until); signals != 0 {
+		t.Errorf("the daemon reported the message in progress %d times between its handler's end and its nak, want none: the keeper has to stop before the terminal call, not in a defer after it",
+			signals)
+	}
+}
+
+// The third claim: a handler that never ends is cut at HandlerLimit, and its message is naked and
+// delivered again rather than held in progress for good.
+func TestTheProgressSignalEndsWithTheHandlerItsLimitCuts(t *testing.T) {
+	pool := migratedPool(t)
+	js, _ := testJetStream(t)
+	logs := &lockedBuffer{}
+	spec := consumerSpec(logs)
+	// Three times the acknowledgement window, so the redelivery this row measures cannot be read
+	// as the window's own, and a small fraction of the row's patience (testwait.Eventually waits a
+	// minute), so a limit that never cuts fails the row instead of holding it.
+	spec.HandlerLimit = 600 * time.Millisecond
+	consumers, err := OpenConsumers(context.Background(), js, pool, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	publishIssueEvent(t, js, "CAPTURE-330", 1)
+
+	held := newHeldOnce()
+	var mu sync.Mutex
+	var entered []time.Time
+	stop := runConsumers(t, consumers, handlerFunc(func(ctx context.Context, _ pgx.Tx, _ Fact) (Result, error) {
+		mu.Lock()
+		entered = append(entered, time.Now())
+		mu.Unlock()
+		// The first delivery waits on the context consumeMessage passes and nothing releases it,
+		// so it ends when and only when the limit cuts it; a handler sleeping on the clock would
+		// ignore the cut and prove nothing. Every delivery after it returns at once.
+		held.hold(ctx)
+		return Result{}, nil
+	}))
+	defer stop()
+
+	testwait.Eventually(t, "the cut fact delivered again", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(entered) >= 2
+	})
+	// The consumers stop on the second delivery, so the row ends there rather than working the
+	// fact again.
+	stop()
+
+	mu.Lock()
+	cut := entered[1].Sub(entered[0])
+	mu.Unlock()
+	if cut < spec.HandlerLimit/2 || cut > 2*spec.HandlerLimit {
+		t.Errorf("the held fact was delivered again %s after its first delivery, want about its %s handler limit: a redelivery at its %s acknowledgement window is the progress signal missing, and none at all is a handler held for good",
+			cut, spec.HandlerLimit, spec.AckWait)
+	}
+	line := cutLine(logs.String())
+	if line == "" {
+		t.Fatalf("no line says an intake handler outran its limit and was cut, in:\n%s", logs.String())
+	}
+	for _, attribute := range []string{"consumer=", "event_id=", "fact=intake.DispatchIssue", "limit=" + spec.HandlerLimit.String()} {
+		if !strings.Contains(line, attribute) {
+			t.Errorf("the cut handler's line carries no %s, which is what names the cut: %s", attribute, line)
+		}
+	}
+}
+
+// cutLine is the line of logs that says a handler outran its limit, empty when there is none.
+func cutLine(logs string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "an intake handler outran its limit and was cut") {
+			return line
+		}
+	}
+	return ""
 }

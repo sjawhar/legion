@@ -617,10 +617,13 @@ func (l *lagWatch) observe(message jetstream.Msg) {
 // nak that outcome asks for follow.
 //
 // The keeper has to stop before that one call rather than in a defer after it. A progress signal
-// that landed after a nak would stretch the retry the nak asked for: nats-server's processNak
-// keeps the entry in o.pending with a timestamp that expires after the nak's delay, and
-// progressUpdate resets that timestamp to now, so a one-second retry would become a whole AckWait
-// (server/consumer.go).
+// that reached the server after a nak would stretch the retry the nak asked for: nats-server's
+// processNak keeps the entry in o.pending with a timestamp that expires after the nak's delay,
+// and progressUpdate resets that timestamp to now, so a one-second retry would become a whole
+// AckWait (server/consumer.go). nats.go stops that tick on its own today — a nak marks the
+// message acknowledged, so every later signal for it is refused and published nowhere — but that
+// guard is the client library's, and what keeps the window between the work and the terminal call
+// free of signals is this order.
 //
 // HandlerLimit is what the held delivery costs: a message reported in progress for ever is a
 // message nothing redelivers, so a handler that hangs is cut at that limit, its message naked and

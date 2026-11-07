@@ -29,8 +29,11 @@ import (
 // works on it, so JetStream does not deliver it again and have it prepared a second time. It
 // returns stop, which ends the keeper. stop is safe to call many times and returns only once the
 // keeper's goroutine has ended, so a caller that calls it before it acknowledges or naks the
-// message knows no tick can still be in flight: a tick that landed after a nak would reset the
-// server's redelivery timer and stretch the retry the nak asked for.
+// message knows no tick can still be in flight: a tick that reached the server after a nak would
+// reset the server's redelivery timer and stretch the retry the nak asked for. nats.go would stop
+// that tick today anyway, since a nak marks the message acknowledged and every later signal for
+// it is refused with ErrMsgAlreadyAckd and published nowhere, but that guard is the client
+// library's and this order does not rest on it.
 //
 // The one caller ticks at a third of AckWait. A fraction well below half leaves room for one tick
 // to be lost or to arrive late and still have another inside the window before it expires.
