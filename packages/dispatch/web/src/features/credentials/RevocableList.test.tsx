@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// biome-ignore lint/style/noRestrictedImports: the two presses below land in one synchronous act, which user-event's awaited interactions cannot do
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -113,12 +115,13 @@ async function afterMicrotasks(): Promise<void> {
 
 for (const section of sections) {
   test(`${section.heading}: Revoke is disabled while a revoke is out, and enabled once it settles`, async () => {
+    const user = userEvent.setup();
     const out = Promise.withResolvers<void>();
     const stubs = section.stub(() => out.promise);
     const confirm = spyOn(window, "confirm").mockReturnValue(true);
     try {
       const button = await renderSection(section);
-      fireEvent.click(button);
+      await user.click(button);
       await waitFor(() => expect(stubs.revokeCalls()).toEqual([[section.rowId, keyedAttempt]]));
       await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
 
@@ -145,7 +148,9 @@ for (const section of sections) {
       // Both presses land inside one act, so React re-renders only after both: the second reaches
       // the handler before the pending revoke disables the button, which only the guard stops.
       act(() => {
+        // Two presses in one task: user-event waits between its events, so it cannot make them.
         fireEvent.click(button);
+        // The second press before React re-renders and disables the button.
         fireEvent.click(button);
       });
       await afterMicrotasks();
@@ -159,12 +164,13 @@ for (const section of sections) {
   });
 
   test(`${section.heading}: a refused revoke shows the broker's refusal`, async () => {
+    const user = userEvent.setup();
     const stubs = section.stub(async () => {
       throw new ApiError(403, { code: "NOT_APPROVER", error: section.refusal });
     });
     const confirm = spyOn(window, "confirm").mockReturnValue(true);
     try {
-      fireEvent.click(await renderSection(section));
+      await user.click(await renderSection(section));
       expect(await screen.findByText(section.refusal)).toBeDefined();
     } finally {
       cleanup();
@@ -174,14 +180,15 @@ for (const section of sections) {
   });
 
   test(`${section.heading}: a revoke refreshes the list, so the revoked row leaves it`, async () => {
+    const user = userEvent.setup();
     // The revoke answers as the broker would: once it succeeds, the list no longer holds the row.
     const stubs = section.stub(async () => stubs.clearList());
     const confirm = spyOn(window, "confirm").mockReturnValue(true);
     try {
-      fireEvent.click(await renderSection(section));
+      await user.click(await renderSection(section));
       const region = within(screen.getByRole("region", { name: section.heading }));
       expect(await region.findByText(section.empty)).toBeDefined();
-      expect(region.queryByRole("button", { name: "Revoke" })).toBeNull();
+      expect(region.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
       expect(stubs.revokeCalls()).toEqual([[section.rowId, keyedAttempt]]);
     } finally {
       cleanup();
