@@ -2465,19 +2465,28 @@ jobs:
     # steps' `env:` drops run-server.sh's `go build` out of check-ci-filters.sh's reduction, which
     # then counts it as reading every Go file of the repository.
     #
-    # The budgets below, this one and the two on steps, are measured: GitHub's jobs API over the
+    # The job budget below and the browser step's are measured: GitHub's jobs API over the
     # 397 of the newest 400 ci.yaml runs that could be read, created between 2026-11-05T04:52:45Z
     # and 2026-11-05T21:06:27Z (268 pull_request, 120 merge_group, 12 push), over the 217 jobs of
     # this name that concluded success. Three runs could not be read, 41995538189, 42034266338 and
     # 42087689355, whose jobs endpoint answered HTTP 502 on four attempts. The whole window is
     # after the commit that moved this job to four lanes, 9689e2c54 of 2026-11-05T04:09:18Z, so no
-    # run is left out for being older than it.
+    # run is left out for being older than it. Those 217 jobs ran a smaller package list than the
+    # install step's below, so the install step is out of the table below, and its budget is its
+    # own retry arithmetic rather than a reading of that window.
     #
-    #   step                                             median    95th     max
-    #   Install Playwright Chromium, WebKit and Firefox     38 s   102 s   634 s
-    #   Browser-test dispatch dashboard                   1475 s  1582 s  1671 s
-    #   every other step summed                            199 s   221 s   232 s
-    #   the whole job                                     1715 s  1875 s  2348 s
+    #   step                               median    95th     max
+    #   Browser-test dispatch dashboard    1475 s  1582 s  1671 s
+    #   every other step summed             199 s   221 s   232 s
+    #   the whole job                      1715 s  1875 s  2348 s
+    #
+    # The install step has one reading at its present package set, not a distribution: 30 s, in
+    # job 128209099649 of cybermonklabs/legion#2888 at 5ff42456. A distribution at that set can
+    # be read from main's jobs of this name. The apt archive cache's three steps came after that
+    # window too, so the "every other step summed" row holds none of them. In that job the restore
+    # missed, and the key and restore steps took under a second each. A restore that hits reads
+    # about 114 MB from the Actions cache, and the save, which runs only on a push to main whose
+    # restore missed, has no reading yet.
     #
     # The rule: a step budget is that step's measured maximum plus 15 per cent, rounded up to the
     # next whole minute, with a floor of two minutes; an install step's budget comes from its own
@@ -2596,60 +2605,117 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('playwright-{0}-', runner.os) || '' }}
+      # The key the apt archive cache below is read and written under, computed here because a
+      # step expression cannot read the runner's own environment.
+      - id: apt-debs-key
+        name: Compute the apt archive cache key
+        run: |
+          # The entry line in bun.lock reads `"playwright-core": ["playwright-core@1.64.1", ...`.
+          version=$(sed -n 's/^ *"playwright-core": \["playwright-core@\([^"]*\)".*/\1/p' bun.lock)
+          [ -n "$version" ] || {
+            echo "::error::no playwright-core version in bun.lock, so the apt archive cache key" \
+              "cannot name the Playwright version"
+            exit 1
+          }
+          # A GitHub hosted runner sets both, for example ubuntu24 and 20251027.1.0.
+          for name in ImageOS ImageVersion; do
+            [ -n "${!name}" ] || {
+              echo "::error::the runner set no $name, so the apt archive cache key cannot name" \
+                "the image"
+              exit 1
+            }
+          done
+          echo "key=apt-playwright-$version-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      # No restore-keys: a partial match would hand the install the .deb files of another
+      # Playwright version or another image, which apt would fetch again anyway.
+      - id: apt-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs-key.outputs.key }}
       # This step installs the system packages itself instead of through `playwright install
-      # --with-deps`, which installs Playwright's whole ubuntu24.04-x64 list. The pinned list
-      # below is that list less four media packages - gstreamer1.0-libav,
-      # gstreamer1.0-plugins-bad, gstreamer1.0-plugins-good and libavcodec60 - which is what
-      # makes this step small enough to bound. Measured on this
-      # image: Playwright's whole list resolves to 181 packages and 114 MB; without those four it
-      # is 60 packages and 51.4 MB. The four carry 121 of the 181 packages and 62.8 of the
-      # 114.2 MB, through the ffmpeg stack and the GStreamer plugin trees.
+      # --with-deps`, which runs its apt calls with no bound, no retry and no second origin. The
+      # pinned list below is Playwright's ubuntu24.04-x64 list exactly: the union of the `tools`,
+      # `chromium`, `firefox` and `webkit` entries of that table in playwright-core's
+      # lib/coreBundle.js. Measured in job 128209099649, of cybermonklabs/legion#2888 at 5ff42456:
+      # Playwright's 79 names and gstreamer1.0-tools resolve, with their dependencies, to 182
+      # packages and 114 MB of archives (`0 upgraded, 182 newly installed, 0 to remove and 27
+      # not upgraded.` and `Need to get 114 MB of archives.`), and the `apt-get update` before
+      # them fetched 13.0 MB of indexes (`Fetched 13.0 MB in 1s (10.1 MB/s)`). Nothing is left
+      # out of the list, so there is no reduced set beside it and no split to measure.
       #
-      # Each is safe to drop because they are plugins and codecs loaded at playback, not
-      # libraries the browsers link: Playwright's own source says of gstreamer1.0-libav that its
-      # one library libgstlibav.so is the library required for playing h.264. No spec or source
-      # file under packages/dispatch holds `<video`, `.mp4`, `.webm`, `new Audio` or
-      # `playsinline`, so no row plays media. The libraries WebKit links stay in the list:
-      # libgstreamer-plugins-bad1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer1.0-0,
-      # libgstreamer-gl1.0-0, libflite1 and libgtk-4-1 among them. A row that later needs media
-      # reinstalls that package by name. That the browsers still launch is what the suite's six
-      # WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone, firefox,
-      # firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) - which the
-      # "Browser-test dispatch dashboard" step below runs.
+      # `step_tools` below is the one package this step installs that Playwright's list does not
+      # name: gstreamer1.0-tools, for the `gst-inspect-1.0` the decoder guard runs. It is a
+      # variable of its own because `packages` is what the check at the end of the step holds
+      # against Playwright's own list, name for name.
       #
-      # On a Playwright upgrade, re-derive the list as the union of the `tools`, `chromium`,
-      # `firefox` and `webkit` entries of the ubuntu24.04-x64 table in playwright-core's
-      # lib/coreBundle.js, less those four. Deriving it at run time by subtracting one apt
-      # closure from the other does not work and must not be written: the two closures share 35
-      # packages Playwright's own list names or needs, and the subtraction leaves WebKit unable
-      # to launch.
+      # WebKit plays video and audio through GStreamer, so without gstreamer1.0-plugins-good,
+      # gstreamer1.0-plugins-bad, gstreamer1.0-libav and libavcodec60 it loads a page and plays
+      # nothing: the first three hold the plugins that demux Matroska and decode VP8 and h.264,
+      # and libavcodec60 is the codec library gstreamer1.0-libav's plugin links for h.264.
+      # Playwright's own source says of gstreamer1.0-libav that its one library libgstlibav.so is
+      # the library required for playing h.264. The decoder guard after the install asks the
+      # GStreamer registry for one element out of each of those three plugin packages and out of
+      # the already-pinned gstreamer1.0-plugins-base; avdec_h264 loads only where libavcodec60 is
+      # installed, so it answers for that library too. It runs before the browsers are
+      # downloaded, and it is the one check that catches a package that installs without its
+      # element reaching the GStreamer registry. That the browsers launch at all is what the
+      # suite's six WebKit and Firefox projects prove - webkit, webkit-iphone, webkit-alone,
+      # firefox, firefox-download-navigation and firefox-alone (e2e/playwright.config.ts) -
+      # which the "Browser-test dispatch dashboard" step below runs.
+      #
+      # On a Playwright upgrade, re-derive the list as that union again, with nothing taken out
+      # of it. Deriving it at run time by subtracting one apt closure from another does not work
+      # and must not be written: the closure of the four that carry playback and the closure of
+      # the rest share 35 packages Playwright's own list names or needs, and the subtraction
+      # leaves WebKit unable to launch. This paragraph is a standing refusal, not a record of a
+      # design that was taken out: nobody is to re-derive a reduced list.
       #
       # The 22-minute budget is the step's own retry arithmetic, not its measured maximum, which
       # the bounds make unreachable: two bounded attempts of `apt-get update` at 90 s, two of the
       # download at 300 s, then, where both of those time out, one 90 s read of the fallback
-      # origin's indexes and a third 300 s download attempt, then the unpack, the browser
-      # download and the two apt simulations of the list check, none of which touch the Ubuntu
-      # mirror. So the arithmetic is 2 x 90 + 2 x 300 + 90 + 300 s of bounded apt, about 20 s of
-      # unpack, about 90 s for the browsers and about 30 s for the list check: 1310 s, rounded up
-      # to 22 min. The budget has to carry the fallback's own update, because the path that
-      # needs every one of those bounds is the path on which the step still succeeds. Healthy
-      # today is a 38 s median and a 102 s 95th percentile for the whole step.
+      # origin's indexes and a third 300 s download attempt, then the unpack, the keeping of the
+      # archives for the cache, the decoder guard, the browser download and the one apt
+      # simulation of the list check, none of which touch the Ubuntu mirror. So the arithmetic is
+      # 2 x 90 + 2 x 300 + 90 + 300 = 1170 s of bounded apt, 13.6 s of unpack, 1.1 s of keeping,
+      # 0.4 s of decoder guard, about 90 s for the browsers and 1.6 s for the list check:
+      # 1170 + 13.6 + 1.1 + 0.4 + 90 + 1.6 = 1276.7 s, rounded up to 22 min. The budget has to
+      # carry the fallback's own update, because the path that needs every one of those bounds is
+      # the path on which the step still succeeds.
+      #
+      # The five readings after the bounded apt are job 128209099649's, of cybermonklabs/legion#2888
+      # at 5ff42456, at its 182 packages. The unpack is the 13.6 s from `Download complete and in
+      # download only mode` at 23:14:13.884 to the last line of the unbounded install at
+      # 23:14:27.475. The keeping is the 1.1 s to `apt archives: seeded 0 .deb files, keeping 182`
+      # at 23:14:28.541, which is 114 MB copied out of apt's directory for the cache above. The
+      # decoder guard is the 0.4 s to `the decoders WebKit plays through are in the registry: ...`
+      # at 23:14:28.984. The browsers and the list check together are the 1.6 s to `The pinned list
+      # is current: ...` at 23:14:30.540 - but that job restored its browsers from the Actions cache
+      # (`Cache hit for: playwright-Linux-7f68fc...`, 482 MB, at 23:13:54), so that 1.6 s is no
+      # reading of the cold browser download and the budget has to carry the cold case. That is what
+      # the 90 s term is: the step's estimate for the cold browsers, not a reading, which the
+      # package set does not reach. The list check is measured inside that 1.6 s, so 1.6 s is the
+      # term the reading supports for it. The whole step took 30 s in that job, 23:14:00 to
+      # 23:14:30: one reading at this package set, not a distribution. Each is one reading, so each
+      # moves a little from run to run; the margin the sum leaves under 22 min is what carries that.
       #
       # Each bound is derived from its own phase: each job's two apt rates, as apt logged them,
-      # scaled onto the head's smaller fetch of 12.9 MB of indexes and 51.4 MB of packages. The
+      # scaled onto the step's fetch of 13.0 MB of indexes and the list's 114 MB of packages. The
       # population is the 205 green dispatch jobs of the tester's window (2026-11-05T08:51:42Z
       # to 23:07:42Z, a different window from the table above, which is why its count differs),
-      # read in full for the 26 whose install step ran over 73 s. No shorter step can reach
-      # either bound: an update need over 90 s means a merge-base index fetch of 10.5 MB taking
-      # over 73 s, and a download need over 300 s means a merge-base fetch of 114 MB taking over
-      # 665 s.
+      # read in full for the 26 whose install step ran over 73 s.
       #
       # Two jobs bind the two bounds. Job 127238648049 binds the download: apt logged
-      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the head's 51.4 MB need
-      # 276.3 s there, and 300 s leaves 8.6 per cent of headroom. Job 127357441704 binds the
-      # update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get update`, so the
-      # head's 12.9 MB need 55.4 s there, and 90 s leaves 63 per cent. On this model the two
-      # bounds fail none of the 205.
+      # `Fetched 114 MB in 10min 13s (186 kB/s)` for its packages, so the list's 114 MB need
+      # 613 s there, which the two 300 s attempts on the primary do not reach. Job 127357441704
+      # binds the update: apt logged `Fetched 10.5 MB in 45s (233 kB/s)` for its `apt-get
+      # update`, so the step's 13.0 MB of indexes need 55.8 s there, and 90 s leaves 61 per cent
+      # over that need. Neither the index figure nor its 90 s bound moves with the package set.
+      #
+      # So at 186 kB/s, the slowest mirror a green job of that window met, the list's 114 MB
+      # need more than the 600 s of the two attempts on the primary, and the origin switch
+      # fires. That is the trade Playwright's whole list costs: a download phase that reaches the
+      # fallback origin on that mirror.
       #
       # One blended rate per job is the wrong model, as job 127238648049's own log shows:
       # `Fetched 10.5 MB in 1s (9797 kB/s)` for its update and the 186 kB/s above for its
@@ -2657,27 +2723,34 @@ jobs:
       # understates the download. The model assumes a retry meets the same mirror rate, and
       # azure.archive.ubuntu.com is a pool, so a retry may meet a faster mirror or a slower one.
       # Both bounds come from the slowest mirror a green job of that window met, and are read
-      # again when a green job meets a slower one. Under about 143 kB/s the indexes do not
-      # arrive inside one bound, and under about 171 kB/s the packages do not: job 127274913129
-      # met 62.5 kB/s for its packages, and its job budget cancelled it.
+      # again when a green job meets a slower one. Under 13.0 MB / 90 s = 144 kB/s the indexes
+      # do not arrive inside one bound, and under 114 MB / 300 s = 380 kB/s the packages do not:
+      # job 127274913129 met 62.5 kB/s for its packages, and its job budget cancelled it. The
+      # list's 114 MB need 1824 s at that rate, which neither 600 s nor 900 s of download
+      # reaches, so the step fails by its own name there.
       #
-      # What the three attempts complete, which is the threshold the step carries: three bounds
-      # of 300 s are 900 s of download, so the step completes above about 57 kB/s, and under
-      # that it fails by its own name - in about 900 s where both `apt-get update` phases were
-      # fast, and in at most 1170 s where each was retried to its bound. Two attempts would have
-      # completed only above about 86 kB/s, which is why there are three: at 62.5 kB/s the
-      # head's 51.4 MB need 822 s, which 600 s of download does not reach and 900 s does, and
-      # job 127274913129 above met exactly that rate.
+      # What the attempts complete is the threshold the step carries, and it is three bands
+      # rather than one number, because the third attempt is on another origin and the partial
+      # may not be reused across that switch. With B the 114 MB the list fetches:
+      #   above B / 600 s = 190 kB/s the two attempts on the primary complete the download;
+      #   between B / 900 s = 127 kB/s and 190 kB/s the origin switch fires on every run and
+      #     completion rests on the fallback resuming the partial; where it does not, that one
+      #     attempt carries all 114 MB and needs B / 300 s = 380 kB/s, which nothing in this
+      #     band meets, so that class fails by its own name;
+      #   below 127 kB/s the step fails by its own name whatever the fallback does - in about
+      #     900 s where both `apt-get update` phases were fast, and in at most 1170 s where each
+      #     was retried to its bound.
       #
       # The attempts accumulate, which is measured and not assumed: `apt-get ... -d` resumes. An
       # attempt the bound kills leaves its bytes in apt's partial directory, and the attempt
-      # after it asks only for the rest, which that attempt logs as
-      # `Need to get 42.1 MB/51.4 MB of archives` after a first attempt that had asked for
-      # 51.4 MB. Measured separately, the partial is resumed across the origin switch too, since
-      # the two mirrors serve the same file and the server answers a byte-range request. Where
-      # the fallback's snapshot holds a different version the filename differs, the partial is
-      # not reused and that attempt carries the full 51.4 MB, which at any healthy rate is
-      # seconds.
+      # after it asks only for the rest. Job 128209099649 measured that at 5ff42456: after the
+      # download phase had fetched all 114 MB, the install call after it asked for
+      # `Need to get 0 B/114 MB of archives.`, so what the download put on disk the install does
+      # not fetch again. Measured separately, the partial is resumed across the origin switch
+      # too, since the two mirrors serve the same file and the server answers a byte-range
+      # request. Where the fallback's snapshot holds a different version the filename differs,
+      # the partial is not reused and that attempt carries the full 114 MB, which that job
+      # fetched in 8 s at 14.7 MB/s.
       #
       # Why the third attempt changes origin rather than the bound being raised: a longer bound
       # buys a longer hang and hides the mirror. One step's log holds both of the rates the one
@@ -2686,16 +2759,31 @@ jobs:
       # that answers that. A single bad pool member is the case no attempt count on one origin
       # reaches.
       #
-      # The slowest reading this repository holds is that 31 kB/s: 9.3 MB fetched in a 300 s
-      # attempt. No attempt count worth having completes 51.4 MB at that rate - it needs
-      # 1658 s - so the step fails by its own name there, which is the intended outcome.
+      # The slowest reading this repository holds is that 31 kB/s: the list's 114 MB need 3677 s
+      # at it, which no attempt count worth having completes, so the step fails by its own name
+      # there, which is the intended outcome.
       #
-      # The worst case the step now carries: if both `apt-get update` attempts fail, the step
+      # The worst case the step carries: if both `apt-get update` attempts fail, the step
       # stops after about 180 s, so the longest the bounded apt phases can run is one update
       # attempt stopped at 90 s, a second ending just inside 90 s, two download attempts stopped
       # at 300 s, the fallback origin's update stopped at 90 s and a third download attempt
       # stopped at 300 s. The step fails by its own name in at most 1170 s, against the
       # 40-minute job cancel it replaces.
+      #
+      # The .deb files of that list are cached between runs. The restore step above reads them
+      # into ~/apt-archives, and the step below copies them into apt's archive directory before
+      # its first call. apt takes a file there whose name and size match the index without
+      # fetching it and without hashing it (the pkgAcqArchive constructor in
+      # apt-pkg/acquire-item.cc, lines 3499-3507 of apt 2.7.14, compares the size alone), so a
+      # restored file is trusted as the push to main that wrote the entry left it. The key names
+      # the Playwright version bun.lock pins, because that version decides Playwright's list, and
+      # the runner image, because the image decides which versions apt resolves, so an image roll
+      # misses the entry rather than restoring files the new image's indexes no longer name. It
+      # names neither `step_tools` nor the versions apt resolves from updates published after the
+      # image was built, and an entry is written once and never replaced, so a package that changes
+      # under one key is fetched on every run until the key moves. Only a push to main writes an
+      # entry. A pull-request or merge-queue run restores main's entry where one exists under its
+      # key and otherwise fetches the whole set, and every bound and budget above is that cold case.
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose index
         # intermittently fails `apt-get update` with a hash-sum mismatch and takes the install
@@ -2705,17 +2793,25 @@ jobs:
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
           packages="fonts-freefont-ttf fonts-ipafont-gothic fonts-liberation fonts-noto-color-emoji
-          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-plugins-base libasound2t64
-          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavif16 libcairo-gobject2
-          libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0 libevent-2.1-7t64
-          libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0 libgles2 libglib2.0-0t64
-          libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0 libgstreamer-plugins-base1.0-0
-          libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0 libharfbuzz0b libhyphen0
-          libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4 libnss3 libopus0 libpango-1.0-0
-          libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9 libwayland-client0 libwayland-egl1
-          libwayland-server0 libwebp7 libwebpdemux2 libwoff1 libx11-6 libx11-xcb1 libx264-164
-          libxcb-shm0 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6
-          libxkbcommon0 libxml2 libxrandr2 libxrender1 libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei gstreamer1.0-libav
+          gstreamer1.0-plugins-bad gstreamer1.0-plugins-base gstreamer1.0-plugins-good libasound2t64
+          libatk-bridge2.0-0t64 libatk1.0-0t64 libatomic1 libatspi2.0-0t64 libavcodec60 libavif16
+          libcairo-gobject2 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libenchant-2-2 libepoxy0
+          libevent-2.1-7t64 libflite1 libfontconfig1 libfreetype6 libgbm1 libgdk-pixbuf-2.0-0
+          libgles2 libglib2.0-0t64 libgstreamer-gl1.0-0 libgstreamer-plugins-bad1.0-0
+          libgstreamer-plugins-base1.0-0 libgstreamer1.0-0 libgtk-3-0t64 libgtk-4-1 libharfbuzz-icu0
+          libharfbuzz0b libhyphen0 libicu74 libjpeg-turbo8 liblcms2-2 libmanette-0.2-0 libnspr4
+          libnss3 libopus0 libpango-1.0-0 libpangocairo-1.0-0 libpng16-16t64 libsecret-1-0 libvpx9
+          libwayland-client0 libwayland-egl1 libwayland-server0 libwebp7 libwebpdemux2 libwoff1
+          libx11-6 libx11-xcb1 libx264-164 libxcb-shm0 libxcb1 libxcomposite1 libxcursor1
+          libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxml2 libxrandr2 libxrender1
+          libxslt1.1 xfonts-cyrillic xfonts-scalable xvfb"
+          # gstreamer1.0-tools holds the gst-inspect-1.0 the decoder guard below runs, and is no
+          # name of Playwright's list. It is out of `packages` because `packages` is the list the
+          # check at the end of the step holds against Playwright's own.
+          step_tools="gstreamer1.0-tools"
+          # What apt is given in every phase: the pinned list and the step's own tool.
+          apt_list="$packages $step_tools"
           # A bounded attempt, retried: the attempt count, then what the log calls the phase,
           # then the command. Each failed attempt prints the phase, that attempt's exit status
           # and how many attempts are left; `timeout` exits 124 when it killed the command, so
@@ -2733,6 +2829,14 @@ jobs:
               [ "$left" -gt 0 ] || return 1
             done
           }
+          # What the restore above found, handed to apt before it reads any index. A file whose
+          # version the index no longer names has another file name, and one whose size differs is
+          # deleted (acquire-item.cc:3508-3511), so apt fetches both again. nullglob makes an empty
+          # or absent directory an empty list instead of a failed copy.
+          shopt -s nullglob
+          seeded=("$HOME"/apt-archives/*.deb)
+          shopt -u nullglob
+          [ "${#seeded[@]}" -eq 0 ] || sudo cp "${seeded[@]}" /var/cache/apt/archives/
           # `sudo timeout`, not `timeout sudo`: the signal has to reach apt-get itself, not a
           # sudo holding it.
           attempts 2 "apt-get update" sudo timeout 90 apt-get update || {
@@ -2743,15 +2847,23 @@ jobs:
           # Download only (`-d`): a killed apt releases its fcntl locks either way, but with
           # nothing unpacked in this phase no dpkg run is ever stopped part way, so the attempts
           # after it and the unbounded install below start from a clean package state. It prints
-          # what it fetched, which is this step's own byte record. $packages is left unquoted on
+          # what it fetched, which is this step's own byte record. $apt_list is left unquoted on
           # purpose, to split into words.
-          if ! attempts 2 "the package download" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages; then
+          if ! attempts 2 "the package download" sudo timeout 300 \
+            apt-get install -y --no-install-recommends -d $apt_list; then
             # The last attempt fetches from another origin, which is the one thing more attempts
             # on the configured pool cannot do. That pool is a mirrorlist, which `apt-get update`
             # reads as `Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist`, so the switch is an edit
             # of that file. The copy beside it is what was there; nothing puts it back, and
             # nothing has to, the runner being ephemeral and going with the job.
             mirrorlist=/etc/apt/apt-mirrors.txt
+            # Where the image stops shipping it, the copy below ends on `cp: cannot stat` and the
+            # log names no cause, so the file is tested here and the error is the step's own.
+            [ -f "$mirrorlist" ] || {
+              echo "::error::there is no $mirrorlist, so the fallback origin cannot be set;" \
+                "the package download ends here"
+              exit 1
+            }
             sudo cp "$mirrorlist" "$mirrorlist.orig"
             sudo sed -i 's,^\(https\?://\)[^/]*,\1archive.ubuntu.com,' "$mirrorlist"
             cat "$mirrorlist"
@@ -2761,24 +2873,57 @@ jobs:
             # than a tidy exit.
             attempts 1 "apt-get update for the fallback origin" sudo timeout 90 apt-get update ||
               echo "::warning::the fallback origin's lists were not read; the attempt below uses what is on disk"
-            attempts 1 "the package download from the fallback origin" sudo timeout 300 apt-get install -y --no-install-recommends -d $packages || {
+            attempts 1 "the package download from the fallback origin" sudo timeout 300 \
+              apt-get install -y --no-install-recommends -d $apt_list || {
               echo "::error::the package download failed three times, the last of them on another origin;" \
                 "the step ends here rather than leaving the job's budget to cancel the browser step after it"
               exit 1
             }
           fi
           # Unbounded and unretried: the archive is on disk now, so this takes no network.
-          sudo apt-get install -y --no-install-recommends $packages
+          sudo apt-get install -y --no-install-recommends $apt_list
+          # What apt has now, kept for the save below. The save runs only on a push to main whose
+          # restore missed, since an entry is never replaced, so on a hit or a branch run this
+          # copy goes unused. apt's archive directory is root's and the cache action runs as the
+          # runner user, so the copies change hands.
+          shopt -s nullglob
+          kept=(/var/cache/apt/archives/*.deb)
+          shopt -u nullglob
+          mkdir -p "$HOME/apt-archives"
+          [ "${#kept[@]}" -eq 0 ] || {
+            sudo cp "${kept[@]}" "$HOME/apt-archives/"
+            sudo chown "$(id -u):$(id -g)" "$HOME"/apt-archives/*.deb
+          }
+          echo "apt archives: seeded ${#seeded[@]} .deb files, keeping ${#kept[@]}"
+          # Is each decoder WebKit plays through in the GStreamer registry? One call per element:
+          # `gst-inspect-1.0 --exists` reads one element argument and discards the rest, so a
+          # single call with five names would report on the first alone. Each element is written
+          # with the package that carries it, and this is what fails the step by its own name
+          # where one of those packages has gone missing from the list above.
+          probed=()
+          for probe in matroskademux:gstreamer1.0-plugins-good vp8dec:gstreamer1.0-plugins-good \
+            h264parse:gstreamer1.0-plugins-bad avdec_h264:gstreamer1.0-libav \
+            vorbisdec:gstreamer1.0-plugins-base; do
+            element=${probe%%:*}
+            gst-inspect-1.0 --exists "$element" || {
+              echo "::error::GStreamer has no $element, which WebKit plays media through;" \
+                "${probe#*:} carries it: packages= above must hold it, and if it does, the plugin" \
+                "did not load: gst-inspect-1.0 -b lists the files GStreamer could not load"
+              exit 1
+            }
+            probed+=("$element")
+          done
+          echo "the decoders WebKit plays through are in the registry: ${probed[*]}"
           # The browsers alone. Named, because with no argument Playwright resolves its own
           # default set rather than this job's three.
           bunx playwright install chromium webkit firefox
           # Has the pinned list fallen behind Playwright? The check is the repository's
           # .github/scripts/playwright-deps-current.sh, and it runs here, against the list it is
           # given on this line: $packages, unquoted so it splits into words, as apt takes it
-          # above. It holds every package Playwright asks for against that list and the four
-          # media packages this step drops. It runs after the install, so Playwright's list, its
-          # missing set and the apt closure they are held against are read from the same state.
-          # The step's working-directory is packages/dispatch, so the script is reached through
+          # above. It holds the two lists against each other both ways: every name Playwright
+          # asks for is one the pinned list holds, and every pinned name is one Playwright asks
+          # for. It runs after the install, so it expects nothing left missing. The step's
+          # working-directory is packages/dispatch, so the script is reached through
           # $GITHUB_WORKSPACE, the checkout root GitHub sets, and the bunx it runs resolves
           # this suite's Playwright.
           "$GITHUB_WORKSPACE/.github/scripts/playwright-deps-current.sh" $packages
@@ -2792,6 +2937,12 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs.cache-primary-key }}
+      # The .deb files the install step kept, under the same rule as the save before it.
+      - if: github.event_name == 'push' && success() && steps.apt-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-debs.outputs.cache-primary-key }}
       - name: Wait for the S3-compatible server
         # The readiness wait of the step that started the container, after the install the
         # container came up during. An anonymous PUT makes the bucket; each lane makes its own
