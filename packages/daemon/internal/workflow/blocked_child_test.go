@@ -38,48 +38,13 @@ func applyMirrored(t *testing.T, pool *pgxpool.Pool, engine *Engine, eventID str
 	}
 }
 
-// startUnblockedChildren is admission's own pass over the waiting line (admit's promoteHolds):
-// the engine no longer chooses which issues start — record.Waiting does, from the tree
-// lifecycles, the design gates and the slots — so this reads the line as admission reads it and
-// gives each issue whose first phase can start what its slot would give it.
+// startUnblockedChildren is admission's own pass over the waiting line with nothing held
+// (admissionPass): the engine no longer chooses which issues start — record.Waiting does, from
+// the tree lifecycles, the design gates and the slots — so the pass reads the line as admission
+// reads it and gives each issue whose first phase can start what its slot would give it.
 func startUnblockedChildren(t *testing.T, pool *pgxpool.Pool, engine *Engine) {
 	t.Helper()
-	scoped, committed := intake.WithCommitHooks(context.Background())
-	tx, err := pool.Begin(scoped)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(scoped)
-	store := record.NewStore()
-	issues, err := store.Issues(scoped, tx)
-	if err != nil {
-		t.Fatalf("list issues: %v", err)
-	}
-	slots, err := store.Slots(scoped, tx)
-	if err != nil {
-		t.Fatalf("list slots: %v", err)
-	}
-	facts, err := record.ReadLineFacts(scoped, tx, store, "LEGION", issues)
-	if err != nil {
-		t.Fatalf("read the line facts: %v", err)
-	}
-	mirrored, err := store.DispatchIssues(scoped, tx, "LEGION")
-	if err != nil {
-		t.Fatalf("list the mirror: %v", err)
-	}
-	rows := blockers.Rows(mirrored)
-	for _, entry := range record.Waiting(issues, slots, facts) {
-		if entry.Kind != record.LineFirstPhase || len(blockers.Holds(rows, entry.Issue)) > 0 {
-			continue
-		}
-		if err := engine.StartFirstPhase(scoped, tx, entry.Issue, rows[entry.Issue.Key].Blockers); err != nil {
-			t.Fatalf("StartFirstPhase %s: %v", entry.Issue.Key, err)
-		}
-	}
-	if err := tx.Commit(scoped); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	committed()
+	admissionPass(t, pool, engine)
 }
 
 // seedTreeLifecycle opens key's tree lifecycle under the workflow's authority, as promotion's own

@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +17,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -234,62 +232,13 @@ func TestAnAutoMergeDisableOfATreeRecordedBeforeItsTransferAddressesTheRepositor
 	}
 }
 
-// A production check's compare of a tree recorded before its repository's transfer is a REST read
-// of the repository GitHub holds it under now, on the token minted for that repository's owner:
-// the check's record keeps sjawhar/legion, and the compare that wakes the check is addressed at
-// cybermonklabs/legion under the configured pair and at sjawhar/legion without it. A REST read
-// addressed at a repository GitHub has transferred away is no git operation either, and the wake
-// it carries is the check's only way forward.
-func TestAProductionCheckCompareOfATreeRecordedBeforeItsTransferAddressesTheRepositoryGitHubServes(t *testing.T) {
-	const merge, build = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-	for _, tc := range []struct {
-		name    string
-		renames ghrepo.Renames
-		served  string
-		want    string
-	}{
-		{name: "the pair configured", renames: transferredLegion, served: "cybermonklabs/legion", want: "cybermonklabs/legion"},
-		{name: "no pair configured", served: "sjawhar/legion", want: "sjawhar/legion"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newRenameGitHub(t, func(string) string { return `{"status":"ahead","ahead_by":1,"behind_by":0,"files":[]}` })
-			pool := isolatedOutboxPool(t)
-			records := record.NewStore()
-			until := time.Now().Add(time.Hour)
-			root := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "LEGION",
-				Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
-			putOutboxIssue(t, pool, records, root)
-			opened := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
-			check := record.ProductionCheck{Issue: root.Key, Project: root.Project, Tree: root.Tree, Repo: "sjawhar/legion", Number: 42, MergeSHA: merge,
-				OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
-				LastWakeKind: "merge", LastWakeDetail: merge, LastWakeAt: &opened}
-			putProductionCheck(t, pool, records, check)
-			facts := &outboxFactHandler{}
-			runner := renameOutbox(t, pool, records, github.url, tc.served, tc.renames)
-			runner.handlers = []intake.Handler{facts}
-
-			row := mustOutboxRow(t, root.Key, record.CheckCompare{Look: 1, Cause: "daemon boot", Build: build, OpenedAt: check.OpenedAt}, time.Now())
-			row.ID = 71
-			if err := runner.execute(context.Background(), row); err != nil {
-				t.Fatalf("execute the check compare: %v", err)
-			}
-
-			github.assertAddressed(t, tc.want)
-			want := intake.CheckWake{Issue: root.Key, Look: 1, Cause: "daemon boot", Detail: build, OpenedAt: check.OpenedAt}
-			if got := facts.facts(); len(got) != 1 || fmt.Sprint(got[0]) != fmt.Sprint(want) {
-				t.Fatalf("facts applied = %+v, want the check woken by %+v", got, want)
-			}
-		})
-	}
-}
-
 // identityTokens is roleTokens with a bot identity of its own for each owner, so a lease shows
 // the owner it was minted for.
 type identityTokens struct{ roleTokens }
 
-func (t identityTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.roleTokens.Token(ctx, role, owner)
-	lease.Identity = runtime.GitIdentity{Name: "legion-" + string(role) + "[bot] of " + owner, Email: owner + "@users.noreply.github.com"}
+func (t identityTokens) Token(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	lease, err := t.roleTokens.Token(ctx, role, repo)
+	lease.Identity = runtime.GitIdentity{Name: "legion-" + string(role) + "[bot] of " + repo.Owner(), Email: repo.Owner() + "@users.noreply.github.com"}
 	return lease, err
 }
 

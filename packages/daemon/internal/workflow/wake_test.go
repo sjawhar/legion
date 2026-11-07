@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/pods"
@@ -40,7 +41,7 @@ func newWakeRig(t *testing.T) wakeRig {
 	pool := migratedPool(t)
 	logged := &bytes.Buffer{}
 	clock := &checkClock{now: wakeAt}
-	engine := New(record.NewStore(), Config{Project: "LEGION", Pods: wakePods(t, pool), Linger: time.Hour, Clock: clock.Now},
+	engine := New(record.NewStore(), Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Pods: wakePods(t, pool), Linger: time.Hour, ProductionCheckRole: claim.RoleTester, Clock: clock.Now},
 		slog.New(slog.NewTextHandler(logged, nil)))
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: wakeIssueGeneration,

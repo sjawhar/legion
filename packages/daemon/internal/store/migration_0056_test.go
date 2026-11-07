@@ -33,9 +33,10 @@ func TestTheAskAndClaimMirrorsArriveWith0056(t *testing.T) {
 		// The older daemon's writes.
 		`insert into dispatch_issues (key, project, status, blockers, dispatch_seq) values ('LEGION-209', 'LEGION', 'todo', '{}', 2)`,
 		`update dispatch_issues set status = 'testing', dispatch_seq = 4 where key = 'LEGION-208' and dispatch_seq < 4`,
+		// This release's writes. The gate write is one of them: the design gate is keyed by its
+		// issue and its step, and an older daemon's `on conflict (issue)` no longer infers a key.
 		`insert into design_gates (issue, artifact_id, latest_version, approved_version) values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 5, null)
-			on conflict (issue) do update set latest_version = excluded.latest_version, approved_version = excluded.approved_version`,
-		// This release's writes.
+			on conflict (issue, step) do update set latest_version = excluded.latest_version, approved_version = excluded.approved_version`,
 		`insert into dispatch_claims (key, claimed_by, claim_seq) values ('LEGION-208', 'user:alice', 6)`,
 		`insert into dispatch_claims (key, claimed_by, claim_seq) values ('LEGION-999', '', 2)`,
 		`insert into root_asks (issue, ask, kind, open, seq, waiting_on, waiting_on_seq, by_tree) values ('LEGION-208', 'ask-q', 'question', true, 7, 'human', 7, true)`,

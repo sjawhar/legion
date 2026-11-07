@@ -56,7 +56,8 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
 // with limits this binary does not own and an id, changed by change. It discards old messages, as
-// a stream an earlier build created does.
+// a stream an earlier build created does. Its consumer cap is the binary's own, taken from
+// streamCfg with the rest.
 func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	deployed := *streamCfg
 	deployed.Replicas = 3
@@ -290,7 +291,7 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("start setting %d: %v", testStreamMaxBytes, err)
 	}
 	if writes := counting.written(); len(writes) != 0 {
@@ -506,8 +507,8 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 }
 
 // With one server of three stopped and the stream and a bucket already at three copies, a start
-// succeeds and writes nothing to either; a create at three copies with one server stopped fails,
-// naming the setting.
+// succeeds and writes nothing to either; a bucket created at three copies with one server stopped
+// lands, with the stopped member among its peers.
 func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
@@ -528,7 +529,7 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	startOnCluster(t, cluster, WithReplicas(3))
 	counting := &countingJetStream{JetStreamContext: js}
 	cfg := parseConnectOptions([]ConnectOption{WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes)}).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("ensure the stream with one server stopped: %v", err)
 	}
 	if _, err := EnsureKeyValue(clusterConn(t, cluster), counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
@@ -538,30 +539,58 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 		t.Fatalf("a start with one server stopped wrote %v, want nothing", writes)
 	}
 
-	_, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: "envoy_new_test", Storage: nats.FileStorage, Replicas: 3})
-	if err == nil || !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("create a three-copy bucket with one server stopped = %v, want a refusal naming %s=3", err, ReplicasEnvVar)
+	// nats-server v2.15.1 places a three-copy bucket with one of three servers stopped, one
+	// offline peer assigned, and the create lands rather than being refused. Our own refusal of a
+	// count the cluster cannot hold at all is TestARefusedRaiseNamesTheReplicaSetting's.
+	const made = "envoy_new_test"
+	if _, err := EnsureKeyValue(clusterConn(t, cluster), js, &nats.KeyValueConfig{Bucket: made, Storage: nats.FileStorage, Replicas: 3}); err != nil {
+		t.Fatalf("create a three-copy bucket with one server stopped: %v", err)
+	}
+	info, err := js.StreamInfo("KV_" + made)
+	if err != nil {
+		t.Fatalf("read the new bucket's stream: %v", err)
+	}
+	if info.Config.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("the new bucket's stream has %d copies configured and %d assigned, want 3 and 3", info.Config.Replicas, testnats.Copies(info.Cluster))
 	}
 }
 
-// A create of the stream at three copies with one server of three stopped fails the start, and the
-// error names the replica setting.
-func TestOneServerStoppedACreateAtThreeCopiesFailsNamingTheSetting(t *testing.T) {
+// A create of the stream at three copies with one server of three stopped lands on nats-server
+// v2.15.1, with the stopped member among the stream's peers, and the start serves: it publishes
+// and reads back. Once the stopped member starts again it catches up, and the stream holds three
+// settled copies with the message the start published.
+func TestOneServerStoppedACreateAtThreeCopiesLandsAndTheStoppedMemberCatchesUp(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
 	cluster.Servers[2].Stop(t)
 	cluster.AwaitReady(t)
 	client, err := ConnectOwningStream(cluster.URLs(), WithReplicas(3))
-	if err == nil {
-		client.Close()
-		t.Fatal("a start created the stream at three copies with one server of three stopped")
+	if err != nil {
+		t.Fatalf("start at three copies with one server of three stopped: %v", err)
 	}
-	if !strings.HasPrefix(err.Error(), ReplicasEnvVar+"=3: ") {
-		t.Fatalf("start error = %q, want it to name %s=3", err, ReplicasEnvVar)
+	t.Cleanup(client.Close)
+	js := cluster.JetStream(t)
+	info := testnats.AwaitStreamLeader(t, js, Stream, cluster.Name(2))
+	if info.Config.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("stream replicas = %d with %d copies assigned, want 3 and 3", info.Config.Replicas, testnats.Copies(info.Cluster))
+	}
+	if err := client.Publish(contracts.Envelope{
+		EventID: "event-stopped", Source: "dispatch",
+		Topic: "notifications.agent.ses_stopped", DedupeKey: "dispatch.event.stopped",
+	}); err != nil {
+		t.Fatalf("publish with one server stopped: %v", err)
+	}
+
+	cluster.Servers[2].Start(t)
+	cluster.AwaitReady(t)
+	js = cluster.JetStream(t)
+	after := testnats.AwaitStreamCopies(t, js, Stream, 3)
+	if after.State.Msgs != 1 {
+		t.Fatalf("stream state = %+v once the stopped member caught up, want the one message", after.State)
 	}
 }
 
 // A server's refusal of the stream names each setting the refused create or update carried, with
-// its value, and wraps the server's error (single server). A single nats-server v2.10.29 refuses a
+// its value, and wraps the server's error (single server). A single nats-server v2.15.1 refuses a
 // create at more than one copy but takes an update to more, recording the count while it holds one
 // copy, so a refused raise is TestARefusedRaiseNamesTheReplicaSetting's, on a cluster.
 func TestARefusedStreamNamesTheSettingsItCarried(t *testing.T) {
@@ -614,7 +643,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
 	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
-	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
+	if err := ensureStreamWithConfig(counting, &cfg, capsAnUnsetStream); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if _, err := EnsureKeyValue(client.Conn, counting, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 1}); err != nil {
@@ -657,4 +686,180 @@ func (js *countingJetStream) UpdateStream(cfg *nats.StreamConfig, opts ...nats.J
 func (js *countingJetStream) CreateKeyValue(cfg *nats.KeyValueConfig) (nats.KeyValue, error) {
 	js.record("create bucket " + cfg.Bucket)
 	return js.JetStreamContext.CreateKeyValue(cfg)
+}
+
+// The reconcile owns the consumer cap as it owns the byte limit, with one question put to the
+// server it writes to. A deployed cap that is positive and below the one this binary compiles is
+// raised on every server, since such a cap bounds the stream's consumers wherever it runs. A
+// deployed -1 or 0, a stream that carries no cap, is raised only where the server caps such a
+// stream at a default of its own (serverDefaultsAnUnsetCap, nats-server 2.15 and later): on
+// every older server that stream has no limit at all, so the raise would write a cap where the
+// deployment asked for none and the stream has nothing this binary's cap fixes. A deployed cap
+// above the compiled one is left as it is on both, so an operator's raise stands. Each row names
+// the version the connected server answers, read by serverDefaultsAnUnsetCap, so a predicate
+// that answered wrongly would fail the rows below rather than its own table alone.
+func TestOwnedStreamRaisesTheConsumerCapWhereItBindsAndKeepsAHigherDeployedOne(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		deployed int
+		version  string
+		want     int
+	}{
+		{"a stream with no cap, which the server answers as -1, on the hub's 2.15.1", -1, "2.15.1", streamMaxConsumers},
+		{"the same stream on 2.10.29, which caps no stream that sets none", -1, "2.10.29", -1},
+		{"a stream whose cap is 0, which the server reads as none too, on 2.15.1", 0, "2.15.1", streamMaxConsumers},
+		{"a stream whose cap is 0 on 2.10.29", 0, "2.10.29", 0},
+		{"a stream capped below the compiled cap on 2.15.1", 1000, "2.15.1", streamMaxConsumers},
+		{"a stream capped below the compiled cap on 2.10.29", 1000, "2.10.29", streamMaxConsumers},
+		{"a stream an operator capped above it on 2.15.1", streamMaxConsumers + 4000, "2.15.1", streamMaxConsumers + 4000},
+		{"a stream an operator capped above it on 2.10.29", streamMaxConsumers + 4000, "2.10.29", streamMaxConsumers + 4000},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			info := &nats.StreamInfo{Config: nats.StreamConfig{Name: Stream, MaxConsumers: row.deployed}}
+			owned := ownedStream(info, streamCfg, serverDefaultsAnUnsetCap(row.version))
+			if owned.MaxConsumers != row.want {
+				t.Fatalf("a stream deployed at %d, on nats-server %s, is owned at %d, want %d", row.deployed, row.version, owned.MaxConsumers, row.want)
+			}
+		})
+	}
+}
+
+// A server below the floor refuses the update that carries the cap with a bare `can not change
+// MaxConsumers`, which names neither the value asked for nor a server that would take it, so the
+// bus names the field as nats-server spells it, the cap this binary asks for and the first server
+// that takes the change. Any other refusal of an update that changes the cap names the field and
+// the cap alone, the refusal the server sends under the same invalid-configuration code for
+// another field included: a server that would have taken the cap is nothing to the operator whose
+// update it refused for another reason. A refusal of an update whose cap is the deployed stream's
+// own is returned as it is: that refusal is not the cap's.
+func TestARefusedUpdateNamesTheConsumerCapAndTheServerThatTakesItOnlyForTheServersOwnRefusal(t *testing.T) {
+	serversRefusal := &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: maxConsumersRefusal}
+	uncapped := &nats.StreamConfig{Name: Stream, MaxConsumers: -1}
+	capped := &nats.StreamConfig{Name: Stream, MaxConsumers: streamMaxConsumers}
+	namedCap := fmt.Sprintf("max_consumers %d", streamMaxConsumers)
+	for _, row := range []struct {
+		name     string
+		refusal  error
+		deployed *nats.StreamConfig
+		request  *nats.StreamConfig
+		names    []string
+		unnamed  []string
+	}{
+		{
+			name:     "the server's own refusal of the change names the cap and the server that takes it",
+			refusal:  serversRefusal,
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap, streamMaxConsumersFloor, serversRefusal.Error()},
+		},
+		{
+			name:     "a refusal that is no API error at all names the cap alone",
+			refusal:  errors.New("nats: insufficient resources"),
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap},
+			unnamed:  []string{streamMaxConsumersFloor},
+		},
+		{
+			name:     "a refusal of another field under the same invalid-configuration code names the cap alone",
+			refusal:  &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: "stream configuration update can not change storage type"},
+			deployed: uncapped,
+			request:  capped,
+			names:    []string{namedCap},
+			unnamed:  []string{streamMaxConsumersFloor},
+		},
+		{
+			name:     "a refusal of an update that changes no cap is returned as it is",
+			refusal:  serversRefusal,
+			deployed: capped,
+			request:  capped,
+			unnamed:  []string{"max_consumers", streamMaxConsumersFloor},
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			named := refusedSettings(row.refusal, row.deployed, row.request)
+			if !errors.Is(named, row.refusal) {
+				t.Fatalf("the refused update reads %q, want the server's error wrapped in it", named)
+			}
+			for _, want := range row.names {
+				if !strings.Contains(named.Error(), want) {
+					t.Errorf("the refused update reads %q, want it to name %q", named, want)
+				}
+			}
+			for _, unwanted := range row.unnamed {
+				if strings.Contains(named.Error(), unwanted) {
+					t.Errorf("the refused update reads %q, want it not to name %q", named, unwanted)
+				}
+			}
+			if len(row.names) == 0 && named != row.refusal {
+				t.Errorf("the refused update reads %q, want the server's error itself", named)
+			}
+		})
+	}
+}
+
+// maxConsumersRefused reads the server's own words rather than the code they arrive under, so it
+// takes that refusal however it reaches the bus, as nats.go's *nats.APIError or wrapped in what a
+// start adds on the way out, and it takes no refusal the server sends under the same code for
+// another field, which is the whole reason the words and not the code are read.
+func TestTheConsumerCapRefusalIsReadByTheServersOwnWordsAndNoOthers(t *testing.T) {
+	serversRefusal := &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: maxConsumersRefusal}
+	for _, row := range []struct {
+		name    string
+		err     error
+		refused bool
+	}{
+		{"no error at all", nil, false},
+		{"the server's refusal as nats.go hands it over", serversRefusal, true},
+		{"the same refusal wrapped on its way out", fmt.Errorf("reconcile %s: %w", Stream, serversRefusal), true},
+		{"the same words from something that is no API error", errors.New("nats: " + maxConsumersRefusal), true},
+		{"another field refused under the same invalid-configuration code", &nats.APIError{Code: 500, ErrorCode: nats.JSStreamInvalidConfig, Description: "stream configuration update can not change storage type"}, false},
+		{"a refusal that is nothing to do with the configuration", &nats.APIError{Code: 503, ErrorCode: nats.JSErrCodeInsufficientResourcesErr, Description: "insufficient resources"}, false},
+		{"a request that went unanswered", nats.ErrTimeout, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if refused := maxConsumersRefused(row.err); refused != row.refused {
+				t.Fatalf("maxConsumersRefused(%v) = %t, want %t", row.err, refused, row.refused)
+			}
+		})
+	}
+}
+
+// serverDefaultsAnUnsetCap reads the connected server's version to answer the one question a
+// deployed stream with no consumer cap raises: whether this server caps it at a default of its
+// own, which nats-server does from 2.15 and no release before it does. Only the major and the
+// minor decide, a pre-release counts as the release it leads to, and a string that carries no
+// version - the empty one a client with no live connection answers among them - is no such
+// server, so a bus that cannot read a version raises no stream that has no cap.
+func TestTheServerVersionThatDefaultsAnUnsetConsumerCapIsReadFrom215Onwards(t *testing.T) {
+	for _, row := range []struct {
+		version  string
+		defaults bool
+	}{
+		{"2.10.29", false},
+		{"2.12.5", false},
+		{"2.14.9", false},
+		{"2.15.0", true},
+		{"2.15.1", true},
+		{"3.0.0", true},
+		{"", false},
+		{"2.15", true},
+		{"2.15.0-RC.1", true},
+		{"2.14.9-RC.4", false},
+		{"v2.15.1", true},
+		{"2.9.25", false},
+		{"1.99.99", false},
+		{"2.100.0", true},
+		{"10.0.0", true},
+		{"2", false},
+		{"2.", false},
+		{"2.x", false},
+		{"nats-server", false},
+	} {
+		t.Run(fmt.Sprintf("nats-server %q", row.version), func(t *testing.T) {
+			if defaults := serverDefaultsAnUnsetCap(row.version); defaults != row.defaults {
+				t.Fatalf("serverDefaultsAnUnsetCap(%q) = %t, want %t", row.version, defaults, row.defaults)
+			}
+		})
+	}
 }

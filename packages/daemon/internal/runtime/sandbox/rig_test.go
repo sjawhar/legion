@@ -94,7 +94,8 @@ func testOptions() Options {
 		AdoptTimeout:          time.Minute,
 		Tokens:                staticTokens{},
 		GitHubCredential:      staticCredential,
-		GitHubOwners:          func() []string { return staticOwners },
+		ControllerCredential:  staticControllerCredential,
+		GitHubDirs:            func(ghrepo.Repository, []appauth.AppRole) []string { return staticDirs },
 		Conns:                 fake.NewConns(),
 		RepositoryCache: RepositoryCache{
 			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
@@ -105,11 +106,11 @@ func testOptions() Options {
 	}
 }
 
-// staticTokens mints the same installation token for every owner.
+// staticTokens mints the same installation token for every repository.
 type staticTokens struct{}
 
-func (staticTokens) Token(_ context.Context, owner string) (string, error) {
-	return "ghs_provision_" + owner, nil
+func (staticTokens) Token(_ context.Context, repo ghrepo.Repository) (string, error) {
+	return "ghs_provision_" + repo.Owner(), nil
 }
 
 // staticCredentialExpiry is the lease expiry every rendered test credential carries.
@@ -126,56 +127,91 @@ func staticReadToken(role claim.Role, owner string) string {
 	return "ghs_" + string(appauth.AppRoleFor(role)) + "_read_" + owner
 }
 
-// staticCredential is the runtime's GitHubCredential in every test: a bundle of owner — sjawhar
-// when owner is empty, the controller's launch — holding the role's App's write token
-// (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with a fixed
-// expiry; owner is the bundle's default.
-func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+// staticCredential is the runtime's GitHubCredential in every test: a bundle of repo's owner —
+// sjawhar when repo is the zero Repository, which is how staticControllerCredential builds the
+// controller's — holding the role's App's write token (appauth.AppRoleFor), and acme holding its
+// read token, rendered as gh's files with a fixed expiry; repo's owner is the bundle's default.
+func staticCredential(_ context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
 	app := string(appauth.AppRoleFor(role))
+	owner := strings.ToLower(repo.Owner())
 	if owner == "" {
 		owner = "sjawhar"
 	}
-	return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{
+	return ghconfig.Bundle{Default: owner, Dirs: map[string]ghconfig.Rendered{
 		"acme": ghconfig.Render(staticReadToken(role, "acme"), app, staticCredentialExpiry),
 		owner:  ghconfig.Render(staticCredentialToken(role), app, staticCredentialExpiry),
 	}}, nil
 }
 
-// staticOwners are the owners of every bundle staticCredential renders for the test specs, whose
-// repository's owner is sjawhar, sorted: the set testOptions serves as GitHubOwners too, so a
+// staticControllerCredential is the runtime's ControllerCredential in every test: the bundle
+// staticCredential renders for the controller, whose default is the owner it is asked for — the
+// one the pod's Secret records, which its refresh asks for — and sjawhar, the first owner, when
+// it is asked for none, which is what the controller's launch asks for, as
+// appauth.ControllerCredential answers one.
+func staticControllerCredential(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+	bundle, err := staticCredential(ctx, claim.RoleController, ghrepo.Repository{})
+	if err != nil || defaultOwner == "" {
+		return bundle, err
+	}
+	bundle.Default = strings.ToLower(defaultOwner)
+	return bundle, nil
+}
+
+// noOwnerControllerCredential is the ControllerCredential of a project with no GitHub owner to
+// mint for (runtime.ErrNoGitHubOwner: every mapped repository lacks an App): a controller's
+// launch then writes no gh files at all and its gh acts as nobody, its gh directory an empty one.
+// It is the controller's own function that refuses, the launch asking for no bundle of any role
+// (relaunch's gitHubBundles).
+func noOwnerControllerCredential(context.Context, string) (ghconfig.Bundle, error) {
+	return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
+}
+
+// staticDirs are the directories of every bundle staticCredential renders for the test specs,
+// whose repository's owner is sjawhar, sorted: the set testOptions serves as GitHubDirs too, so a
 // pod a rig launches projects a gh directory for each of them and has drifted from none.
-var staticOwners = []string{"acme", "sjawhar"}
+var staticDirs = []string{"acme", "sjawhar"}
 
 // addedOwner is an owner the project's mapping gained after a pod was created: no owner of
-// staticOwners, and sorted between them, so a pod built before it holds no directory of that
+// staticDirs, and sorted between them, so a pod built before it holds no directory of that
 // name and a bundle rendered now holds one.
 const addedOwner = "globex"
 
-// servedOwners are the owners a daemon servingAddedOwner serves, sorted: staticOwners with
-// addedOwner among them, which is what appauth.GitHubOwners answers once the mapping names a
-// repository of that owner. It is derived, so a staticOwners this package edits moves it too.
-var servedOwners = slices.Sorted(slices.Values(append(slices.Clone(staticOwners), addedOwner)))
+// servedDirs are the directories a daemon servingAddedOwner serves, sorted: staticDirs with
+// addedOwner among them, which is what appauth.GitHubDirs answers once the mapping names a
+// repository of that owner. It is derived, so a staticDirs this package edits moves it too.
+var servedDirs = slices.Sorted(slices.Values(append(slices.Clone(staticDirs), addedOwner)))
 
-// servingAddedOwner is a restarted daemon serving one owner more: GitHubOwners answers
-// servedOwners, and every bundle it renders holds addedOwner's read-only files beside the
-// owners staticCredential always renders, as the daemon's own two answers move together
-// (appauth.GitHubOwners and appauth.GitHubCredential read one mapping). A pod created before it
-// projects no directory for the new owner and never will (movedGhOwners).
+// servingAddedOwner is a restarted daemon serving one owner more: GitHubDirs answers
+// servedDirs, and every bundle it renders holds addedOwner's read-only files beside the
+// directories staticCredential always renders, the controller's own among them (its launch and
+// its refresh both ask ControllerCredential), as the daemon's own answers move together
+// (appauth.GitHubDirs, appauth.GitHubCredential and appauth.ControllerCredential read one
+// mapping). A pod created before it projects no directory for the new owner and never will
+// (movedGhDirs).
 func servingAddedOwner(o *Options) {
-	o.GitHubOwners = func() []string { return servedOwners }
-	o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
-		bundle, err := staticCredential(ctx, role, owner)
+	o.GitHubDirs = func(ghrepo.Repository, []appauth.AppRole) []string { return servedDirs }
+	credential := func(ctx context.Context, role claim.Role, repo ghrepo.Repository) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, repo)
 		if err != nil {
 			return bundle, err
 		}
-		bundle.Owners[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		bundle.Dirs[addedOwner] = ghconfig.Render(staticReadToken(role, addedOwner), string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		return bundle, nil
+	}
+	o.GitHubCredential = credential
+	o.ControllerCredential = func(ctx context.Context, defaultOwner string) (ghconfig.Bundle, error) {
+		bundle, err := credential(ctx, claim.RoleController, ghrepo.Repository{})
+		if err != nil || defaultOwner == "" {
+			return bundle, err
+		}
+		bundle.Default = strings.ToLower(defaultOwner)
 		return bundle, nil
 	}
 }
 
 // launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
 // role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
-// name the bundle's owners.
+// name the bundle's directories.
 func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
 	t.Helper()
 	l, err := r.prepare(spec)
@@ -373,8 +409,12 @@ type rig struct {
 	// node, past workspace-init, and Running at once.
 	hold      atomic.Bool
 	autoStart atomic.Bool
-	// suspendDelay is how long a pod the controller deletes stays terminating first.
-	suspendDelay time.Duration
+	// suspendDelay is how long a pod the controller deletes stays terminating first, in
+	// nanoseconds. It is atomic because a test may shorten it while control() is running, to ask
+	// for a pod it has been holding terminating to end now: g.suspendDelay.Store(0) in
+	// TestPodDriftTellsTheRoundsOwnReplacementFromALaunchs (drift_test.go) ends the pod its
+	// replacement is waiting out, as the cluster would.
+	suspendDelay atomic.Int64
 	// noController leaves every object as the test wrote it.
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
@@ -718,15 +758,24 @@ func (g *rig) control() {
 			pod := g.pod(s.Name)
 			owned := ownedBy(pod, s.UID)
 			switch {
+			case owned && pod.DeletionTimestamp != nil:
+				// A pod the cluster is terminating goes once its grace has passed, whatever its
+				// Sandbox says by then. Only the suspended branch below used to remove one, so a
+				// pod still terminating when its Sandbox came back to Running was in a state this
+				// controller could not leave: it neither removed that pod nor made a replacement,
+				// since a replacement needs none to be there. A launch whose own wait for the pod
+				// to go accepts a terminating one - which production's does, because in a cluster
+				// such a pod is on its way out - then waited for a pod this controller was never
+				// going to create. That is what red this package's pod-drift row about 4 times in
+				// 100 under load, at every bound it was given, with the controller reading
+				// `generation 3, Running, pod uid-pod-13 terminating` for ever (INFRA-985).
+				if started, ok := terminating[pod.UID]; ok && time.Since(started) >= time.Duration(g.suspendDelay.Load()) {
+					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+				}
 			case s.mode() == modeSuspended && owned:
-				started, ok := terminating[pod.UID]
-				if !ok {
+				if _, ok := terminating[pod.UID]; !ok {
 					terminating[pod.UID] = time.Now()
 					g.update(pod, func(p *corev1.Pod) { now := metav1.Now(); p.DeletionTimestamp = &now })
-					continue
-				}
-				if time.Since(started) >= g.suspendDelay {
-					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
 				}
 			case s.mode() == modeRunning && pod == nil && !g.hold.Load():
 				g.createPod(s)

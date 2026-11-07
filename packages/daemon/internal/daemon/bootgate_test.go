@@ -838,14 +838,17 @@ func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 
 // The gate runs under the environment a pane gets from the daemon's own (HOME and OMP_PROFILE here)
 // before the daemon boots: a refusal records no boot, and a daemon stopped while the gate waits
-// stops cleanly, having served nothing.
+// stops cleanly, having served nothing. The plugin is held to this daemon's own number, so the
+// contract below it — the one the previous release pins — is refused like any other.
 func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 	// The daemon holds the plugin to its own DaemonAPIVersion.
 	thisDaemons := `{"daemonApiVersion":` + strconv.Itoa(api.DaemonAPIVersion) + `}`
+	previous := strconv.Itoa(api.DaemonAPIVersion - 1)
 	for _, testCase := range []struct {
 		name, legion, step, want string
 	}{
 		{"another contract", `{"daemonApiVersion":1}`, "yes", "speaks daemon API contract 1"},
+		{"the contract below this one", `{"daemonApiVersion":` + previous + `}`, "yes", "speaks daemon API contract " + previous},
 		{"not loaded", thisDaemons, "no", "is installed but not loaded by omp"},
 		{"stopped while the probe runs", thisDaemons, "hang", ""},
 	} {
@@ -870,7 +873,7 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 				time.AfterFunc(300*time.Millisecond, cancel)
 			}
 
-			err := run(ctx, cfg, Build{}, quietLogger(), o)
+			err := run(ctx, cfg, quietLogger(), o)
 
 			if testCase.want == "" && err != nil {
 				t.Fatalf("run stopped during its gate = %v, want a clean stop", err)
@@ -904,7 +907,7 @@ func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
 		return ""
 	}
 
-	if err := run(context.Background(), cfg, Build{}, quietLogger(), o); err == nil {
+	if err := run(context.Background(), cfg, quietLogger(), o); err == nil {
 		t.Fatal("run passed the gate, want the fake's not-loaded refusal")
 	}
 	var skills string
@@ -953,7 +956,7 @@ esac
 		return ""
 	}
 
-	if err := run(context.Background(), cfg, Build{}, quietLogger(), o); err == nil || !strings.Contains(err.Error(), "is installed but not loaded by omp") {
+	if err := run(context.Background(), cfg, quietLogger(), o); err == nil || !strings.Contains(err.Error(), "is installed but not loaded by omp") {
 		t.Fatalf("run = %v, want the gate's refusal", err)
 	}
 	var got []string

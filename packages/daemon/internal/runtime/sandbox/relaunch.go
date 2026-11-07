@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -64,7 +65,8 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 //
 // A live pod a round covers (roundCovers) that has merely drifted from the configuration — a
 // container on another image, the kind's reservation, an operator volume or mount, the disk size,
-// the role's overlays, the secrets broker's enrollment or the session store (PodDrift) — is kept,
+// the ServiceAccount it runs as, the role's overlays, the secrets broker's enrollment, the session
+// store or the GitHub owners its gh volume projects a directory for (PodDrift) — is kept,
 // and this role is started in it.
 // Such a pod is replaced by an update round, which first tasks every worker in it to push its work
 // and answer, and then ends the pod (ReplacePod): replacing it at a launch would end every role's
@@ -82,18 +84,22 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // A live pod no round covers is replaced here for every kind of drift instead, as every launch did
 // before the round existed: no round is ever opened over such a pod, so a launch that kept it
 // would leave its role in a pod the configuration has left behind for ever (movedInPod,
-// roundCovers). Its three facets reach this launch as moved addresses, and the shape its template
-// was built from is read here (shapeDrift, the one reading PodDrift takes of a covered pod's
-// shape). A launch installing a stale-plugin pair into such a pod keeps it, as it always did
+// roundCovers). Every facet of the pod itself but the account reaches this launch as a moved
+// address — the two whose worker cannot be reached at all and the four driftedInPod reads, which
+// in a covered pod are a round's — and the shape its template was built from is read here
+// (shapeDrift, the one reading PodDrift takes of a covered pod's shape). A launch installing a
+// stale-plugin pair into such a pod keeps it, as it always did
 // (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
 // that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
 // still is.
 //
-// A ServiceAccount other than the configured one (accountDrift) is the one kind of drift no round
-// and no install answers, so a pod carrying it is replaced here whatever kind of pod it is and
-// whatever the launch is installing: the account is fixed for the pod's life, and until the pod is
-// created afresh its agents go on holding the identity the old account grants, so the old account
-// can be deleted only once every such pod has gone.
+// A ServiceAccount other than the configured one (accountDrift) is answered by whoever answers
+// the pod's other drift. A launch into a pod a round covers keeps it for the account as for every
+// other drift, and leaves it to that pod's round, which has every worker in it push its work
+// before the pod is ended. A launch into a pod no round covers replaces it for the account
+// whatever it is installing, since no round will ever come for such a pod: the account is fixed
+// for the pod's life, and until the pod is created afresh its agents go on holding the identity
+// the old account grants, so an old account can be deleted only once every pod of it has gone.
 //
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
@@ -157,19 +163,22 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	_, accountDrifted := accountDrift(pod, r.pod.ServiceAccount)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
-	// A live pod no round covers is this launch's to replace for every kind of drift: its three
-	// facets come through movedInPod, and the shape its template was built from is read here,
-	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
+	covered := roundCovers(l.kind)
+	// A live pod no round covers is this launch's to replace for every kind of drift: every facet
+	// of the pod itself but the account comes through movedInPod, the account is read here as
+	// accountDrifted, and the shape its template was built from is read here too, unless this
+	// launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
 	//
-	// A pod running as a ServiceAccount other than the configured one is replaced here whatever
-	// kind of pod it is and whatever the launch is installing (accountDrift): the account is
-	// fixed for the pod's life, so no install can move it and no update round can either — the
-	// round's own replacement is what a covered pod's other drift waits for, and this one cannot
-	// wait, since until the pod is created afresh its agents go on holding the identity the old
-	// account grants.
-	replace := !live || accountDrifted || migrate ||
+	// A pod running as a ServiceAccount other than the configured one is this launch's to
+	// replace only where no round covers that pod (accountDrift, roundCovers), and then whatever
+	// the launch is installing: no round will ever come for such a pod, the account is fixed for
+	// the pod's life, and until the pod is created afresh its agents go on holding the identity
+	// the old account grants. A pod a round covers is kept for the account as for its other
+	// drift, and that round, which has every worker in it push its work first, is what replaces
+	// it.
+	replace := !live || (accountDrifted && !covered) || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
-		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
+		(!installing && !covered && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {
@@ -421,13 +430,16 @@ func launcherBackstop(boot, bound time.Duration) time.Duration {
 
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
-// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
-// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
-// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
-// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
-// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
-// timeout waits it alone.
+// launcher starts only once every init container of the pod has finished, however many the
+// deployment gives it, and the three steps whose duration follows the repository's size —
+// workspace-fetch's whole fetch with its retries, then workspace-init's shared clone of the feed
+// and the issue's own checkout of it — may take up to ProvisionBound from the fetch's own start,
+// a sum that counts no term for the commands which keep CommandTimeout, skills-fetch's one
+// shallow clone among them (ProvisionBound, manifest.go). So until the wait
+// first sees the pod provisioning (an init container running, provisioning) it gives the pod the
+// boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw the
+// pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
@@ -495,8 +507,11 @@ func (r *Runtime) stillFetching(pod *corev1.Pod) string {
 	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
-// provisioning is whether pod is running one of its init containers, workspace-fetch or
-// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+// provisioning is whether pod is running any of its init containers, whichever they are:
+// workspace-fetch, then skills-fetch where the deployment names a skills repository, then
+// workspace-init. It names none of them, reading each status for its own state, so a pod whose
+// init containers differ needs nothing here. It is the rule the liveness mapping reads such a pod
+// alive by (evaluate).
 func provisioning(pod *corev1.Pod) bool {
 	if phaseOf(pod) != corev1.PodPending {
 		return false
@@ -836,9 +851,14 @@ func (r *Runtime) waitedOut(ctx context.Context, s *sandbox) string {
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
 // launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
-// credential, its gh bundle (gitHubBundles): each owner's hosts.yml and config.yml (GitHubHostsKey,
-// GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container projects at
-// GHConfigDir.
+// credential, its gh bundle (gitHubBundles): each directory of that role's own bundle as its
+// hosts.yml and config.yml (GitHubHostsKey, GitHubConfigKey) and the default owner
+// (GitHubDefaultKey), which its container projects at GHConfigDir.
+//
+// The Secret holds the role's own directories, where the pod projects only the ones every role
+// holds (l.gitHubDirs, gitHubBundles): a key outside that projection is written and never read,
+// and the refresher keeps it current with the rest (refreshGitHubCredential), so the role's next
+// pod projects it the moment every role's bundle holds it.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launch) error {
 	bundles, err := r.gitHubBundles(ctx, l)
 	if err != nil {
@@ -851,9 +871,9 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 		}
 		bundle := bundles[role]
 		data := map[string][]byte{LauncherTokenFile: []byte(token), GitHubDefaultKey: []byte(bundle.Default)}
-		for _, owner := range l.gitHubOwners {
-			rendered := bundle.Owners[owner]
-			data[GitHubHostsKey(owner)], data[GitHubConfigKey(owner)] = []byte(rendered.Hosts), []byte(rendered.Config)
+		for _, dir := range bundle.DirNames() {
+			rendered := bundle.Dirs[dir]
+			data[GitHubHostsKey(dir)], data[GitHubConfigKey(dir)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
 		if err := r.upsertSecret(ctx, corev1.Secret{
 			ObjectMeta: r.secretMeta(s, *l, roleSecretName(s.Name, role)),
@@ -866,28 +886,54 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 			r.log.Info("sandbox runtime: no GitHub owner to act for; the role's gh acts as nobody", "sandbox", s.Name, "role", role)
 			continue
 		}
-		written := bundle.Owners[bundle.Default]
+		written := bundle.Dirs[bundle.Default]
 		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
-			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
+			"expiresAt", written.ExpiresAt, "dirs", l.gitHubDirs)
 	}
 	return nil
 }
 
-// gitHubBundles mints each launcher role's gh bundle for the issue's repository's owner
-// (Options.GitHubCredential) and records the bundle's owners and default on l, which the pod's gh
-// volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
-// and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
-// refuses does, naming the role, since a pod whose gh holds no token would start every role unable
-// to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
-// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
-// nobody, as `legion controller start` does there, its bundle empty — no owner, no default — and
-// its gh directory an empty one (volumes).
+// gitHubBundles mints each launcher role's gh bundle for the issue's repository
+// (Options.GitHubCredential) and records on l the directories the pod projects and the bundles'
+// default, which the pod's gh volumes and every agent's GH_CONFIG_DIR are built from. A mint
+// that fails, a bundle Validate refuses, and a role whose bundle names another default fail the
+// launch, naming the role, since a pod whose gh holds no token would start every role unable to
+// reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
+// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting
+// as nobody, as `legion controller start` does there, its bundle empty — no directory, no
+// default — and its gh directory an empty one (volumes).
+//
+// The pod projects the directories every role's bundle holds, and no more (ghDirsShared): a
+// projection item naming a key the role's Secret lacks stops the pod from starting, and the six
+// roles of an issue pod run as two Apps whose installations answer for themselves, so one App's
+// installation not reaching `acme/x` leaves acme out of that App's bundles alone (appauth's
+// mintBundle). A role whose bundle holds a directory outside that set simply does not project
+// it; its Secret keeps the key, unused (writeLauncherSecrets), and the launch says once which
+// role lacked which directory. The launch fails where the set the roles share does not hold the
+// bundles' default, an empty set included — GH_CONFIG_DIR would then name a directory the pod
+// does not carry — and where a role's own default is not the pod's, which would leave that
+// role's Secret recording a directory its container never reads from (refreshGitHubCredential).
+// A refused write lease still fails its own bundle (appauth's mintBundle), so every role that
+// reaches here holds the directory it writes to.
+//
+// The controller's bundle is asked for by owner (Options.ControllerCredential), the one function
+// a controller's bundle is made from here, by this launch and by the refresh of the pod it makes
+// (refreshGitHubCredential). The launch asks for no owner, which takes the first owner the
+// project serves that the mint answered for, sorted, and records it as the pod's default; a
+// controller works no repository, so its every directory is read-only.
 func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
-	l.gitHubOwners, l.gitHubDefault = nil, ""
+	l.gitHubDirs, l.gitHubDefault = nil, ""
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
+	held := make(map[claim.Role][]string, len(l.roles))
 	for i, role := range l.roles {
 		minting, cancel := call(ctx)
-		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
+		var bundle ghconfig.Bundle
+		var err error
+		if role == claim.RoleController {
+			bundle, err = r.controllerCredential(minting, "")
+		} else {
+			bundle, err = r.gitHubCredential(minting, role, l.spec.Repository)
+		}
 		cancel()
 		switch {
 		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
@@ -898,16 +944,55 @@ func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]
 		if err != nil {
 			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
 		}
-		owners := bundle.OwnerNames()
 		if i == 0 {
-			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
-		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
-			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
-				role, owners, bundle.Default, l.gitHubOwners, l.gitHubDefault)
+			l.gitHubDefault = bundle.Default
 		}
-		bundles[role] = bundle
+		bundles[role], held[role] = bundle, bundle.DirNames()
 	}
+	shared, lacked := ghDirsShared(held)
+	if len(lacked) > 0 {
+		r.log.Warn("sandbox runtime: the roles' gh bundles hold different directories; the pod projects the ones they share",
+			"sandbox", l.name, "lacked", lacked, "projecting", shared)
+	}
+	if l.gitHubDefault != "" && !slices.Contains(shared, l.gitHubDefault) {
+		return nil, fmt.Errorf("write the github credential: the roles' gh bundles share the directories %v, which do not hold the pod's default owner %s",
+			shared, l.gitHubDefault)
+	}
+	for _, role := range l.roles {
+		if bundles[role].Default != l.gitHubDefault {
+			return nil, fmt.Errorf("write the github credential for %s: its default owner %s is not the pod's %s",
+				role, bundles[role].Default, l.gitHubDefault)
+		}
+	}
+	l.gitHubDirs = shared
 	return bundles, nil
+}
+
+// ghDirsShared is the directories every role's bundle holds, sorted — what a pod of those roles
+// may project (volumes) — and lacked, one phrase for each directory some role's bundle does not
+// hold, naming the directory and the roles that lack it, for the launch to say once.
+func ghDirsShared(held map[claim.Role][]string) (shared, lacked []string) {
+	holders := map[string]int{}
+	for _, dirs := range held {
+		for _, dir := range dirs {
+			holders[dir]++
+		}
+	}
+	roles := slices.Sorted(maps.Keys(held))
+	for _, dir := range slices.Sorted(maps.Keys(holders)) {
+		if holders[dir] == len(held) {
+			shared = append(shared, dir)
+			continue
+		}
+		without := make([]string, 0, len(roles))
+		for _, role := range roles {
+			if !slices.Contains(held[role], dir) {
+				without = append(without, string(role))
+			}
+		}
+		lacked = append(lacked, dir+" ("+strings.Join(without, ", ")+")")
+	}
+	return shared, lacked
 }
 
 // secretMeta is a pod's Secret's metadata: the pod's labels, the Sandbox as owner, and the

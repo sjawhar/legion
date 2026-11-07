@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -41,14 +42,13 @@ const headSHA = "c0de0000000000000000000000000000000000ff"
 // token, minted for which owner, reached GitHub.
 type handoffTokens struct{}
 
-func (handoffTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	return appauth.Lease{Token: string(role) + "-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+func (handoffTokens) Token(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (appauth.Lease, error) {
+	return appauth.Lease{Token: string(role) + "-token-for-" + repo.Owner(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
-	lease, err := t.Token(ctx, role, owner)
-	lease.Token += "-read"
-	return lease, err
+func (t handoffTokens) ReadToken(_ context.Context, role appauth.AppRole, owner string, _ []string) (appauth.Lease, error) {
+	lease := appauth.Lease{Token: string(role) + "-token-for-" + owner + "-read", ExpiresAt: time.Now().Add(time.Hour)}
+	return lease, nil
 }
 
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
@@ -215,6 +215,7 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 	facts := &factRecorder{refusal: refusal}
 	h.handoffs = &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: h.handoffs, PluginRelaunchable: true,
@@ -253,9 +254,10 @@ func newWorkflowHandoffHarness(t *testing.T, github *handoffGitHub, logs io.Writ
 	t.Helper()
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handoffs = &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine}, Dispatch: h.handoffs, Log: slog.New(slog.NewTextHandler(logs, nil)),
@@ -762,16 +764,22 @@ func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	}
 }
 
+// checkOpenedAt is when seedCheck's production check opened: its identity
+// (record.ProductionCheck.ID), which the look's own task carries and the route holds a report to.
+var checkOpenedAt = time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+
 // seedCheck records key's production check on acme/widgets#42 at look 2 — open, with its look
-// open, unless closed — as the close and a pending first look leave it.
-func seedCheck(t *testing.T, h *harness, key string, closed bool) {
+// open, unless closed — as the close and a pending first look leave it. role is the role the
+// check records as its own (record.ProductionCheck.Role), the one whose reports it takes, and
+// last marks the check's last look, after which no look follows.
+func seedCheck(t *testing.T, h *harness, key string, role claim.Role, closed, last bool) {
 	t.Helper()
-	opened := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	opened := checkOpenedAt
 	woke := opened.Add(time.Hour)
 	check := record.ProductionCheck{
 		Issue: key, Project: testProject, Tree: key, Repo: "acme/widgets", Number: 42, MergeSHA: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0",
-		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 2, LookOpen: true, LookWakeAt: &woke,
-		LastWakeKind: "issue.deployed", LastWakeDetail: "run 7 completed 2026-10-19T07:00:00Z", LastWakeAt: &woke,
+		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Role: role, Looks: 2, LookOpen: true, LookWakeAt: &woke,
+		LastWakeKind: "check wake", LastWakeDetail: "the deploy of the merge commit", LastWakeAt: &woke, Last: last,
 	}
 	if closed {
 		check.LookOpen, check.ClosedAt, check.Outcome = false, &woke, record.CheckRecorded
@@ -782,6 +790,20 @@ func seedCheck(t *testing.T, h *harness, key string, closed bool) {
 	if err != nil {
 		t.Fatalf("seed the production check of %s: %v", key, err)
 	}
+}
+
+// checkWakeAt is the time a pending report of these tests names for its next look; the route
+// reads that a pending names one, and the engine, which clamps it, is not in this harness.
+var checkWakeAt = time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+
+// sameCheckReport says whether got is want, comparing the reports' wake times as instants: the
+// report travels as JSON, so the fact the route applies carries a pointer of its own.
+func sameCheckReport(got, want intake.CheckReport) bool {
+	if (got.WakeAt == nil) != (want.WakeAt == nil) || (got.WakeAt != nil && !got.WakeAt.Equal(*want.WakeAt)) {
+		return false
+	}
+	got.WakeAt, want.WakeAt = nil, nil
+	return got == want
 }
 
 // lastCheckReport is the newest check report facts recorded.
@@ -798,28 +820,30 @@ func lastCheckReport(t *testing.T, facts *factRecorder) intake.CheckReport {
 	return fact
 }
 
-// The implementer's call on its closed issue, whose production check is open, is a report on the
-// check's current look: it carries no commit (the look pushed nothing) and one of the three
-// verdicts, and the fact is the check report of that look, not a phase completion. A claim that
-// took no task reports all the same — the check fences itself on the look, not on a run — and
-// nothing reads GitHub. A repeated report of the same look and verdict is answered as already
-// received.
+// The checking role's call inside the turn of a look's task is a report on that look: it carries
+// no commit (the look pushed nothing) and one of the three verdicts, and the fact is the check
+// report of that look, not a phase completion. No run is read — the check fences itself on the
+// look, not on a run — and nothing reads GitHub. A repeated report of the same look and verdict
+// is answered as already received.
 func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
-	seedCheck(t, h, "LEGION-208", false)
-	token, boot := h.launch("LEGION-208", claim.RoleImplementer)
-	registration := h.registered(boot, "ses_implementer_untasked")
-	implementer := liveClaim{h: h, token: token, session: "ses_implementer_untasked", secret: registration.Secret, tree: "LEGION-208", issue: "LEGION-208"}
+	seedCheck(t, h, "LEGION-208", claim.RoleImplementer, false, false)
+	implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
+	token := implementer.token
 
 	for _, verdict := range []string{"pending", "fail", "pass"} {
-		answer := completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked: " + verdict, Verdict: verdict}))
+		report := HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked: " + verdict, Verdict: verdict}
+		want := intake.CheckReport{Issue: "LEGION-208", Claim: token, Look: 2, Verdict: verdict, Summary: "looked: " + verdict}
+		if verdict == "pending" {
+			report.WakeAt, want.WakeAt = &checkWakeAt, &checkWakeAt
+		}
+		answer := completion(t, h.complete(report))
 		if answer.Note != "" {
 			t.Fatalf("answer = %+v, want no note on a check report", answer)
 		}
-		want := intake.CheckReport{Issue: "LEGION-208", Claim: token, Look: 2, Verdict: verdict, Summary: "looked: " + verdict}
-		if got := lastCheckReport(t, facts); got != want {
+		if got := lastCheckReport(t, facts); !sameCheckReport(got, want) {
 			t.Fatalf("check report = %+v, want %+v", got, want)
 		}
 	}
@@ -844,8 +868,8 @@ func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testin
 func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
-	seedCheck(t, h, "LEGION-208", false)
-	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	seedCheck(t, h, "LEGION-208", claim.RoleImplementer, false, false)
+	implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
 
 	for _, verdict := range []string{"", "maybe"} {
 		if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: verdict}), http.StatusBadRequest, "CHECK_VERDICT_REQUIRED"); message != "a production check report names a verdict of pass, pending or fail" {
@@ -858,18 +882,19 @@ func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testi
 	}
 }
 
-// The implementer on a done issue with no open production check — none ever opened, or the check
-// closed on an earlier look — reports on nothing: the call is refused by name, with nothing
-// recorded, rather than read as a completion of a phase no role works.
-func TestHandoffCompleteRefusesTheImplementerOnADoneIssueWithNoOpenCheck(t *testing.T) {
+// A caller whose live assignment is a look of its issue's production check, on an issue with no
+// open check — none ever opened, or the check closed on an earlier look — reports on nothing: the
+// call is refused by name, with nothing recorded, rather than falling into the phase path.
+func TestHandoffCompleteRefusesALooksCallWhereNoCheckIsOpen(t *testing.T) {
 	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	implementer.worksLook(t, 2, checkOpenedAt)
 
 	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass"}), http.StatusConflict, "CHECK_NOT_OPEN"); message != "LEGION-208 has no open production check; this completion changed nothing" {
 		t.Fatalf("refusal with no check = %q", message)
 	}
-	seedCheck(t, h, "LEGION-208", true)
+	seedCheck(t, h, "LEGION-208", claim.RoleImplementer, true, false)
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass"}), http.StatusConflict, "CHECK_NOT_OPEN")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want none", got)
@@ -881,10 +906,10 @@ func TestHandoffCompleteRefusesTheImplementerOnADoneIssueWithNoOpenCheck(t *test
 func TestHandoffCompleteAnswersTheEnginesRefusalOfACheckReport(t *testing.T) {
 	h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, &intake.Refusal{Status: http.StatusConflict, Code: "CHECK_LOOK_NOT_OPEN", Message: "look 2 of LEGION-208's production check is not open"})
 	seedIssueAt(t, h, "LEGION-208", phase.Done)
-	seedCheck(t, h, "LEGION-208", false)
-	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	seedCheck(t, h, "LEGION-208", claim.RoleImplementer, false, false)
+	implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
 
-	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pending"}), http.StatusConflict, "CHECK_LOOK_NOT_OPEN"); message != "look 2 of LEGION-208's production check is not open" {
+	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pending", WakeAt: &checkWakeAt}), http.StatusConflict, "CHECK_LOOK_NOT_OPEN"); message != "look 2 of LEGION-208's production check is not open" {
 		t.Fatalf("refusal = %q, want the engine's sentence", message)
 	}
 }
@@ -911,11 +936,12 @@ func TestHandoffCompleteTakesAReportOnALaterChecksLookAsANewFact(t *testing.T) {
 	opened := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
 	first := record.ProductionCheck{
 		Issue: "LEGION-208", Project: testProject, Tree: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0",
-		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
+		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Role: claim.RoleImplementer, Looks: 1, LookOpen: true, LookWakeAt: &opened,
 		LastWakeKind: "merge", LastWakeDetail: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", LastWakeAt: &opened,
 	}
 	put(first)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the merge yet", Verdict: "pending"}))
+	implementer.worksLook(t, 1, opened)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the merge yet", Verdict: "pending", WakeAt: &checkWakeAt}))
 	if got := facts.recorded(); len(got) != 1 {
 		t.Fatalf("facts after the first check's report = %#v, want one", got)
 	}
@@ -932,14 +958,148 @@ func TestHandoffCompleteTakesAReportOnALaterChecksLookAsANewFact(t *testing.T) {
 	second.LastWakeDetail, second.LastWakeAt = second.MergeSHA, &reopened
 	second.ClosedAt, second.Outcome = nil, ""
 	put(second)
+	implementer.worksLook(t, 1, reopened)
 
-	answer := h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the rerun's merge yet", Verdict: "pending"})
+	answer := h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the rerun's merge yet", Verdict: "pending", WakeAt: &checkWakeAt})
 	if answer.Code != http.StatusOK {
 		t.Fatalf("the rerun's first look reported pending = %d: %s; want it taken as the second check's own report, not the first check's", answer.Code, answer.Body)
 	}
-	want := intake.CheckReport{Issue: "LEGION-208", Claim: implementer.token, Look: 1, Verdict: "pending", Summary: "no production carries the rerun's merge yet"}
-	if got := facts.recorded(); len(got) != 2 || got[1] != want {
+	want := intake.CheckReport{Issue: "LEGION-208", Claim: implementer.token, Look: 1, Verdict: "pending", Summary: "no production carries the rerun's merge yet", WakeAt: &checkWakeAt}
+	if got := facts.recorded(); len(got) != 2 || !sameCheckReport(lastCheckReport(t, facts), want) {
 		t.Fatalf("facts after the second check's report = %#v, want the first check's report and then %+v", got, want)
+	}
+}
+
+// recordedCheck is key's production check as the record holds it now.
+func recordedCheck(t *testing.T, h *harness, key string) record.ProductionCheck {
+	t.Helper()
+	var check *record.ProductionCheck
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		var err error
+		check, err = record.NewStore().ProductionCheck(context.Background(), tx, key)
+		return err
+	}); err != nil || check == nil {
+		t.Fatalf("read the production check of %s = %v, %v", key, check, err)
+	}
+	return *check
+}
+
+// checkEvents is how many check reports of key the intake has marked processed.
+func checkEvents(t *testing.T, h *harness, key string) int {
+	t.Helper()
+	var count int
+	if err := h.store.Pool().QueryRow(context.Background(),
+		"select count(*) from processed_events where source = 'api' and event_id like $1", "check:"+key+":%").Scan(&count); err != nil {
+		t.Fatalf("count the check reports of %s the intake processed: %v", key, err)
+	}
+	return count
+}
+
+// A pending report names when the check is next looked at: the checking agent names its own next
+// look, and nothing else would start one. Without it the report is refused CHECK_WAKE_REQUIRED
+// before the fact is applied, so no event is marked processed, the look stays open, and the same
+// report sent again with a time is recorded under the event the refused one would have taken.
+func TestACheckReportOfAPendingWithoutAWakeIsRefusedAndTheSameReportWithOneIsRecorded(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	seedCheck(t, h, "LEGION-208", claim.RoleImplementer, false, false)
+	implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
+
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no deploy carries the merge", Verdict: "pending"}),
+		http.StatusBadRequest, "CHECK_WAKE_REQUIRED")
+	if !strings.Contains(message, "wakeAt") || !strings.Contains(message, "look 2 stays open") {
+		t.Fatalf("refusal = %q, want it to name wakeAt and say the look stays open", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none", got)
+	}
+	if got := checkEvents(t, h, "LEGION-208"); got != 0 {
+		t.Fatalf("processed check events = %d, want none: the refusal is written before the fact is applied", got)
+	}
+	if check := recordedCheck(t, h, "LEGION-208"); !check.Open() || !check.LookOpen || check.Looks != 2 {
+		t.Fatalf("the check after the refusal = %+v, want it open at look 2 with the look open", check)
+	}
+
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no deploy carries the merge", Verdict: "pending", WakeAt: &checkWakeAt}))
+	want := intake.CheckReport{Issue: "LEGION-208", Claim: implementer.token, Look: 2, Verdict: "pending", Summary: "no deploy carries the merge", WakeAt: &checkWakeAt}
+	if got := lastCheckReport(t, facts); !sameCheckReport(got, want) {
+		t.Fatalf("the report sent again = %+v, want %+v", got, want)
+	}
+	if got := checkEvents(t, h, "LEGION-208"); got != 1 {
+		t.Fatalf("processed check events = %d, want the recorded report's one", got)
+	}
+}
+
+// A wake has no place on a report no look follows: a pass and a fail each close the check, and a
+// pending on the check's last look closes it as not run. Each is refused CHECK_WAKE_UNEXPECTED
+// with nothing recorded.
+func TestACheckReportNamingAWakeWhereNoLookFollowsIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict string
+		last    bool
+	}{
+		{name: "a pass", verdict: "pass"},
+		{name: "a fail", verdict: "fail"},
+		{name: "a pending on the last look", verdict: "pending", last: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+			seedIssueAt(t, h, "LEGION-208", phase.Done)
+			seedCheck(t, h, "LEGION-208", claim.RoleImplementer, false, tc.last)
+			implementer := newCheckLookClaim(t, h, "LEGION-208", claim.RoleImplementer, 2)
+
+			message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: tc.verdict, WakeAt: &checkWakeAt}),
+				http.StatusBadRequest, "CHECK_WAKE_UNEXPECTED")
+			if !strings.Contains(message, "wakeAt") {
+				t.Fatalf("refusal of %s = %q, want it to name the field", tc.name, message)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("facts = %#v, want none", got)
+			}
+			if got := checkEvents(t, h, "LEGION-208"); got != 0 {
+				t.Fatalf("processed check events = %d, want none", got)
+			}
+		})
+	}
+}
+
+// A report is the check's own role's: the role the check records when it opened
+// (record.ProductionCheck.Role), which the project's setting decides, and no other role of the
+// issue. Another role's report is refused CHECK_ROLE_MISMATCH, naming both roles, with nothing
+// recorded and the record unchanged, and the same look's report from the check's own role is
+// taken.
+//
+// The implementer holds its look by the one path that reaches this refusal: a start row queued
+// before start rows carried the check instance, whose zero instance names no check
+// (record.ProductionCheck.NamedBy), so the look is not refused as a replaced check's and the
+// role is what catches it. Every look this daemon starts is the check's own role's and names
+// its instance (workflow's startLook).
+func TestACheckReportFromAnotherRoleIsRefusedAndTheChecksOwnRolesIsRecorded(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	seedCheck(t, h, "LEGION-208", claim.RoleTester, false, false)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	implementer.worksLook(t, 2, time.Time{})
+	tester := newCheckLookClaim(t, h, "LEGION-208", claim.RoleTester, 2)
+	before := recordedCheck(t, h, "LEGION-208")
+
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass"}),
+		http.StatusConflict, "CHECK_ROLE_MISMATCH")
+	if !strings.Contains(message, "tester") || !strings.Contains(message, "implementer") {
+		t.Fatalf("refusal = %q, want both roles named", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none", got)
+	}
+	if got := recordedCheck(t, h, "LEGION-208"); !reflect.DeepEqual(got, before) {
+		t.Fatalf("the check after another role's report = %+v, want it unchanged: %+v", got, before)
+	}
+
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: tester.grant(t), Summary: "driven in production", Verdict: "pass"}))
+	want := intake.CheckReport{Issue: "LEGION-208", Claim: tester.token, Look: 2, Verdict: "pass", Summary: "driven in production"}
+	if got := lastCheckReport(t, facts); !sameCheckReport(got, want) {
+		t.Fatalf("the check's own role's report = %+v, want %+v", got, want)
 	}
 }
 
@@ -1239,10 +1399,11 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	facts := &factRecorder{}
 	h.handoffs = &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, facts}, Dispatch: h.handoffs,
@@ -1319,9 +1480,10 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps(), ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handoffs = &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Steps:      config.DesignGateRootIssues.Steps(),
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine}, Dispatch: h.handoffs,
@@ -1852,7 +2014,8 @@ func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testi
 // submits the merge on the architect's word once the gate opens, already knows a person merges it.
 func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T) {
 	github := byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`)
-	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
+	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED",
+		Message: "READY refused: approve design version 4 of the tree's spec document before requesting READY."})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
 	seedApproval(t, h, "LEGION-208", approvedSHA)

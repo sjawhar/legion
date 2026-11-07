@@ -11,7 +11,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testpg"
 )
 
@@ -175,25 +174,10 @@ func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
 	}
 }
 
-// migratedPool is a migrated database of this test's own: the mirror's writes are SQL — an upsert
-// fenced in its own where clause — so they are tested against the real schema, as every other
-// package's record tests are.
+// migratedPool is a migrated database of this test's own, cloned from the package's template: the
+// mirror's writes are SQL — an upsert fenced in its own where clause — so they are tested against
+// the real schema, as every other package's record tests are.
 func migratedPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := testpg.Database(t, "legion_blockers_test")
-	st, err := legionstore.Open(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open the test database: %v", err)
-	}
-	if _, err := st.Migrate(context.Background()); err != nil {
-		st.Close()
-		t.Fatalf("migrate the test database: %v", err)
-	}
-	st.Close()
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("open a pool on the test database: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return testpg.ClonePool(t, "legion_blockers_test")
 }

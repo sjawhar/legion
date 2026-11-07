@@ -19,8 +19,9 @@ import (
 // log (renderedReplica.seq, documentUpdateClass.seq), and every durable writer of the room stores,
 // under the document's advisory lock and before an append of its own, every update of the
 // instance through the position it read the room at that no writer has stored yet (flushThrough).
-// The room's own persistence is one such writer, through its own update's position
-// (StoreUpdateContext), so the order ygo hands it updates in never decides the stored order.
+// The room's own persistence is one such writer, through the position its batch takes, its own
+// update's at least (roomBatchThrough, StoreUpdateContext), so the order ygo hands it updates in
+// never decides the stored order.
 
 // roomPoint is an exact position in one room instance's commits: cursor names the instance (its
 // roomCursor), and seq is the position of the last commit a read of it holds (readPoint). The zero
@@ -202,7 +203,8 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 	return seq != point.seq
 }
 
-// RoomFlush is what one transaction's flushThrough calls stored of one room instance, the one
+// RoomFlush is what one transaction stored of one room instance - a joined transaction's
+// flushThrough calls, or a room's own batch (appendRoomTx, through flushRun) - the one
 // cursor names: the classes, in commit order, with the version each was appended at, the class it
 // was stored with (changed) and the credit its append took (credits; storedClasses). repairs are
 // the versions of the repairs a settlement wrote into the instance and stored between its flushes
@@ -246,8 +248,9 @@ func (f *RoomFlush) appended(own []persistence.Version) []persistence.Version {
 
 // heldThrough is the durable version the flushed instance holds every update through as the
 // flush's transaction sees it: the instance's cursor with the versions the transaction has
-// appended for it folded in (appended), which gates each next append of the flush
-// (appendingCursor).
+// appended for it folded in (appended). The transaction's appends' gate reads it (appendingCursor,
+// and appendRoomTx for a room's own batch), and so does its fork read's judgment of the room
+// (roomBehindHead), each through transactionCursor where the transaction carries a ledger.
 func (f *RoomFlush) heldThrough() int64 {
 	return foldAppended(f.cursor.heldThrough(), f.appended(nil))
 }
@@ -274,29 +277,61 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 // recorded at a commit position through `through` and no writer has stored yet: in commit order,
 // each with its class and its credit (storedClasses: the ones its observer recorded, or for a
 // browser update stored after a live write it was measured without, the ones the room's shadow
-// measures; AppendRoomUpdateTx, whose UpdateCredit.take writes the credit's authors), each gated on
-// that instance's cursor as any append of the room is (appendingCursor). It records them on flush,
-// and the transaction's commit marks them stored and lands their credits (markStored); a
-// transaction that rolls back marks nothing, and the room's persistence stores them later.
+// measures), as the one insert statement of one row per update that every append of a room writes
+// (AppendRoomUpdatesTx, appendWrites, whose UpdateCredit.take writes each credit's authors), gated
+// on that instance's cursor as any append of the room is (appendingCursor). It stores the run
+// whole or fails: the gate cuts a browser's run at the first update its document's closed issue
+// no longer admits and stores the prefix before it (gateAppend), and a flush the gate cut that
+// way answers ErrIssueClosed and records nothing on flush, so the transaction that joined this
+// flush rolls back and stores nothing of the run - neither the prefix nor the writer's own
+// update, which it would otherwise derive from a room state holding a keystroke the store
+// refused. The prefix rule is the room's own batch path's (appendRoomTx): the room stores what
+// it took in time and meets the gate again on the rest, which refuses it and closes the room for
+// its issue. A run this stores whole is recorded on flush, and the transaction's commit marks
+// those classes stored and lands their credits (markStored); a transaction that rolls back marks
+// nothing, and the room's persistence stores them later.
 //
 // Every flush runs on a transaction or a session that already holds the room's advisory lock,
 // taken before the head it is gated on was read: the room's own persistence worker holds the
 // session-level lock on its connection across the whole transaction (AppendRoomFlush,
-// withRoomLock), and every caller of Ledger.flushThrough took the transaction-level lock in the
+// appendRoomTx), and every caller of Ledger.flushThrough took the transaction-level lock in the
 // same transaction - a live write's one read of the document (readFork, lockedHead), a version
 // capture's (captureLiveTextAndAuthors) and the write's own (captureWrite, through its read), a
 // settlement's (lockSettlementCursor) and the block-id backfill's (lockDocumentRoom), which a
-// repair's flush runs under too (storeRepair). So the appends this makes take no lock of their
-// own: a second acquisition would cost a round trip each and grant what the caller holds
-// (appendUpdateTxClass). The caller calls this before its own append. The classes are read under
-// that lock, and every writer marks what it stored before the lock passes on, so no update is
-// stored twice. Every class is measured before the first append: between its appends it renders
-// and decodes nothing, so it is the lock, the read of the room's queue, the measures, and the
-// appends.
+// repair's flush runs under too (storeRepair). So the append this makes takes no lock of its own:
+// a second acquisition would cost a round trip and grant what the caller holds (appendUpdatesTx).
+// The caller calls this before its own append. The classes are read under that lock, and every
+// writer marks what it stored before the lock passes on, so no update is stored twice. Every
+// class is measured before the append: it renders and decodes nothing between the read of the
+// room's queue and the write, so the flush is the lock, that read, the measures, and one
+// statement.
 func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
+	updates, taking := s.flushRun(flush, through)
+	if len(updates) == 0 {
+		return nil
+	}
+	first, stored, err := s.persistence.AppendRoomUpdatesTx(ctx, tx, flush.room, flush, updates)
+	if err != nil {
+		return err
+	}
+	if stored < len(updates) {
+		return fmt.Errorf("%w: room %s's document belongs to a closed issue, which refused %d of the %d updates this transaction flushed",
+			ErrIssueClosed, flush.room, len(updates)-stored, len(updates))
+	}
+	flush.appendedRun(taking, updates, first)
+	return nil
+}
+
+// flushRun is the run a flush of flush's room instance through `through` stores, read under the
+// room's state lock: the classes its update observer recorded at a commit position through that
+// one which no writer has stored yet and this flush has not stored already, in commit order, and
+// the updates they are stored as - each class's bytes with the content class and credit its
+// append takes (storedClasses). It records on flush the record it read the queue from and how far
+// the flush has stored, whether or not it took anything.
+func (s *Service) flushRun(flush *RoomFlush, through uint64) ([]BrowserUpdate, []*queuedClass) {
 	state := s.lockExistingState(flush.room)
 	if state == nil {
-		return nil
+		return nil, nil
 	}
 	var taking []*queuedClass
 	for _, class := range state.updateClasses {
@@ -310,21 +345,34 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush,
 	s.unlockState(flush.room, state)
 	flush.state = state
 	flush.through = max(flush.through, through)
+	if len(taking) == 0 {
+		return nil, nil
+	}
 	if s.beforeFlushMeasure != nil {
 		s.beforeFlushMeasure(flush.room)
 	}
 	stored := storedClasses(flush.room, window, taking)
+	updates := make([]BrowserUpdate, len(taking))
 	for index, class := range taking {
-		version, err := s.persistence.AppendRoomUpdateTx(ctx, tx, flush.room, flush, class.update, stored[index].changed, stored[index].credit, class.observed)
-		if err != nil {
-			return err
+		updates[index] = BrowserUpdate{
+			Update:         class.update,
+			ContentChanged: stored[index].changed,
+			Credit:         stored[index].credit,
+			Observed:       class.observed,
 		}
-		flush.classes = append(flush.classes, class)
-		flush.versions = append(flush.versions, version)
-		flush.changed = append(flush.changed, stored[index].changed)
-		flush.credits = append(flush.credits, stored[index].credit)
 	}
-	return nil
+	return updates, taking
+}
+
+// appendedRun records on f the run its transaction appended, taking's classes stored as updates at
+// consecutive versions from first.
+func (f *RoomFlush) appendedRun(taking []*queuedClass, updates []BrowserUpdate, first persistence.Version) {
+	for index, class := range taking {
+		f.classes = append(f.classes, class)
+		f.versions = append(f.versions, first+persistence.Version(index))
+		f.changed = append(f.changed, updates[index].ContentChanged)
+		f.credits = append(f.credits, updates[index].Credit)
+	}
 }
 
 // markStored marks what f stored once its transaction has committed: each class stored, the

@@ -3,13 +3,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { LegionCapabilityReport } from "@legion/contracts/legion-api";
+import {
+  LegionCapabilityReport,
+  type LegionCapabilityReportBody,
+} from "@legion/contracts/legion-api";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import {
   CAPABILITY_CHECK_TIMEOUT_MS,
   CAPABILITY_REPORT_TIMEOUT_MS,
   type CapabilityHost,
   type CapabilityInput,
+  type CommandResult,
   cleanDetail,
   ENVOY_TOOL_NAMES,
   LIVE_CAPABILITIES,
@@ -105,6 +109,20 @@ async function measure(
   return rows;
 }
 
+/**
+ * The names of the rows that passed, less `repository-extensions`: alone among the live checks it
+ * awaits the filesystem — a `readdir`, then a `stat` for each entry — so its outcome lands on a
+ * macrotask a loaded event loop can defer past a short budget, the budget working as designed, not
+ * a defect. `checkDispatchEnvoyTools` reads the disk too, but synchronously, through `whichOnPath`
+ * (`Bun.which`); every other check settles in microtasks alone under `fakeHost`, so no timer can
+ * defer one and its row reads the same on any machine.
+ */
+function passingNamesExceptTheDiskCheck(report: LegionCapabilityReportBody): string[] {
+  return report.rows
+    .filter((row) => row.ok && row.name !== "repository-extensions")
+    .map((row) => row.name);
+}
+
 describe("the report", () => {
   test("carries the six live rows in the daemon's table order, when it started and how long it took, in the wire's shape", async () => {
     const before = Date.now();
@@ -178,24 +196,84 @@ describe("the report", () => {
     const row = report.rows.find((candidate) => candidate.name === "web-search");
     expect(row).toEqual({ name: "web-search", ok: false, detail: "did not finish within 20 ms" });
     expect(seen?.aborted).toBe(true);
-    expect(report.rows.filter((candidate) => candidate.ok)).toHaveLength(5);
+    expect(passingNamesExceptTheDiskCheck(report)).toEqual([
+      "subagents",
+      "mcp",
+      "dispatch-envoy-tools",
+      "github",
+    ]);
   });
 
-  test("a row still pending at the report's budget is a failing row naming that budget", async () => {
-    const host = fakeHost({ run: () => Promise.withResolvers<never>().promise });
-    const report = await measureCapabilities(host, input(), { checkMs: 60, reportMs: 20 });
-    const details = Object.fromEntries(report.rows.map((row) => [row.name, row.detail]));
-    expect(details.github).toBe("did not finish within 20 ms");
-    expect(details["dispatch-envoy-tools"]).toBe("did not finish within 20 ms");
-    expect(report.rows.filter((row) => row.ok)).toHaveLength(4);
-    expect(report.elapsedMs).toBeLessThan(60);
-  });
+  test("a row still pending at the report's budget is a failing row naming that budget, and the report does not wait for it", async () => {
+    const pending = Promise.withResolvers<CommandResult>();
+    const host = fakeHost({ run: () => pending.promise });
+    // Nothing but a budget can end the two command rows, and the check budget is six times the
+    // per-test limit below: a report that ends them on its own 20 ms budget comes back at once,
+    // while one that waited for its checks could not come back inside that limit at all, so the
+    // limit is the hang guard this row's proof rests on.
+    const report = await measureCapabilities(host, input(), { checkMs: 30_000, reportMs: 20 });
+    // The report is back: resolving lets the abandoned checks settle, so their 30 s timers clear.
+    pending.resolve({ code: 0, stdout: "", stderr: "" });
+
+    for (const name of ["github", "dispatch-envoy-tools"])
+      expect(report.rows.find((row) => row.name === name)).toEqual({
+        name,
+        ok: false,
+        detail: "did not finish within 20 ms",
+      });
+    expect(passingNamesExceptTheDiskCheck(report)).toEqual(["subagents", "web-search", "mcp"]);
+  }, 5_000);
 
   test("a whole-second budget reads in seconds", async () => {
     const host = fakeHost({ run: () => Promise.withResolvers<never>().promise });
     const report = await measureCapabilities(host, input(), { checkMs: 1_000, reportMs: 1_500 });
     const github = report.rows.find((row) => row.name === "github");
     expect(github).toEqual({ name: "github", ok: false, detail: "did not finish within 1 s" });
+  });
+
+  // INFRA-927: the session measures again while a row is missing (src/capability-schedule.ts), so
+  // a second measurement must carry nothing of the first: the row that failed on its budget is
+  // asked again, and so is every row that passed.
+  test("a second measurement carries nothing of the first: every row is measured again, and the one that failed on its budget passes", async () => {
+    let searches = 0;
+    const host = fakeHost({
+      // The first measurement's search never answers, so its row fails on the check budget; the
+      // second's answers.
+      runSearchQuery: () => {
+        searches += 1;
+        return searches === 1
+          ? Promise.withResolvers<never>().promise
+          : Promise.resolve({
+              content: [{ type: "text", text: "[1] Jujutsu—a version control system" }],
+              details: { response: { provider: "parallel" } },
+            });
+      },
+    });
+    const budgets = { checkMs: 20, reportMs: 500 };
+
+    const first = await measureCapabilities(host, input(), budgets);
+    const second = await measureCapabilities(host, input(), budgets);
+
+    expect(first.rows.find((row) => row.name === "web-search")).toEqual({
+      name: "web-search",
+      ok: false,
+      detail: "did not finish within 20 ms",
+    });
+    expect(second.rows.map((row) => row.name)).toEqual([...LIVE_CAPABILITIES]);
+    expect(passingNamesExceptTheDiskCheck(second)).toEqual([
+      "subagents",
+      "web-search",
+      "mcp",
+      "dispatch-envoy-tools",
+      "github",
+    ]);
+    // The second report is its own measurement, not the first with one row patched: it started
+    // after the first ended, and every check asked the host a second time.
+    expect(Date.parse(second.measuredAt)).toBeGreaterThan(Date.parse(first.measuredAt));
+    expect(first.elapsedMs).toBeGreaterThanOrEqual(20);
+    expect(searches).toBe(2);
+    // `dispatch` and `gh`, once each per measurement, in the order the checks start them.
+    expect(host.runs.map((run) => run.command)).toEqual(["dispatch", "gh", "dispatch", "gh"]);
   });
 });
 
@@ -812,15 +890,31 @@ describe("cleanDetail", () => {
   // A rule that may start inside a run its own value class reads through makes JavaScriptCore,
   // which backtracks, read that run once per start: time quadratic in the detail, which the plugin
   // cleans before it cuts it to 1,024 bytes, so one such detail stalls a session's start. Each
-  // fixture unit, repeated, holds a start for every repetition. At 64 KiB a linear rule takes a few
-  // milliseconds and a quadratic one takes seconds, so the 1 s bound separates them on any machine.
+  // fixture unit, repeated, holds a start for every repetition. Measured from 4 to 128 KiB, every
+  // case here doubles its cost when its text doubles, below and above one step where the engine
+  // leaves a fast path and the cost jumps about 40x in a single doubling; a quadratic rule would
+  // read four times the cost at every doubling instead. That step falls at a different size for
+  // each case, so at the 64 KiB this row cleans two cases land just above it and take about 369 and
+  // 383 ms on an idle machine.
+  //
+  // What this row holds is that `cleanDetail` comes back on the largest input the fixture builds,
+  // inside the hang guard below. What it does not hold is that a rule has stayed linear: a
+  // quadratic rule is not caught here. The JWT rule made quadratic by hand costs 13,570 to
+  // 14,088 ms on a 2-CPU gVisor agent pod, which the 10 s guard does fail; but CI is about 4.5
+  // times faster (job 128346885451 ran the two cases above at 83.20 and 80.76 ms), where that same
+  // regression would cost about 3 s and pass — an estimate from those ratios, not a run on CI. One
+  // bound at 64 KiB cannot hold both machines: it would have to sit above the 2,633 ms a linear
+  // rule costs on that pod under load and below that 3 s, which is no room to stand on.
+  // INFRA-985's architect ruled on 2026-11-07 that this is not fixed here: an accepted risk of this
+  // change, recorded in the pull request body, not an oversight.
   for (const { name, unit } of redaction.linear) {
-    test(`stays linear: ${name}, 64 KiB in under 1 s`, () => {
+    test(`cleans 64 KiB of ${name} without stalling`, () => {
       const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
-      const started = performance.now();
       cleanDetail(text);
-      expect(performance.now() - started).toBeLessThan(1_000);
-    });
+      // The limit is a hang guard: on bun 1.4.4 a per-test limit is reported for a body that
+      // blocks the thread only once that body comes back, so it ends a blow-up that returns at
+      // all, and a rule that never returns is ended by the pi-legion job's own timeout-minutes: 10.
+    }, 10_000);
   }
 });
 

@@ -962,6 +962,133 @@ func TestAMountPointsPlaceFollowsNoLinkARoleLeft(t *testing.T) {
 	}
 }
 
+// A mount point's place is decided from a handle the walk opened and read, so a component that
+// changed between the removal of the link that stood there and the making of the place is read
+// again rather than assumed: the directory replaced leaves at the component's own name is the
+// directory the walk descends, where a walk that took its own Mkdirat's refusal as the answer
+// would refuse a place it had just been given. replaced is the only thing that can put an entry
+// at that name while role-init runs — nothing of the role runs then, and no other role reaches
+// the role's layers — so the callback below stands for that window and for nothing else. The two
+// refusals are unchanged behaviour: a new link at the component's name is refused, and so is a
+// directory where a file's mount point goes. No walk here, refused or not, leaves a descriptor
+// behind.
+func TestAMountPointsPlaceRereadsAnEntryThatChangedUnderTheWalk(t *testing.T) {
+	dir := t.TempDir()
+	root, elsewhere := filepath.Join(dir, "home"), filepath.Join(dir, "elsewhere")
+	for _, path := range []string{root, elsewhere} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, place := range []struct {
+		name    string // the component the role left a link at, one per case so the cases do not meet
+		plant   string // what replaced puts back at that component's own name: a dir or a link
+		target  string // the path under the root the walk is asked to make, relative to it
+		dir     bool
+		wantErr bool
+	}{
+		{name: "changed", plant: "dir", target: filepath.Join("changed", "sessions"), dir: true},
+		{name: "relinked", plant: "link", target: filepath.Join("relinked", "sessions"), dir: true, wantErr: true},
+		{name: "as-file", plant: "dir", target: "as-file", dir: false, wantErr: true},
+	} {
+		component := filepath.Join(root, place.name)
+		if err := os.Symlink(filepath.Join(elsewhere, place.name), component); err != nil {
+			t.Fatal(err)
+		}
+		planted, replaced := false, []string(nil)
+		plant := func(link string) {
+			replaced = append(replaced, link)
+			if planted {
+				return
+			}
+			planted = true
+			var err error
+			if place.plant == "link" {
+				err = os.Symlink(filepath.Join(elsewhere, place.name+"-again"), component)
+			} else {
+				err = os.Mkdir(component, 0o755)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		before := openDescriptors(t)
+		err := mountPointBeneath(root, filepath.Join(root, place.target), place.dir, plant)
+		descriptorsKept(t, "the place of "+place.target, before, openDescriptors(t))
+		switch {
+		case place.wantErr && (err == nil || !strings.Contains(err.Error(), component)):
+			t.Errorf("the place of %s over the %s replaced left = %v, want a refusal naming %s", place.target, place.plant, err, component)
+		case !place.wantErr && err != nil:
+			t.Errorf("the place of %s over the %s replaced left = %v, want the place made in the role's own layer", place.target, place.plant, err)
+		}
+		if want := []string{component}; strings.Join(replaced, " ") != strings.Join(want, " ") {
+			t.Errorf("the place of %s replaced %q, want %q: the link it removed", place.target, replaced, want)
+		}
+	}
+	for path, want := range map[string]fs.FileMode{
+		"changed": fs.ModeDir, filepath.Join("changed", "sessions"): fs.ModeDir,
+	} {
+		if info, err := os.Lstat(filepath.Join(root, path)); err != nil || info.Mode().Type() != want {
+			t.Errorf("%s is %v (%v), want type %v: the entry replaced left was read again", path, info, err, want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "plain"), []byte("plain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := openDescriptors(t)
+	err := mountPointBeneath(root, filepath.Join(root, "plain", "x"), true, func(link string) {
+		t.Errorf("the place through a regular file replaced %s, want no link in its way", link)
+	})
+	descriptorsKept(t, "the place through a regular file", before, openDescriptors(t))
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(root, "plain")) {
+		t.Errorf("the place through a regular file = %v, want a refusal naming it", err)
+	}
+	if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+		t.Errorf("what the links named holds %v (%v), want nothing: a link was followed", entries, err)
+	}
+}
+
+// openDescriptors is every descriptor this process holds open and what each names, read the
+// moment it is called.
+func openDescriptors(t *testing.T) map[int]string {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := map[int]string{}
+	for _, entry := range entries {
+		number, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+		if err != nil {
+			continue // the listing's own descriptor, closed before this read
+		}
+		open[number] = target
+	}
+	return open
+}
+
+// descriptorsKept reports what the call between the two snapshots left open, as a set and never
+// as a count: a descriptor open after it, on a target that was not open on that number before
+// it, is one the call opened and did not close. It reads the whole process, so it holds only
+// while nothing else opens a descriptor in the window: no test of this package runs in parallel,
+// and every goroutine a test starts ends with that test. That is why it checks this direction
+// alone: a descriptor vanishing between the snapshots is no finding, because the finaliser of a
+// file an earlier test left unreferenced closes it at whatever garbage collection lands in the
+// window (measured, with the two snapshots around a runtime.GC()), and a finaliser closes where
+// it never opens.
+func descriptorsKept(t *testing.T, label string, before, after map[int]string) {
+	t.Helper()
+	for number, target := range after {
+		if held, ok := before[number]; !ok || held != target {
+			t.Errorf("%s left descriptor %d open on %s, want every handle it opened closed", label, number, target)
+		}
+	}
+}
+
 // A role's own config home is a finished copy only once it holds ownConfigHome's marker: a
 // directory at its path without the marker — a copy a generation stopped midway, or an empty
 // directory something else made there before the role's first start — is removed and copied

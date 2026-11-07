@@ -24,7 +24,9 @@ import (
 // turn, or a fresh agent whose workspace was lost, and neither was woken. A ready is one fact per
 // launch, so the boot's replay of one already applied tells nothing more. A catch-up the launch
 // before never had delivered is dropped, so the new agent is given one catch-up, the current one.
-// The notice states the design gate policy, so the architect knows whether to ask for approval.
+// The notice states each design-gate step the root must hold open, whether a person must approve
+// it, and that nothing has registered it yet, so the architect knows what to register and
+// whether to ask for approval.
 func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -39,9 +41,15 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 			engine := testEngine(tc.policy, nil)
 			// The reason is worded for a relaunch mid-tree as much as for the first launch: an
 			// architect told to start over would edit its spec, and a new version closes its gate.
+			// Nothing has registered the tree's gate, so the one step it must hold open is
+			// unregistered; a deployment on `off` gates that step for no person.
+			gates := "spec(gated=true,unregistered=true)"
+			if tc.policy == config.DesignGateOff {
+				gates = "spec(gated=false,unregistered=true)"
+			}
 			told := func(generation, launch int) string {
-				return fmt.Sprintf("gen=%d launch=%d policy=%s issues=LEGION-1,LEGION-2 reason=the tree of LEGION-1 at generation %d as the daemon records it now; start or resume it as your role says",
-					generation, launch, tc.policy, generation)
+				return fmt.Sprintf("gen=%d launch=%d gates=%s issues=LEGION-1,LEGION-2 reason=the tree of LEGION-1 at generation %d as the daemon records it now; start or resume it as your role says",
+					generation, launch, gates, generation)
 			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
@@ -205,7 +213,7 @@ func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) 
 				Phase: tc.child, Generation: 1, Status: tc.childStatus, Rank: "V"})
 			claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), root.Key, claim.RoleArchitect, 1)
 			got := catchUps(t, pool)
-			want := fmt.Sprintf("gen=1 launch=1 policy=root-issues issues=LEGION-1,LEGION-2 reason=%s", tc.want)
+			want := fmt.Sprintf("gen=1 launch=1 gates=spec(gated=true,unregistered=true) issues=LEGION-1,LEGION-2 reason=%s", tc.want)
 			if len(got) != 1 || got[0] != want {
 				t.Fatalf("catch-ups %v; want [%s]", got, want)
 			}
@@ -273,8 +281,9 @@ func claimReady(t *testing.T, pool *pgxpool.Pool, engine *Engine, issue string, 
 	}
 }
 
-// catchUps is every catch-up notice the outbox holds, in order: the generation it names, the launch
-// it was written for, the gate policy it states, the tree's issue keys it lists, and its reason.
+// catchUps is every catch-up notice the outbox holds, in order: the generation it names, the
+// launch it was written for, the design-gate steps it states, the tree's issue keys it lists, and
+// its reason.
 func catchUps(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
 	got := []string{}
@@ -287,7 +296,11 @@ func catchUps(t *testing.T, pool *pgxpool.Pool) []string {
 		for _, issue := range notice.CatchUp.Issues {
 			keys = append(keys, issue.Key)
 		}
-		got = append(got, fmt.Sprintf("gen=%d launch=%d policy=%s issues=%s reason=%s", notice.CatchUp.Generation, notice.CatchUp.Launch, notice.CatchUp.Gate.Policy, strings.Join(keys, ","), notice.Reason))
+		steps := []string{}
+		for _, gate := range notice.CatchUp.Gates {
+			steps = append(steps, fmt.Sprintf("%s(gated=%t,unregistered=%t)", gate.Step, gate.Gated, gate.Unregistered))
+		}
+		got = append(got, fmt.Sprintf("gen=%d launch=%d gates=%s issues=%s reason=%s", notice.CatchUp.Generation, notice.CatchUp.Launch, strings.Join(steps, ","), strings.Join(keys, ","), notice.Reason))
 	}
 	return got
 }
@@ -304,4 +317,64 @@ func catchUpRows(t *testing.T, pool *pgxpool.Pool) []int64 {
 		t.Fatalf("scan the catch-up rows: %v", err)
 	}
 	return ids
+}
+
+// The catch-up a start writes in place of a launch waits its turn in the daemon's wake pacing:
+// the ready carries the mark only that start sets (intake.ClaimReady.Paced), the engine takes one
+// turn from the limiter it was given, and the row is due at the moment that turn comes and
+// carries it (record.Notice.PacedAt), which is what the outbox reads for the wait in the line
+// that wake writes and what a ready compares its now against. A launch's own ready takes no turn,
+// whatever the pacing: the launch already took one at the machine's gate. An engine with no
+// limiter at all — the deployment that paces nothing — writes both at once, with no moment.
+func TestAPacedReadysCatchUpIsDueAtTheMomentTheWakePacingGivesIt(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	turn := now.Add(90 * time.Second)
+	for _, tc := range []struct {
+		name    string
+		paced   bool
+		pacing  bool
+		due     time.Time
+		marked  time.Time
+		reserve int
+	}{
+		{name: "a start's ready while the pacing is on", paced: true, pacing: true, due: turn, marked: turn, reserve: 1},
+		{name: "a launch's ready while the pacing is on", pacing: true, due: now},
+		{name: "a start's ready while the pacing is off", paced: true, due: now},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedAdmittedTree(t, pool, 1)
+			reserved := 0
+			cfg := Config{Project: "LEGION", Steps: config.DesignGateRootIssues.Steps(), Repositories: testRepositories,
+				Clock: func() time.Time { return now }}
+			if tc.pacing {
+				cfg.Reserve = func(time.Time) time.Time { reserved++; return turn }
+			}
+			engine := New(record.NewStore(), cfg, nil)
+			token, err := claim.NewToken("legion", "LEGION-1", claim.RoleArchitect)
+			if err != nil {
+				t.Fatalf("claim token: %v", err)
+			}
+			if _, err := intake.ApplyFact(context.Background(), pool, "outbox", fmt.Sprintf("start-running:%s:1", token),
+				intake.ClaimReady{Issue: "LEGION-1", Role: claim.RoleArchitect, Launch: 1, Paced: tc.paced}, engine, admissionStub{}); err != nil {
+				t.Fatalf("apply the ready: %v", err)
+			}
+
+			var due time.Time
+			// A catch-up the pacing reserved no moment for carries none at all (omitzero).
+			var marked *time.Time
+			if err := pool.QueryRow(t.Context(), `select next_at, (payload->>'paced_at')::timestamptz from outbox
+				where kind = 'notice' and payload->>'kind' = 'catch-up'`).Scan(&due, &marked); err != nil {
+				t.Fatalf("read the catch-up: %v", err)
+			}
+			var reservedAt time.Time
+			if marked != nil {
+				reservedAt = marked.UTC()
+			}
+			if !due.UTC().Equal(tc.due) || !reservedAt.Equal(tc.marked) || reserved != tc.reserve {
+				t.Fatalf("the catch-up is due at %s, reserved for %s, after %d reservations; want %s, %s, %d",
+					due.UTC(), reservedAt, reserved, tc.due, tc.marked, tc.reserve)
+			}
+		})
+	}
 }

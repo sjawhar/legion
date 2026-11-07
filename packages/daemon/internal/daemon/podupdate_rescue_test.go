@@ -206,6 +206,71 @@ func TestPodUpdatePushesWhatTheDiskHoldsBeforeItReplacesThePod(t *testing.T) {
 	}
 }
 
+// podUpdateAccountDrift is the reason PodDrift gives for a pod running as a ServiceAccount other
+// than the configured one, spelled as drift.go builds it: "account " + <the account the pod runs
+// as> + ", now " + <the configured account> (PodDrift, accountDrift), here a pod left on `default`
+// under a configuration that now names `legion-worker`. This round rig scripts PodDrift, so
+// nothing here reads drift.go: the sandbox package's TestPodDriftNamesTheServiceAccountThePodRunsAs
+// holds that spelling, and this copy of it only makes the round below one opened on the account.
+const podUpdateAccountDrift = "account default, now legion-worker"
+
+// The ServiceAccount a pod runs as reaches its replacement the way every other drift of an issue
+// pod does, and that is the whole of what this test holds. A pod created under the account the
+// configuration has since moved off used to be replaced by the next launch of any of its roles,
+// which cut every turn running in the pod and deleted its disk with everything unpushed still on
+// it. The account is now one of PodDrift's reasons for every pod a round covers, so a round
+// opened on that reason alone does what a round does: every worker claim of the issue is asked
+// and answers, the push check runs over the pod's disk and carries what it still held to a
+// rescue branch on the remote, and only then is the pod replaced and the claims let go of the
+// round. The rest of the round's machinery is held by the tests around this one; this one holds
+// the daemon's half of the account's path, with PodDrift's half held in the sandbox package.
+func TestPodUpdateCarriesAnAccountDriftedPodToItsReplacement(t *testing.T) {
+	d := rescuetest.New(t, podUpdateIssue)
+	d.Write(d.Workspace, "account.txt", "work the pod on the old account never pushed\n")
+	d.JJ("commit", "-m", "work the pod on the old account never pushed")
+	commit := d.JJ("log", "--no-graph", "-r", "@-", "-T", "commit_id")
+	roles := []claim.Role{claim.RoleArchitect, claim.RoleImplementer}
+	rig := newPodUpdateRig(t, readyWorker(claim.RoleArchitect), readyWorker(claim.RoleImplementer))
+	rig.rescueOn(d)
+	// The round answeredRound opens is the image's; this one is opened on the account alone.
+	rig.drifts(podUpdateAccountDrift)
+
+	rig.tick()
+	for _, role := range roles {
+		asked := rig.awaitRound(role, podUpdateRound)
+		if asked.UpdateReasons != podUpdateAccountDrift {
+			t.Errorf("%s UpdateReasons = %q, want the account reason %q and nothing else",
+				role, asked.UpdateReasons, podUpdateAccountDrift)
+		}
+		rig.signal(role, "")
+		rig.awaitClaim(role, "its answer to the round the account opened", func(c supervise.Claim) bool {
+			return c.UpdateRound == podUpdateRound && c.UpdateSignalledAt != nil
+		})
+	}
+
+	calls := rig.awaitReplacement(1, "once every worker of the account-drifted pod answered and the push check passed")
+	if calls[0].Pod.Locator == nil || calls[0].Pod.Locator.Sandbox.PodUID != podUpdatePod {
+		t.Fatalf("ReplacePod called with %+v, want a process of the account-drifted pod %s", calls[0].Pod, podUpdatePod)
+	}
+	checks := rig.rt.CallsOf("RescueUnpushed")
+	if len(checks) != 1 {
+		t.Fatalf("the runtime was asked for %d push checks, want one for the one replacement", len(checks))
+	}
+	if got := checks[0]; got.Pod.Claim != rig.tokens[claim.RoleImplementer] || got.Rescue.Branch != podUpdateRescueBranch {
+		t.Errorf("the push check was asked through %s for %+v, want the implementer's claim and branch %s",
+			got.Pod.Claim, got.Rescue, podUpdateRescueBranch)
+	}
+	branch := podUpdateRescueBranch + "-1"
+	if held := d.RemoteBranch(branch); held != commit {
+		t.Fatalf("the remote holds %s at %q, want the commit the disk still held %s", branch, held, commit)
+	}
+	for _, role := range roles {
+		rig.awaitClaim(role, "its round to end with the replacement", func(c supervise.Claim) bool {
+			return c.UpdateRound == "" && c.UpdateSignalledAt == nil
+		})
+	}
+}
+
 // A failed claim is not waited for (askedClaims), so nothing it promised says its work is pushed.
 // The check reads the disk itself, so what it committed there and never pushed reaches the remote
 // before the pod goes.

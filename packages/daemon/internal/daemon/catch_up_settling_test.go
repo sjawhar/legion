@@ -69,8 +69,9 @@ func (p *hookPublisher) ranHook(t *testing.T) {
 	}
 }
 
-// keptCatchUp is the catch-up of root a ready writes, naming every decision nobody claims and
-// claiming them for its row (workflow.QueueCatchUp), for launch.
+// keptCatchUp is the catch-up of root a launch's ready writes, naming every decision nobody
+// claims and claiming them for its row (workflow.QueueCatchUp), for launch. No pacing holds it:
+// the launch took its turn at the machine's gate, so the row is due at now.
 func keptCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root string, launch uint64, now time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -79,7 +80,7 @@ func keptCatchUp(t *testing.T, pool *pgxpool.Pool, records record.Store, root st
 		if err != nil || stored == nil {
 			return fmt.Errorf("read %s: %w", root, err)
 		}
-		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, launch, now)
+		return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, launch, now, time.Time{})
 	}); err != nil {
 		t.Fatalf("queue the catch-up of %s for launch %d: %v", root, launch, err)
 	}
@@ -213,7 +214,7 @@ func TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues, *stored, 2, now)
+			return workflow.QueueCatchUp(ctx, tx, records, config.DesignGateRootIssues.Steps(), *stored, 2, now, time.Time{})
 		})
 	}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,

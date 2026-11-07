@@ -8,12 +8,16 @@ import (
 )
 
 // Every test of this module that makes a database of its own drops it with `with (force)`, which
-// terminates whatever is still attached to it — an autovacuum worker, most often. Terminating a
-// backend of another role needs pg_signal_backend or the superuser, so a server whose login holds
-// neither fails those drops with `permission denied to terminate process` (SQLSTATE 42501), at a
-// different handful of tests each run, and only where that server is: CI's login is a superuser,
-// so CI stays green while every Legion issue pod goes red. This holds the right the drop needs on
-// whatever server LEGION_TEST_PG_DSN names, which is the one the tests will use.
+// ends every backend still attached to that database. The clause is there for a connection a test
+// left open, which is why the helpers write it: a plain `drop database` makes the server end the
+// database's autovacuum worker itself and needs no right for it, while `with (force)` ends that
+// worker and every other backend as the dropping login, and ending a backend of another role needs
+// pg_signal_backend or the superuser (PostgreSQL 18.6's TerminateOtherDBBackends, in
+// src/backend/storage/ipc/procarray.c). A server whose login holds neither fails those drops with
+// `permission denied to terminate process` (SQLSTATE 42501), at a different handful of tests each
+// run, and only where that server is: CI's login is a superuser, so CI stays green while every
+// Legion issue pod goes red. This holds the right the drop needs on whatever server
+// LEGION_TEST_PG_DSN names, which is the one the tests will use.
 func TestTheDSNRoleMayTerminateAnotherRolesBackend(t *testing.T) {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
@@ -38,7 +42,8 @@ func TestTheDSNRoleMayTerminateAnotherRolesBackend(t *testing.T) {
 		if err := conn.QueryRow(t.Context(), "select current_user").Scan(&login); err != nil {
 			login = "the DSN's login"
 		}
-		t.Fatalf("%s is no superuser and does not hold pg_signal_backend, so `drop database … with (force)` fails for it with SQLSTATE 42501; "+
-			"in a Legion issue pod the server is the pod's own and packages/daemon/docker/legion-testpg is where the grant belongs", login)
+		t.Fatalf("%s is no superuser and does not hold pg_signal_backend, so `drop database … with (force)` fails for it with SQLSTATE 42501. "+
+			"packages/daemon/docker/legion-testpg grants the right on every start, so a pod that fails here runs a worker image built before that grant: "+
+			"the fix is a newer worker image, built from a commit that carries the grant; a person moves that pin, and no edit in this tree does", login)
 	}
 }

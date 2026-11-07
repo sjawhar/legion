@@ -18,7 +18,7 @@ dispatch search --query 'reviewer threads OR review comments'
 ```
 
 - No hits: remove a word before you add one. Try two or three wordings before you decide nothing exists.
-- Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`).
+- Open each hit that can be yours with `dispatch read --issue KEY`, then its parent (`child_of` under `Links:`, or a document's `Issue:`), with its status and recent events.
 
 ## What to do with what you find
 
@@ -27,6 +27,12 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
 - **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
+
+## Research before you ask
+
+- Research when a file, command or document can show the answer (a pattern, a convention, a solved problem, a technical approach).
+- Ask a person only for what their authority, taste or risk appetite settles, because no file holds that. Where a file records the decision, cite it (`file:line`) and follow it; ask again only when the facts it rested on changed.
+- Say what you searched: each part you found with its source, and each part you did not, with the queries you ran. Ask only the part no search answered.
 
 ## Reach a person only through Dispatch
 

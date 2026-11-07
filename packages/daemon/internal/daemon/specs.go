@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -15,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -41,14 +43,27 @@ type specs struct {
 	// the daemon's own store). Boot always sets it; it is nil only in a test whose specs literal
 	// leaves it out, and such a specs launches nothing with memory.
 	memoryGroup func(ctx context.Context, tree string) (bool, error)
-	// designGate is the project's design gate policy (gates.design), which a tree's root architect
-	// is told after its addressing (DesignGateFragment).
-	designGate config.DesignGate
-	// slackChannels is the project's slack_channels, which the controller is told after the design
-	// gate policy (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
+	// designSteps is the design-gate steps the project gates (gates.design), in the order it
+	// gates them, which a tree's root architect is told after its addressing
+	// (DesignGateFragment); empty for a deployment that gates no step.
+	designSteps []record.DesignStep
+	// slackChannels is the project's slack_channels, which the controller is told after the
+	// design gate steps (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
+	// commitIssueTrailerRepos is the project's commit_issue_trailer_repos, the repositories whose
+	// commits a pane stamps with its issue key (runtime.SpawnSpec.IssueTrailer); nil for a
+	// project that names none, whose panes stamp nothing.
+	commitIssueTrailerRepos []ghrepo.Repository
+	// same is whether two repository names name one repository: the daemon's one equivalence,
+	// the project's mapping's (repositories.same) — the same name compared without case, or the
+	// two names of a configured rename (repository_renames) — which issueTrailer compares
+	// commit_issue_trailer_repos against, so a launch on the name a transfer moved a repository
+	// away from stamps exactly as one on the name the project wrote. Boot always sets it; it is
+	// nil only in a test whose specs literal leaves it out, and such a specs stamps no issue key
+	// at all, as memoryGroup's nil leaves a launch without memory.
+	same func(a, b string) bool
 	// identity is the role's App bot identity every pane commits as, minted for the owner whose
 	// installation holds the repository the launch works — the record's name over a transfer, the
 	// mint's owner its serving one (workflowRuntime.identity); nil for a daemon with no GitHub
@@ -61,7 +76,7 @@ type specs struct {
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
 	// repositories is the project's repository mapping as the daemon serves it (repositories.view),
 	// in the daemon's own order: what a worker's addressing names beside its own issue's
-	// repository and the controller's names after its design gate policy (RepositoriesClause). The
+	// repository and the controller's names after its design gate steps (RepositoriesClause). The
 	// daemon sets it at boot whether or not a workflow is configured.
 	repositories func() api.RepositoriesView
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
@@ -143,7 +158,9 @@ func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
 // workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. It is the one
 // launch that may carry memory: whether the claim's tree is in the project's memory group
 // (memoryGroup), which decides both the overlays each runtime names last in PI_CONFIG_FILES
-// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with.
+// (runtime.SpawnSpec.Memory) and the memory instructions its prompt ends with. It is the one
+// launch that may stamp an issue key into its commits too (issueTrailer), since it is the one
+// that works a repository.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -158,6 +175,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
 		}
 	}
+	spec.IssueTrailer = s.issueTrailer(spec.Repository, c.Issue)
 	// Every launch, not only a claim's first: a claim resumed, relaunched or recovered on this host
 	// may have no workspace here — its issue ran in another runtime's pods before, or its tree's
 	// linger removed it — and a pane cannot start without one. Provisioning checks out the issue's
@@ -172,7 +190,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		return runtime.SpawnSpec{}, err
 	}
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
-		addressing += " " + DesignGateFragment(s.designGate)
+		addressing += " " + DesignGateFragment(s.designSteps)
 	}
 	if c.Role == claim.RoleMerger {
 		addressing += " " + MergeRulesFragment(s.mergeRules)
@@ -213,6 +231,25 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		}
 	}
 	return spec, nil
+}
+
+// issueTrailer is the issue key a launch on repository stamps into its commits
+// (runtime.SpawnSpec.IssueTrailer, which each runtime tells its agent as LEGION_ISSUE_TRAILER):
+// the claim's own issue when the project names that repository in commit_issue_trailer_repos, and
+// "" for every other repository and for a launch that works none. The two names are compared as
+// every repository comparison of the daemon is, the mapping's own equivalence (s.same): without
+// case and through the deployment's configured renames, so a claim on the name a transfer moved
+// a repository away from stamps exactly as one on the name the project wrote. A specs with no
+// equivalence stamps nothing.
+func (s specs) issueTrailer(repository ghrepo.Repository, issue string) string {
+	if repository.IsZero() || s.same == nil {
+		return ""
+	}
+	name := repository.String()
+	if slices.ContainsFunc(s.commitIssueTrailerRepos, func(named ghrepo.Repository) bool { return s.same(named.String(), name) }) {
+		return issue
+	}
+	return ""
 }
 
 // stallLimitVariables are the four numbers a phase worker's end-of-turn reminder runs on, in name
@@ -257,17 +294,20 @@ func (s specs) stalePluginInstall(c supervise.Claim, backend runtime.Backend) *r
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part; as its addressing the project's design gate policy, then the project's
-// repositories as a sentence of their own (RepositoriesSentence, which also says when the daemon
-// maps none) and, when it names any, its Slack channels; then the deployment instructions and the
-// launch secrets. The operator's controller (`legion controller start`) is told the policy and
-// the repositories the same way, never channels, since only the daemon's may have channels
-// (config.checkSlackChannels). The channels reach its environment as LEGION_SLACK_CHANNELS from the
-// runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
-// controller was launched under and relaunches it when they change; a spec cannot set that variable.
+// the headless part; as its addressing the design-gate steps the project gates, then the
+// project's repositories as a sentence of their own (RepositoriesSentence, which also says when
+// the daemon maps none) and, when it names any, its Slack channels; then the deployment
+// instructions and the launch secrets. The operator's controller (`legion controller start`) is
+// told the steps and the repositories the same way, never channels, since only the daemon's may
+// have channels (config.checkSlackChannels). The channels reach its environment as
+// LEGION_SLACK_CHANNELS from the runtime (sandbox.Options.ControllerSlackChannels), which
+// compares them with the list a running controller was launched under and relaunches it when
+// they change; a spec cannot set that variable.
 // It has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing. It is in no memory group and is told no memory instructions whatever the
-// project's mode is: a memory group is a tree's, and the controller runs in none.
+// commits nothing, so it stamps no issue key into one either (runtime.SpawnSpec.IssueTrailer,
+// which validateControllerShape refuses on a controller's spec). It is in no memory group and is
+// told no memory instructions whatever the project's mode is: a memory group is a tree's, and the
+// controller runs in none.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -276,7 +316,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
-	addressing := DesignGateFragment(s.designGate) + " " + RepositoriesSentence(s.repositories())
+	addressing := DesignGateFragment(s.designSteps) + " " + RepositoriesSentence(s.repositories())
 	if len(s.slackChannels) > 0 {
 		addressing += " " + SlackChannelsFragment(s.slackChannels)
 	}
@@ -360,18 +400,28 @@ func RepositoriesClause(view api.RepositoriesView) string {
 }
 
 // RepositoriesSentence is RepositoriesClause as a sentence of its own, for the controller's
-// addressing, which follows the design gate policy's sentence.
+// addressing, which follows the design gate steps' sentence.
 func RepositoriesSentence(view api.RepositoriesView) string {
 	clause := RepositoriesClause(view)
 	return strings.ToUpper(clause[:1]) + clause[1:]
 }
 
-// DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the
-// controller as its launch addressing: this project's design gate policy, the "Design gate policy"
-// line the shared role prompts read. What each policy asks of the architect is in its Go role part
-// (prompts/go/architect-root.md).
-func DesignGateFragment(policy config.DesignGate) string {
-	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
+// DesignGateFragment is the sentence a tree's root architect is told after its addressing, and
+// the controller as its launch addressing: the design-gate steps this deployment gates, in the
+// order it gates them, each in backticks, which is the "Design gate steps" line the shared role
+// prompts read. A deployment that gates no step is told so by name, since a line that named
+// nothing would read as a line the daemon failed to fill. What each step asks of the architect,
+// and which document each records, is in its role parts (prompts/roles/architect-root.md and
+// prompts/go/architect-root.md).
+func DesignGateFragment(steps []record.DesignStep) string {
+	if len(steps) == 0 {
+		return "Design gate steps: none."
+	}
+	quoted := make([]string, len(steps))
+	for i, step := range steps {
+		quoted[i] = "`" + string(step) + "`"
+	}
+	return fmt.Sprintf("Design gate steps: %s.", strings.Join(quoted, ", "))
 }
 
 // SlackChannelsFragment names the project's Slack channels, the list the controller answers

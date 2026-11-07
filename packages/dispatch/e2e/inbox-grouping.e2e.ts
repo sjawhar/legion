@@ -7,13 +7,18 @@ import {
   createIssue,
   createProject,
   createProjectDocument,
-  getInbox,
   patchIssue,
-  snoozeAsk,
 } from "./api";
-import { selectedRow } from "./inbox-pane";
+import { inboxList, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+
+/**
+ * How the Inbox bands its one list (INFRA-450). The owner groups that once sat inside the turn
+ * bands, and the jump a grouped header offered across them, are gone: the bands are a choice of
+ * **Group by**, priority by default and the turn bands under **Waiting on**, and whichever is
+ * chosen the rows stay one flat list the keyboard walks top to bottom.
+ */
 
 const session = {
   actor: { id: "e2e-inbox-grouping", kind: "session" as const },
@@ -24,179 +29,100 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-async function seededGroups() {
+/**
+ * Rows across three priority bands and both turn bands: a P0 issue's ask, three on a P2 issue
+ * of which one has been handed back to its session, and a document's ask, which has no issue
+ * and so no priority at all.
+ */
+async function seededBands() {
   await createProject({ key: "CORE", name: "Core" });
-  const leading = await createIssue({ project: "CORE", title: "Leading other issue" });
-  await patchIssue(leading.key, { priority: 0 });
-  const groupedIssue = await createIssue({ project: "CORE", title: "Grouped issue" });
-  const trailing = await createIssue({ project: "CORE", title: "Trailing other issue" });
-  await patchIssue(trailing.key, { priority: 2 });
+  const urgent = await createIssue({ project: "CORE", title: "Urgent issue" });
+  await patchIssue(urgent.key, { priority: 0 });
+  const steady = await createIssue({ project: "CORE", title: "Steady issue" });
+  await patchIssue(steady.key, { priority: 2 });
 
-  const leadingAsk = await createAsk(leading.key, { question: "Leading other ask" }, session);
-  const first = await createAsk(groupedIssue.key, { question: "Grouped first" }, session);
-  const second = await createAsk(groupedIssue.key, { question: "Grouped second" }, session);
-  const third = await createAsk(groupedIssue.key, { question: "Grouped third" }, session);
-  const trailingAsk = await createAsk(trailing.key, { question: "Trailing other ask" }, session);
-  await createComment(
-    groupedIssue.key,
-    { ask_id: first.id, body: "The first grouped ask became active last." },
-    session
-  );
+  const urgentAsk = await createAsk(urgent.key, { question: "Urgent ask" }, session);
+  const steadyFirst = await createAsk(steady.key, { question: "Steady first" }, session);
+  const steadySecond = await createAsk(steady.key, { question: "Steady second" }, session);
+  const handed = await createAsk(steady.key, { question: "Handed back" }, session);
+  // Alice asks for clarification instead of answering, which hands this one to its session:
+  // the row the **Waiting on** grouping puts in a band of its own.
+  await createComment(steady.key, { ask_id: handed.id, body: "Which widths matter?" });
 
   const document = await createProjectDocument("CORE", {
-    content: "# Grouped document\n",
-    name: "Grouped document",
+    content: "# Banded document\n",
+    name: "Banded document",
   });
-  const documentFirst = await createArtifactAsk(
+  const documentAsk = await createArtifactAsk(
     document.artifact.id,
-    { question: "Document first" },
-    session
-  );
-  const documentSecond = await createArtifactAsk(
-    document.artifact.id,
-    { question: "Document second" },
+    { question: "Document ask" },
     session
   );
 
   return {
-    document,
-    documentAsks: [documentFirst, documentSecond],
-    groupedAsks: [first, second, third],
-    groupedIssue,
-    otherAsks: [leadingAsk, trailingAsk],
+    handed,
+    rows: [urgentAsk, steadyFirst, steadySecond, handed, documentAsk],
+    unbanded: documentAsk,
   };
 }
 
+/** Every band heading the list is drawing, top to bottom, with its count. */
+async function bandHeadings(page: Page): Promise<string[]> {
+  return inboxList(page)
+    .locator("h2 button")
+    .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").trim()));
+}
+
+/** The ids the list is drawing, top to bottom, bands and all. */
 async function inboxRows(page: Page): Promise<string[]> {
   return page
     .locator("[data-inbox-row]")
     .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-inbox-row") ?? ""));
 }
 
-test("groups an issue and document's asks while rows remain the flat keyboard list", async ({
+test("the list bands by priority and by whose turn it is, and its rows stay one flat keyboard list", async ({
   browser,
 }) => {
-  const seed = await seededGroups();
-  const singletonIssue = await createIssue({ project: "CORE", title: "Singleton issue" });
-  const singleton = await createAsk(singletonIssue.key, { question: "Only ask" }, session);
+  const seed = await seededBands();
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
-    // The cleared filter, so the document's asks - which nobody holds - are listed beside the
-    // issues' and the grouping is read over every row the server returned.
+    // The cleared filter, so the document's ask - which nobody holds - is listed beside the
+    // issues' and every band is read over every row the server returned.
     await page.goto("/?assignee=everyone");
-    await expect(page.locator("[data-inbox-row]")).toHaveCount(8);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(seed.rows.length);
 
-    const issueHeader = page.locator('[data-inbox-group-header="issue:CORE-2"]');
-    await expect(issueHeader).toContainText("CORE-2");
-    await expect(issueHeader).toContainText("Grouped issue");
-    await expect(issueHeader).toContainText("3 asks");
+    // The default banding is the priority one: one band per priority the rows hold, highest
+    // first, with the rows that have none last under their own heading.
+    expect(await bandHeadings(page)).toEqual(["P0 (1)", "P2 (3)", "No priority (1)"]);
 
-    const documentHeader = page.locator(
-      '[data-inbox-group-header="document:CORE/grouped-document"]'
+    // The turn bands are a choice of their own now, not the default, and they band the same
+    // rows: the one handed back to its session stands apart from the four waiting on a person.
+    await page.goto("/?assignee=everyone&group=waiting-on");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(seed.rows.length);
+    expect(await bandHeadings(page)).toEqual(["Waiting on a person (4)", "Waiting on agents (1)"]);
+    await expect(page.locator(`[data-inbox-row="${seed.handed.id}"]`)).toHaveAttribute(
+      "data-inbox-section",
+      "agent"
     );
-    await expect(documentHeader).toContainText("CORE · Grouped document");
-    await expect(documentHeader).toContainText("2 asks");
-
-    const served = await getInbox({ login: "alice" });
-    const groupedIds = new Set(seed.groupedAsks.map((ask) => ask.id));
-    const documentIds = new Set(seed.documentAsks.map((ask) => ask.id));
-    const rowIds = await inboxRows(page);
-    const ungrouped = rowIds.filter((id) => !groupedIds.has(id) && !documentIds.has(id));
-    expect(ungrouped).toEqual(
-      served.map((row) => row.id).filter((id) => !groupedIds.has(id) && !documentIds.has(id))
+    await expect(page.locator(`[data-inbox-row="${seed.unbanded.id}"]`)).toHaveAttribute(
+      "data-inbox-section",
+      "human"
     );
 
-    const firstGroupId = served.find((row) => groupedIds.has(row.id))?.id;
-    if (firstGroupId === undefined) throw new Error("server did not list a grouped ask");
-    const firstGroupRow = page.locator(`[data-inbox-row="${firstGroupId}"]`);
-    await expect(firstGroupRow).toHaveAttribute("data-inbox-owner-key", "issue:CORE-2");
-    await expect(firstGroupRow.locator("xpath=preceding-sibling::*[1]")).toHaveAttribute(
-      "data-inbox-group-header",
-      "issue:CORE-2"
-    );
-    await expect(page.locator(`[data-inbox-row="${singleton.id}"]`)).not.toHaveAttribute(
-      "data-inbox-group"
-    );
-    await expect(
-      page.locator(`[data-inbox-group-header="issue:${singletonIssue.key}"]`)
-    ).toHaveCount(0);
-
-    // The reading column follows the list's one order: the Inbox selects its first row, `j`
-    // walks down it and `k` walks back up, bands, groups and all.
-    const expectedForward = await inboxRows(page);
+    // Whatever the banding, the rows are one list: the Inbox selects its first row, `j` walks
+    // down it and `k` walks back up, across every band heading on the way.
+    const forward = await inboxRows(page);
     await page.locator("body").focus();
-    for (const [index, id] of expectedForward.entries()) {
+    for (const [index, id] of forward.entries()) {
       if (index > 0) await page.keyboard.press("j");
       await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", id);
     }
-
-    const expectedBackward = [...expectedForward].reverse();
-    for (const [index, id] of expectedBackward.entries()) {
+    for (const [index, id] of [...forward].reverse().entries()) {
       if (index > 0) await page.keyboard.press("k");
       await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", id);
     }
-  } finally {
-    await alice.close();
-  }
-});
-
-test("a grouped header crosses bands to a singleton target without making it a group", async ({
-  browser,
-}) => {
-  const seed = await seededGroups();
-  const moving = seed.groupedAsks[2];
-  if (moving === undefined) throw new Error("grouped ask missing");
-  const alice = await asUser(browser, "alice");
-
-  try {
-    const page = await alice.newPage();
-    await page.goto("/?assignee=everyone");
-    const header = page.locator('[data-inbox-group-header="issue:CORE-2"]');
-    await expect(header).toContainText("3 asks");
-
-    await createComment(
-      seed.groupedIssue.key,
-      { ask_id: moving.id, body: "I am looking into the grouped ask.", turn: "agent" },
-      session
-    );
-
-    await expect(header).toContainText("2 asks");
-    const jump = header.getByRole("button", {
-      name: "Jump to CORE-2's asks Waiting on agents",
-    });
-    await expect(jump).toHaveText("1 more waiting on agents");
-    await jump.click();
-
-    const target = page.locator(`[data-inbox-row="${moving.id}"]`);
-    await expect(target).toBeFocused();
-    await expect(target).not.toHaveAttribute("data-inbox-group", "issue:CORE-2");
-  } finally {
-    await alice.close();
-  }
-});
-
-test("a grouped header opens Later and focuses its snoozed target", async ({ browser }) => {
-  const seed = await seededGroups();
-  const deferred = seed.groupedAsks[2];
-  if (deferred === undefined) throw new Error("grouped ask missing");
-  await snoozeAsk(deferred.id, new Date(Date.now() + 60_000).toISOString(), { login: "alice" });
-  const alice = await asUser(browser, "alice");
-
-  try {
-    const page = await alice.newPage();
-    await page.goto("/?assignee=everyone");
-    const header = page.locator('[data-inbox-group-header="issue:CORE-2"]');
-    const jump = header.getByRole("button", { name: "Jump to CORE-2's asks Later" });
-    await expect(jump).toHaveText("1 more later");
-    await jump.click();
-
-    await expect(page.getByRole("button", { name: "Later (1)" })).toHaveAttribute(
-      "aria-expanded",
-      "true"
-    );
-    await expect(page.locator(`[data-inbox-row="${deferred.id}"]`)).toBeFocused();
   } finally {
     await alice.close();
   }

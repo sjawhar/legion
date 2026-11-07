@@ -49,8 +49,12 @@ jest.setTimeout(30_000);
 // Testing Library's default `asyncUtilTimeout` is 1000 ms. 10 s is above every per-call budget
 // this tree keeps but one, and a third of the per-test deadline, so a wait that runs out reports
 // as the wait that failed and names what it waited for, rather than as a bare test timeout. The
-// slowest test of a loaded run that drives no subprocess reads 5.80 s whole. dispatch://INFRA-1405
-// sets this same budget too, for the same reason; the overlap is intended.
+// slowest test of a loaded run that drives no subprocess reads 5.80 s whole. Under
+// `jest.useFakeTimers()` the budget is 10 s of the clock the test moves, not of real time, since
+// a wait advances that clock itself. dispatch://INFRA-1405 sets this same budget too, and
+// measured there that the 1000 ms default failed 13 of 30 loaded runs, a different row each
+// time, which is why the budget is the suite's and not a deadline per row; the overlap is
+// intended.
 const { configure } = await import("@testing-library/react");
 configure({ asyncUtilTimeout: 10_000 });
 

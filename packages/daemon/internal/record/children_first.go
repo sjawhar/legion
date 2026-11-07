@@ -24,7 +24,7 @@ import (
 // offer a slot to, so a root there waits for nothing and is told nothing; from the opening the
 // root and every released member of its tree are issues whose first phase the line does offer a
 // slot to, and each of them waits for whatever Dispatch still shows hanging under it.
-func ChildrenFirstCandidates(issues []Issue, gates map[string]DesignGate) []string {
+func ChildrenFirstCandidates(issues []Issue, gates map[string]TreeGate) []string {
 	byKey := make(map[string]Issue, len(issues))
 	for _, issue := range issues {
 		byKey[issue.Key] = issue
@@ -39,7 +39,7 @@ func ChildrenFirstCandidates(issues []Issue, gates map[string]DesignGate) []stri
 		if issue.Phase != phase.Admitted || !InWorkflow(issue) || !recorded || root.Lingers() {
 			continue
 		}
-		if gate, registered := gates[issue.Tree]; !registered || !GateOpen(gate) {
+		if !gates[issue.Tree].Open() {
 			continue
 		}
 		keys = append(keys, issue.Key)

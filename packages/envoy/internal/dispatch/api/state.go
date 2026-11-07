@@ -265,6 +265,19 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	return &parsed, nil
 }
 
+// userAgentStateEvent announces that the viewer's state on one session moved. It is owned by the
+// session, like its messages, so the outbox publishes it nowhere and it reaches only the viewer's
+// other tabs and devices, which refresh their badge from it rather than waiting for a focus or
+// the next message. Both writers of that state build it here: putUserAgentState below, and the
+// Inbox's Mark all read (api/inbox_read.go).
+func userAgentStateEvent(actor model.Actor, sessionID string) model.Event {
+	return model.Event{
+		Type:    "user_agent_state.updated",
+		Actor:   actor,
+		Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
+	}
+}
+
 // putUserAgentState records a Clear (cleared_before, which replaces the previous one), a read
 // mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
 // make a reply unread again), and/or replies read one by one (read_replies, the session's own
@@ -413,14 +426,13 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		// of them its own replies, and a session answers only what was delivered to it, so its
 		// replies sit under roots targeted at it, where this mark is the one the unread count
 		// reads. A Clear plays no part: it can move back.
-		if _, err := tx.Exec(r.Context(), `
-			delete from user_agent_reply_read
-			using messages, user_agent_read
-			where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = $2
-			  and user_agent_read.login = $1 and user_agent_read.session_id = $2
-			  and messages.id = user_agent_reply_read.reply_id
-			  and messages.created_at <= user_agent_read.read_through
-		`, model.CanonicalLogin(actor.ID), sessionID); err != nil {
+		//
+		// The dead rows are locked in one order before the delete reaches them, for the reason
+		// written on pruneAgentReplies below, which this route and the Inbox's mark-all share
+		// (markInboxReadThreads names the lock order every writer here takes).
+		if _, err := tx.Exec(r.Context(), pruneAgentReplies,
+			model.CanonicalLogin(actor.ID), []string{sessionID},
+		); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -436,15 +448,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// The viewer's other open tabs and devices refresh their badge from this event rather
-		// than waiting for a focus or the next message. It is owned by the session, like its
-		// messages, so the outbox publishes it nowhere and it reaches only the dashboard's event
-		// stream.
-		event, err := s.appendEvent(r.Context(), tx, model.Event{
-			Type:    "user_agent_state.updated",
-			Actor:   actor,
-			Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
-		})
+		event, err := s.appendEvent(r.Context(), tx, userAgentStateEvent(actor, sessionID))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -462,3 +466,30 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, states[sessionID])
 }
+
+// pruneAgentReplies is the one prune of user_agent_reply_read, shared by the two writers that
+// make rows dead: this route, which moves one session's read mark, and the Inbox's mark-all,
+// which writes replies by id across several sessions at once. A reply at or before its session's
+// read mark is read whatever user_agent_reply_read holds, so its row is dead.
+//
+// The locked subquery takes exactly those rows, ascending by reply id, and the delete removes the
+// rows it locked and no others: a delete left to itself locks rows in whatever order its plan
+// finds them, and the plans differ with the session list's size, so two writers that crossed here
+// would each hold a row the other waits on. One statement rather than a lock and a delete of its
+// own, because two statements read two snapshots, and a row that died between them would be
+// deleted without ever being locked in that order (markInboxReadThreads states the whole lock
+// order this file's transactions take).
+const pruneAgentReplies = `
+	with locked as materialized (
+		select user_agent_reply_read.reply_id
+		from user_agent_reply_read, messages, user_agent_read
+		where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = any($2::text[])
+		  and user_agent_read.login = $1 and user_agent_read.session_id = user_agent_reply_read.session_id
+		  and messages.id = user_agent_reply_read.reply_id
+		  and messages.created_at <= user_agent_read.read_through
+		order by user_agent_reply_read.reply_id
+		for no key update of user_agent_reply_read
+	)
+	delete from user_agent_reply_read
+	using locked
+	where user_agent_reply_read.login = $1 and user_agent_reply_read.reply_id = locked.reply_id`

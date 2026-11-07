@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -259,7 +260,7 @@ func TestBootReconcileReadsWhoSetTheLabelOfAnUnrecordedTriageRoot(t *testing.T) 
 		{Key: unlabelled, ResolvedRepo: "acme/widgets", Title: unlabelled, Status: "triage", Rank: "C", LastSeq: 2},
 		{Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "triage", Rank: "D", Parent: under(unrecorded), HandedOver: true, LastSeq: 2},
 	}
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Steps: config.DesignGateRootIssues.Steps()}, log)
 	admission := admit.New(records, engine, 2, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, records: records, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE", ghrepo.Renames{}),
