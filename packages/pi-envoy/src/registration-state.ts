@@ -314,7 +314,9 @@ export interface RegistrationState {
   readonly recordClaimAfterDeadline: (topic: string, sessionID: string) => void;
   /**
    * Records a claim the listener granted after its task's session moved: the new hold is this
-   * process's own under the id the listener names, and an earlier role ends and is handed back.
+   * process's own under the id the listener names, and an earlier role ends and is handed back —
+   * a hand-back the listener refused is abandoned, so the pass behind this process's next
+   * registration of that hold's session sends it again.
    */
   readonly adoptClaimAfterSessionMoved: (
     topic: string,
@@ -447,7 +449,9 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
    * to another role, ends first and its own hold is handed back at the listener under the id it
    * was held as (a fork's parent, until a pass carried it). `recordClaim` runs between the two,
    * where the claim's durable transcript record belongs: the hold is this process's by then, and
-   * the hand-back that follows can fail or outrun the task.
+   * the hand-back that follows can fail or outrun the task. A hand-back the listener refused is
+   * abandoned rather than thrown: the claim this move carries landed, and the role it superseded
+   * is sent again by the pass behind this process's next registration of that hold's session.
    */
   const moveHold = async (
     topic: string,
@@ -461,7 +465,28 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
     claimedRoleTopic = topic;
     claimedRoleSessionID = sessionID;
     recordClaim?.();
-    if (movedOff !== undefined && previousHoldID) await handBackAt(movedOff, previousHoldID);
+    if (movedOff !== undefined && previousHoldID) {
+      await handBackAt(movedOff, previousHoldID).catch((error: unknown) => {
+        // The listener refused the release — its own holder's renewal beat each of the
+        // conditional deletes — so the hold is abandoned rather than left to the caller's
+        // catch-all, which would warn and forget it: this process's next registration of that
+        // session takes it back as a pending hand-back (`refreshRegistration`) and the pass
+        // behind it sends the release again (`settleEndedHolds`), as a hand-back
+        // `handBackHeldRole` could not make is. Throwing here would lose the role at the
+        // listener while this process's registrations went on renewing its claim, which is the
+        // defect a release naming its process fixed, reached by another path; it would also
+        // fail a claim that landed, which the state above has already taken.
+        abandonedHolds.set(`${movedOff}@${previousHoldID}`, {
+          topic: movedOff,
+          id: previousHoldID,
+        });
+        deps.log.warn("envoy: a role this process gave up was not handed back", {
+          topic: movedOff,
+          sessionID: previousHoldID,
+          error: messageFor(error),
+        });
+      });
+    }
   };
 
   /**
