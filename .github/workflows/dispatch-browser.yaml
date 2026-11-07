@@ -19,9 +19,10 @@ name: Dispatch browser suite
 # same, so a reader can diff them.
 #
 # That reason is a composite action's, and not a script's: a step that calls a script keeps its
-# own timeout-minutes. So the two bodies the jobs really shared are scripts, written once and
-# called from both - .github/scripts/playwright-install.sh for the install, and
-# .github/scripts/dispatch-browser-samples.sh for the memory and CPU sampler and its two
+# own timeout-minutes. So the three bodies the jobs really shared are scripts, written once and
+# called from both - .github/scripts/playwright-install.sh for the install,
+# .github/scripts/playwright-apt-key.sh for the apt archive cache key both jobs restore under,
+# and .github/scripts/dispatch-browser-samples.sh for the memory and CPU sampler and its two
 # readings - and each of those files' head is where what it does and why is written down.
 #
 # The budget rule every job and step below follows, which ci.yaml states above its dispatch job's
@@ -462,10 +463,10 @@ jobs:
     # Playwright command below, an install of this leg's own engine rather than the lane's whole
     # set, no file store on the machine, and no cache save, since the shard job's first leg saves
     # the one key of each cache both jobs restore - and their commands are kept the same
-    # everywhere else, so the two can be diffed; the install and the sampler are the same script
-    # on both, which is what keeps them so. They are not one composite action for the reason this
-    # file's head gives. The `env:` rule of the shard job's head holds here too, and so does its
-    # reason.
+    # everywhere else, so the two can be diffed; the install, the apt archive cache key and the
+    # sampler are the same three scripts on both, which is what keeps them so. They are not one
+    # composite action for the reason this file's head gives. The `env:` rule of the shard job's
+    # head holds here too, and so does its reason.
     #
     # The budgets below, this one and the one on the browser step, are measured, on the full-lane
     # run of this head, 42316487530. The pull-request lane runs no leg of this job, so there is

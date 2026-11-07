@@ -2577,10 +2577,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Build contracts for dispatch e2e
         # The reader this step is kept for is e2e/__tests__/row-configurations.test.ts, which the
-        # test step below runs: it lists e2e/playwright.config.ts in a child process of its own
-        # (`node_modules/.bin/playwright` under /opt/node/bin/node), and that lister resolves
-        # @legion/contracts through plain Node, which takes the package's "default" condition to
-        # dist/index.js. The config pulls e2e/agents.ts in, which imports the package as a value.
+        # test step below runs. It spawns `bunx playwright test --config e2e/playwright.config.ts
+        # --list` (that file's line 40), and Playwright's bin starts `#!/usr/bin/env node`, so the
+        # lister runs under whatever Node the machine has rather than under bun. A listing loads
+        # every spec the config's `testDir: "."` collects, 36 of which import e2e/agents.ts, among
+        # them agent-view.e2e.ts:4; and agents.ts:1 imports @legion/contracts as a value. Under
+        # Node that import takes the package's "default" condition, which is dist/index.js.
+        #
+        # Reading the config's own imports answers a different question and gives the wrong
+        # answer: it never imports ./agents, and its one route to the package, api.ts:1-5, is an
+        # `import type`, which carries no value and needs no dist/. The specs the listing loads
+        # are what reaches it.
         #
         # Nothing else in this job needs dist/. Lint, typecheck, build:web, check:classes and
         # check:asset-sizes all reach src/ instead, through the "types" and "bun" export
