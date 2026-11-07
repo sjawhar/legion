@@ -31,10 +31,14 @@
 #   6. an `env:` naming an `INPUT_*` variable at workflow, job, `container:` or step level — an
 #      action reads its inputs from `INPUT_*`, either way,
 #   7. a job `container:` or `services:` image on `oven/bun` whose tag is not the pinned one,
-#   8. that wrapper missing, or not holding exactly one setup-bun step — that step holds
-#      `bun-version-file: .bun-version` and may also pass `no-cache` (which only turns setup-bun's
-#      cache off and cannot change the version), and any other input fails; it is checked for what
-#      it is, not only for what other files are not,
+#   8. that wrapper missing, a step of it that prepends `$GITHUB_PATH` (rule 4 holds its
+#      `$GITHUB_ENV` half, there and everywhere else), or the wrapper not holding exactly one
+#      setup-bun step — that step holds `bun-version-file: .bun-version` and may also pass
+#      `no-cache` (which only turns setup-bun's own cache off and cannot change the version),
+#      and any other input fails; it is checked for what it is, not only for what other files
+#      are not. Its other steps are free to read the pin and restore the cache the version
+#      names, which is what the wrapper does today: what they may not do is hand a later step
+#      an input or a bun of their own, since both outlive this action,
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, a
 #      `FROM` on `ghcr.io/cybermonklabs/legion/ci` — the package every image a CI job fetches is copied
 #      into, named by digest — whose digest no row of `.github/ci-images.yaml` holds, or whose row
@@ -145,7 +149,7 @@ BUN_ARG_STANDIN = "0bun-version-arg0"
 
 problems = []
 wrapper_setup_steps: list[tuple[int, dict]] = []
-wrapper_total_steps = 0
+wrapper_path_writes: list[int] = []
 
 
 def one_line(value: object) -> str:
@@ -333,8 +337,6 @@ for workflow in workflows:
         # it cannot parse is that file's problem to report, not a crash for everyone.
         problems.append(f"::error file={workflow}::{workflow} is not valid YAML: {one_line(error)}")
         continue
-    if workflow == SETUP_ACTION:
-        wrapper_total_steps = sum(1 for _ in steps(document))
     for step in steps(document):
         line = line_of(step)
         script = step.get("run")
@@ -348,6 +350,10 @@ for workflow in workflows:
                 f"{workflow}:{line}: this step exports an INPUT_* variable into $GITHUB_ENV, "
                 f"which every step after it inherits — an action input, written sideways"
             )
+        # The $GITHUB_PATH half of what the wrapper's steps may not do, bound to the wrapper
+        # because every other action here prepends a path on purpose (install-jj, install-omp).
+        if workflow == SETUP_ACTION and isinstance(script, str) and "GITHUB_PATH" in script:
+            wrapper_path_writes.append(line)
         uses = step.get("uses")
         # Mis-cased is still the same action: GitHub serves `Oven-Sh/setup-bun@v2`.
         if not isinstance(uses, str) or "oven-sh/setup-bun" not in uses.lower():
@@ -374,16 +380,22 @@ for workflow in workflows:
 
 # The wrapper is judged for what it is, not only for what other files are not: a wrapper that is
 # deleted, repointed at a fork, duplicated, or given any input other than `no-cache` would
-# otherwise leave every other rule satisfied while CI installed something else.
+# otherwise leave every other rule satisfied while CI installed something else. Its step count is
+# not the rule — it reads the pin, restores the cache that version keys, and installs — but no
+# step of it may hand a later step an input or a bun of its own, since both outlive the action:
+# the $GITHUB_ENV half is rule 4 above, which holds every file in the tree, and this is the
+# $GITHUB_PATH half.
+for line in wrapper_path_writes:
+    problems.append(
+        f"{SETUP_ACTION}:{line}: this step prepends $GITHUB_PATH, which every step after this "
+        f"action keeps — a bun earlier on that path than the one setup-bun installs runs in its "
+        f"place, and no later step's log says which bun it ran"
+    )
+
 if not SETUP_ACTION.is_file():
     problems.append(
         f"::error file={SETUP_ACTION}::{SETUP_ACTION} is missing: it is the one place Bun is "
         f"installed, and every job uses it"
-    )
-elif wrapper_total_steps != 1:
-    problems.append(
-        f"{SETUP_ACTION}:1: holds {wrapper_total_steps} steps, not one — a second step can write "
-        f"INPUT_* into $GITHUB_ENV or prepend $GITHUB_PATH, which later steps then take"
     )
 elif len(wrapper_setup_steps) != 1:
     problems.append(

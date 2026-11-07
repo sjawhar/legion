@@ -135,11 +135,39 @@ jobs:
       # psql, which it resets its schema with. A proof with no package installs none.
       - name: Install this proof's packages
         if: matrix.apt != ''
+        # Its own retry arithmetic, so an exhausted phase fails this step by name rather than
+        # being cut part way by the job: the index read's 5 x 95 + 150 = 625 s and the package
+        # download's 5 x 125 + 150 = 775 s, 1400 s -> 24 min.
+        timeout-minutes: 24
         env:
           PACKAGES: ${{ matrix.apt }}
         run: |
-          sudo apt-get update
+          . .github/scripts/ci-retry.sh
+          # Both apt phases retry through .github/scripts/ci-retry.sh: five attempts, the last
+          # starting 150 s after the first. What bounds an attempt is the inner `sudo timeout`,
+          # not `timeout sudo`, so the signal reaches apt-get itself rather than a sudo holding
+          # it — ci.yaml's Playwright step states that rule; retry_fetch's own bound sits five
+          # seconds above it and backstops the sudo alone.
+          #
+          # 90 s for the index read, which is the bound ci.yaml's Playwright step derives for
+          # this same runner image and these same indexes: the slowest green `apt-get update` of
+          # its window fetched 10.5 MB at 233 kB/s, so 12.9 MB of indexes need 55.4 s there.
+          # 120 s for the package download: a proof installs one package of
+          # .github/e2e-scripts.json (postgresql-client or tmux), a few MB against that step's
+          # 51.4 MB, and at the slowest green package rate of the same window, 186 kB/s, even
+          # 10 MB needs 54 s. The index read carries `-o APT::Update::Error-Mode=any`, which
+          # makes a failed index read fail the command instead of warning and exiting 0: without
+          # it retry_fetch has nothing to retry
+          # (.github/scripts/check-download-retry.sh's rule 5 is the whole reason).
+          retry_fetch "apt's package lists" 95 -- \
+            sudo timeout 90 apt-get update -o APT::Update::Error-Mode=any
           # Each word is one package name of .github/e2e-scripts.json.
+          # The download is the half that retries; the unpack after it takes no network, so an
+          # attempt the bound kills never stops a dpkg run part way (ci.yaml's Playwright step
+          # says why the two are separate).
+          # shellcheck disable=SC2086
+          retry_fetch "the proof's apt packages" 125 -- \
+            sudo timeout 120 apt-get install -y --no-install-recommends -d $PACKAGES
           # shellcheck disable=SC2086
           sudo apt-get install -y --no-install-recommends $PACKAGES
 
@@ -147,13 +175,26 @@ jobs:
       # both import this repository's packages.
       - if: matrix.bun
         uses: ./.github/actions/setup-bun
+      # The install retries, as every dependency install in this repository's CI does
+      # (.github/scripts/ci-retry.sh): five bounded attempts, the last starting 150 s after the
+      # first. 180 s per attempt, the bound every Bun install of this repository's CI carries
+      # (dispatch://INFRA-1545): this install measured 20.70 s cold on a pod, against at most
+      # 11 s over 180 observations in the 20 most recent successful ci.yaml push runs on main.
       - if: matrix.bun
-        run: bun install --frozen-lockfile
+        name: Install the workspace's dependencies
+        # Its own retry arithmetic: 5 x 180 + 150 = 1050 s -> 18 min.
+        timeout-minutes: 18
+        run: |
+          . .github/scripts/ci-retry.sh
+          retry_fetch "the workspace's dependencies" 180 -- bun install --frozen-lockfile
 
       # The three proofs that start the Go daemon: it refuses to boot without jj, and names it
       # (`missing required daemon tools: jj`), as run 40957651922 showed. This installs the jj the
       # worker image ships, which is the one the daemon is written for.
       - if: matrix.jj
+        # install-jj's own retry arithmetic: the mise archive's curl, 8 x 60 + 127 = 607 s, and
+        # its `mise install` of the jj release, 5 x 60 + 150 = 450 s, 1057 s -> 18 min.
+        timeout-minutes: 18
         uses: ./.github/actions/install-jj
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

@@ -137,6 +137,9 @@ web_modules/
 *.tgz
 # The nats chart gcp:ClusteredNatsHub's live test renders, vendored at the version the component pins.
 !packages/envoy/infra/gcp/testdata/nats-2.15.1.tgz
+# The upstream editor sources packages/proof-editor installs as proof-sdk-upstream, packed from
+# the pinned sjawhar/proof-sdk commit so no install fetches them (packages/proof-editor/AGENTS.md).
+!packages/proof-editor/proof-sdk-dc6a852b2ab45463dc9d3d17762235450c8ff0d6.tgz
 
 # Yarn Integrity file
 .yarn-integrity

@@ -151,6 +151,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -448,6 +449,40 @@ def verdict(what: str, summary: str) -> None:
 
 
 # ---------------------------------------------------------------- rule 8: the package
+# The two reads below retry, in this check's own idiom rather than through
+# .github/scripts/ci-retry.sh, which is shell: five attempts, waits of 10, 20, 40 and 80 seconds
+# between them, so the fifth starts 150 s after the first, each attempt bounded by the 30-second
+# timeout the reads already carried (dispatch://INFRA-1545, R1). The bound stays 30 s because
+# nothing here measures larger: both reads ask for one small answer, a token and a manifest's
+# headers, and five attempts at 30 s plus 150 s of waits is 300 s, which the ci-images job's
+# 15-minute budget carries beside the copy that runs before it.
+#
+# An answer carrying a status is an answer, not a fault: a 404 says the package does not hold
+# that digest, which is this rule's whole question, so only a 5xx and a failure with no status at
+# all — a reset, a timeout, a name that does not resolve — are retried. Retrying a 404 would add
+# 150 s for every row the package lacks, which are the rows this rule exists to name.
+RETRY_WAITS = (10, 20, 40, 80)
+
+
+def read_retrying(request):
+    """The answer to `request`, a Request or a URL, read with the retry above. Raises the last
+    attempt's error, so each caller keeps the handling it had."""
+    for wait in (*RETRY_WAITS, None):
+        try:
+            return urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or wait is None:
+                raise
+            reason = f"HTTP {error.code}"
+        except Exception as error:  # noqa: BLE001 - any other failure of the read is retried
+            if wait is None:
+                raise
+            reason = f"{type(error).__name__}: {one_line(error)}"
+        print(f"ghcr.io: {reason}; next attempt in {wait}s", file=sys.stderr)
+        time.sleep(wait)
+    raise AssertionError("read_retrying ran out of attempts without raising")
+
+
 def manifest_status(digests: list[str]) -> dict[str, str]:
     """The HTTP status of an anonymous manifest HEAD, per digest. CI_IMAGES_MANIFEST_HEAD stands
     in for the read, so a test drives this check without the network."""
@@ -461,9 +496,8 @@ def manifest_status(digests: list[str]) -> dict[str, str]:
             out[digest] = done.stdout.strip().split()[0] if done.stdout.strip() else "no status"
         return out
     try:
-        with urllib.request.urlopen(
-            f"https://ghcr.io/token?scope=repository:{REPOSITORY}:pull&service=ghcr.io",
-            timeout=30,
+        with read_retrying(
+            f"https://ghcr.io/token?scope=repository:{REPOSITORY}:pull&service=ghcr.io"
         ) as answer:
             token = json.load(answer)["token"]
     except Exception as error:  # noqa: BLE001 - every failure to read the package is a refusal
@@ -481,7 +515,7 @@ def manifest_status(digests: list[str]) -> dict[str, str]:
         request.add_header("Authorization", f"Bearer {token}")
         request.add_header("Accept", ACCEPT)
         try:
-            with urllib.request.urlopen(request, timeout=30) as answer:
+            with read_retrying(request) as answer:
                 out[digest] = str(answer.status)
         except urllib.error.HTTPError as error:
             out[digest] = str(error.code)

@@ -11,14 +11,48 @@ description: >-
   commits: the new version's row in .github/ci-images.yaml first, then .bun-version, the
   `ARG BUN_VERSION` default of packages/daemon/docker/worker.Dockerfile and every `FROM`.
 
-  A run off main passes no-cache, so only a run on main saves: an entry a pull request writes is
-  readable by no other pull request. no-cache is setup-bun's only cache input and also skips the
-  restore, so a run off main downloads Bun (about 34 MB) instead of restoring it.
+  The restore below runs on every ref: it reads the `bun` cache family, one entry holding
+  ~/.bun/bin keyed on the pinned version, which ci.yaml's lint job saves on a push to main
+  (that file's Caches note). no-cache: true then runs on every ref too, so setup-bun writes no
+  second entry of its own — an entry a pull request writes is readable by no other pull request,
+  and the family above is the one copy worth keeping. On a hit setup-bun finds ~/.bun/bin/bun,
+  reads its `bun --revision`, takes it as an existing installation of the version this file
+  names, and downloads nothing: the release asset it fetches on a miss is 51,794,595 bytes.
+  That branch of setup-bun runs before any cache logic of its own, which is why no-cache: true
+  does not cost the restore.
+
+outputs:
+  cache-primary-key:
+    description: >-
+      The key the restore looked for, so the job that saves this family passes it to
+      actions/cache/save rather than spelling the expression a second time.
+    value: ${{ steps.bun-cache.outputs.cache-primary-key }}
+  cache-hit:
+    description: >-
+      'true' when the restore found that key. The saving job tests it: an entry already in the
+      family is not written again.
+    value: ${{ steps.bun-cache.outputs.cache-hit }}
 
 runs:
   using: composite
   steps:
+    # The pin, as half the cache key. Read with tr rather than `cat`, so a trailing carriage
+    # return or a stray space in the file cannot reach the key: a key is matched byte for byte,
+    # and the mismatch would show only as a restore that never hits.
+    - id: bun-pin
+      shell: bash
+      run: echo "version=$(tr -d '[:space:]' < .bun-version)" >> "$GITHUB_OUTPUT"
+
+    # One entry per Bun version, and no restore-keys: a near-miss Go module cache is still most
+    # of a module cache, while a Bun binary of another version is one setup-bun rejects after
+    # paying for the restore.
+    - id: bun-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/bin
+        key: bun-${{ runner.os }}-${{ steps.bun-pin.outputs.version }}
+
     - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       with:
         bun-version-file: .bun-version
-        no-cache: ${{ github.ref != 'refs/heads/main' }}
+        no-cache: true

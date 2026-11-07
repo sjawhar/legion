@@ -29,7 +29,16 @@ COPY packages/envoy/go.mod packages/envoy/go.sum /src/packages/envoy/
 COPY packages/envoy/listenfd /src/packages/envoy/listenfd
 COPY packages/envoy/infra/go.mod packages/envoy/infra/go.sum packages/envoy/infra/go.work packages/envoy/infra/go.work.sum ./
 COPY packages/envoy/infra/host/heldportwrapper ./host/heldportwrapper
-RUN CGO_ENABLED=0 go build -o /out/envoy-listener-heldport ./host/heldportwrapper
+# The build's modules come down first, under the retry: five attempts, the fifth starting 150 s
+# after the first, each attempt bounded at 600 s, which is what the two modules' zips cost from the
+# proxy. The `go build` that follows reads the cache the download filled and fetches nothing, so it
+# stays bare. Both stay in this one layer: the wrapper's sources are already copied in above, so a
+# layer of its own would be rebuilt by every source change anyway.
+RUN retry() { b=$1; what=$2; shift 2; i=1; while :; do timeout "$b" "$@" && return 0; s=$?; \
+  [ "$i" -ge 5 ] && { echo "$what failed after $i attempts (last exit $s)" >&2; return "$s"; }; \
+  sleep "$(( 10 << (i - 1) ))"; i=$((i + 1)); done; } \
+    && retry 600 "go mod download" go mod download \
+    && CGO_ENABLED=0 go build -o /out/envoy-listener-heldport ./host/heldportwrapper
 
 FROM ${BASE}
 

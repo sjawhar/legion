@@ -21,7 +21,13 @@ runs:
         fi
         dir="$RUNNER_TEMP/uv"
         mkdir -p "$dir"
-        curl -fsSLo "$dir/uv.tar.gz" \
+        # Retried, in the spelling .github/actions/install-changie explains: 8 bounded attempts,
+        # the last starting 127 s after the first, with `--fail` kept so a 504's body never lands
+        # in the tarball. 60 s per attempt: a release asset is tens of megabytes — the Bun
+        # release zip this repository measures is 51,794,595 bytes — and 60 s is the bound every
+        # release-asset fetch of this repository's CI carries (dispatch://INFRA-1545). This step
+        # measured at most 1 s across the 20 most recent successful ci.yaml push runs on main.
+        curl -fsSLo "$dir/uv.tar.gz" --retry 7 --retry-all-errors --max-time 60 \
           "https://github.com/astral-sh/uv/releases/download/${version}/uv-x86_64-unknown-linux-gnu.tar.gz"
         printf '%s  %s\n' "$sha256" "$dir/uv.tar.gz" > "$dir/SHA256SUMS"
         sha256sum --check --strict "$dir/SHA256SUMS"
