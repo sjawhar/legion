@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubtest"
 )
 
 func testAppKey(t *testing.T) (*rsa.PrivateKey, string) {
@@ -1020,7 +1021,7 @@ type keyModeGitHub struct {
 
 func (g *keyModeGitHub) serve(t *testing.T) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return githubtest.Serve(t, githubtest.Spec{Handle: func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/app/installations":
 			listed := make([]string, 0, len(g.owners))
@@ -1060,9 +1061,7 @@ func (g *keyModeGitHub) serve(t *testing.T) *httptest.Server {
 		default:
 			t.Errorf("unexpected GitHub path %s", r.URL.Path)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}})
 }
 
 // exchanges is every access_tokens body GitHub was sent, in the order it got them.
