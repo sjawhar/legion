@@ -470,11 +470,12 @@ func TestARenewalThatLosesItsCompareAndSwapWritesNothingAndIsNotRetried(t *testi
 // before the mark: the holder went on renewing the claim for as long as its process ran, so the
 // role stayed with the very process that gave it up. No registration renews a marked claim,
 // whoever sends it, so the renewal stands where the hand-back left it and the role claim reaper
-// frees the role one live window later.
+// frees the role at its first pass past the live window.
 //
 // The client that handed the role back is still running and still registering, so the sweep is
 // given an isAlive that answers true for its session throughout: a role handed back comes free
-// one live window later while its old holder lives, which is the whole of what the mark buys.
+// a live window later, at the sweep that follows, while its old holder lives, which is the
+// whole of what the mark buys.
 // A row that asked the sweep over a holder the session bucket had lost would pass with the
 // reaper reading that liveness and the hand-back doing nothing. The control is the heartbeat
 // before the hand-back, which renews this very claim through this very call: without it a case

@@ -169,8 +169,8 @@ func TestAnUnsubscribeNamingTheClaimsProcessFreesTheRoleAndRemovesItsTopics(t *t
 // is does the same. Neither frees the live holder's claim, and both are answered 200.
 //
 // The claim stands, so the role's lane topic stays in the session's interest record: one record
-// serves every process running under one session id, and taking that topic out would stop the
-// deliveries of the process that still holds the role. Every other topic the request names is
+// serves every process running under one session id, and that topic is the interest half of a
+// claim this release may not free. Every other topic the request names is
 // removed as it always was, which is what the topic of the holder's own, named beside the
 // lane's, reads here.
 func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
@@ -213,7 +213,7 @@ func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
 // What the route answers as removed, over the four shapes a release has. The answer is the
 // topics the store took out of the record (store.Registry.Remove), never the topics the request
 // named: the two differ over a role lane topic the record kept, where echoing the request would
-// tell the client its deliveries no longer ride on a topic they still do. The empty list is the
+// tell the client a topic left its record while the record still holds it. The empty list is the
 // answer wherever nothing left the record, and null is never written.
 func TestUnsubscribeAnswersTheTopicsItRemoved(t *testing.T) {
 	const role = "legion-controller"

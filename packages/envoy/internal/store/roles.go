@@ -47,7 +47,8 @@ type RoleClaim struct {
 	// outright, never by the empty-topics deregistration, and never onto a claim that names no
 	// process, which its own session's release frees. Its readers are the renewal, which renews
 	// no marked claim whoever registers (Registry.renewRoleClaim), so the role claim reaper
-	// frees the role one live window later, and GET /v1/roles/<role>, which reports it as
+	// frees the role once that renewal has lapsed, a live window and up to one reap interval
+	// later, and GET /v1/roles/<role>, which reports it as
 	// handed_back. Absent means no hand-back of that shape has reached this claim: a claim
 	// granted since clears the mark, because every grant writes a fresh record
 	// (SetRoleWithPrevious).
@@ -749,7 +750,7 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, req RoleClaimRequest
 		// running under one session id, so a claim refused because the claim that won names
 		// this session - the claimant's own process's, another process's, or a claim that
 		// names none - leaves that record alone. It carries the lane topic of the role that
-		// session now holds, and taking it out would stop the fan-out to the holder.
+		// session now holds, the interest half of the claim that stands.
 		if !heldBySession {
 			if rollbackErr := r.removeInterestTopics(ctx, req.SessionID, []string{roleTopic}); rollbackErr != nil {
 				return Interest{}, errors.Join(err, holderErr, rollbackErr)

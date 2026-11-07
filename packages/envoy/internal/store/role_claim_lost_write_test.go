@@ -32,7 +32,7 @@ import (
 //
 // The role's lane topic stays in the interest record in every row, including the refusals: one
 // record serves every process running under one session id, the session does hold the role, and
-// a rollback would stop the fan-out to the process that holds it.
+// a rollback would leave that standing claim with no interest half naming it.
 func TestAClaimWhoseWriteFailedIsSuccessOnlyForTheClaimantsOwnProcess(t *testing.T) {
 	const (
 		role   = "legion-controller"

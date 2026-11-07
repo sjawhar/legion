@@ -68,7 +68,8 @@ type roleHolderError struct {
 	// HandedBack is the hand-back mark the lapsed holder's claim carries
 	// (store.RoleClaim.HandedBack), as the 200 reports it beside the live holder: the holder
 	// gave this role back through a release that could not free the claim, so no registration
-	// renews it any more and the role claim reaper frees the role one live window later.
+	// renews it any more and the role claim reaper frees the role once that renewal has
+	// lapsed, a live window and up to one reap interval later.
 	// Absent for a role no claim stands for, and for a claim no such release reached.
 	HandedBack bool `json:"handed_back,omitempty"`
 	// ClaimRevision is the role's claim revision, as the 200 reports it: the revision of the

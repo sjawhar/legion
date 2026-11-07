@@ -1817,7 +1817,8 @@ func roleSetHandler(d *listenerDeps, machineID string, logger *logging.Logger) h
 // Both answers carry handed_back where the claim carries the hand-back mark
 // (store.RoleClaim.HandedBack): the holder gave this role back through a release that could not
 // free the claim, so no registration renews it any more and the role claim reaper frees the role
-// one live window later. The key is left out where the claim carries no mark, as
+// once that renewal has lapsed, a live window and up to one reap interval later. The key is left
+// out where the claim carries no mark, as
 // client_instance_id is left out where it names no process, so a client reads an absent field as
 // "this claim is still its holder's" rather than having to tell false from missing.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
@@ -2106,9 +2107,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// What it renews is decided on the claims alone, and on no topic list: a claim a
 		// hand-back could not free carries that hand-back as a mark of its own
 		// (store.RoleClaim.HandedBack, written by POST /v1/interests/unsubscribe), and no
-		// registration renews a marked claim, which the role claim reaper then frees one live
-		// window later. So this registration's topics - the record it just wrote, or the
-		// absence of a list on the request - say nothing about which roles it renews.
+		// registration renews a marked claim, which the role claim reaper then frees at its
+		// first pass past the live window. So this registration's topics - the record it just
+		// wrote, or the absence of a list on the request - say nothing about which roles it
+		// renews.
 		if err := d.registry.RenewRoleClaims(ctx, body.SessionID, strings.TrimSpace(body.ClientInstanceID)); err != nil {
 			switch {
 			case errors.Is(err, store.ErrRoleViewNotReady):
@@ -2161,8 +2163,10 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			// ClientInstanceID is the process handing these interests back, which is
 			// what decides the role claims this release frees: the claims naming that
 			// same process and no others (store.RoleReleaseAuthority). It is trimmed
-			// like session_id, and a request that leaves it out states no process and
-			// frees no claim - the session's topics are still removed.
+			// like session_id, and a request that leaves it out states no process: it
+			// frees a claim that names none outright, marks a claim it cannot free as
+			// handed back and keeps that claim's lane topic in the record, and removes
+			// the session's other topics.
 			ClientInstanceID string `json:"client_instance_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -2197,11 +2201,12 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		d.consumers.refollow(r.Context(), d, body.SessionID)
 		// removed is what the store took out of the record, not the topics the request named.
 		// The two differ over a role lane topic the record kept: a release that may not free
-		// the claim leaves the lane topic standing (store.Registry.Remove), and echoing the
-		// request would tell the client a topic was removed while its deliveries still ride on
-		// it. A deregistration, which names no topic and deletes the whole record, and a
-		// release whose every named topic was kept both answer the empty list, and the store's
-		// nil is written as that empty list rather than as null.
+		// the claim leaves the lane topic standing (store.Registry.Remove), the interest half
+		// of a claim that still stands, and echoing the request would tell the client a topic
+		// was removed while the record still holds it. A deregistration, which names no topic
+		// and deletes the whole record, and a release whose every named topic was kept both
+		// answer the empty list, and the store's nil is written as that empty list rather than
+		// as null.
 		if removed == nil {
 			removed = []string{}
 		}

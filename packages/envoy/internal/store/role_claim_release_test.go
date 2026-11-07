@@ -55,9 +55,10 @@ const releaseKeptTopic = "notifications.team.release"
 // instance they carry.
 //
 // The interest half follows the claim in one way: the role's lane topic stays in the record
-// wherever the release freed no claim, because the process that still holds the role takes its
-// deliveries through that very topic, and the topic goes only when the claim does. An empty
-// topics is the session's own deregistration and deletes the record whatever the claim did.
+// wherever the release freed no claim, because that topic is the interest half of a claim that
+// still stands and one record serves every process under one session id; the topic goes only
+// when the claim does. An empty topics is the session's own deregistration and deletes the
+// record whatever the claim did.
 func TestAReleaseFreesARoleClaimOnlyForTheProcessTheClaimNames(t *testing.T) {
 	const (
 		role   = "legion-controller"
@@ -426,7 +427,7 @@ func TestOnlyAHandBackStatingNoProcessMarksAClaimItCannotFree(t *testing.T) {
 // A hand-back stating no process against a claim that names none frees that claim and marks
 // nothing: the claim keeps the rule it was written under (RoleReleaseAuthority.frees), so a
 // client built before claims named a process still gives its role up at once rather than
-// leaving a marked claim for the reaper to clear one live window later.
+// leaving a marked claim for the reaper to clear a live window and up to one reap interval later.
 func TestAHandBackFreesAClaimThatNamesNoProcessAndMarksNothing(t *testing.T) {
 	const (
 		role   = "legion-controller"

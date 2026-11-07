@@ -213,9 +213,15 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // What the release freed decides one thing in the interest half too. A role lane topic the
 // caller named whose claim still names this session and which this release did not free stays
 // in the record (releaseRoleClaims answers which topics those are), because one interest record
-// serves every process running under one session id and the live holder's deliveries ride on
-// that topic: a release from a process that does not hold the claim would otherwise take the
-// lane topic out from under the process that does. Every other topic the caller named is
+// serves every process running under one session id and that topic is the interest half of a
+// claim that still stands, written there by the grant (SetRoleWithPrevious). No delivery rides
+// on it - a role lane is not stream-captured, so it never enters a session's consumer filter
+// (cmd/listener's sessionConsumerFilter), and a role message reaches its holder's agent subject
+// with the holder read off the claim (cmd/listener's resolveCoreRoleHolder) - but the record is
+// where a deregistration of this session finds the role claims it frees (the empty-topics
+// branch below, releaseRoleClaims), so a release from a process that does not hold the claim
+// would otherwise take the lane topic out from under the process that does and leave the claim
+// standing with nothing in the record naming it. Every other topic the caller named is
 // removed exactly as before - one that is not a role lane's, a wildcard, a role no record
 // claims, a role another session holds, and a role whose claim this release did free. A caller
 // whose every named topic was kept writes nothing at all, since an empty list is how

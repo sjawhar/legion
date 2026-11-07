@@ -280,12 +280,12 @@ a log rather than inferred.
 The listener runs with windows of its own, because every row turns on whether a claim's holder is
 still answering for it: `ENVOY_SESSION_LIVE_WINDOW=10s`, which is how long a claim stands renewed
 after its holder's last registration, and `ENVOY_ROLE_CLAIM_REAP_INTERVAL=2s`, so every row is
-swept several times. The reaper does free claims in the run, because what a pass weighs is the
-claim's own renewal and not the liveness of the session id its holder registered under: a claim
-nobody has answered for inside the live window is gone within one more reap interval, whoever
-goes on registering that session id. `ENVOY_SESSION_GONE_HORIZON` keeps its hour-long default
-all the same, since a claim that names no process is the one kind a pass still reads its
-holder's liveness for. The rows still read the listener's own word for each outcome — a claim
+swept several times. The one claim the reaper frees in the run is the one a hand-back marked:
+no registration renews a marked claim, so it goes within one more reap interval of its renewal
+lapsing, though the client that handed it back goes on registering that session id.
+`ENVOY_SESSION_GONE_HORIZON` keeps its hour-long default all the same, since every unmarked
+claim is kept while its holder's session reads short of `gone`, which is what leaves every
+other row's holder in its role. The rows still read the listener's own word for each outcome — a claim
 granted, a `409`, or the lookup's `404` — which reads the same whether a standing claim lapsed
 where it stood or a pass had already removed it, and a row whose claimant must be refused is
 decided inside the window, its holder having answered for the claim immediately before. A row
@@ -325,7 +325,8 @@ Seventeen rows are printed, each with its outcome:
   nothing and marks the claim: the lookup answers `handed_back`, the real Oh My Pi holder reads
   that as a role it does not hold, claims it back at its next heartbeat and takes the lane's
   next message. The same hand-back against an old-build holder, driven by `curl` because a
-  current client would take the role straight back, frees the role one live window later while
+  current client would take the role straight back, frees the role a live window and up to one
+  reap interval later while
   that client is still registering. And a client that states no process at all — the shape every
   claim standing at a deploy is in — keeps its role across three live windows of registrations
   that carry no `client_instance_id`.

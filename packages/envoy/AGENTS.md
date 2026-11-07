@@ -2987,14 +2987,16 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A holder renews its claim by registering, so `renewed_at` is the holder's heartbeat and not the instant the role was taken (`store.Registry.RenewRoleClaims`, called from `/v1/interests/subscribe`);
   listener restart restores the claim from that record, but a message reaches the holder only while the holder's own record reads live (`session.Live`, judged from that record's last registration and from nothing else).
   Reaping stale interests never releases a role, and neither does a lookup, a role send, a role delivery nor a forward that failed:
-  the role claim reaper is the one place a claim is taken away, and what it weighs is the claim's own renewal and not the liveness of the session id its holder registered under.
-  A claim renewed inside the live window is kept whatever that session's record says, and one whose renewal has lapsed is freed though a process of that session goes on registering (`store.Registry.ClaimRenewedWithin`, read off the very record the pass's scan carried).
-  A session id is not a process — a second process can resume a live session's id, and a first process can hand a role back and go on running — so only the registration of the process a claim names moves that renewal (`store.Registry.RenewRoleClaims`), and nothing at all moves the renewal of a claim its holder handed back (`store.RoleClaim.HandedBack`).
+  the role claim reaper is the one place a claim is taken away.
+  A claim renewed inside the live window is kept whatever its holder's session record says (`store.Registry.ClaimRenewedWithin`, read off the very record the pass's scan carried).
+  Past that window the rule is dispatch://INFRA-392's, unchanged:
+  an unmarked claim is kept while its holder's session record reads short of `gone` (`roleHolderMayBeLive`, `sessionMayBeLive` with `notGone`, which answers false only for a record past the gone horizon or no record at all) and freed once that session is gone,
+  for a claim that names a process (`store.RoleClaim.ClientInstanceID`) and a claim that names none alike, so an unresponsive holder keeps its role and the paths that need a live holder report it rather than taking the role from it.
+  The one claim freed past a holder session that still answers is one the hand-back marked (`store.RoleClaim.HandedBack`), and only once its own renewal has lapsed:
+  the mark is the holder's own word that it gave the role up, written by a release only that holder's session could make, and no registration renews a marked claim, so the lapse is final rather than a holder briefly out of touch.
+  A session id is not a process — a second process can resume a live session's id, and a first process can hand a role back and go on running — so only the registration of the process a claim names moves that renewal (`store.Registry.RenewRoleClaims`), and nothing at all moves the renewal of a marked claim.
   So a second process that resumes the holder's session id and then deregisters it leaves the record gone and the holder running, and the holder's own renewals keep its role;
-  and a role an older client handed back comes free one live window later while that client is still registering.
-  Two kinds of claim are kept past a lapsed renewal, and the holder's own session read (`roleHolderMayBeLive`, `sessionMayBeLive` with `notGone`, which answers false only for a record past the gone horizon or no record at all) decides the first of them alone:
-  a claim that names no process — one an earlier build wrote, or one whose claimant stated none — while that read puts its holder short of `session.Gone`, since such a claim has no renewal of its own until a registration renews or adopts it and at a deploy its `claimed_at` can be any age;
-  and a claim whose session carries a registration this listener itself could not answer less than one live window ago (`store.Registry.renewalRefusedWithin`), kept whatever that session read says, because while the role claim view cannot be served no registration renews anything and the lapse is the listener's rather than the holder's.
+  and a role an older client handed back comes free one live window plus up to one reap interval later — about ten minutes with the shipped defaults — while that client is still registering.
 
 - A holder that is `unresponsive` — past the live window, inside the gone horizon — keeps its claim and its `claimed_at` through any number of resolutions, and the paths that need a live holder report it instead:
   the publish route's and the lookup's 404 `holder_lapsed`, which carries `holder_state`, `last_seen` and `claim_released: false`, and a `delivery_failed` exception on the role lane.
@@ -3916,7 +3918,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   It also answers `client_instance_id`, the process the holder's claim names (`store.RoleClaim.ClientInstanceID`): it is how a client sees that a role is held under its own session id by another process, which is what `/v1/roles/set` refuses such a claimant for, and a claim that names no process — one an earlier build wrote, or one whose claimant stated none — leaves the field out, on the 200 as the 404 has always left it out.
   A client reads an absent field as "no other process holds this role" and an empty one as "another process does", so a 200 that wrote `""` would send such a claim's own holder a soft claim it does not need and a 409 naming itself, until its next registration adopted the claim for its process.
   It answers `handed_back` beside the holder on the 200 and on a lapsed holder's 404 alike, `true` where the claim carries the hand-back mark (`store.RoleClaim.HandedBack`) and the key left out where it carries none, as `client_instance_id` is left out where the claim names no process:
-  the holder gave this role back through a release that could not free the claim, so no registration renews it any more and the role claim reaper frees the role one live window later.
+  the holder gave this role back through a release that could not free the claim, so no registration renews it any more and the role claim reaper frees the role at its first pass past the live window.
   Both clients read a marked claim as a role they do not hold (`roleHeldBy` in `@legion/envoy-client/transport`), so a holder an older client's hand-back marked wrongly claims the role again at its next heartbeat and has it back, the fresh record that grant writes carrying no mark.
   A 404 has `reason: "unclaimed"` when no role claim exists;
   for a holder whose own record does not read live it has `reason: "holder_lapsed"` with that holder's id, that holder's `client_instance_id` and `handed_back` on the same terms as the 200's, its `holder_state` (`unresponsive` or `gone`), `claim_released: false`, since the lookup takes nothing from a holder in either state, and the last registration the listener still keeps (`session.LastSeenMemory`, 2 hours).
@@ -3988,16 +3990,15 @@ Each item below names an endpoint and its method, then its contract, and an item
   `/v1/interests/unsubscribe` drops them from the row it rewrites as well), so `Match` stops fanning those messages out to the session after its next heartbeat.
 
 - The registration is also the holder's heartbeat for the role claims it holds:
-  it stamps `renewed_at` on every claim this session holds that names this same `client_instance_id`, and the first such registration adopts a claim that names no process (`store.Registry.RenewRoleClaims`), which is what `/v1/roles/set` and the role claim reaper weigh against the live window.
+  it stamps `renewed_at` on every claim this session holds that names this same `client_instance_id`, and the first registration of that session id stating any instance adopts a claim that names no process (`store.Registry.RenewRoleClaims`), which is what `/v1/roles/set` and the role claim reaper weigh against the live window.
   A registration that states no instance renews the claims of its own session that name no process, leaving them naming none, and adopts nothing:
   an absent instance names no process, so it can be neither a holder's heartbeat for a claim that names one nor the adopter of what another process holds.
   That arm is what keeps every claim standing at a deploy renewed, since such a claim names no process until a registration that states one adopts it, and a client built before registrations carried an instance renews it meanwhile.
-  What a registration renews turns on the claims alone and on no topic list.
-  The condition this route once carried — a claim renewed only while the interest record the registration had just written still named that role's lane topic (`notifications.role.<role>`) — is gone, and so is the case a registration carrying no topics at all was:
-  a release that hands one role back and may not free its claim marks the claim instead (`store.RoleClaim.HandedBack`, `POST /v1/interests/unsubscribe` below), no registration renews a marked claim, and the role claim reaper frees the role one live window later, so a renewal no longer has to read a hand-back out of a list of topics.
-  A holder that still holds its role is renewed whatever topics it registers, and a claim its holder gave up is renewed by nobody, its own process included.
+  What a registration renews turns on the claims alone and on no topic list:
+  a release that hands one role back and may not free its claim marks the claim instead (`store.RoleClaim.HandedBack`, `POST /v1/interests/unsubscribe` below), no registration renews a marked claim, and the role claim reaper frees the role at its first pass past the live window — one live window plus up to one reap interval, about ten minutes with the shipped defaults.
+  A holder that still holds its role is renewed whatever topics it registers, a registration carrying no topic list at all is no case of its own, and a claim its holder gave up is renewed by nobody, its own process included.
   The renewal runs last, after the records this route owns are written, and can never fail the registration: a claim view that cannot answer yet, a bucket call that did not answer and a renewal that lost its compare-and-swap are each logged and passed over, since a heartbeat refused for any of them would take down the very sessions whose claims it keeps alive.
-  Each such failure is also recorded against the session as the moment this listener could not answer its renewal (`store.Registry.renewalRefusals`), which the role claim reaper reads to keep that session's claims for one live window past each refusal, exactly as it keeps them past each renewal.
+  A refused renewal buys the session's claims nothing: the claim keeps the renewal it already carries, and the reaper weighs it exactly as it weighs any other.
   It costs one role-bucket write per heartbeat per role the session holds.
 
 - The stored subscription records the `machine_id` and `dir` of the registration that last wrote it, and a registration through another listener moves both (`store.mergeForUpsert`;
@@ -4028,7 +4029,9 @@ Each item below names an endpoint and its method, then its contract, and an item
 - `/v1/interests/unsubscribe` (POST)
 
   Removes the topics it may remove and answers exactly those in `removed`, which is what left the record and never an echo of the request:
-  a role lane topic whose claim this release did not free stays in the record and is left out of `removed`, since one interest record serves every process running under one session id and the live holder's deliveries ride on that topic, so a release from a process that does not hold the claim must not take the lane topic out from under the process that does.
+  a role lane topic whose claim this release did not free stays in the record and is left out of `removed`, since one interest record serves every process running under one session id and that topic is the interest half of a claim that still stands, written there by the claim itself (`/v1/roles/set`), so a release from a process that does not hold the claim must not take away the half it may not free.
+  No delivery rides on that topic: a role lane is not stream-captured, so it never enters a session's consumer filter (`sessionConsumerFilter`), and a role message reaches its holder's agent subject with the holder read off the claim (`resolveCoreRoleHolder`).
+  What the record's role topics are read for is the session's own deregistration, which expands them into the claims it frees (`store.Registry.Remove`, `releaseRoleClaims`), so a lane topic taken out from under the live holder would leave its standing claim with nothing in the record naming it.
   A deregistration, which names no topic and deletes the whole record, and a release whose every named topic was kept both answer the empty list, and `removed` is never written as `null`.
   It carries `client_instance_id`, the process handing the interests back, and that is what decides the role claims it frees: the claims naming that same process and no others (`store.RoleReleaseAuthority`).
   A release that names no process frees no claim that names one, and neither does any other process's instance — an absent instance is no match against a claim that names a process — while every topic it named that is not such a claim's lane is removed either way.
@@ -4047,7 +4050,7 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - A hand-back is the one release that marks a claim it could not free (`store.RoleClaim.HandedBack`, `store.markRoleClaimHandedBack`):
   a release that states no process, does not force, and names a role's own lane topic, which is the shape a client built before a release named its process sends.
-  No registration renews a marked claim, so the role claim reaper frees the role one live window later, and `GET /v1/roles/<role>` answers `handed_back` meanwhile.
+  No registration renews a marked claim, so the role claim reaper frees the role at its first pass past the live window — one live window plus up to one reap interval — and `GET /v1/roles/<role>` answers `handed_back` meanwhile.
   The empty-topics deregistration names no one role's lane and so hands no one role back, a release that names a process frees the claims of that process and marks none, the administrator's force frees them all, and a claim that names no process at all is freed outright rather than marked.
   A current client reads a marked claim as a role it does not hold (`roleHeldBy`) and claims it again at its next heartbeat, which writes a fresh record and so clears the mark, so a live holder an older client's hand-back marked keeps its role.
 

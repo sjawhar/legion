@@ -1,6 +1,6 @@
 // What a release leaves in the session's interest record. One record serves every process
 // running under one session id, so the topic a release may not take is the lane topic of a claim
-// it did not free: the process that still holds the role takes the role's messages through it.
+// it did not free: that topic is the interest half of a claim the release left standing.
 // The claim half of the same releases is read in role_claim_release_test.go.
 
 package store
@@ -28,8 +28,8 @@ func assertRemovedTopics(t *testing.T, removed []string, want ...string) {
 
 // A release that frees no claim keeps that claim's lane topic in the interest record, and
 // removes every other topic it named. The record is shared by every process under one session
-// id, so a release from a second process that resumed the holder's id would otherwise take the
-// lane topic the live holder's deliveries ride on while leaving it the role.
+// id, so a release from a second process that resumed the holder's id would otherwise take out
+// the interest half of a claim it was not allowed to touch, while leaving the holder the role.
 //
 // The release the claim's own process makes is the control: it frees the claim, so the lane
 // topic goes with it, exactly as it always did.
@@ -100,9 +100,9 @@ func TestAReleaseThatKeepsEveryTopicItNamedLeavesTheRecordWhole(t *testing.T) {
 // release arrives. The second process keeps the claim, keeps its lane topic, and its own
 // registrations go on renewing the claim window after window.
 //
-// Both halves are read, because either one alone leaves the role broken: a release that freed
-// the claim would hand the role to nobody, and a release that took the lane topic out of the
-// record would leave the second process holding a role whose messages no longer reach it.
+// Both halves are read, because either one alone leaves the role half-given-up: a release that
+// freed the claim would hand the role to nobody, and a release that took the lane topic out of
+// the record would leave the second process holding a role its own record no longer names.
 func TestASecondProcessThatTookALapsedClaimKeepsItThroughTheFirstsRelease(t *testing.T) {
 	const (
 		role       = "legion-controller"

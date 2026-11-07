@@ -245,9 +245,9 @@ process, minted once when that instance starts) as `client_instance_id`, omitted
 has none so an older listener sees an unchanged body; the listener stores it on the session's
 registry entry and renews with it every role claim this session holds that names that same
 process, so each registration is the holder's answer for the roles it holds. It renews every such
-claim the listener has not marked handed back, whatever topics the registration carries: the
-condition that renewed a claim only while the interest record still named that role's lane topic
-is gone, and a hand-back now marks the claim it could not free instead. A registration that
+claim the listener has not marked handed back, whatever topics the registration carries: what
+says a role was given up is the mark a hand-back leaves on a claim it could not free, and a
+marked claim is renewed by nobody. A registration that
 states no instance renews the claims of its own session that name no process, and adopts none, so
 a claim standing at a deploy is kept by a client that cannot say which process it is.
 `getRole` returns a role holder with its last-seen timestamp and, where the
@@ -267,7 +267,7 @@ record another process wrote is only while this one holds no role. Both read an 
 process named, exactly as an absent one. The mark is why a holder an older client's hand-back
 reached claims its role again at its next heartbeat and has it back, the grant writing a fresh
 record that carries no mark, rather than reading the lookup as confirmation until the role claim
-reaper frees the role.
+reaper frees the role a live window and up to one reap interval later.
 
 `setRole` and `unsubscribe` take a `clientInstanceID` of their own, sent as `client_instance_id`
 and omitted from the wire when the caller states none: the listener records the claim's as the
@@ -276,7 +276,8 @@ so a second process that resumed this session id can neither take the role nor h
 a release naming no process frees no claim that names one, while it frees a claim that names
 none outright. `unsubscribe` answers in `removed` the topics that left the record rather than the
 ones it named: a role lane topic whose claim the release did not free stays in the record,
-because one interest record serves every process running under one session id. Such a release,
+because one interest record serves every process running under one session id and that topic is
+the interest half of a claim that still stands. Such a release,
 where it names that role's own lane topic, is a hand-back, and the listener marks the claim it
 could not free. A release the holder's own renewal beat under
 each of its three conditional deletes fails rather than answering success, so `unsubscribe`

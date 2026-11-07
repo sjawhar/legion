@@ -10,13 +10,15 @@ body: |-
   and `handed_back`, the mark the listener leaves on a claim a hand-back could not free.
 
   `roleHeldBy` reads a marked claim as a role nobody holds, whoever it names: no registration
-  renews such a claim, so a holder that read it as a hold would lose the role one live window
-  later. A hold an older client's hand-back marked is therefore claimed again at the next
-  heartbeat and comes straight back, the grant writing a fresh record with no mark.
+  renews such a claim, so a holder that read it as a hold would lose the role a live window and
+  up to one reap interval later. A hold an older client's hand-back marked is therefore claimed
+  again at the next heartbeat and comes straight back, the grant writing a fresh record with no
+  mark.
 
   `unsubscribe` answers in `removed` the topics that left the listener's record rather than the
   ones the request named: a role lane topic whose claim the release could not free stays in the
-  record, since one interest record serves every process running under one session id. A
+  record, since one interest record serves every process running under one session id and that
+  topic is the interest half of a claim that still stands. A
   release that states no process frees no claim that names one, frees a claim that names none
   outright, and — where it names a role's own lane topic — marks the claim it could not free.
 time: 2026-11-06T17:29:51.000000000Z

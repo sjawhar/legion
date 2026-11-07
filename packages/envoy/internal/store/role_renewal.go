@@ -38,13 +38,12 @@ import (
 //
 // A hand-back is read off the claim and not out of this registration. A release that hands one
 // role back and may not free it marks the claim instead (RoleClaim.HandedBack, written by
-// Registry.Remove's release path), and renewRoleClaim renews no marked claim, so the role claim
-// reaper frees the role one live window later. That replaces the lane-topic condition this call
-// once carried, which renewed a role only while the registering session's interest record still
-// named that role's lane topic: the mark says what the hand-back did, so the renewal no longer
-// has to read a hand-back out of a list of topics, a registration carrying no topic list is no
-// longer a case of its own, and a holder that still holds its role is renewed whatever topics it
-// registers.
+// Registry.Remove's release path), and renewRoleClaim renews no marked claim, so that claim's
+// renewal lapses and the role claim reaper frees the role at its first pass past the live
+// window: one live window plus up to one reap interval, about ten minutes with the shipped
+// defaults. The mark is what says the hand-back happened, so this call reads no list of topics
+// at all: a registration carrying no topic list is no case of its own, and a holder that still
+// holds its role is renewed whatever topics it registers.
 //
 // Every failure is returned, not raised: a view that cannot answer (ErrRoleViewNotReady, wrapped)
 // after a listener restart, a read or write that did not answer, a record this build cannot read.
@@ -85,10 +84,11 @@ func (r *Registry) RenewRoleClaims(ctx context.Context, sessionID, clientInstanc
 //
 // A claim marked handed back (RoleClaim.HandedBack) is renewed by nobody, its own process
 // included: the mark is the release's word that the holder gave the role up, so the claim ages
-// out and the role claim reaper frees the role one live window later. A claim naming another
-// session or another process is left exactly as it stands - the renewal is the holder's own
-// heartbeat, and no other process's heartbeat may move it - and so is a role with no claim
-// record at all, which the read answers as a zero claim and so a zero revision (RoleClaim).
+// out and the role claim reaper frees the role one live window and up to one reap interval
+// later. A claim naming another session or another process is left exactly as it stands - the
+// renewal is the holder's own heartbeat, and no other process's heartbeat may move it - and so
+// is a role with no claim record at all, which the read answers as a zero claim and so a zero
+// revision (RoleClaim).
 //
 // Only RenewedAt, and on adoption ClientInstanceID, are written: HolderSessionID, ClaimedAt and
 // PreviousSessionID are the claim's own provenance and are carried over untouched, so a renewal

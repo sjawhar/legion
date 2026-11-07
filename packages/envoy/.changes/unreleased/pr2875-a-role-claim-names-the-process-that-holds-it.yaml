@@ -18,26 +18,28 @@ body: |-
   unchanged, and the predecessor rule is unchanged, still reading the claimant's stored instance
   where the request states none. `POST /v1/interests/subscribe` renews every claim the
   registering session holds that names the registering process, whatever topics the registration
-  carries, and the first such registration adopts a claim that names none; one that states no
-  process renews the claims of its own session that name none and adopts none, so no claim
-  standing at a deploy ages out. A renewal that cannot run never fails the registration, and the
-  cost is one role-bucket write per heartbeat per role held. `POST /v1/interests/unsubscribe`
+  carries, and the first registration of that session stating any instance adopts a claim that
+  names none — any process of the session id, not only the one that took the role; one that
+  states no process renews the claims of its own session that name none and adopts none, so no
+  claim standing at a deploy ages out. A renewal that cannot run never fails the registration,
+  and the cost is one role-bucket write per heartbeat per role held.
+  `POST /v1/interests/unsubscribe`
   takes `client_instance_id` and frees only the claims naming that process, freeing a claim that
   names no process outright, while `DELETE /v1/interests/<session_id>` keeps its force and is
   the one caller that forces. It answers in `removed` the topics that left the record rather
   than the ones the request named, because a role lane topic whose claim it did not free stays
-  in the record: one interest record serves every process running under one session id, and the
-  live holder's deliveries ride on that topic. Such a release, where it states no process, does
-  not force and names that role's own lane topic, is a hand-back, and it marks the claim it
-  could not free (`RoleClaim.HandedBack`): no registration renews a marked claim, so the role
-  claim reaper frees the role one live window later. What that reaper weighs is the claim's own
-  renewal and not the liveness of the session id its holder registered under, so a claim renewed
-  inside the live window is kept whatever that session's record says, and one whose renewal has
-  lapsed is freed though a process of that session goes on registering — which is how a role an
-  older client handed back comes free one live window later while that client still runs. It
-  keeps two claims past a lapsed renewal: one that names no process, while its holder's session
-  read puts it short of `gone`, and one whose session carries a registration this listener
-  itself could not answer inside the live window. `GET /v1/roles/<role>`
+  in the record: one interest record serves every process running under one session id, and that
+  topic is the interest half of a claim that still stands, written there by the grant. Such a
+  release, where it states no process, does not force and names that role's own lane topic, is a
+  hand-back, and it marks the claim it could not free (`RoleClaim.HandedBack`): no registration
+  renews a marked claim, so the role claim reaper frees the role at its first pass past the live
+  window — one live window plus up to one reap interval, about ten minutes with the shipped
+  defaults. That mark is the one thing that takes a role past a holder session that still
+  answers. What the reaper weighs otherwise is unchanged: a claim renewed inside the live window
+  is kept whatever its holder's record says, and an unmarked claim whose renewal has lapsed is
+  kept while that session reads short of `gone` and freed once it is gone, for a claim that
+  names a process and one that names none alike, so a holder that has stopped answering keeps
+  its role. `GET /v1/roles/<role>`
   answers the holder's `client_instance_id` on the 200 and on a lapsed holder's 404, and
   `handed_back` on both where the claim carries the mark. Every grant writes a fresh record, so
   a grant to the process a marked claim names clears the mark.

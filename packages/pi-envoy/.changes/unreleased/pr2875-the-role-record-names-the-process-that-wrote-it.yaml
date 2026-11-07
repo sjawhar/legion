@@ -31,8 +31,7 @@ body: |-
   mark claims the role again at once and the grant writes a fresh record with no mark, so a hold
   marked that way is back before the listener's role claim reaper could free the role. Each
   registration renews every claim of this process the listener has not marked, whatever topics
-  that registration carries, where it once renewed a claim only while the interest record still
-  named that role's lane topic.
+  that registration carries.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875

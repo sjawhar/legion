@@ -65,8 +65,9 @@ type RoleReleaseAuthority struct {
 // that every claim standing at the deploy is still freed by its holder's clean stop, rather than
 // waiting out the role claim reaper. It closes nothing that was open: a second process that
 // resumed the session's id could already free that claim before this field existed, and the
-// first registration of the holder's own process adopts the claim and names it
-// (Registry.renewRoleClaim), after which only that process frees it.
+// first registration of that session id that states an instance adopts the claim and writes
+// that instance in (Registry.renewRoleClaim) - any process of the session, not only the one
+// that took the role - after which only the process named frees it.
 func (a RoleReleaseAuthority) frees(claim RoleClaim, sessionID string) bool {
 	if claim.HolderSessionID != sessionID {
 		return false
@@ -80,11 +81,12 @@ func (a RoleReleaseAuthority) frees(claim RoleClaim, sessionID string) bool {
 //
 // It answers the lane topics it left standing: the ones whose claim still names sessionID and
 // which this release did not free. Those are the topics Registry.Remove keeps in the session's
-// interest record, because one record serves every process running under one session id, and a
-// release from a process that does not hold the claim must not take the lane topic the process
-// that does holds its deliveries by. Every other topic named is the caller's to remove - one
-// that is not a role lane's, a wildcard, a role no record claims, a role another session holds,
-// and a role this release did free.
+// interest record, because one record serves every process running under one session id and
+// that topic is the interest half of a claim that still stands, written there by the grant
+// (SetRoleWithPrevious): a release from a process that does not hold the claim must not take
+// away the half it may not free. Every other topic named is the caller's to remove - one that
+// is not a role lane's, a wildcard, a role no record claims, a role another session holds, and
+// a role this release did free.
 //
 // A release that is its caller's hand-back (RoleReleaseAuthority.handsBack) marks a claim it may
 // not free rather than leaving it as it stands (releaseReadRoleClaim). Nothing here infers that:
@@ -162,8 +164,9 @@ const roleClaimReleaseAttempts = 3
 //
 // It answers whether the claim stands as sessionID's: the role's claim still names that session
 // and this release did not free it. That is what keeps the role's lane topic in the session's
-// interest record (releaseRoleClaims, Registry.Remove). A role this release freed, a role no
-// record claims and a claim another session holds each answer false, and so does every failure.
+// interest record (releaseRoleClaims, Registry.Remove), the interest half of a claim this
+// release left standing. A role this release freed, a role no record claims and a claim another
+// session holds each answer false, and so does every failure.
 //
 // A claim this release may not free is marked handed back instead, where the release is its
 // caller's own hand-back of this very role (RoleReleaseAuthority.handsBack,
@@ -237,7 +240,8 @@ func (r *Registry) releaseReadRoleClaim(ctx context.Context, sessionID, role str
 
 // markRoleClaimHandedBack writes read back with RoleClaim.HandedBack set, the mark a hand-back
 // leaves on the claim it was not authorised to free, so that no registration renews it again
-// (Registry.renewRoleClaim) and the role claim reaper frees the role one live window later. Its
+// (Registry.renewRoleClaim) and the role claim reaper frees the role once that renewal has
+// lapsed, one live window and up to one reap interval later. Its
 // one caller is releaseReadRoleClaim, over a release its caller stated to be a hand-back of this
 // very role; read is that release's own read of the record.
 //
@@ -308,17 +312,18 @@ func (r *Registry) markRoleClaimHandedBack(ctx context.Context, sessionID, role 
 // grace, measured from this registry's own start and given only to a claim this registry
 // restored at that start. A sessionTTL of zero grants no restart grace.
 //
-// The holder it releases from is the one the claim names: the caller found that holder gone by
-// reading this very claim (ReapRoleClaims), so a holder named beside the claim could only be
-// that same session, or one the caller never found gone.
+// The holder it releases from is the one the claim names, and it is the caller that decided the
+// claim may be taken from that holder (ReapRoleClaims): either the holder's session is gone, or
+// the claim carries the hand-back mark its own holder's release wrote, which is freed though
+// that session answers. A holder named beside the claim could only be that same session.
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or replacement, so
 // callers never report that a lost conditional delete released a claim. A failure is reported
 // retained, its error naming the release. A zero revision is a role no record claims, as it is
 // for releaseReadRoleClaim, and reports the claim missing.
 //
-// It makes no read of its own, so the reaper's pass, which found the holder gone in the claim
-// its scan carried, spends one bucket call on an expired claim, the conditional delete
+// It makes no read of its own, so the reaper's pass, which weighed the holder in the claim its
+// scan carried, spends one bucket call on an expired claim, the conditional delete
 // (ReapRoleClaims). That delete waits no longer than ctx (bus.Bounded), the pass's loop context
 // there.
 //
@@ -326,8 +331,8 @@ func (r *Registry) markRoleClaimHandedBack(ctx context.Context, sessionID, role 
 // the role again between that read and this delete keeps the role and is reported
 // ExpiredRoleClaimSuperseded. A delete ctx abandoned may still land after this answer. That is
 // safe to leave running: it deletes the claim only if the bucket still holds the very revision
-// that read returned, naming the holder the caller has just found gone from the session
-// bucket, so at worst a lapsed holder's claim is released a moment after the caller was told the
+// that read returned, naming the holder the caller has just judged to have lost the claim, so
+// at worst a lapsed holder's claim is released a moment after the caller was told the
 // bus did not answer, and a fresh claim that landed meanwhile is never touched.
 func (r *Registry) releaseReadExpiredRoleClaim(ctx context.Context, role string, claim RoleClaim, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
 	if claim.Revision == 0 {

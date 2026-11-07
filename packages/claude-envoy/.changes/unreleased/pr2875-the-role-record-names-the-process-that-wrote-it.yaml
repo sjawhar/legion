@@ -20,9 +20,8 @@ body: |-
   registration renews it. The re-assertion claims the role again on that heartbeat and the
   grant writes a fresh record with no mark, so the role is back before the listener's role
   claim reaper could free it. Each registration renews every claim of this process the listener
-  has not marked, whatever topics that registration carries, where it once renewed a claim only
-  while the interest record still named that role's lane topic — which this process, giving a
-  role up by deregistering the session rather than by releasing the lane, never removed.
+  has not marked, whatever topics that registration carries: this process gives a role up by
+  deregistering the session rather than by releasing the lane, so it leaves no mark of its own.
 time: 2026-11-06T17:29:51.000000000Z
 custom:
     Issue: pr2875

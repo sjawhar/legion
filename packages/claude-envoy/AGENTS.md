@@ -319,12 +319,11 @@ above says how to run it).
   process holds, and a release the holder's own renewal beat under each of the route's three
   conditional deletes fails rather than reporting one it did not make. The registration that
   renews those claims renews every one of them whatever topics it carries, and renews no claim
-  the listener has marked handed back: the lane-topic condition that once gated a renewal is
-  gone, and what says a role was given up is the mark a hand-back leaves on a claim it could not
-  free. This process writes no such mark — it gives a role up by deregistering the session, not
-  by releasing the lane — but a client built before a release stated its process can leave one
-  on this session's claim, and the re-assertion above claims the role back on the next
-  heartbeat, its grant a fresh record with no mark.
+  the listener has marked handed back: what says a role was given up is the mark a hand-back
+  leaves on a claim it could not free. This process writes no such mark — it gives a role up by
+  deregistering the session, not by releasing the lane — but a client built before a release
+  stated its process can leave one on this session's claim, and the re-assertion above claims
+  the role back on the next heartbeat, its grant a fresh record with no mark.
   The handoff directory `sessions/<claude-pid>/` is pruned at startup when its pid is gone —
   never deleted on shutdown, because Claude Code restarts the server inside the same `claude`
   process — and the two id-keyed directories, `roles/` and `titles/`, are pruned there too at

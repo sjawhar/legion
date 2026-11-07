@@ -425,8 +425,9 @@ test("the wait lands the grant inside the daemon's registration deadline for `cl
 })
 
 test("a claim under this session's own id that is never granted stops the pane once the wait is out", async () => {
-  // The wait is the listener's live window plus one heartbeat: past it, nothing explains a claim
-  // that still stands under this id, and the pane is stopped as any other failed boot is.
+  // The wait is `ROLE_CLAIM_WAIT_MS` (`src/legion-claim.ts`), the listener's live window and one
+  // retry more: past it, nothing explains a claim that still stands under this id, and the pane
+  // is stopped as any other failed boot is.
   const configDir = await tempDir()
   await mkdir(join(configDir, "projects", "p"), { recursive: true })
   await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
