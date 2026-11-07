@@ -376,7 +376,7 @@ func TestAHandoverResolvesTheHolderOfAWalkAfterThePauseBeforeIt(t *testing.T) {
 		defer close(released)
 		<-failed
 		time.Sleep(roleKeepDrainRetryPause / 2)
-		if err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
+		if _, err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
 			t.Errorf("release %s's claim of %s: %v", holder, role, err)
 		}
 	}()

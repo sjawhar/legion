@@ -7,11 +7,24 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 )
+
+// assertRemovedTopics fails unless removed, which Registry.Remove answers, holds exactly want:
+// the topics it took out of the record, which POST /v1/interests/unsubscribe reports as its
+// removed list.
+func assertRemovedTopics(t *testing.T, removed []string, want ...string) {
+	t.Helper()
+	got := slices.Sorted(slices.Values(removed))
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the release answered %v as removed, want %v", got, want)
+	}
+}
 
 // A release that frees no claim keeps that claim's lane topic in the interest record, and
 // removes every other topic it named. The record is shared by every process under one session
@@ -36,18 +49,24 @@ func TestAReleaseKeepsTheLaneTopicOfAClaimItDidNotFree(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
 
-			if err := reg.Remove(context.Background(), holder, []string{roleTopic, releaseKeptTopic}, tc.authority); err != nil {
+			removed, err := reg.Remove(context.Background(), holder, []string{roleTopic, releaseKeptTopic}, tc.authority)
+			if err != nil {
 				t.Fatalf("release %s's interests: %v", holder, err)
 			}
 
 			if tc.frees {
 				assertRoleHolder(t, reg, role, "")
-				// Both topics the request named are gone, which leaves no record at all.
+				// Both topics the request named are gone, which leaves no record at all,
+				// and both are what the release answers it removed.
 				assertInterestMissing(t, reg, holder)
+				assertRemovedTopics(t, removed, roleTopic, releaseKeptTopic)
 				return
 			}
 			assertRoleHolder(t, reg, role, holder)
 			assertInterestTopicsForSession(t, reg, holder, roleTopic)
+			// The answer is the topics that left the record, so the kept lane topic is not in
+			// it even though the request named it.
+			assertRemovedTopics(t, removed, releaseKeptTopic)
 		})
 	}
 }
@@ -63,12 +82,15 @@ func TestAReleaseThatKeepsEveryTopicItNamedLeavesTheRecordWhole(t *testing.T) {
 	roleTopic := contracts.RoleTopicPrefix + role
 	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
 
-	if err := reg.Remove(context.Background(), holder, []string{roleTopic}, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}); err != nil {
+	removed, err := reg.Remove(context.Background(), holder, []string{roleTopic}, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance})
+	if err != nil {
 		t.Fatalf("release %s's claim of %s from a second process: %v", holder, role, err)
 	}
 
 	assertRoleHolder(t, reg, role, holder)
 	assertInterestTopicsForSession(t, reg, holder, releaseKeptTopic, roleTopic)
+	// Nothing left the record, so the release answers no topic at all.
+	assertRemovedTopics(t, removed)
 }
 
 // The whole of the incident, on one session id: a first process takes the role and renews it; it
@@ -117,9 +139,13 @@ func TestASecondProcessThatTookALapsedClaimKeepsItThroughTheFirstsRelease(t *tes
 	claimRoleAs(t, reg, session, "example-host", role, roleClaimSecondInstance)
 
 	// 4. The first process's release arrives, naming itself.
-	if err := reg.Remove(ctx, session, []string{roleTopic}, RoleReleaseAuthority{ClientInstanceID: roleClaimInstance}); err != nil {
+	removed, err := reg.Remove(ctx, session, []string{roleTopic}, RoleReleaseAuthority{ClientInstanceID: roleClaimInstance})
+	if err != nil {
 		t.Fatalf("the first process's release of %s: %v", role, err)
 	}
+	// The second process holds the claim, so the lane topic stays and the release answers that
+	// it removed nothing.
+	assertRemovedTopics(t, removed)
 	taken := storedRoleClaim(t, reg, role)
 	if taken.HolderSessionID != session || taken.ClientInstanceID != roleClaimSecondInstance || taken.HandedBack {
 		t.Fatalf("the claim after the first process's release is %+v, want %s's claim of process %q, unmarked", taken, session, roleClaimSecondInstance)

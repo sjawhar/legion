@@ -550,7 +550,7 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	pollMatch(t, reg, "m1", "notifications.test", 1, 5*time.Second)
 
 	// Delete via KV Delete operation (empty topics = delete all)
-	if err := reg.Remove(context.Background(), "ses_del", nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), "ses_del", nil, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -857,7 +857,7 @@ func TestRemoveAllDeletesAnUndecodableInterestRecordAndReleasesItsRoles(t *testi
 	reg, kv := coldRegistry(t, conn)
 	const sessionID = "ses_undecodable_remove_all"
 	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
-	if err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove(%s, nil) over an undecodable record: %v", sessionID, err)
 	}
 	if entry, err := kv.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {
@@ -879,7 +879,7 @@ func TestRemoveTopicsLeavesAnUndecodableInterestRecordAndReleasesTheirRoles(t *t
 	reg, kv := coldRegistry(t, conn)
 	const sessionID = "ses_undecodable_remove_topics"
 	storeUndecodableInterest(t, reg, kv, sessionID, "reviewer")
-	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.role.reviewer"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, []string{"notifications.role.reviewer"}, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove(%s, its role topic) over an undecodable record: %v", sessionID, err)
 	}
 	if holder, err := reg.RoleHolder("reviewer"); err != nil || holder != "" {
@@ -1276,7 +1276,7 @@ func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	putInterest(t, kv, Interest{SessionID: "ses_rm", MachineID: "m1", Topics: []string{"topic.a", "topic.b", "topic.c"}})
 
 	// Remove topic B — cache is cold, must read from KV
-	if err := reg.Remove(context.Background(), "ses_rm", []string{"topic.b"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), "ses_rm", []string{"topic.b"}, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
@@ -1309,8 +1309,8 @@ func TestRemoveAndSetRole_DropStoredTopicsReachingAPrivateStreamSubject(t *testi
 	}
 	for name, write := range map[string]func(*Registry) ([]string, error){
 		"unsubscribe": func(reg *Registry) ([]string, error) {
-			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>"},
-				reg.Remove(context.Background(), "ses_stale", []string{"topic.gone"}, releasedByItsProcess)
+			_, err := reg.Remove(context.Background(), "ses_stale", []string{"topic.gone"}, releasedByItsProcess)
+			return []string{"notifications.agent.ses_stale", "notifications.dispatch.issue.KEY-1.>"}, err
 		},
 		"role set": func(reg *Registry) ([]string, error) {
 			_, err := reg.SetRole("ses_stale", "m1", "reviewer", false)
@@ -1516,7 +1516,7 @@ func TestRemove_ReleasesRoleClaimAfterSameSessionReplacement(t *testing.T) {
 	reg, _ := coldRegistry(t, conn)
 	claimRoleAs(t, reg, "ses_role", "m1", "legion-controller", roleClaimInstance)
 	claimRoleAs(t, reg, "ses_role", "m1", "legion-reviewer", roleClaimInstance)
-	if err := reg.Remove(context.Background(), "ses_role", []string{"notifications.role.legion-controller"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), "ses_role", []string{"notifications.role.legion-controller"}, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove controller role: %v", err)
 	}
 
@@ -2159,7 +2159,7 @@ func TestRemoveWritesThroughCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}, releasedByItsProcess); err != nil {
 		t.Fatalf("unsubscribe failed: %v", err)
 	}
 	if _, err := reg.Upsert(
@@ -2191,7 +2191,7 @@ func TestRemoveAllClearsCache(t *testing.T) {
 	); err != nil {
 		t.Fatalf("subscribe failed: %v", err)
 	}
-	if err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
 		t.Fatalf("unsubscribe all failed: %v", err)
 	}
 
@@ -2212,7 +2212,7 @@ func TestRemoveAllReleasesRoleClaims(t *testing.T) {
 		role      = "legion-controller"
 	)
 	claimRoleAs(t, reg, sessionID, "example-host", role, roleClaimInstance)
-	if err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, nil, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -2238,7 +2238,7 @@ func TestRemoveAllReleasesRoleClaimMissingFromInterest(t *testing.T) {
 	if _, err := reg.roleKV.Put(role, []byte(sessionID)); err != nil {
 		t.Fatalf("seed orphaned role claim: %v", err)
 	}
-	if err := reg.Remove(context.Background(), sessionID, nil, RoleReleaseAuthority{Force: true}); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, nil, RoleReleaseAuthority{Force: true}); err != nil {
 		t.Fatalf("Remove all: %v", err)
 	}
 	assertRoleHolder(t, reg, role, "")
@@ -2803,7 +2803,7 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 			pollMatch(t, reg, machineID, "notifications.remote", 1, 5*time.Second)
 		},
 	})
-	if err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), sessionID, []string{"notifications.b"}, releasedByItsProcess); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 
@@ -3249,7 +3249,7 @@ func TestCachedRoleHolderFollowsAnotherRegistrysClaimsWithoutReadingTheBucket(t 
 	requireHolder("reviewer", "ses_first")
 	claimRoleAs(t, writerRegistry, "ses_second", "m1", "reviewer", roleClaimInstance)
 	requireHolder("reviewer", "ses_second")
-	if err := writerRegistry.Remove(context.Background(), "ses_second", []string{contracts.RoleTopicPrefix + "reviewer"}, releasedByItsProcess); err != nil {
+	if _, err := writerRegistry.Remove(context.Background(), "ses_second", []string{contracts.RoleTopicPrefix + "reviewer"}, releasedByItsProcess); err != nil {
 		t.Fatalf("release the role: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return holderOf(readerRegistry, "reviewer") == "" })

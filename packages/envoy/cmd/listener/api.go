@@ -1395,7 +1395,9 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 			}
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
-			if err := registry.Remove(ctx, sessionID, nil, store.RoleReleaseAuthority{Force: true}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+			// A deregistration answers no topic list, and this route's 204 carries no body
+			// to write one in, so the store's first answer is dropped here.
+			if _, err := registry.Remove(ctx, sessionID, nil, store.RoleReleaseAuthority{Force: true}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 				writeStoreError(ctx, w, err, http.StatusInternalServerError)
 				return
 			}
@@ -2186,13 +2188,20 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		// a session id names no process, and a second process that resumed this one's id hands
 		// back a role it does not hold. This route never forces a release; DELETE
 		// /v1/interests/<session_id> is the one that does.
-		if err := d.registry.Remove(ctx, body.SessionID, body.Topics, store.RoleReleaseAuthority{ClientInstanceID: body.ClientInstanceID}); err != nil {
+		removed, err := d.registry.Remove(ctx, body.SessionID, body.Topics, store.RoleReleaseAuthority{ClientInstanceID: body.ClientInstanceID})
+		if err != nil {
 			writeStoreError(ctx, w, err, http.StatusInternalServerError)
 			return
 		}
 		// A consumer-delivery session's consumer stops filtering on the topics just removed.
 		d.consumers.refollow(r.Context(), d, body.SessionID)
-		removed := body.Topics
+		// removed is what the store took out of the record, not the topics the request named.
+		// The two differ over a role lane topic the record kept: a release that may not free
+		// the claim leaves the lane topic standing (store.Registry.Remove), and echoing the
+		// request would tell the client a topic was removed while its deliveries still ride on
+		// it. A deregistration, which names no topic and deletes the whole record, and a
+		// release whose every named topic was kept both answer the empty list, and the store's
+		// nil is written as that empty list rather than as null.
 		if removed == nil {
 			removed = []string{}
 		}

@@ -2998,7 +2998,7 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementIsKeptForItsNextHolder
 	controllerTopic := contracts.RoleTopicPrefix + controller
 	// The claims above name no process, so the release that frees one is the forced one DELETE
 	// /v1/interests/<session_id> makes (store.RoleReleaseAuthority.Force).
-	if err := harness.registry.Remove(context.Background(), "ses_role", []string{controllerTopic}, store.RoleReleaseAuthority{Force: true}); err != nil {
+	if _, err := harness.registry.Remove(context.Background(), "ses_role", []string{controllerTopic}, store.RoleReleaseAuthority{Force: true}); err != nil {
 		t.Fatalf("release controller role: %v", err)
 	}
 

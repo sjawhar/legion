@@ -221,6 +221,13 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // whose every named topic was kept writes nothing at all, since an empty list is how
 // removeInterestTopics is told to delete the whole record.
 //
+// Remove answers the topics it took out of the record, and that list is what POST
+// /v1/interests/unsubscribe reports as removed. It is the removed list rather than the one the
+// caller named because the two part company over a kept lane topic: the caller named it, the
+// record still holds it, and an answer echoing the request would report a removal that did not
+// happen. A deregistration answers no list at all - it deletes the whole record, so there is no
+// list of named topics to report, and its route writes the empty list for it.
+//
 // An empty topics is the whole of the session's interests, so the claims a deregistration
 // releases come from two sources: the role topics of the session's own interest record
 // (releaseRoleClaims), which runs first, and then the roles the role claim view names it the
@@ -237,31 +244,34 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // names a process frees the claims of that process and leaves another process's alone, and the
 // administrator's force frees them all; neither leaves a mark, since a mark is for the
 // hand-back that could free nothing.
-func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string, release RoleReleaseAuthority) error {
+func (r *Registry) Remove(ctx context.Context, sessionID string, topics []string, release RoleReleaseAuthority) ([]string, error) {
 	if len(topics) == 0 {
 		item, err := r.Get(ctx, sessionID)
 		if err == nil {
 			if _, err := r.releaseRoleClaims(ctx, sessionID, item.Topics, release, false); err != nil {
-				return err
+				return nil, err
 			}
 		} else if !errors.Is(err, nats.ErrKeyNotFound) && !errors.Is(err, ErrMalformedInterest) {
-			return err
+			return nil, err
 		}
 		if err := r.releaseAllRoleClaims(ctx, sessionID, release); err != nil {
-			return err
+			return nil, err
 		}
-		return r.removeInterestTopics(ctx, sessionID, topics)
+		return nil, r.removeInterestTopics(ctx, sessionID, topics)
 	}
 	marks := release.ClientInstanceID == "" && !release.Force
 	kept, err := r.releaseRoleClaims(ctx, sessionID, topics, release, marks)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	removed := topicsExcept(topics, kept)
 	if len(removed) == 0 {
-		return nil
+		return removed, nil
 	}
-	return r.removeInterestTopics(ctx, sessionID, removed)
+	if err := r.removeInterestTopics(ctx, sessionID, removed); err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 // topicsExcept is topics less the ones in kept, which releaseRoleClaims left standing. It

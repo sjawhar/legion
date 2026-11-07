@@ -295,7 +295,7 @@ func TestTheOutboxHandsACopyOverPastTheCursorTheListenersDrainWrote(t *testing.T
 	// event rather than forwarding it, and the claim comes back under that keep. The claim this
 	// lane's route wrote names no process, so the release that frees it is the forced one
 	// DELETE /v1/interests/<session_id> makes (store.RoleReleaseAuthority.Force).
-	if err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
+	if _, err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
 		t.Fatalf("release %s's claim of %s: %v", holder, role, err)
 	}
 	second := outboxIssueEvent(t, database, broker, key, "9f2c6e18-40b7-4d35-8a91-5e07c3b8df42", "the issue's next event")

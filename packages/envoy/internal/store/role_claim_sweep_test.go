@@ -366,7 +366,7 @@ func TestTheDeregistrationSweepReadsOnlyTheClaimsItsSessionHoldsFromALargeRoleBu
 		ctx, cancel := context.WithTimeout(context.Background(), sweepDeadline)
 		defer cancel()
 		started := time.Now()
-		err := reg.Remove(ctx, session, nil, releasedByItsProcess)
+		_, err := reg.Remove(ctx, session, nil, releasedByItsProcess)
 		t.Logf("Remove(%s) over %d stored claims answered in %s", session, otherRoleClaims+len(roles), time.Since(started).Round(time.Millisecond))
 		return err, counting
 	}
@@ -430,7 +430,7 @@ func TestTheDeregistrationSweepReadsOnlyTheClaimsItsSessionHoldsFromALargeRoleBu
 		ctx, cancel := context.WithTimeout(context.Background(), sweepDeadline)
 		defer cancel()
 		started := time.Now()
-		err := cold.Remove(ctx, session, nil, releasedByItsProcess)
+		_, err := cold.Remove(ctx, session, nil, releasedByItsProcess)
 		elapsed := time.Since(started)
 		gets, deletes := counting.totals()
 		scans := counting.scans()
@@ -581,7 +581,7 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s) over a bucket with one unreadable claim of another session's: %v, want it released and no error", session, err)
 		}
 		for _, role := range held {
@@ -630,7 +630,7 @@ func TestTheDeregistrationSweepsFallbackGoesPastAClaimItCannotReadAndFailsOnOneI
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		err := reg.Remove(ctx, session, nil, releasedByItsProcess)
+		_, err := reg.Remove(ctx, session, nil, releasedByItsProcess)
 		if !errors.Is(err, refusal) {
 			t.Fatalf("Remove(%s) answered %v, want the refused delete of the claim it still holds", session, err)
 		}
@@ -733,7 +733,7 @@ func TestTheDeregistrationSweepLeavesEveryClaimAnotherSessionHolds(t *testing.T)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s): %v", session, err)
 		}
 		// The watcher has delivered nothing of this role, so a sweep reading the roles from the
@@ -759,7 +759,7 @@ func TestTheDeregistrationSweepLeavesEveryClaimAnotherSessionHolds(t *testing.T)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s): %v", session, err)
 		}
 		// The read the sweep makes before each release names the holder, and it is not this
@@ -794,7 +794,7 @@ func TestTheDeregistrationSweepLeavesEveryClaimAnotherSessionHolds(t *testing.T)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s) lost its conditional delete to a claim that landed under it: %v, want the loss read as the race it is", session, err)
 		}
 		if _, deletes := counting.callsOn(takenDuring); deletes != 1 {
@@ -911,7 +911,7 @@ func TestTheSweepsThatReadFromOneScanKeepAClaimTakenUnderTheirDelete(t *testing.
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
+		if _, err := reg.Remove(ctx, session, nil, releasedByItsProcess); err != nil {
 			t.Fatalf("Remove(%s) lost its conditional delete to a claim that landed under it: %v, want the loss read as the race it is", session, err)
 		}
 		assertTheNewHoldersClaimStands(t, rawRoles, taken, takenRevision())
@@ -978,7 +978,7 @@ func TestTheDeregistrationSweepFreesOnlyTheClaimsTheDeregisteringProcessHolds(t 
 
 	resumed, cancelResumed := context.WithTimeout(context.Background(), deadline)
 	defer cancelResumed()
-	if err := reg.Remove(resumed, session, nil, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}); err != nil {
+	if _, err := reg.Remove(resumed, session, nil, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}); err != nil {
 		t.Fatalf("a second process's deregistration of %s: %v", session, err)
 	}
 	assertRoleHolder(t, reg, held, session)
@@ -993,7 +993,7 @@ func TestTheDeregistrationSweepFreesOnlyTheClaimsTheDeregisteringProcessHolds(t 
 	waitForHeld(t, reg, session, held)
 	own, cancelOwn := context.WithTimeout(context.Background(), deadline)
 	defer cancelOwn()
-	if err := reg.Remove(own, session, nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(own, session, nil, releasedByItsProcess); err != nil {
 		t.Fatalf("the holder's own deregistration of %s: %v", session, err)
 	}
 	assertRoleHolder(t, reg, held, "")

@@ -502,7 +502,7 @@ func TestNoRegistrationRenewsAClaimItsHolderHandedBack(t *testing.T) {
 		t.Fatalf("the claim was renewed at %d, want the registration's own moment %d", renewed.RenewedAt, renewed.ClaimedAt+beat.Milliseconds())
 	}
 
-	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+	if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
 		t.Fatalf("hand %s's role back from a release naming no process: %v", role, err)
 	}
 	marked := storedRoleClaim(t, reg, role)

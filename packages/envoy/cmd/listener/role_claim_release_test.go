@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -121,6 +122,28 @@ func (r *roleClaimReleaseRig) assertNoRecord(t *testing.T) {
 	}
 }
 
+// assertRemoved fails unless the answer's removed list is exactly want. It reads the raw body
+// before decoding it, because a null decodes into the same empty slice an empty list does, and
+// null is what the route must never write.
+func (r *roleClaimReleaseRig) assertRemoved(t *testing.T, recorder *httptest.ResponseRecorder, want ...string) {
+	t.Helper()
+	body := recorder.Body.String()
+	if strings.Contains(body, `"removed":null`) {
+		t.Fatalf("body = %s, want removed written as a list, never null", body)
+	}
+	var answer struct {
+		Removed []string `json:"removed"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	got := slices.Sorted(slices.Values(answer.Removed))
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("removed = %v, want %v; body %s", got, want, body)
+	}
+}
+
 // An unsubscribe naming the process the claim names frees the role, and removes the topics it
 // named from the record as it always has. The instance is trimmed on the way in, as session_id
 // is, so a client that pads the field still hands its own role back.
@@ -136,6 +159,7 @@ func TestAnUnsubscribeNamingTheClaimsProcessFreesTheRoleAndRemovesItsTopics(t *t
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s; want 200", recorder.Code, recorder.Body.String())
 	}
+	rig.assertRemoved(t, recorder, contracts.RoleTopicPrefix+role)
 	rig.assertHolder(t, "")
 	rig.assertTopics(t, releaseKeptTopic)
 }
@@ -165,9 +189,9 @@ func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
 				if recorder.Code != http.StatusOK {
 					t.Fatalf("status = %d, body %s; want 200", recorder.Code, recorder.Body.String())
 				}
-				if body := recorder.Body.String(); !strings.Contains(body, contracts.RoleTopicPrefix+role) {
-					t.Fatalf("body = %s, want the topics it was given", body)
-				}
+				// The answer is the topics the release removed, so the lane topic it kept
+				// is not in it although the request named it.
+				rig.assertRemoved(t, recorder, releaseKeptTopic)
 				rig.assertHolder(t, "ses_release_other_topic")
 				rig.assertTopics(t, contracts.RoleTopicPrefix+role)
 			})
@@ -182,6 +206,69 @@ func TestAnUnsubscribeThatDoesNotNameTheClaimsProcessFreesNoRole(t *testing.T) {
 				rig.assertHolder(t, "ses_release_other_all")
 				rig.assertNoRecord(t)
 			})
+		})
+	}
+}
+
+// What the route answers as removed, over the four shapes a release has. The answer is the
+// topics the store took out of the record (store.Registry.Remove), never the topics the request
+// named: the two differ over a role lane topic the record kept, where echoing the request would
+// tell the client its deliveries no longer ride on a topic they still do. The empty list is the
+// answer wherever nothing left the record, and null is never written.
+func TestUnsubscribeAnswersTheTopicsItRemoved(t *testing.T) {
+	const role = "legion-controller"
+	roleTopic := contracts.RoleTopicPrefix + role
+	for name, tc := range map[string]struct {
+		sessionID   string
+		instance    string
+		topics      []string
+		wantRemoved []string
+		wantHolder  string
+		// wantTopics is the record the release leaves; an empty one is a record gone from the
+		// bucket.
+		wantTopics []string
+	}{
+		"a release that frees the claim it names": {
+			sessionID:   "ses_answer_frees_claim",
+			instance:    holdingProcess,
+			topics:      []string{releaseKeptTopic, roleTopic},
+			wantRemoved: []string{releaseKeptTopic, roleTopic},
+		},
+		"a release of a claim naming another process": {
+			sessionID:   "ses_answer_keeps_lane",
+			instance:    secondProcess,
+			topics:      []string{releaseKeptTopic, roleTopic},
+			wantRemoved: []string{releaseKeptTopic},
+			wantHolder:  "ses_answer_keeps_lane",
+			wantTopics:  []string{roleTopic},
+		},
+		"a release whose every named topic is kept": {
+			sessionID:  "ses_answer_keeps_every_topic",
+			instance:   secondProcess,
+			topics:     []string{roleTopic},
+			wantHolder: "ses_answer_keeps_every_topic",
+			wantTopics: []string{releaseKeptTopic, roleTopic},
+		},
+		"a deregistration, which names no topic": {
+			sessionID: "ses_answer_deregisters",
+			instance:  holdingProcess,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newRoleClaimReleaseRig(t, tc.sessionID, role, holdingProcess)
+
+			recorder := rig.unsubscribe(tc.instance, tc.topics...)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %s; want 200", recorder.Code, recorder.Body.String())
+			}
+			rig.assertRemoved(t, recorder, tc.wantRemoved...)
+			rig.assertHolder(t, tc.wantHolder)
+			if len(tc.wantTopics) == 0 {
+				rig.assertNoRecord(t)
+				return
+			}
+			rig.assertTopics(t, tc.wantTopics...)
 		})
 	}
 }

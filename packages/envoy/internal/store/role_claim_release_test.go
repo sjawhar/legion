@@ -75,7 +75,7 @@ func TestAReleaseFreesARoleClaimOnlyForTheProcessTheClaimNames(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Run("the role's own topic", func(t *testing.T) {
 				reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
-				if err := reg.Remove(context.Background(), holder, []string{roleTopic}, release.authority); err != nil {
+				if _, err := reg.Remove(context.Background(), holder, []string{roleTopic}, release.authority); err != nil {
 					t.Fatalf("release %s's claim of %s: %v", holder, role, err)
 				}
 				wantHolder, wantTopics := holder, []string{releaseKeptTopic, roleTopic}
@@ -87,7 +87,7 @@ func TestAReleaseFreesARoleClaimOnlyForTheProcessTheClaimNames(t *testing.T) {
 			})
 			t.Run("every topic the session has", func(t *testing.T) {
 				reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
-				if err := reg.Remove(context.Background(), holder, nil, release.authority); err != nil {
+				if _, err := reg.Remove(context.Background(), holder, nil, release.authority); err != nil {
 					t.Fatalf("release every interest of %s: %v", holder, err)
 				}
 				wantHolder := holder
@@ -115,7 +115,7 @@ func TestAReleaseFreesNoClaimOfAnotherSession(t *testing.T) {
 		t.Fatalf("register %s's interests: %v", leaving, err)
 	}
 
-	if err := reg.Remove(context.Background(), leaving, nil, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), leaving, nil, releasedByItsProcess); err != nil {
 		t.Fatalf("release every interest of %s: %v", leaving, err)
 	}
 
@@ -146,7 +146,7 @@ func TestAClaimThatNamesNoProcessIsFreedByItsSessionsOwnRelease(t *testing.T) {
 				t.Fatalf("the seeded claim names the process %q, want none", claim.ClientInstanceID)
 			}
 
-			if err := reg.Remove(context.Background(), holder, nil, authority); err != nil {
+			if _, err := reg.Remove(context.Background(), holder, nil, authority); err != nil {
 				t.Fatalf("release every interest of %s: %v", holder, err)
 			}
 
@@ -203,7 +203,7 @@ func TestARefusedReleaseLeavesTheStoredClaimAtItsOwnRevision(t *testing.T) {
 	reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
 	before := storedRoleClaim(t, reg, role)
 
-	if err := reg.Remove(context.Background(), holder, nil, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}); err != nil {
+	if _, err := reg.Remove(context.Background(), holder, nil, RoleReleaseAuthority{ClientInstanceID: roleClaimSecondInstance}); err != nil {
 		t.Fatalf("release every interest of %s: %v", holder, err)
 	}
 
@@ -276,7 +276,7 @@ func TestAReleaseThatRacesItsOwnHoldersRenewalFreesTheClaim(t *testing.T) {
 				}
 			})
 
-			if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, authority); err != nil {
+			if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, authority); err != nil {
 				t.Fatalf("hand %s's role back under its own renewal: %v", holder, err)
 			}
 
@@ -315,7 +315,7 @@ func TestAReleaseThatRacesAnotherClaimantFreesNothing(t *testing.T) {
 				claimRoleAs(t, reg, winner.session, "example-host", role, winner.instance)
 			})
 
-			if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess); err != nil {
+			if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess); err != nil {
 				t.Fatalf("hand %s's role back under another claim: %v", holder, err)
 			}
 
@@ -347,7 +347,7 @@ func TestAReleaseLeavesAClaimRenewedUnderEveryDeleteStanding(t *testing.T) {
 		}
 	})
 
-	err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess)
+	_, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, releasedByItsProcess)
 
 	if err == nil {
 		t.Fatalf("the release of a claim renewed under every delete answered success, want the failure that says the claim is still held")
@@ -396,7 +396,7 @@ func TestOnlyAHandBackStatingNoProcessMarksAClaimItCannotFree(t *testing.T) {
 			reg := releasableRoleClaim(t, role, holder, roleClaimInstance)
 			stood := storedRoleClaim(t, reg, role)
 
-			if err := reg.Remove(context.Background(), holder, tc.topics, tc.authority); err != nil {
+			if _, err := reg.Remove(context.Background(), holder, tc.topics, tc.authority); err != nil {
 				t.Fatalf("release %s's interests %v: %v", holder, tc.topics, err)
 			}
 
@@ -433,7 +433,7 @@ func TestAHandBackFreesAClaimThatNamesNoProcessAndMarksNothing(t *testing.T) {
 	)
 	reg := releasableRoleClaim(t, role, holder, "")
 
-	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+	if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
 		t.Fatalf("hand %s's role back from a release stating no process: %v", role, err)
 	}
 
@@ -463,7 +463,7 @@ func TestAMarkThatRacesItsOwnHoldersRenewalLandsOnTheClaimThatStands(t *testing.
 	}
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
-	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+	if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
 		t.Fatalf("hand %s's role back under its own renewal: %v", role, err)
 	}
 
@@ -492,7 +492,7 @@ func TestAMarkThatRacesAnotherProcessMarksNothing(t *testing.T) {
 	}
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
-	if err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
+	if _, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{}); err != nil {
 		t.Fatalf("hand %s's role back under another process's claim: %v", role, err)
 	}
 
@@ -552,7 +552,7 @@ func TestAHandBackLeavesAClaimRenewedUnderEveryWriteUnmarked(t *testing.T) {
 	}
 	reg.roleKV = bus.NewKeyValue(racing, reg.roleKV.WatchHandle(), reg.roleKV.Streams())
 
-	err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{})
+	_, err := reg.Remove(context.Background(), holder, []string{contracts.RoleTopicPrefix + role}, RoleReleaseAuthority{})
 
 	if err == nil {
 		t.Fatalf("the hand-back of a claim renewed under every write answered success, want the failure that says the claim is unmarked")
@@ -608,7 +608,7 @@ func TestAReleaseThatRacesTheAdoptionOfAClaimNamingNoProcess(t *testing.T) {
 				}
 			})
 
-			if err := reg.Remove(context.Background(), holder, []string{roleTopic}, tc.authority); err != nil {
+			if _, err := reg.Remove(context.Background(), holder, []string{roleTopic}, tc.authority); err != nil {
 				t.Fatalf("release %s's claim of %s under its adoption: %v", holder, role, err)
 			}
 

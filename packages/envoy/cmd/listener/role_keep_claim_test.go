@@ -65,7 +65,7 @@ func TestADrainThatFailedAForwardLeavesThatCopyAndTheRestToTheNextDrain(t *testi
 		// (drainKeptRole), and what this test is about is the lane one walk left behind. The
 		// claim names no process, so the release is the forced one DELETE
 		// /v1/interests/<session_id> makes (store.RoleReleaseAuthority.Force).
-		if err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
+		if _, err := harness.registry.Remove(ctx, holder, []string{contracts.RoleTopicPrefix + role}, store.RoleReleaseAuthority{Force: true}); err != nil {
 			t.Errorf("release %s's claim of %s: %v", holder, role, err)
 		}
 		return errors.New("the forward this listener ended on")

@@ -186,7 +186,7 @@ func TestRolesHeldByFollowsTheRoleClaims(t *testing.T) {
 	if got := heldRoles(t, reg, "ses_c"); !slices.Equal(got, []string{"planner"}) {
 		t.Fatalf("a claim this registry wrote is not in its view as the write answers: %v", got)
 	}
-	if err := reg.Remove(context.Background(), "ses_c", []string{"notifications.role.planner"}, releasedByItsProcess); err != nil {
+	if _, err := reg.Remove(context.Background(), "ses_c", []string{"notifications.role.planner"}, releasedByItsProcess); err != nil {
 		t.Fatalf("release planner: %v", err)
 	}
 	if got := heldRoles(t, reg, "ses_c"); len(got) != 0 {
