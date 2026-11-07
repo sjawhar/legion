@@ -80,6 +80,10 @@ describe("no text an agent reads names a native Dispatch tool", () => {
     }
   });
 
+  // The 30 s limit is a hang guard, not a budget: the row refuses every required field of every
+  // tool spec in turn, and bun's unwritten 5,000 ms per-test default is a limit on that work rather
+  // than on a hang. Measured in a 2-CPU pod: 0.14 s idle, 2.72 s at most under 16 busy loops
+  // (8 x nproc). It fires only if a refusal never settles.
   test("every refusal of a spec's example with one required field removed", async () => {
     let refusals = 0;
     for (const spec of dispatchToolSpecs) {
@@ -104,7 +108,7 @@ describe("no text an agent reads names a native Dispatch tool", () => {
       }
     }
     expect(refusals).toBeGreaterThan(20);
-  });
+  }, 30_000);
 
   test("the follow notice, for an issue and for a project document", () => {
     for (const details of [

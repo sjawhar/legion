@@ -61,6 +61,10 @@ async function runEntry(): Promise<{ code: number; stdout: Uint8Array; stderr: s
 }
 
 describe("the dispatch entry", () => {
+  // The 30 s limit is a hang guard, not a budget: the row runs the entry as a child process and
+  // reads its whole pipe, and bun's unwritten 5,000 ms per-test default is a limit on that work
+  // rather than on a hang. Measured in a 2-CPU pod: 0.36 s idle, 3.46 s at most under 16 busy
+  // loops (8 x nproc). It fires only if the child never exits or its pipe never ends.
   test("writes all of its output to a pipe, however long", async () => {
     const { code, stdout, stderr } = await runEntry();
     expect(stderr).toBe("");
@@ -69,5 +73,5 @@ describe("the dispatch entry", () => {
     expect(stdout.length).toBeGreaterThan(64 * 1024);
     expect(text).toContain(`P${PROJECTS - 1}`);
     expect(text.endsWith("\n")).toBe(true);
-  });
+  }, 30_000);
 });
