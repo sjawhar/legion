@@ -20,6 +20,8 @@ export const walkRoutes = [
   { page: "BroadcastPage", path: "/agents/broadcasts/:id" },
   { page: "AgentConversationPage", path: "/agents/:sessionId/live" },
   { page: "AgentArtifactPage", path: "/agents/:sessionId/artifacts/:slug" },
+  { page: "MachinesPage", path: "/machines" },
+  { page: "MachinePage", path: "/machines/:machine" },
   { page: "IssuePage", path: "/issues/:key/*" },
   { page: "ProjectPage", path: "/projects/:key" },
   { page: "ProjectPage", path: "/projects/:key/architecture" },

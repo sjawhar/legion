@@ -3,13 +3,7 @@ import { execFileSync } from "node:child_process"
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  isAncestor,
-  queryTmux,
-  sessionTitle,
-  type TmuxQuery,
-  tmuxPaneTitle,
-} from "../src/session-title"
+import { queryTmux, sessionTitle, type TmuxQuery, tmuxPaneTitle } from "../src/session-title"
 
 const SESSION_ID = "3084299d-32a7-41a3-ba9b-f61675b03b8d"
 const SERVER_PID = "4242"
@@ -288,14 +282,6 @@ test("a TMUX_PANE left over from elsewhere names no pane but this session's own"
       })
     )(SESSION_ID),
   ).toBe("legion 3084299d")
-})
-
-test("isAncestor finds this process and its parent, and not a process outside its chain", () => {
-  expect(isAncestor(String(process.pid))).toBe(true)
-  expect(isAncestor(String(process.ppid))).toBe(true)
-  expect(isAncestor("1")).toBe(false)
-  const child = Bun.spawnSync([process.execPath, "-e", "process.stdout.write(String(process.pid))"])
-  expect(isAncestor(child.stdout.toString())).toBe(false)
 })
 
 test("a title that shows nothing once cleaned falls through, from every source", async () => {

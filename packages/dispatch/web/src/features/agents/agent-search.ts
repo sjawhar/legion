@@ -1,5 +1,6 @@
 import type { Agent, InboxRow } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
+import { AGENTS_MACHINE_PARAM } from "../refs/routes";
 
 /**
  * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
@@ -11,11 +12,20 @@ export interface AgentFilters {
   readonly search: string;
 }
 
-/** The free-text query is the page's one URL-backed filter field (`?q=`, through the same
- *  capped, history-`replace`d hook `useIssueFilters` uses); `machine` and `role` stay plain
- *  component state, as they were before this box. */
+/** The page's two URL-backed filter fields, each through the same capped, history-`replace`d
+ *  hook `useIssueFilters` uses: the free-text query (`?q=`) and the machine (`?machine=`).
+ *  `role` stays plain component state, as it was before this box. Both parameters live here
+ *  rather than in the page, so the control around them can be rebuilt without moving them. */
 export function useAgentSearch(): readonly [string, (next: string) => void] {
   return useCappedSearchParam("q");
+}
+
+/** The machine filter, which is the address's own `?machine=` rather than part of `?q=`: the
+ *  free-text query matches the directory as well as the machine, so `?q=<host>` would also find
+ *  a session whose directory holds the machine's name, while `/machines/<machine>`'s link to
+ *  `/agents?machine=<host>` must name exactly the sessions on that machine. */
+export function useAgentMachine(): readonly [string, (next: string) => void] {
+  return useCappedSearchParam(AGENTS_MACHINE_PARAM);
 }
 
 /** Every word `search` names, lowercased; an empty query has none. The page splits this once per
@@ -53,14 +63,29 @@ export function matchesFilters(
   return words.every((word) => haystack.includes(word));
 }
 
-/** The machines and roles the live sessions actually occupy: a filter can only offer what is
- *  there, so a stale option can never hide every agent. */
-export function filterOptions(agents: readonly Agent[]): {
+/**
+ * The machines and roles the filter control offers: the ones the live sessions occupy, and the
+ * machine the filter already names wherever no live session reports it.
+ *
+ * That last one is the whole of this rule. `?machine=` can name a host nothing live reports —
+ * an old link, a machine whose sessions have ended, or `/machines/<machine>`'s own "Agents on
+ * this machine" link, which that page shows even when it draws nothing. The list is then
+ * honestly empty, which is the filter doing its job; but with the live hosts alone for options
+ * the control would show no value, read `All machines` while every row was hidden, and fire no
+ * change when the reader picked `All machines` — the one control that seems to show the filter
+ * could not clear it. Offering the named machine keeps the control showing the filter in force,
+ * so a stale option can never hide every agent with no way back.
+ */
+export function filterOptions(
+  agents: readonly Agent[],
+  machine: string
+): {
   machines: string[];
   roles: string[];
 } {
   const machines = new Set<string>();
   const roles = new Set<string>();
+  if (machine !== "") machines.add(machine);
   for (const agent of agents) {
     if (agent.host !== "") machines.add(agent.host);
     for (const role of agent.roles) roles.add(role);

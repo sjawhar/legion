@@ -20,7 +20,7 @@ import {
   userAgentStateQuery,
   whoAmIQuery,
 } from "../../api/queries";
-import type { Agent, InboxRow, Message, MessageDeliveryMode, MessageRead } from "../../api/types";
+import type { Agent, Message, MessageDeliveryMode, MessageRead } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
@@ -64,7 +64,7 @@ import {
   useAgentText,
 } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildInboxPath, buildIssuePath } from "../refs/routes";
+import { buildInboxPath, buildIssuePath, buildMachinePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
 import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
@@ -72,14 +72,17 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
+import { QUIET_AFTER_MS } from "./agent-groups";
 import {
   type AgentFilters,
   filterOptions,
   matchesFilters,
   searchWords,
   sessionIssueKeys,
+  useAgentMachine,
   useAgentSearch,
 } from "./agent-search";
+import { type NeedsYouBySession, tallyBySession } from "./ask-tally";
 import { deliveryAttempts } from "./attempts";
 import { BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
@@ -91,8 +94,6 @@ import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap }
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
-const INACTIVE_AFTER_MS = 10 * 60_000;
-
 /** The composer's one notice slot: the recipient limit, the exclusions, or the mode the selection
  *  sends in, one at a time. In the compact grid it is one line that scrolls sideways like the
  *  chips: between the mode and Send on a narrow screen, adding no height, and the third and last
@@ -101,26 +102,10 @@ const composerLineLayout =
   "mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1";
 const composerLine = `${composerLineLayout} ${dangerText}`;
 
-/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. */
+/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. It is the
+ *  Quiet bound of the four groups, taken from there so the two cannot drift. */
 function isInactive(agent: Agent, now: number): boolean {
-  return now - agent.last_seen >= INACTIVE_AFTER_MS;
-}
-
-/** Open asks from each session whose turn is the viewer's, keyed by session ID. */
-export type NeedsYouBySession = ReadonlyMap<string, number>;
-
-/** Open asks a session authored, tallied by that session's id: the walk both card numbers make
- *  over the one inbox query, each over the rows it counts (`keep`, every row by default). */
-function tallyBySession(
-  asks: readonly InboxRow[],
-  keep: (ask: InboxRow) => boolean = () => true
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const ask of asks) {
-    if (ask.author.kind !== "session" || !keep(ask)) continue;
-    counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
-  }
-  return counts;
+  return now - agent.last_seen >= QUIET_AFTER_MS;
 }
 
 /** Whether Dispatch has heard from the session at all: an event, or an open ask. */
@@ -538,6 +523,12 @@ function lastPathSegment(dir: string): string {
   return segments.at(-1) ?? dir;
 }
 
+/** A row's machine name, the one link in its directory line. It sits inside that line's
+ *  sentence, so it keeps its line box (`dispatch-inline-link`, `styles.css`) rather than taking
+ *  the 44 px touch floor every other link below 1280 px takes, which would make every row on a
+ *  phone a line taller; its padding reaches the hit size instead. */
+const machineLink = `dispatch-inline-link rounded underline outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`;
+
 function AgentRow({
   agent,
   hidden,
@@ -584,7 +575,7 @@ function AgentRow({
   // The name takes the row's width, so from `md` - where the span's own `md:` classes truncate
   // it - the directory gives its own up and keeps the segment that names the session's work,
   // with the whole path on the hover its `title` is.
-  const shownDir = `${agent.host} · ${mdViewport ? lastPathSegment(agent.dir) : agent.dir}`;
+  const shownDir = mdViewport ? lastPathSegment(agent.dir) : agent.dir;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -684,7 +675,16 @@ function AgentRow({
             data-agent-dir=""
             title={machineAndDir}
           >
-            {shownDir}
+            {/* Only the machine is a link: the span still reads `<machine> · <directory>` whole,
+                and the machine's own page is one click from a row that names it. */}
+            <Link
+              className={machineLink}
+              data-agent-machine={agent.host}
+              to={buildMachinePath(agent.host)}
+            >
+              {agent.host}
+            </Link>
+            {` · ${shownDir}`}
           </span>
           {agent.roles.map((role) => (
             <LabelPill key={role}>{role}</LabelPill>
@@ -879,7 +879,9 @@ function AgentFilterBar({
   onFilters: (filters: AgentFilters) => void;
   searchInputRef: RefObject<HTMLInputElement | null>;
 }): ReactNode {
-  const { machines, roles } = filterOptions(agents);
+  // The options carry the machine the filter names even when no live session reports it, so the
+  // control shows the filter in force and `All machines` can clear it (`filterOptions`).
+  const { machines, roles } = filterOptions(agents, filters.machine);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
   return (
     <fieldset className="mb-3 flex flex-wrap items-center gap-2">
@@ -1193,16 +1195,15 @@ export function AgentsPage(): ReactNode {
   // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
   // "issue key" field.
   const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
-  // The free-text query is the page's own `?q=`; `machine` and `role` stay plain state, as they
-  // were before this box.
+  // The free-text query and the machine are the page's own `?q=` and `?machine=`, both owned by
+  // `agent-search.ts`; `role` stays plain component state.
   const [search, setSearch] = useAgentSearch();
-  const [fieldFilters, setFieldFilters] = useState<Omit<AgentFilters, "search">>({
-    machine: "",
-    role: "",
-  });
-  const filters: AgentFilters = { ...fieldFilters, search };
+  const [machine, setMachine] = useAgentMachine();
+  const [role, setRole] = useState("");
+  const filters: AgentFilters = { machine, role, search };
   const setFilters = (next: AgentFilters) => {
-    setFieldFilters({ machine: next.machine, role: next.role });
+    setRole(next.role);
+    if (next.machine !== machine) setMachine(next.machine);
     if (next.search !== search) setSearch(next.search);
   };
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1381,6 +1382,9 @@ export function AgentsPage(): ReactNode {
           <span>Live Envoy sessions and their Dispatch activity.</span>
           <Link className={`${linkText} ${linkHoverText}`} to="/agents/broadcasts">
             Broadcasts
+          </Link>
+          <Link className={`${linkText} ${linkHoverText}`} to="/machines">
+            Machines
           </Link>
         </p>
       </header>

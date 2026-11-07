@@ -193,6 +193,8 @@ const agentArtifactReferencePattern = new RegExp(
   "u"
 );
 const agentArtifactPathPattern = /^\/agents\/([^/]+)\/artifacts\/([^/]+)$/;
+/** One machine's page: `/machines/<machine>`, the machine name as one percent-encoded segment. */
+const machinePathPattern = /^\/machines\/([^/]+)$/;
 
 /** The page of an agent's artifact, the router's pattern for `AgentArtifactRoute`. */
 export const AGENT_ARTIFACT_PATH = "/agents/:sessionId/artifacts/:slug";
@@ -501,6 +503,31 @@ export function parseAgentArtifactPath(
     return undefined;
   }
   return agentArtifactRoute(session, match[2] ?? "", new URLSearchParams(search).get("v"));
+}
+
+/** The page of one machine's tmux layout (`features/machines/MachinePage.tsx`). The machine name
+ *  is percent-encoded as a session id is, because it holds dots and may be a whole domain name.
+ *  The builder lives here, with every other path the app builds, so a page links to a machine
+ *  without importing `features/machines`. */
+export function buildMachinePath(host: string): string {
+  return `/machines/${encodeURIComponent(host)}`;
+}
+
+/** The `?machine=` the Agents page filters on, named once here so the page reading it
+ *  (`useAgentMachine`) and the links building it cannot drift apart. */
+export const AGENTS_MACHINE_PARAM = "machine";
+
+/** The Agents page narrowed to one machine, `/agents?machine=<host>`: the link a machine's own
+ *  page sends a reader to its sessions by. */
+export function buildAgentsMachinePath(host: string): string {
+  return `/agents?${new URLSearchParams({ [AGENTS_MACHINE_PARAM]: host })}`;
+}
+
+/** The machine `/machines/<machine>` names, its segment percent-decoded as every other segment
+ *  is (`decodedSegment`); `undefined` for any other path and for a segment naming nothing. */
+export function parseMachinePath(pathname: string): string | undefined {
+  const match = pathname.match(machinePathPattern);
+  return match === null ? undefined : decodedSegment(match[1] ?? "");
 }
 
 /** The project a route is about: a project path's own key, or an issue path's key without its

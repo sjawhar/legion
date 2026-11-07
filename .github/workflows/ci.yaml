@@ -2324,11 +2324,17 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts, extensions/askgate/askgate-omp.test.ts and
-      # extensions/card-delivery-omp.test.ts run the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts, extensions/askgate/askgate-omp.test.ts,
+      # extensions/card-delivery-omp.test.ts and extensions/tmux-place-omp.test.ts run the pinned
+      # Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub
+      # Actions without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # extensions/tmux-place-omp.test.ts runs that binary in a pane of a tmux server of its own,
+      # the only way the place a session registers can be read from the session itself, and refuses
+      # on GitHub Actions without a tmux.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build

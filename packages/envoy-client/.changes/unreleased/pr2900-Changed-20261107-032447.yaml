@@ -1,0 +1,5 @@
+kind: Changed
+body: "`parentPid` and `isAncestor` moved here from `@sjawhar/claude-envoy` as `@legion/envoy-client/process-ancestry`, so the pane guard has one copy: a pane is a session's own only when the pane's first process is that process or one of its ancestors, and both the session title and the tmux place read that rule now."
+time: 2026-11-07T03:24:47.888437656Z
+custom:
+    Issue: pr2900

@@ -111,14 +111,39 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+/** The machine the seeded session reports. It reports it as `machine_id` and no `host`, which
+ *  the fake Envoy answers as the session's host (e2e/fake-envoy.ts), so this is the machine
+ *  `/machines` lists and `/machines/:machine` draws. */
+const machine = "two-builds-host";
+
+/** The window `/machines/:machine` draws: a three-pane window as tmux 3.5a writes it, `%0` over
+ *  `%1` beside `%2`. The seeded session sits in `%0`, so the page draws a real window rather
+ *  than saying it has none, and the drawing runs the layout parser. Its narrowest pane is 39 of
+ *  80 columns and 11 of 24 rows, which the walk's window is wide enough to draw rather than list
+ *  (a pane under 96 px wide or 42 px tall makes the window a list, WindowDrawing.tsx): panes of
+ *  this window hold those at any drawing wider than 192 px. */
+const windowLayout = "b05b,80x24,0,0[80x12,0,0,0,80x11,0,13{40x11,0,13,1,39x11,41,13,2}]";
+
 const session: FakeSession = {
   capabilities: ["aside", "btw", "steer"],
   dir: "/workspaces/two-builds",
-  machine_id: "two-builds-host",
+  machine_id: machine,
   roles: ["planner"],
   // The live view's stream hook takes a session uuid only, as a real session id is.
   session_id: "019a2b3c-0559-7000-8000-000000000559",
   title: "Two builds planner",
+  tmux_place: {
+    layout: windowLayout,
+    pane_id: "%0",
+    pane_index: 0,
+    server_pid: "4242",
+    session_name: "main",
+    socket: "/tmp/tmux-1000/default",
+    window_id: "@1",
+    window_index: 1,
+    window_name: "agents",
+    zoomed: false,
+  },
 };
 
 /** The text each seeded thing shows, which its route's landmark finds. */
@@ -345,6 +370,28 @@ function visits(seed: Seeded): readonly Visit[] {
         page.getByRole("img", { name: "shot.png version 1" }),
       ],
       url: `${agent}/artifacts/${seed.agentArtifact}`,
+    },
+    {
+      route: "/machines",
+      shows: (page) => [
+        heading(page, "Machines"),
+        page.locator(`[data-testid="machine-row"][data-machine="${machine}"]`),
+      ],
+      url: "/machines",
+    },
+    {
+      // The drawing is the point: a machine whose sessions are in no pane says so and draws
+      // nothing, which never runs the layout parser or the window drawing. The seeded session's
+      // place names a window of three panes, so the page draws that window and the pane box
+      // below is the session's own.
+      route: "/machines/:machine",
+      shows: (page) => [
+        heading(page, machine),
+        page
+          .getByTestId("window-layout")
+          .locator(`[data-testid="window-pane"][data-agent="${session.session_id}"]`),
+      ],
+      url: `/machines/${machine}`,
     },
     { route: "/issues/:key/*", shows: (page) => [issueHeading(page, shown.issue)], url: issue },
     {

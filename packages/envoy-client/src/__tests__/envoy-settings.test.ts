@@ -74,6 +74,7 @@ describe("envoySettings", () => {
         natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
       },
       heartbeatMs: 90_000,
+      tmuxPlaceCacheMs: 30_000,
       passDeadlineMs: 90_000,
       passDeadlineRaisedFrom: undefined,
     });
@@ -103,6 +104,7 @@ describe("envoySettings", () => {
         natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
       },
       heartbeatMs: 25,
+      tmuxPlaceCacheMs: 30_000,
       passDeadlineMs: 30_000,
       passDeadlineRaisedFrom: undefined,
     });
@@ -232,6 +234,27 @@ describe("envoySettings", () => {
     });
   });
 
+  // The cache spares a shared tmux server one call per session per event; a test that shortens
+  // the heartbeat shortens this with it, so it is held to the same bounds the heartbeat is.
+  test("ENVOY_TMUX_PLACE_CACHE_MS names the tmux place cache, inside the interval bounds", () => {
+    const config = configFrom({ envoy: listener });
+    expect(envoySettings({}, config)).toMatchObject({ tmuxPlaceCacheMs: 30_000 });
+    expect(envoySettings({ ENVOY_TMUX_PLACE_CACHE_MS: "50" }, config)).toMatchObject({
+      tmuxPlaceCacheMs: 50,
+    });
+    expect(envoySettings({ ENVOY_TMUX_PLACE_CACHE_MS: "10" }, config)).toMatchObject({
+      tmuxPlaceCacheMs: 25,
+    });
+    expect(envoySettings({ ENVOY_TMUX_PLACE_CACHE_MS: "99999999999" }, config)).toMatchObject({
+      tmuxPlaceCacheMs: 2_147_483_647,
+    });
+    for (const value of ["soon", "0", "-5000", ""]) {
+      expect(envoySettings({ ENVOY_TMUX_PLACE_CACHE_MS: value }, config)).toMatchObject({
+        tmuxPlaceCacheMs: 30_000,
+      });
+    }
+  });
+
   test("a section with enabled: false is off whatever the variables say, and the notice says so", () => {
     const config = configFrom({ envoy: { ...listener, enabled: false } });
     expect(
@@ -265,6 +288,7 @@ describe("envoySettings", () => {
       token: undefined,
       inbound: { natsUrls: ["nats://nats.internal.example:4222"], natsSeed: undefined },
       heartbeatMs: 90_000,
+      tmuxPlaceCacheMs: 30_000,
       passDeadlineMs: 90_000,
       passDeadlineRaisedFrom: undefined,
     });
@@ -388,6 +412,7 @@ describe("envoySettings", () => {
         token: "file-token",
         inbound: { off: "this session opens no NATS connection" },
         heartbeatMs: 90_000,
+        tmuxPlaceCacheMs: 30_000,
         passDeadlineMs: 90_000,
         passDeadlineRaisedFrom: undefined,
       });
@@ -528,6 +553,7 @@ describe("the NATS seed in envoy.json", () => {
         off: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
       },
       heartbeatMs: 90_000,
+      tmuxPlaceCacheMs: 30_000,
       passDeadlineMs: 90_000,
       passDeadlineRaisedFrom: undefined,
     });

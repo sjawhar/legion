@@ -6,6 +6,7 @@ import {
   buildDispatchReference,
   buildInboxPath,
   buildIssuePath,
+  buildMachinePath,
   buildProjectPath,
   buildReferencePath,
   documentItemPath,
@@ -17,6 +18,7 @@ import {
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
+  parseMachinePath,
   parseNodeReference,
   parseProjectPath,
   pictureReference,
@@ -1076,5 +1078,42 @@ test("routeIsInbox covers every path that renders the Inbox, and not the machine
   }
   for (const pathname of ["/credentials/machine", "/agents", "/settings", "/issues/CORE-1"]) {
     expect([pathname, routeIsInbox(pathname)]).toEqual([pathname, false]);
+  }
+});
+
+// A machine name is `ENVOY_MACHINE_ID` or the kernel hostname: it holds dots, may be a whole
+// domain name, and a deployment may put anything in it, so its segment is encoded and decoded
+// exactly as a session id's is.
+test("a machine path percent-encodes its name and reads it back", () => {
+  for (const host of [
+    "sami-devbox",
+    "example-host-devbox.example-tailnet.ts.net",
+    "legion infra/daemon",
+    "box%2F1",
+    "ホスト",
+  ]) {
+    const path = buildMachinePath(host);
+
+    expect([host, path.startsWith("/machines/")]).toEqual([host, true]);
+    expect([host, path.includes("/", "/machines/".length)]).toEqual([host, false]);
+    expect(parseMachinePath(path)).toBe(host);
+  }
+  expect(buildMachinePath("example-host-devbox.example-tailnet.ts.net")).toBe(
+    "/machines/example-host-devbox.example-tailnet.ts.net"
+  );
+  expect(buildMachinePath("legion infra/daemon")).toBe("/machines/legion%20infra%2Fdaemon");
+});
+
+test("a path that names no one machine names no machine at all", () => {
+  for (const pathname of [
+    "/machines",
+    "/machines/",
+    "/machines/one/two",
+    "/machines/%",
+    "/machines/%01",
+    "/agents",
+    "/credentials/machine",
+  ]) {
+    expect([pathname, parseMachinePath(pathname)]).toEqual([pathname, undefined]);
   }
 });

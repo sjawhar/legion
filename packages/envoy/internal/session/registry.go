@@ -40,6 +40,12 @@ type SessionEntry struct {
 	// whose plugin predates this field (subscribeBody had no "host"), and HostOrMachine falls
 	// back to MachineID so every display caller sees a populated value.
 	Host string `json:"host,omitempty"`
+	// TmuxPlace is where the session's process sits in tmux, as its own client read it and sent
+	// it with this registration. Nil for a session that is in no pane — one started outside
+	// tmux, or one whose tmux server has gone — and for a session whose plugin predates the
+	// field. A registration that carries no place clears one a previous registration stored,
+	// since the entry is built fresh from each body (cmd/listener's sessionEntryFromSubscribe).
+	TmuxPlace *TmuxPlace `json:"tmux_place,omitempty"`
 	// Delivery is DeliveryConsumer when the session registered for consumer delivery and the
 	// listener it registered through holds its session consumer (bus.SessionConsumers): the
 	// session's stored messages reach it from that consumer, relayed by the listener that owns it,
@@ -72,6 +78,27 @@ type SessionEntry struct {
 	// held it, while another instance's live session keeps its role however it is named. Empty
 	// for a client that predates the field.
 	ClientInstanceID string `json:"client_instance_id,omitempty"`
+}
+
+// TmuxPlace is a session's pane and the window and tmux session holding it, in the wire names
+// every side of the hop shares (packages/envoy-client's readTmuxPlace reports it,
+// packages/contracts' TmuxPlace declares it). No delivery reads it: it is what lets Dispatch draw
+// a machine's tmux layout and say which pane runs which session. A session outside tmux is a nil
+// TmuxPlace on the entry, never a place with empty members: every place names a whole pane.
+type TmuxPlace struct {
+	Socket      string `json:"socket"`
+	ServerPID   string `json:"server_pid"`
+	SessionName string `json:"session_name"`
+	WindowID    string `json:"window_id"`
+	WindowIndex int    `json:"window_index"`
+	WindowName  string `json:"window_name"`
+	PaneID      string `json:"pane_id"`
+	PaneIndex   int    `json:"pane_index"`
+	// Layout is tmux's window_layout string, which draws how the window is split. Empty when the
+	// client dropped it: a window split finely enough grows a layout past what a registration
+	// carries, and the other nine members are sent without it rather than the place being lost.
+	Layout string `json:"layout,omitempty"`
+	Zoomed bool   `json:"zoomed"`
 }
 
 // DeliveryConsumer is SessionEntry.Delivery for a session whose stored messages its session consumer

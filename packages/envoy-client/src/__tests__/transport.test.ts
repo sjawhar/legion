@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ISSUE_CLAIM_UNRESPONSIVE_GRACE_MS, MINTED_DEDUPE_KEY_PATTERN } from "@legion/contracts";
 import { bearerCredential, type RequestCredential } from "../bearer";
 import { machineID } from "../machine";
+import type { TmuxPlace } from "../tmux-place";
 import {
   createEnvoyClient,
   type DeliveryAnswer,
@@ -126,6 +127,49 @@ describe("EnvoyClient", () => {
       plugin: "@sjawhar/pi-envoy",
       plugin_version: "11.0.0",
     });
+  });
+
+  test("a subscription carries the session's tmux place, and no key when it has none", async () => {
+    const interest = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      topics: ["notifications.agent.ses_sender"],
+    };
+    const recorded = recordFetch([jsonResponse(interest), jsonResponse(interest)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+    const register = (place?: TmuxPlace) =>
+      client.subscribe({
+        sessionID: "ses_sender",
+        directory: "/work",
+        topics: ["notifications.agent.ses_sender"],
+        port: 0,
+        title: "Envoy QA",
+        driving: true,
+        plugin: PLUGIN,
+        ...(place === undefined ? {} : { place }),
+      });
+
+    const place: TmuxPlace = {
+      socket: "/tmp/tmux-1000/default",
+      server_pid: "4242",
+      session_name: "legion",
+      window_id: "@7",
+      window_index: 3,
+      window_name: "worker",
+      pane_id: "%3",
+      pane_index: 1,
+      layout: "b2f1,208x52,0,0,5",
+      zoomed: false,
+    };
+    await register(place);
+    await register();
+
+    expect(await recorded.requests[0]?.json()).toMatchObject({ tmux_place: place });
+    const outside = (await recorded.requests[1]?.json()) as Record<string, unknown>;
+    // The key is absent, not undefined: a registration that reports no place must not read as
+    // one reporting an empty place.
+    expect(Object.hasOwn(outside, "tmux_place")).toBe(false);
   });
 
   test("asks for consumer delivery and reads each delivery answer", async () => {
@@ -765,6 +809,52 @@ describe("EnvoyClient", () => {
       { ...versioned, state: "live" },
     ]);
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
+  });
+
+  test("drops a session row's tmux place, and any other member this build does not read", async () => {
+    const row = {
+      session_id: "ses_placed",
+      machine_id: "host-a",
+      dir: "/work",
+      port: 0,
+      title: "Envoy QA",
+      topics: ["notifications.agent.ses_placed"],
+      self_subscribed: false,
+    };
+    const placed = {
+      ...row,
+      // The listener answers the place of a session in a pane. Nothing on this side reads it —
+      // the one reader of this list is the `envoy_sessions` tool, which hands the model every
+      // member of every row, and a layout string is up to 2 000 characters of them — so the
+      // schema leaves it off and zod drops it.
+      tmux_place: {
+        socket: "/tmp/tmux-1000/default",
+        server_pid: "4242",
+        session_name: "legion",
+        window_id: "@7",
+        window_index: 3,
+        window_name: "worker",
+        pane_id: "%3",
+        pane_index: 1,
+        zoomed: true,
+      },
+    };
+    const recorded = recordFetch([
+      jsonResponse([
+        placed,
+        // A newer listener's row, read by this build: the member it does not know is dropped,
+        // not refused, so one added field never blanks a machine's session list.
+        { ...placed, session_id: "ses_newer", pane_title: "worker 3" },
+      ]),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    // A row carrying a place still parses, which is what keeps an older reader working against a
+    // listener that answers one.
+    expect(sessions[0]).toEqual({ ...row, state: "live" });
+    expect(sessions[1]).toEqual({ ...row, session_id: "ses_newer", state: "live" });
   });
 
   test("keeps an unresponsive row's state and its last registration, and asks for it by name", async () => {

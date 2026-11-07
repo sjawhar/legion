@@ -1,0 +1,5 @@
+kind: Changed
+body: "`isAncestor` and `parentPid` are imported from `@legion/envoy-client/process-ancestry` rather than declared here. Nothing a Claude Code session registers changes."
+time: 2026-11-07T03:24:44.888437656Z
+custom:
+    Issue: pr2900

@@ -1,0 +1,5 @@
+kind: Added
+body: "Every registration carries where the session sits in tmux, so Dispatch can draw a machine's tmux layout and say which pane runs which session. The place is whatever the session's cache holds when the registration is built, so no registration waits on a tmux call: one reading serves every registration for `ENVOY_TMUX_PLACE_CACHE_MS` and runs between them, since a tmux server driving a wall of panes answers slowly under load, and a reading that fails never reaches the heartbeat. The cache reads again on a timer of its own at that lifetime, so the place a registration carries is a lifetime old rather than a heartbeat old, and a pane that moved shows on the next registration. A session shutting down stops that timer and lets no reading in flight report anything. A session outside tmux, which is every session in a Kubernetes pod, makes no tmux call."
+time: 2026-11-07T03:24:49.888437656Z
+custom:
+    Issue: pr2900

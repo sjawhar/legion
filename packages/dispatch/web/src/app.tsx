@@ -116,6 +116,14 @@ const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
 );
 
+const MachinesPage = lazy(() =>
+  import("./features/machines/MachinesPage").then((module) => ({ default: module.MachinesPage }))
+);
+
+const MachinePage = lazy(() =>
+  import("./features/machines/MachinePage").then((module) => ({ default: module.MachinePage }))
+);
+
 const AgentConversationPage = lazy(() =>
   import("./features/agent-view/AgentConversationPage").then((module) => ({
     default: module.AgentConversationPage,
@@ -825,6 +833,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
                 <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
                 <Route element={<AgentArtifactPage />} path={AGENT_ARTIFACT_PATH} />
+                <Route element={<MachinesPage />} path="/machines" />
+                <Route element={<MachinePage />} path="/machines/:machine" />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />

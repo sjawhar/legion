@@ -31,6 +31,13 @@ type subscribeBody struct {
 	// consumer, relayed by that listener, or on the session's own NATS subscription, wherever
 	// its process runs. Empty for a session whose plugin predates this field.
 	Host string `json:"host"`
+	// TmuxPlace is where the session's process sits in tmux, as its own client read it from the
+	// tmux server it is under (packages/envoy-client's readTmuxPlace). No delivery reads it: it
+	// is what lets Dispatch draw a machine's tmux layout and say which pane runs which session.
+	// Absent for a session in no pane, and for one whose plugin predates the field; absent here
+	// it is written nil, clearing any place a previous registration stored, since the entry is
+	// built fresh from this body.
+	TmuxPlace *session.TmuxPlace `json:"tmux_place"`
 	// Plugin and PluginVersion name the plugin the session registers through (its npm package
 	// name) and that plugin's build, so the session list shows which build each session runs.
 	// Empty for a session whose plugin predates the fields.
@@ -83,6 +90,7 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 		Capabilities:     append([]string{}, body.Capabilities...),
 		SelfSubscribed:   body.SelfSubscribed,
 		Host:             body.Host,
+		TmuxPlace:        body.TmuxPlace,
 		Plugin:           strings.TrimSpace(body.Plugin),
 		PluginVersion:    strings.TrimSpace(body.PluginVersion),
 		ClientInstanceID: strings.TrimSpace(body.ClientInstanceID),
