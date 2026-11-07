@@ -1,6 +1,7 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
+import { spliceViewFrames } from "../view/view-slots";
 import { type MarkdownEngine, markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
 import type { TextSource } from "./text-references";
@@ -88,7 +89,12 @@ function finishBlock(element: HTMLElement): void {
 }
 
 const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
-  element.replaceChildren(serializer.serializeFragment(parsed.content));
+  const painted = serializer.serializeFragment(parsed.content);
+  // A body holding a `view` block's frame is written over in place, so no repaint takes a
+  // running frame out of the document; every other body is replaced outright.
+  if (!spliceViewFrames(element, painted)) {
+    element.replaceChildren(painted);
+  }
   finishBlock(element);
 };
 
@@ -211,6 +217,14 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
  * it costs one off-page walk rather than thousands of live mutations. Only the attach itself is
  * split, and by node count rather than by time: putting a node in is a pointer's work, and what
  * it costs is paid by the engine afterwards, where no clock of this module's can see it.
+ *
+ * A body whose live element already holds a `view` block's frame is the one exception: it is
+ * written over what is on the page in a single task (`spliceViewFrames`), because no split of the
+ * attach can keep the frame in the document. The batches carry what the element held off the
+ * page, and the stop that puts it back re-parents it; an `<iframe>` out of the document, even
+ * for an instant, loads again, and the block reads a second load as "the page moved away",
+ * which is permanent. The build above is still sliced, which is where a long body's work is,
+ * and the one task the attach then costs is the one `paintBlock` costs for the same body.
  */
 function* paintBlockInSlices(
   element: HTMLElement,
@@ -223,6 +237,9 @@ function* paintBlockInSlices(
   }
   finishBlock(built);
   yield;
+  if (spliceViewFrames(element, built)) {
+    return;
+  }
   // The reader's own text goes as the first batch of the body arrives, so the element holds one
   // or the other at every moment the engine draws, and the batches fill it from there. What it
   // held waits off the page meanwhile and goes back if this paint is stopped before its last

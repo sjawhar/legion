@@ -318,6 +318,63 @@ export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
   ];
 }
 
+/** The class every `view` block's frame carries, in a document and in a body alike. */
+const VIEW_FRAME_CLASS = `proof-typed-block proof-typed-block-view my-5 rounded-xl border px-4 pt-3 pb-4 ${borderDefault}`;
+
+/** The one selector for a `view` block's frame slot, which the mounted `ViewBlock` owns: the
+ *  element `renderViewBlockShell` stamps `data-dispatch-view-frame` on. Every pass that runs
+ *  over a painted body reads it, to leave the slot and everything in it to React. */
+export const VIEW_FRAME_SLOT = "[data-dispatch-view-frame]";
+
+/**
+ * The `view` block's shell as a static spec: the frame, a header naming the block and its page
+ * file, the content hole that holds the caption, and the frame slot. The editor's
+ * `viewBlockView` and the read-only text engine (a comment, ask or message body) both draw this
+ * one spec, so a view in a document and the same view in a comment are one shape.
+ *
+ * The frame slot sits outside the content hole, is `contenteditable="false"`, and holds the
+ * sandboxed frame a `ViewBlock` runs in it. It carries the block's `page` and `data` as
+ * attributes: `page` is what a repaint pairs a live slot with a fresh one by
+ * (`features/refs/MarkdownBody.tsx`), and `data` is the set of files the mounted block sends.
+ * Nothing but the mounted block writes inside the slot.
+ */
+export function renderViewBlockShell(node: ProseMirrorNode): DOMOutputSpec {
+  const page = String(node.attrs.page ?? "");
+  return [
+    "section",
+    { class: VIEW_FRAME_CLASS, "data-proof-block-type": "view" },
+    [
+      "header",
+      { contenteditable: "false", "data-proof-block-summary": "" },
+      ["span", { "data-proof-block-name": "" }, "view"],
+      ["span", { "data-proof-block-attribute": "page" }, page],
+    ],
+    ["div", { class: textPrimaryOnSurface, "data-proof-block-content": "" }, 0],
+    [
+      "div",
+      {
+        class: "not-prose",
+        contenteditable: "false",
+        "data-dispatch-view-data": String(node.attrs.data ?? ""),
+        "data-dispatch-view-frame": "",
+        "data-dispatch-view-page": page,
+      },
+    ],
+  ];
+}
+
+/**
+ * The typed blocks that draw a shell of their own, by type name: the one map that says which
+ * block is special and what draws it. The read-only text engine reads it to draw a body's
+ * blocks (`features/refs/markdown-engine.ts`), and the editor reads it to leave those types to
+ * their own node views (`features/doc/ask-block.ts`), so a block cannot be special on one path
+ * and a plain typed block on the other. Every other type of the schema draws `renderTypedBlock`.
+ */
+export const TYPED_BLOCK_SHELLS: Record<string, (node: ProseMirrorNode) => DOMOutputSpec> = {
+  ask: renderAskBlockShell,
+  view: renderViewBlockShell,
+};
+
 /** A decision shell's own three slots: the header and footer the card portals into, and the
  * content hole. */
 export interface AskShellSlots {

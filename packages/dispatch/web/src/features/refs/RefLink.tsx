@@ -1,6 +1,7 @@
 import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
+import { VIEW_FRAME_SLOT } from "../doc/typed-block-drawing";
 import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
@@ -98,13 +99,23 @@ export function RefLink({
 
 const excludedRefAncestorTags: Record<string, true> = { A: true, CODE: true, PRE: true };
 
+/**
+ * Whether a reference pass must leave this node alone: it sits inside a link, inline code or a
+ * preformatted block, or inside a `view` block's frame slot. The slot belongs to the block
+ * mounted in it (`features/view/ViewBlock.tsx`), and no pass that runs after a body is painted
+ * writes inside it. The link passes would otherwise rewrite the block's "not granted to this
+ * page" link and empty it for a portal, inside DOM React renders and owns.
+ */
 function isInsideExcludedAncestor(node: Node, root: Node): boolean {
   for (
     let current = node.parentNode;
     current !== null && current !== root;
     current = current.parentNode
   ) {
-    if (current instanceof HTMLElement && excludedRefAncestorTags[current.tagName] === true) {
+    if (
+      current instanceof HTMLElement &&
+      (excludedRefAncestorTags[current.tagName] === true || current.matches(VIEW_FRAME_SLOT))
+    ) {
       return true;
     }
   }
@@ -209,6 +220,10 @@ export function collectReferenceAnchors(
   const targets: ReferenceAnchor[] = [];
   let index = 0;
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a:not([data-dispatch-picture])")) {
+    // A link the mounted `view` block renders is React's, not a reference this pass titles.
+    if (anchor.closest(VIEW_FRAME_SLOT) !== null) {
+      continue;
+    }
     const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
     if (href === null) {
       continue;

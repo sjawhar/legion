@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -188,6 +189,47 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 	}
 	if memory.Len() != 0 {
 		t.Fatalf("serving a row-held version wrote %d objects to the store", memory.Len())
+	}
+}
+
+// A `HEAD` of a version's address is what a view block weighs against its 16 MiB before it sends
+// the bytes to a page (dispatch://INFRA-682, R6), so it must answer the length and read none of
+// them. The row records every version's size, whether its bytes sit in the row or in the store,
+// so the answer needs no object at all: the bucket is made unreachable here, and the `HEAD` is
+// expected to answer all the same, with the download headers its `GET` carries.
+func TestAHeadOfAStoreBackedVersionAnswersItsLengthWithoutReadingTheObject(t *testing.T) {
+	memory := filestest.NewMemory()
+	handler, database, _ := newTestServer(t, testServerOptions{files: memory})
+	issue := fileIssue(t, handler)
+	body := []byte(strings.Repeat("attempts", 4096))
+	upload := multipartRequest(t, handler, "/api/v1/issues/"+issue+"/artifacts", map[string]string{"name": "loop.json"}, "loop.json", "application/json", body, "alice")
+	if upload.Code != http.StatusCreated {
+		t.Fatalf("upload: status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	version := decodeBody[uploaded](t, upload)
+	if versionRow(t, database, version.Artifact.ID, 1) != nil {
+		t.Fatal("the row kept its bytes, so this test would not reach the store path")
+	}
+	route := "/api/v1/artifacts/" + version.Artifact.ID + "/versions/1"
+
+	memory.SetFailure(errors.New("the store must not be read to answer a HEAD"))
+	head := dispatchRequest(t, handler, http.MethodHead, route, nil, "alice")
+	if head.Code != http.StatusOK {
+		t.Fatalf("HEAD of a store-backed version: status=%d body=%s, want 200 answered from the row's size", head.Code, head.Body.String())
+	}
+	if got := head.Header().Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Errorf("HEAD Content-Length = %q, want %d", got, len(body))
+	}
+	if got := head.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("HEAD Content-Type = %q, want application/json", got)
+	}
+
+	// The control: with the bucket reachable the same address still serves the bytes, so what
+	// the HEAD avoided is a read it did not need rather than one the route has lost.
+	memory.SetFailure(nil)
+	served := dispatchRequest(t, handler, http.MethodGet, route, nil, "alice")
+	if served.Code != http.StatusOK || !bytes.Equal(served.Body.Bytes(), body) {
+		t.Fatalf("GET after the HEAD: status=%d, %d body bytes", served.Code, served.Body.Len())
 	}
 }
 

@@ -83,6 +83,9 @@ const READS = {
     key: ["references", "to", "dispatch://CORE/artifact/plan-md"],
   },
   grandparent: { key: issueQuery("CORE-00").queryKey },
+  // The data grants of page file artifact-1, the read the panel on its view and every `view`
+  // block showing that page share.
+  grants: { key: ["artifact-grants", "artifact-1"] },
   handoffs: { key: ["handoffs", "CORE-1"] },
   inbox: { key: inboxQuery().queryKey },
   inboxThreads: { key: inboxThreadsQuery().queryKey },
@@ -111,6 +114,7 @@ const READS = {
     key: documentSummaryQuery("CORE", "notes-md").queryKey,
   },
   otherDocumentPage: { data: { id: "artifact-2" }, key: ["artifact-ref", "CORE/notes-md"] },
+  otherGrants: { key: ["artifact-grants", "artifact-2"] },
   otherHandoffs: { key: ["handoffs", "CORE-9"] },
   otherIssueMessage: { key: messageQuery("CORE-9", "message-9").queryKey },
   otherProjectList: { key: projectIssuesQuery("OTHER", []).queryKey },
@@ -898,6 +902,16 @@ const rules: Record<string, Rule> = {
     refreshes: ["docSummary", "documentPage"],
     spares: ["otherDocSummary", "otherDocumentPage", "projects", "inbox", "detail", "summary"],
   },
+  "a grant change on an issue's page file refreshes that file's grants and no other file's": {
+    event: event("artifact.grants_changed", { artifact_id: "artifact-1" }),
+    refreshes: ["grants", "detail", "log"],
+    spares: ["otherGrants", "summary", "inbox", "projects", "docSummary"],
+  },
+  "a grant change on a project page file refreshes that file's grants and no other file's": {
+    event: event("artifact.grants_changed", { artifact_id: "artifact-1" }, documentOwner),
+    refreshes: ["grants"],
+    spares: ["otherGrants", "detail", "summary", "inbox", "projects"],
+  },
   "a comment anchored in a project document refreshes that document's panel": {
     event: event(
       "comment.created",
@@ -1171,6 +1185,7 @@ const eventsByType: Record<EventType, Event> = {
     from_version: 4,
     to_version: 7,
   }),
+  "artifact.grants_changed": event("artifact.grants_changed", { artifact_id: "artifact-3" }),
   "ask.anchor_refreshed": event("ask.anchor_refreshed", { anchor: null, id: "ask-1" }),
   "ask.answered": event("ask.answered", { anchor: null, id: "ask-1" }),
   "ask.edited": event("ask.edited", { anchor: null, id: "ask-1" }),

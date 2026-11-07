@@ -57,14 +57,14 @@ function install(anchoredBlockId: string | undefined) {
 
 test("no anchored block leaves every plain block without a node view of its own", () => {
   const { nodeViews } = install(undefined);
-  expect(Object.keys(nodeViews).sort()).toEqual(["ask", "image"]);
+  expect(Object.keys(nodeViews).sort()).toEqual(["ask", "image", "view"]);
 });
 
 test("the anchored block's node view draws the block and a slot a thread portals into", () => {
   const { hosts, nodeViews } = install("b-2");
   // Every plain block type of the schema takes the view; `doc` and `text` are no blocks of a
-  // document.
-  expect(Object.keys(nodeViews).sort()).toEqual(["ask", "heading", "image", "paragraph"]);
+  // document, and the typed blocks (`ask`, `view`, `image`) have node views of their own.
+  expect(Object.keys(nodeViews).sort()).toEqual(["ask", "heading", "image", "paragraph", "view"]);
   const construct = nodeViews.paragraph;
   if (construct === undefined) throw new Error("no paragraph node view was installed");
 

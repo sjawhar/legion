@@ -25,7 +25,8 @@
     "table_header",
     "table_header_row",
     "table_row",
-    "text"
+    "text",
+    "view"
   ],
   "marks": [
     "dispatchAsk",

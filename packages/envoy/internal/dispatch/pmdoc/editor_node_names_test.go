@@ -23,6 +23,7 @@ var editorNodeDifferences = map[string]string{
 	"check":       "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"plan_task":   "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 	"requirement": "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
+	"view":        "a typed block of schema/blocks.json: IsTypedBlock accepts it, nodeTypes does not list it",
 }
 
 // editorMarkDifferences are the mark names the editor's schema and markTypes do not share. There

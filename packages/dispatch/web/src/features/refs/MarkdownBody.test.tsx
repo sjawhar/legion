@@ -5,6 +5,7 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { installIntersectionObserver } from "../../__tests__/intersection-observer";
 import { renderWithQueries as render } from "../../__tests__/query-provider";
 import { api } from "../../api/client";
 import type {
@@ -36,6 +37,7 @@ const picture: IssueReferenceSummaryDocument = {
   latest_version: 2,
   name: "shot.png",
   primary: false,
+  size: 4096,
   slug: "shot-png",
 };
 
@@ -213,6 +215,7 @@ describe("Dispatch pictures", () => {
       latest_version: 4,
       name: "notes.md",
       primary: false,
+      size: 512,
       slug: "notes-md",
     };
     const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(issueSummary([notes]));
@@ -513,6 +516,41 @@ test("a typed callout in a body draws its name, kind and title above its content
     expect(view.container.textContent).not.toContain(":::callout");
   } finally {
     view.unmount();
+  }
+});
+
+// The `view` arm of `markdown-engine.ts`'s `renderBlock` is what gives a `view` block in a
+// comment, reply, ask or message the frame slot its page runs in. Drop that arm and the block
+// still draws - as a generic typed block with no slot - so nothing but the browser suite
+// noticed. This row is the cheap guard: it paints one body and reads the slot.
+test("a view block in a body draws the frame slot its page runs in", async () => {
+  const intersection = installIntersectionObserver();
+  const view = render(
+    <MarkdownBody
+      markdown={
+        ':::view{page="dispatch://CORE-1/artifact/chart-html" data="dispatch://CORE-1/artifact/data-json"}\nAttempts, by try.\n:::\n'
+      }
+    />
+  );
+
+  try {
+    const slot = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-dispatch-view-frame]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(slot.getAttribute("data-dispatch-view-page")).toBe(
+      "dispatch://CORE-1/artifact/chart-html"
+    );
+    expect(slot.getAttribute("data-dispatch-view-data")).toBe(
+      "dispatch://CORE-1/artifact/data-json"
+    );
+    expect(view.container.querySelector('section[data-proof-block-type="view"]')).not.toBeNull();
+    expect(view.container.textContent).toContain("Attempts, by try.");
+    expect(view.container.textContent).not.toContain(":::view");
+  } finally {
+    view.unmount();
+    intersection.restore();
   }
 });
 
@@ -979,6 +1017,7 @@ test("two references in one body each resolve their own inline link and title, r
     latest_version: 4,
     name: "Runbook.md",
     project: "CORE",
+    size: null,
     slug: "runbook-md",
   });
   const getIssue = spyOn(api, "getIssue");

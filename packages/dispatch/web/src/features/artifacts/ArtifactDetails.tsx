@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 import { isText } from "../../api/artifact-version";
-import { api } from "../../api/client";
+import { api, artifactVersionUrl } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
@@ -18,12 +18,7 @@ import { ChangeView } from "../doc/ChangeView";
 import { ReferencedBy } from "../refs/ReferencedBy";
 import { buildDispatchReference, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import {
-  artifactVersionUrl,
-  formatArtifactBytes,
-  versionLabel,
-  versionsNewestFirst,
-} from "./ArtifactHeader";
+import { formatArtifactBytes, versionLabel, versionsNewestFirst } from "./ArtifactHeader";
 
 // A blob (image/file) has no markdown to diff, so its "compare" is size and checksum, not a
 // text diff — this is what a document's From/To compare falls back to when either side lacks

@@ -10,6 +10,8 @@ import {
 import { createPortal } from "react-dom";
 
 import { type AskBlockHost, applyAskBlockShell, askShellSlots } from "../doc/typed-block-drawing";
+import { viewPortals } from "../view/ViewPortals";
+import { collectViewSlots, type ViewBlockSlot } from "../view/view-slots";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import {
@@ -34,6 +36,8 @@ const NO_ANCHORS: readonly ReferenceAnchor[] = [];
 const NO_PICTURES: readonly PictureAnchor[] = [];
 /** The same, for a body with no decision card to mount. */
 const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
+/** The same, for a body with no `view` block. */
+const NO_VIEWS: readonly ViewBlockSlot[] = [];
 
 /**
  * A host for each `ask` shell `paint` drew under `element` (`renderAskBlockShell`), paired in
@@ -417,6 +421,7 @@ export function useRenderedMarkdown(
   const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>(NO_ANCHORS);
   const [pictureAnchors, setPictureAnchors] = useState<readonly PictureAnchor[]>(NO_PICTURES);
   const [askHosts, setAskHosts] = useState<readonly AskBlockHost[]>(NO_ASK_HOSTS);
+  const [viewSlots, setViewSlots] = useState<readonly ViewBlockSlot[]>(NO_VIEWS);
   const [isFallback, setIsFallback] = useState(false);
   const [isPending, setIsPending] = useState(false);
   /** The source the element holds painted, which a pending source keeps rather than replacing
@@ -485,6 +490,7 @@ export function useRenderedMarkdown(
           }
           element.replaceChildren(document.createTextNode(markdown));
           setAskHosts(NO_ASK_HOSTS);
+          setViewSlots(NO_VIEWS);
           const { pictures: placeholders, references: anchors } = portalAnchors(
             element,
             decorate,
@@ -536,6 +542,8 @@ export function useRenderedMarkdown(
           );
           setReferenceAnchors(anchors);
           setPictureAnchors(placeholders);
+          const slots = collectViewSlots(element);
+          setViewSlots(slots.length === 0 ? NO_VIEWS : slots);
           if (engine !== undefined && parsed !== undefined) {
             drawing.current = drawMermaidDiagrams(
               element,
@@ -638,6 +646,7 @@ export function useRenderedMarkdown(
           key
         )
       ),
+      ...viewPortals(viewSlots),
       ...(Card === undefined
         ? []
         : askHosts.map((host) => <Card host={host} key={`ask-${host.key}`} />)),

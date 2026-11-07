@@ -99,8 +99,8 @@ test("a paragraph replaced by a rule draws the words it lost in the editor", asy
   const handle = await createEditor(root, {
     awareness: null,
     blockSchema,
-    // This row reads the editor's decorations, never its decision blocks.
-    onAskBlockHosts: () => {},
+    // This row reads the editor's decorations, never its typed blocks.
+    onTypedBlockHosts: () => {},
     // No picture in this row's document, so nothing ever asks for a latest version.
     watchPicture: () => () => {},
     user: { color: "#f59e0b", name: "alice" },

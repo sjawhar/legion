@@ -1,0 +1,234 @@
+<!doctype html>
+<!--
+  A minimal page for a Dispatch `view` block (skill://dispatch-view).
+
+  It posts `dispatch-view:ready`, takes the `MessagePort` Dispatch answers it with, draws one
+  card per data file as each `dispatch-view:data` arrives on that port, says what went wrong for
+  a file that carries an `error`, and posts its height. It loads nothing from the network,
+  because the page route's Content-Security-Policy refuses every request this page could make.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>A minimal Dispatch view page</title>
+    <style>
+      body {
+        margin: 0;
+        background: #ffffff;
+        color: #1f2328;
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      #view {
+        padding: 12px;
+      }
+      .card {
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        margin-bottom: 8px;
+        padding: 8px 10px;
+      }
+      .name {
+        font-weight: 600;
+      }
+      .version {
+        color: #59636e;
+        font-weight: 400;
+      }
+      .error {
+        color: #b35900;
+        margin: 4px 0 0;
+      }
+      .bars {
+        list-style: none;
+        margin: 6px 0 0;
+        padding: 0;
+      }
+      .bars li {
+        align-items: center;
+        display: flex;
+        gap: 6px;
+        margin-top: 2px;
+      }
+      .label {
+        flex: 0 0 120px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .bar {
+        background: #0969da;
+        border-radius: 2px;
+        height: 12px;
+        min-width: 1px;
+      }
+      pre {
+        margin: 6px 0 0;
+        max-height: 240px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="view">
+      <p id="waiting">Waiting for data from Dispatch.</p>
+    </main>
+    <script>
+      (() => {
+        "use strict";
+
+        const view = document.getElementById("view");
+
+        /** What each `error` code of a data entry means, in the words the reader sees. */
+        const CAUSES = {
+          "not-granted": "no grant of this page covers this file",
+          "not-text": "this file is not UTF-8 text",
+          "read-failed": "Dispatch could not read this file",
+          unreadable: "Dispatch could not resolve this file",
+        };
+
+        const element = (tag, className, text) => {
+          const node = document.createElement(tag);
+          if (className) {
+            node.className = className;
+          }
+          if (text !== undefined) {
+            node.textContent = text;
+          }
+          return node;
+        };
+
+        /**
+         * The rows of `text` when it is a JSON array of `{label, value}` objects, and undefined
+         * for any other text. A page that draws a shape of its own replaces this function.
+         */
+        const rowsOf = (text) => {
+          let parsed;
+          try {
+            parsed = JSON.parse(text);
+          } catch {
+            return undefined;
+          }
+          if (!Array.isArray(parsed) || parsed.length === 0) {
+            return undefined;
+          }
+          const rows = [];
+          for (const row of parsed) {
+            const fine =
+              row !== null &&
+              typeof row === "object" &&
+              typeof row.label === "string" &&
+              typeof row.value === "number" &&
+              Number.isFinite(row.value);
+            if (!fine) {
+              return undefined;
+            }
+            rows.push({ label: row.label, value: row.value });
+          }
+          return rows;
+        };
+
+        /** One bar per row, each as wide as its value against the largest. */
+        const bars = (rows) => {
+          let largest = 0;
+          for (const row of rows) {
+            largest = Math.max(largest, row.value, 0);
+          }
+          const list = element("ul", "bars");
+          for (const row of rows) {
+            const item = document.createElement("li");
+            item.appendChild(element("span", "label", row.label));
+            const bar = element("span", "bar");
+            bar.style.width = `${largest > 0 ? (row.value / largest) * 70 : 0}%`;
+            item.appendChild(bar);
+            item.appendChild(element("span", "value", String(row.value)));
+            list.appendChild(item);
+          }
+          return list;
+        };
+
+        /** One card for one entry of a `dispatch-view:data` message. */
+        const card = (entry) => {
+          const node = element("div", "card");
+          node.setAttribute("data-ref", String(entry.ref));
+          const heading = element("p", "head");
+          heading.appendChild(element("span", "name", String(entry.name || entry.ref)));
+          if (entry.version !== undefined) {
+            heading.appendChild(element("span", "version", ` v${entry.version}`));
+          }
+          node.appendChild(heading);
+          if (typeof entry.error === "string") {
+            node.setAttribute("data-error", entry.error);
+            let cause = CAUSES[entry.error] || `this file did not arrive (${entry.error})`;
+            if (typeof entry.status === "number") {
+              cause += `, answer ${entry.status}`;
+            }
+            node.appendChild(element("p", "error", cause));
+            return node;
+          }
+          const text = typeof entry.text === "string" ? entry.text : "";
+          const rows = rowsOf(text);
+          // Data is text, never markup: it goes in through `textContent`, never `innerHTML`.
+          node.appendChild(rows === undefined ? element("pre", "text", text) : bars(rows));
+          return node;
+        };
+
+        /** Draws every entry of one message, in the order of the block's `data` attribute. */
+        const draw = (files) => {
+          while (view.firstChild !== null) {
+            view.removeChild(view.firstChild);
+          }
+          if (files.length === 0) {
+            view.appendChild(element("p", "empty", "This block names no data file."));
+            return;
+          }
+          for (const entry of files) {
+            view.appendChild(card(entry));
+          }
+        };
+
+        /** Tells Dispatch how tall the frame must be. Dispatch holds it to 100 to 2,000 pixels. */
+        const postHeight = () => {
+          const height = Math.ceil(view.getBoundingClientRect().bottom) + 12;
+          window.parent.postMessage({ height, type: "dispatch-view:height" }, "*");
+        };
+
+        /** One `dispatch-view:data` message, as it arrives on the port. */
+        const take = (message) => {
+          if (
+            message === null ||
+            typeof message !== "object" ||
+            message.type !== "dispatch-view:data" ||
+            !Array.isArray(message.files)
+          ) {
+            return;
+          }
+          draw(message.files);
+          postHeight();
+        };
+
+        window.addEventListener("message", (event) => {
+          // Another block's page can post to this one, so read only Dispatch's own messages.
+          if (event.source !== window.parent) {
+            return;
+          }
+          const message = event.data;
+          // Dispatch answers the first `dispatch-view:ready` with the port every data message
+          // of this page comes over. The port is this document's own: move the frame and the
+          // data stops, which is why no data arrives on the window itself.
+          if (
+            message !== null &&
+            typeof message === "object" &&
+            message.type === "dispatch-view:port"
+          ) {
+            event.ports[0].onmessage = (sent) => take(sent.data);
+          }
+        });
+
+        window.parent.postMessage({ type: "dispatch-view:ready" }, "*");
+        postHeight();
+      })();
+    </script>
+  </body>
+</html>

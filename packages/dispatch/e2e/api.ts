@@ -12,6 +12,8 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactGrant,
+  ArtifactGrantsResponse,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -801,6 +803,102 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
     undefined,
     options
   );
+}
+
+/** The data files a person has granted this page file, oldest first
+ *  (`GET /api/v1/artifacts/{id}/grants`). */
+export function listArtifactGrants(id: string, options: ApiOptions = {}): Promise<ArtifactGrant[]> {
+  return request<ArtifactGrantsResponse>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/grants`,
+    "GET",
+    undefined,
+    options
+  ).then((answer) => answer.grants);
+}
+
+/** Grants this page file one data file, named as `dispatch://<issue or project>/artifact/<slug>`
+ *  with an optional `@v<N>`. Only a person may: a bearer gets `403 HUMAN_ONLY`. */
+export function createArtifactGrant(
+  id: string,
+  ref: string,
+  options: ApiOptions = {}
+): Promise<ArtifactGrant> {
+  return request<ArtifactGrant>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/grants`,
+    "POST",
+    { ref },
+    options
+  );
+}
+
+/** Takes one data file back from this page file. */
+export function deleteArtifactGrant(
+  id: string,
+  grantId: string,
+  options: ApiOptions = {}
+): Promise<void> {
+  return request<void>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/grants/${encodeURIComponent(grantId)}`,
+    "DELETE",
+    undefined,
+    options
+  );
+}
+
+/** One file to upload as a multipart form: its name, its bytes and the content type they are
+ *  stored under. */
+export interface UploadFileInput {
+  readonly name: string;
+  readonly content: Uint8Array | string;
+  readonly type: string;
+  readonly summary?: string;
+}
+
+/** Uploads one file to `path` (an owner's artifacts route) as a browser's own upload does, as a
+ *  multipart form, and answers the file it wrote. A JSON upload (`createIssueArtifact`) is
+ *  always stored as `text/markdown`, which makes a document, and a `view` block reads no
+ *  document, so a page file and a data file are uploaded here, under the content type named.
+ *  Uploading under a name the owner already holds writes that file's next version. */
+async function uploadFile(
+  path: string,
+  input: UploadFileInput,
+  login: string
+): Promise<ArtifactUploadResponse> {
+  const form = new FormData();
+  form.set("name", input.name);
+  if (input.summary !== undefined) {
+    form.set("summary", input.summary);
+  }
+  // A copy into a plain `Uint8Array`, since a `Buffer` is backed by a shared pool.
+  const bytes = typeof input.content === "string" ? input.content : new Uint8Array(input.content);
+  form.set("file", new Blob([bytes], { type: input.type }), input.name);
+  const response = await fetch(new URL(path, baseUrl), {
+    body: form,
+    headers: await userHeaders(login),
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `POST ${path} (${input.name}) failed: ${response.status} ${await response.text()}`
+    );
+  }
+  return (await response.json()) as ArtifactUploadResponse;
+}
+
+export function uploadIssueFile(
+  issue: string,
+  input: UploadFileInput,
+  login = "alice"
+): Promise<ArtifactUploadResponse> {
+  return uploadFile(`/api/v1/issues/${encodeURIComponent(issue)}/artifacts`, input, login);
+}
+
+export function uploadProjectFile(
+  project: string,
+  input: UploadFileInput,
+  login = "alice"
+): Promise<ArtifactUploadResponse> {
+  return uploadFile(`/api/v1/projects/${encodeURIComponent(project)}/artifacts`, input, login);
 }
 
 /**

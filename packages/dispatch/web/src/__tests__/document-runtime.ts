@@ -2,6 +2,7 @@ import type { BlockMark, EditorReferences } from "@legion/proof-editor";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
+import type { BlockSchema } from "../api/types";
 import { installTypedBlocks } from "../features/doc/ask-block";
 import type {
   ConnectDocument,
@@ -63,16 +64,25 @@ export interface FakeDocumentRuntime {
   text: string;
 }
 
-const blockSchema = {
+const blockSchema: BlockSchema = {
   types: [
     {
       attributes: {
-        kind: { choices: ["note", "warning"], default: "note", kind: "enum" as const },
-        title: { default: "", kind: "string" as const },
+        kind: { choices: ["note", "warning"], default: "note", kind: "enum" },
+        title: { default: "", kind: "string" },
       },
-      content: "paragraph+" as const,
+      content: "paragraph+",
       name: "callout",
-      render: "host" as const,
+      render: "host",
+    },
+    {
+      attributes: {
+        data: { default: "", kind: "string" },
+        page: { default: "", kind: "string" },
+      },
+      content: "paragraph+",
+      name: "view",
+      render: "host",
     },
   ],
   version: 1,
@@ -195,7 +205,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     installTypedBlocks(
       handle.view,
       options.blockSchema,
-      options.onAskBlockHosts,
+      options.onTypedBlockHosts,
       options.watchPicture,
       options.anchoredBlock
     );

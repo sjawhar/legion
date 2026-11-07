@@ -41,6 +41,7 @@ const tables = [
   "doc_checkpoints",
   "doc_snapshots",
   "doc_updates",
+  "artifact_grants",
   "artifact_versions",
   "artifacts",
   "issue_external_links",

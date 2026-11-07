@@ -882,6 +882,9 @@ func TestEveryResolvingIDRouteAnswersTheNotFoundItNames(t *testing.T) {
 		path = strings.ReplaceAll(path, "{id}", id)
 		path = strings.ReplaceAll(path, "{block_id}", blockID)
 		path = strings.ReplaceAll(path, "{session_id}", "s1")
+		// A grant id that is a whole uuid and no grant, so the delete reads the {id} beside it
+		// rather than answering GRANT_NOT_FOUND for a value uuid.Parse refuses.
+		path = strings.ReplaceAll(path, "{grant_id}", "00000000-0000-4000-8000-00000000000a")
 		path = strings.ReplaceAll(path, "{number}", "1")
 		return strings.ReplaceAll(path, "{attempt}", "1")
 	}

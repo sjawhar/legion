@@ -36,6 +36,14 @@ function tagged(tag: string): RegExp {
 const phoneTagged = tagged("phone");
 const webkitTagged = tagged("webkit");
 const firefoxTagged = tagged("firefox");
+// A row tagged `@alone` is a measurement: what it reads - how many bytes of JavaScript a page
+// made the browser fetch - is read against the machine rather than against the page alone, and
+// four lanes on one machine change what a page gets through before the row looks. `chromium`
+// takes every such row out of its own run (`grepInvert`) and `chromium-alone-rows` at the end of
+// this file runs them, one at a time, with nothing else on the machine. The tag, rather than the
+// row's title, is what the two projects agree on, so a row renamed keeps its project and a row
+// that drops the tag goes back to the four-lane run rather than nowhere.
+const aloneTagged = tagged("alone");
 // Specs of two Dispatch processes behind the round-robin proxy (e2e/round-robin-proxy.ts), each
 // named `*.multiprocess.e2e.ts`. The default run ignores them, since they need both processes and
 // the proxy's own routes; two-process mode (DISPATCH_E2E_PROCESSES=2, `bun run e2e:multiprocess`)
@@ -189,10 +197,14 @@ const multiprocessProjects = [
 const clockSpecs = /(heavy-bodies|heavy-document-writes|nested-directive)\.e2e\.ts/;
 
 // Every project that runs four lanes wide. The `-alone` projects below name all of them, so a
-// project added here is one more the clock rows wait for.
+// project added here is one more the measured rows wait for.
 const parallelProjects = [
+  // Every row of every spec, less the measurements: a row tagged `@alone` belongs to
+  // `chromium-alone-rows` below, and running it here as well would both measure it under three
+  // other lanes' load and run it twice.
   {
     name: "chromium",
+    grepInvert: aloneTagged,
     testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
     use: { ...devices["Desktop Chrome"] },
   },
@@ -227,6 +239,10 @@ const parallelProjects = [
   // view, since WebKit is the engine iOS Safari opens every subscription in.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
   // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // A sandboxed frame's own origin, what a page inside it may reach, the `postMessage` pair that
+  // carries its data and the height it reports: every row of `view-block`, `view-sandbox` and
+  // `view-grants`, since WebKit is the engine iOS Safari gives a `view` block's page. The block's
+  // byte budget (`view-budget`) is Chromium's alone; that file says why.
   // Without a `testMatch` the project would see every spec in this directory, so it names the
   // same `testIgnore` as `chromium`: no tagged row may sit in a plain-HTTP, multiprocess or
   // clock-read spec, and `heavy-bodies.e2e.ts` belongs to `webkit-alone` alone.
@@ -241,15 +257,19 @@ const parallelProjects = [
   // header's model and thinking pickers on a phone, what the Conversation's floating pills
   // cover on a phone, and the one-socket invariant also run in WebKit, the engine iOS Safari
   // uses; only those rows, since the rest of each spec is engine-agnostic.
-  // This project keeps its file `testMatch` and its title `grep` rather than an engine tag: 13
-  // rows is already as narrow as a tag would make it, and Playwright reads an array of regexes
-  // as OR (`createTitleMatcher` answers on the first that matches), so a tag beside the titles
-  // below would widen the project rather than narrow it.
+  // This project keeps its file `testMatch` and its title `grep` rather than an engine tag, and
+  // Playwright reads an array of regexes as OR (`createTitleMatcher` answers on the first that
+  // matches), so a tag beside the titles below would widen the project rather than narrow it.
+  // The `view` block's three engine specs join it by file and by the phrase `a view block`, which
+  // every one of their titles holds: a frame's sandbox, its opaque origin, what a page in it may
+  // reach, the `postMessage` pair and the frame's height are each engine's own, and this project
+  // is where they meet WebKit on a phone. A file matched here with no title in the `grep` runs
+  // zero tests and looks green, so a row added to one of those files keeps that phrase.
   {
     name: "webkit-iphone",
     testMatch:
-      /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket)\.e2e\.ts/,
-    grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view/,
+      /(agent-view|agent-view-settings|phone-conversation|delivery-live|live-socket|view-block|view-sandbox|view-grants)\.e2e\.ts/,
+    grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model|a tab holds one live socket for every live view|a view block/,
     use: { ...devices["iPhone 13"] },
   },
   // Firefox runs the rows a Firefox decision can change, and nothing else: it selects by the
@@ -283,6 +303,10 @@ const parallelProjects = [
   // a row is kept in the project that failed it so that failure cannot come back unseen.
   // The keyed write path's request failure, its abort, a tab's storage across a reload and the
   // ask before a tab unloads: five `keyed-writes` rows and two `keyed-send` rows.
+  // A sandboxed frame's own origin, what a page inside it may reach, the `postMessage` pair that
+  // carries its data and the height it reports: every row of `view-block`, `view-sandbox` and
+  // `view-grants`, for the reason given above `webkit`. The block's byte budget (`view-budget`)
+  // is Chromium's alone; that file says why.
   // The `testIgnore` is `chromium`'s, for the reason given above `webkit`.
   {
     name: "firefox",
@@ -326,12 +350,12 @@ const parallelProjects = [
 ] satisfies Project[];
 
 /**
- * The last projects of a run: the rows whose claim is a wall-clock time, with the machine to
- * themselves.
+ * The last projects of a run: the rows whose claim is a measurement - a wall-clock time, or how
+ * many bytes of JavaScript a page made the browser fetch - with the machine to themselves.
  *
  * Each names in `dependencies` every project before it, so Playwright starts the first of them
- * only once every parallel project has finished, and runs these three one after another rather
- * than three at a time. Ordering alone is not quiet: a project's own rows would still run four
+ * only once every parallel project has finished, and runs these four one after another rather
+ * than four at a time. Ordering alone is not quiet: a project's own rows would still run four
  * at a time, so each caps its own workers at one. Playwright 1.64.1 takes that cap per project -
  * `testProject.workers`, "The maximum number of concurrent worker processes to use for
  * parallelizing tests from this project", which its dispatcher holds a project's running jobs to
@@ -344,7 +368,7 @@ const parallelProjects = [
  * A project whose dependency has a failing row is not run at all: in a red run these rows are
  * left unrun rather than measured beside whatever the failing row's retry is doing.
  *
- * A command line that names one of these three files runs the whole suite, since a project's
+ * A command line that names one of these files runs the whole suite, since a project's
  * dependencies are pulled in whole: a file filter narrows a project it selects, never a project
  * selected to run before it. `--no-deps` is how one of these files is run by itself, and such a
  * run is as quiet as the machine it is on.
@@ -354,10 +378,16 @@ const parallelProjects = [
  * `heavy-document-writes.e2e.ts`, which drives no browser, and `nested-directive.e2e.ts` ran in
  * `chromium` alone and run in `chromium-alone` alone.
  *
- * These three select by `testMatch` alone, where `webkit` and `firefox` select by an engine tag:
- * their axis is the file, not a behaviour. Every row of a clock-read file runs here whatever it
- * asserts, because what puts it here is that its claim is a wall-clock time, and
+ * The first three select by `testMatch` alone, where `webkit` and `firefox` select by an engine
+ * tag: their axis is the file, not a behaviour. Every row of a clock-read file runs here
+ * whatever it asserts, because what puts it here is that its claim is a wall-clock time, and
  * `heavy-bodies.e2e.ts` carries no engine tag at all - the two tagged projects ignore it.
+ *
+ * `chromium-alone-rows` is the one that selects by tag, because its axis is the row: the byte
+ * measure of `view-budget.e2e.ts` must be alone, and the five frame rows beside it in that file
+ * must not - they read what the frames of one page asked for, which four lanes do not change,
+ * and a row left unrun behind a red elsewhere is a row that stops catching anything. It takes
+ * whatever `chromium` drops for the tag, so a tagged row can never fall between the two.
  */
 const aloneProjects = [
   {
@@ -383,6 +413,21 @@ const aloneProjects = [
     ],
     testMatch: /heavy-bodies\.e2e\.ts/,
     use: { ...devices["Desktop Safari"] },
+    workers: 1,
+  },
+  // The `@alone` rows of every spec `chromium` runs: it ignores the files `chromium` ignores, so
+  // it and `chromium-alone` never see one row twice, and it selects the tag `chromium` inverts.
+  {
+    name: "chromium-alone-rows",
+    dependencies: [
+      ...parallelProjects.map((project) => project.name),
+      "chromium-alone",
+      "firefox-alone",
+      "webkit-alone",
+    ],
+    grep: aloneTagged,
+    testIgnore: [plainHttpSpecs, multiprocessSpecs, clockSpecs],
+    use: { ...devices["Desktop Chrome"] },
     workers: 1,
   },
 ] satisfies Project[];

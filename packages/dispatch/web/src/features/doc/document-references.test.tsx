@@ -66,6 +66,7 @@ const summary: IssueReferenceSummary = {
       latest_version: 1,
       name: "spec.md",
       primary: true,
+      size: 1024,
       slug: "spec",
     },
     {
@@ -74,6 +75,7 @@ const summary: IssueReferenceSummary = {
       latest_version: 2,
       name: "design.md",
       primary: false,
+      size: 2048,
       slug: "design",
     },
   ],

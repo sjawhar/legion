@@ -38,6 +38,10 @@ export type WalkRoutePath = (typeof walkRoutes)[number]["path"];
 
 /** The chunks a page loads only once it needs them, each named by what shows it has run. */
 export const lazyPieces = {
+  "artifact-grants":
+    "the grants panel's body, the data files a page may read " +
+    "(features/artifacts/ArtifactGrants.tsx), which a page file's artifact view loads for a " +
+    "person and for no other reader (features/artifacts/ArtifactGrantsPanel.tsx)",
   echarts: "the delivery timeline's chart, echarts (features/delivery/Timeline.tsx)",
   editor:
     "the document editor, @legion/proof-editor and its stylesheet (features/doc/editor.ts), " +
@@ -53,6 +57,10 @@ export const lazyPieces = {
   mermaid:
     "the Mermaid renderer's Web Worker (features/refs/mermaid-render.worker.ts), which a body " +
     "holding a fenced `mermaid` block starts (features/refs/mermaid-diagrams.ts)",
+  "view-block":
+    "the `view` block's renderer, its frame budget and its attribute reading " +
+    "(features/view/ViewBlock.tsx), which a body or a document holding a `view` block mounts as " +
+    "the block's shell is drawn (features/view/ViewPortals.tsx)",
 } as const;
 
 export type LazyPiece = keyof typeof lazyPieces;

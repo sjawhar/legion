@@ -40,6 +40,7 @@ function spyReads() {
         latest_version: 2,
         name: "design.md",
         primary: true,
+        size: null,
         slug: "design",
       },
     ],
@@ -72,6 +73,7 @@ function spyReads() {
       latest_version: 4,
       name: "Runbook.md",
       project: "CORE",
+      size: null,
       slug: "runbook-md",
     }),
     getReferences: spyOn(api, "getReferences").mockResolvedValue({
@@ -369,6 +371,7 @@ test("watchPicturePath reports an image's latest version and follows its summary
         latest_version: latest,
         name: "shot.png",
         primary: false,
+        size: 4096,
         slug: "shot-png",
       },
     ],

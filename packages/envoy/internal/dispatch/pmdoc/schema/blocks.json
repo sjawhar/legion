@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "types": [
     {
       "name": "callout",
@@ -112,6 +112,21 @@
         },
         "negative_control": {
           "kind": "string"
+        }
+      }
+    },
+    {
+      "name": "view",
+      "content": "paragraph+",
+      "render": "host",
+      "attributes": {
+        "page": {
+          "kind": "string",
+          "default": ""
+        },
+        "data": {
+          "kind": "string",
+          "default": ""
         }
       }
     }

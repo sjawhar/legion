@@ -331,6 +331,7 @@ func routeProbePath(pattern string) string {
 		{"/issues/{key}", "/issues/TEST-1"},
 		{"/me/issues/{key}", "/me/issues/TEST-1"},
 		{"{id}", "00000000-0000-0000-0000-000000000001"},
+		{"{grant_id}", "00000000-0000-0000-0000-000000000002"},
 		{"{session_id}", "s1"},
 		{"{block_id}", "b1"},
 		{"{owner}", "owner"},

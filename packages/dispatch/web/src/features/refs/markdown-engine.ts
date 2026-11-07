@@ -10,7 +10,7 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
-import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
+import { renderTypedBlock, TYPED_BLOCK_SHELLS } from "../doc/typed-block-drawing";
 import type { DocumentJSON, ParsedBody, ParseRequest, ParseSchema } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
@@ -115,8 +115,12 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
         await createHeadlessProof({
           blockSchema,
           readOnly: true,
-          renderBlock: (node, type) =>
-            type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+          // A block with a shell of its own draws it; every other typed block draws the header
+          // shell (`TYPED_BLOCK_SHELLS`).
+          renderBlock: (node, type) => {
+            const shell = TYPED_BLOCK_SHELLS[type.name];
+            return shell === undefined ? renderTypedBlock(node, type) : shell(node);
+          },
         }),
         blockSchema
       )

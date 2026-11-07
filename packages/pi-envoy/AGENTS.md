@@ -1,8 +1,8 @@
 # Pi Envoy Extension
 
 Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
-every session loads, in one entry, `extensions/envoy.ts`, with the eight skills every session with
-Dispatch reads (`agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`,
+every session loads, in one entry, `extensions/envoy.ts`, with the nine skills every session with
+Dispatch reads (`agent-secrets`, `asd-ste100`, `dispatch`, `dispatch-first`, `dispatch-view`,
 `dispatch-writing-specs`, `envoy`, `outside-message`, `plain-words`) staged into
 `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
 modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a

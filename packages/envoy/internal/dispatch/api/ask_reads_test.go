@@ -480,7 +480,7 @@ func TestTargetedReadsReadAUrnUuidIDAsTheCanonicalID(t *testing.T) {
 }
 
 // The same spelling on a route the prefix layer does not wrap. canonicalizeUUIDPath runs only
-// for the 48 rows of idRoutes whose kind resolves, so a handoff's, a broadcast's and a Delivery
+// for the 52 rows of idRoutes whose kind resolves, so a handoff's, a broadcast's and a Delivery
 // session group's id still reaches Postgres as written and answers 500 where the canonical
 // spelling answers that route's own refusal. Each pair below is measured over live HTTP: the
 // canonical id's answer first, which is what the URN spelling must give too.

@@ -37,8 +37,8 @@ plugin() {
   @sjawhar/pi-envoy)
     entry=envoy
     skills=(
-      agent-secrets asd-ste100 dispatch dispatch-first dispatch-writing-specs envoy outside-message
-      plain-words thermonuclear-code-quality thermonuclear-deep-review
+      agent-secrets asd-ste100 dispatch dispatch-first dispatch-view dispatch-writing-specs envoy
+      outside-message plain-words thermonuclear-code-quality thermonuclear-deep-review
     )
     ;;
   @sjawhar/pi-legion)

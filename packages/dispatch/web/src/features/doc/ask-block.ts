@@ -8,6 +8,7 @@ import type {
 } from "@milkdown/kit/prose/view";
 
 import type { BlockSchema, BlockTypeSchema } from "../../api/types";
+import type { ViewBlockSlot } from "../view/view-slots";
 import { pictureNodeView, type WatchPicture } from "./picture-view";
 import {
   type AskBlockHost,
@@ -15,7 +16,9 @@ import {
   askShellSlots,
   renderAskBlockShell,
   renderTypedBlock,
+  TYPED_BLOCK_SHELLS,
 } from "./typed-block-drawing";
+import { viewBlockView } from "./view-block";
 
 /** The node view of a host-owned typed block other than `ask`: `renderTypedBlock`'s drawing,
  * under the block's id. It stamps `data-block-id` the way `AskBlockView` does, from the node's
@@ -279,13 +282,25 @@ export const askBlockEditingPlugin = new Plugin({
   },
 });
 
+/** The blocks of one editor that React draws into: the decision cards, in document order, and
+ * the frame slots a `ViewBlock` is portalled into. They are one editor's own, never another's:
+ * a document page holds the live editor and a version view at once, and each draws its own. */
+export interface TypedBlockHosts {
+  readonly asks: readonly AskBlockHost[];
+  readonly views: readonly ViewBlockSlot[];
+}
+
+/** The blocks of an editor that has reported none yet. */
+export const NO_TYPED_BLOCKS: TypedBlockHosts = { asks: [], views: [] };
+
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
- * reporting the live set of hosts (in document order) whenever it changes,
- * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
- * every `image` node (a picture whose source is a Dispatch reference draws from its version's
- * bytes route, a version-less one from its latest version's, which `watchPicture` reports), while
- * keeping the library's other node views, and `askBlockEditingPlugin`. Call once per editor,
- * right after it is created.
+ * `viewBlockView` for every `view` node (the sandboxed frame its page runs in, beside the
+ * editable caption), reporting both live sets whenever either changes, the decision hosts in
+ * document order; `renderTypedBlock`'s node view for every other type in the block schema,
+ * `pictureNodeView` for every `image` node (a picture whose source is a Dispatch reference draws
+ * from its version's bytes route, a version-less one from its latest version's, which
+ * `watchPicture` reports), while keeping the library's other node views, and
+ * `askBlockEditingPlugin`. Call once per editor, right after it is created.
  *
  * With `anchoredBlock`, every plain block type of the editor's schema that has no node view yet -
  * a paragraph, a heading, a quote, a list - takes `AnchoredBlockView`, which gives the one block
@@ -295,32 +310,36 @@ export const askBlockEditingPlugin = new Plugin({
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
-  onHostsChange: (hosts: readonly AskBlockHost[]) => void,
+  onHostsChange: (hosts: TypedBlockHosts) => void,
   watchPicture: WatchPicture,
   anchoredBlock?: AnchoredBlock
 ): void {
-  const registry = new Map<number, AskBlockHost>();
+  const asks = new Map<number, AskBlockHost>();
+  const views = new Map<string, ViewBlockSlot>();
   const publish = () => {
-    onHostsChange(
-      [...registry.values()].sort((left, right) =>
+    onHostsChange({
+      asks: [...asks.values()].sort((left, right) =>
         left.header.compareDocumentPosition(right.header) & Node.DOCUMENT_POSITION_FOLLOWING
           ? -1
           : 1
-      )
-    );
+      ),
+      views: [...views.values()],
+    });
   };
   const nodeViews: Record<string, NodeViewConstructor> = {
     ...view.props.nodeViews,
+    // A type with a shell of its own (`TYPED_BLOCK_SHELLS`) has a node view of its own below;
+    // every other type of the schema draws the header shell through `typedBlockView`.
     ...Object.fromEntries(
       blockSchema.types
-        .filter((type) => type.name !== "ask")
+        .filter((type) => TYPED_BLOCK_SHELLS[type.name] === undefined)
         .map((type) => [
           type.name,
           (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
         ])
     ),
-    ask: (node: ProseMirrorNode) =>
-      new AskBlockView(node, view.dom.ownerDocument, registry, publish),
+    ask: (node: ProseMirrorNode) => new AskBlockView(node, view.dom.ownerDocument, asks, publish),
+    view: (node: ProseMirrorNode) => viewBlockView(node, view.dom.ownerDocument, views, publish),
     image: pictureNodeView(view, watchPicture),
   };
   if (anchoredBlock !== undefined) {

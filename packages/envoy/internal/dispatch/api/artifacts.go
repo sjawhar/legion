@@ -47,6 +47,10 @@ const (
 	// already stored past it, under a key Postgres compressed into the index, keeps its name and
 	// key: an upload naming it stores a version as before.
 	maxNewArtifactKeyBytes = 2692
+	// maxPageBytes bounds a version the page route serves. A page holds the code that draws it
+	// and no data, and a minified echarts is 1,121,883 bytes, so 5 MiB leaves a page room and
+	// keeps one frame's download small (INFRA-682, R6).
+	maxPageBytes int64 = 5 << 20
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads. role is read through
@@ -856,18 +860,29 @@ func (s *server) blockReferences(ctx context.Context, artifactID string) (map[st
 	return references, nil
 }
 
-func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
+// artifactVersionOfRequest is the prologue both version routes make before they read a version,
+// and answers the request itself when one of its steps refuses: the caller is signed in,
+// {number} is a version number a version could have, and {id} names an artifact.
+func (s *server) artifactVersionOfRequest(w http.ResponseWriter, r *http.Request) (model.Artifact, int, bool) {
 	if !s.requireAuthenticated(w, r) {
-		return
+		return model.Artifact{}, 0, false
 	}
 	number, err := strconv.Atoi(r.PathValue("number"))
 	if err != nil || number < 1 {
 		writeError(w, "INVALID_VERSION", http.StatusBadRequest, "version number must be positive")
-		return
+		return model.Artifact{}, 0, false
 	}
 	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
 		s.writeHandlerError(w, err)
+		return model.Artifact{}, 0, false
+	}
+	return artifact, number, true
+}
+
+func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
+	artifact, number, ok := s.artifactVersionOfRequest(w, r)
+	if !ok {
 		return
 	}
 	if artifact.Kind == "doc" {
@@ -886,6 +901,27 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 		}{Markdown: markdown, Version: version})
 		return
 	}
+	// Go's ServeMux serves HEAD from this GET pattern, and net/http drops the body, so a HEAD is
+	// answered from the row alone and never from the bytes: the version a view block weighs
+	// against its 16 MiB - tens of megabytes of it - is neither detoasted nor fetched from the
+	// file store for a body nothing reads. octet_length reads the length from the stored value's
+	// header where the row holds the bytes; where a store holds them the row still records the
+	// file's length in size, and that is the same number, so the answer is the same either way
+	// and the bucket is not touched. Only a row that records neither falls through to the read
+	// below, which keeps the file store's own refusals.
+	if r.Method == http.MethodHead {
+		var contentType, sha *string
+		var length, recorded *int64
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+			select mime, sha256, octet_length(content), size from artifact_versions where artifact_id = $1 and number = $2
+		`, artifact.ID, number).Scan(&contentType, &sha, &length, &recorded); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if answerHead(length, recorded, downloadHeaders(w, contentType, sha)) {
+			return
+		}
+	}
 	var content []byte
 	var contentType, sha *string
 	var size *int64
@@ -897,6 +933,132 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.serveFileVersion(w, r, artifact.ID, number, content, contentType, sha, size)
 }
+
+// getArtifactVersionPage is GET /api/v1/artifacts/{id}/versions/{number}/page: one version of a
+// page file, as an HTML page in an opaque origin, for the frame a view block inserts. A page
+// file is an issue's or a project's file whose latest version's stored type is text/html, or
+// whose name ends .html or .htm (isPageFile).
+//
+// The refusals run in this order, so a file that is not a page never has its bytes read: the
+// artifact, its kind, the version's row without its content, the page test, the size, and only
+// then the bytes. A document is refused 415 before any version is read, because no version of a
+// document is a page file. The page test reads a type off the version row - the latest
+// version's, not this one's - so the version asked for must exist before it can run, and a
+// version that is not there is 404 rather than 415.
+//
+// Go's ServeMux serves HEAD from this GET pattern, so a HEAD gets each refusal too: that is the
+// request the block sends before it inserts a frame. A HEAD's answer is its headers alone, since
+// net/http discards the body, so it reads the length of the page out of the row and never the
+// page itself.
+func (s *server) getArtifactVersionPage(w http.ResponseWriter, r *http.Request) {
+	artifact, number, ok := s.artifactVersionOfRequest(w, r)
+	if !ok {
+		return
+	}
+	if artifact.Kind == "doc" {
+		writeNotAPage(w)
+		return
+	}
+	// One read of the version's row for everything the answer is decided by: the hash it is
+	// cached under, the size the 5 MiB cap is applied to, the length a HEAD answers with
+	// (octet_length reads it from the stored value's header, detoasting nothing, and is null
+	// only where a file store holds the bytes), and the stored type of the file's latest
+	// version, which with the name is the page test.
+	var sha *string
+	var size, length *int64
+	var latestType string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select v.sha256, v.size, octet_length(v.content), `+latestStoredTypeColumn+`
+		from artifact_versions v where v.artifact_id = $1 and v.number = $2
+	`, artifact.ID, number).Scan(&sha, &size, &length, &latestType); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "ARTIFACT_NOT_FOUND", http.StatusNotFound, "artifact version not found")
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	if !isPageFile(artifact, latestType) {
+		writeNotAPage(w)
+		return
+	}
+	// A file version records its size, so the cap is applied to the row and the bytes stay where
+	// they are until it passes.
+	if size != nil && *size > maxPageBytes {
+		writeError(w, "PAGE_TOO_LARGE", http.StatusRequestEntityTooLarge, fmt.Sprintf("a page is at most %d bytes", maxPageBytes))
+		return
+	}
+	// The frame revalidates on every load (`no-cache`), so a page whose bytes the browser still
+	// holds is answered from the row, before the bytes are read at all.
+	if pageNotModified(w, r, sha) {
+		return
+	}
+	// A HEAD is answered from the row alone and never from the bytes: the page the block asks
+	// after before each frame - over a megabyte of it - is neither detoasted nor fetched from
+	// the file store for a body net/http drops. The length is read above, with everything else
+	// the row decides this answer by.
+	if r.Method == http.MethodHead && answerHead(length, size, pageHeaders(w, r, sha)) {
+		return
+	}
+	var content []byte
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select content from artifact_versions where artifact_id = $1 and number = $2
+	`, artifact.ID, number).Scan(&content); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.serveFilePage(w, r, artifact.ID, number, content, sha, size)
+}
+
+// writeNotAPage refuses a version of an artifact the page route does not serve.
+func writeNotAPage(w http.ResponseWriter) {
+	writeError(w, "NOT_A_PAGE", http.StatusUnsupportedMediaType, "this artifact is not a page file")
+}
+
+// isPageFile reports whether an artifact is a page file: a view block shows one in its frame,
+// and a person grants one the data files it may read. It is one test, over the artifact and the
+// stored type of its latest version, and the three routes that ask the question - the page
+// route here and the grants routes (artifact_grants.go) - all call it, so a file the grants
+// routes list is a file the page route serves and the other way about.
+//
+// A page file is an issue's or a project's file whose latest version's stored type is text/html
+// or whose name ends .html or .htm. The rule is over the file and never over one version of it,
+// because that is what the question is asked about: a grant hangs from the file and covers every
+// version of it, the panel lists a file's grants with no version in hand, and a block that pins
+// `@vN` shows an older version of that same file. Reading the version the block asked for
+// instead would mean a file whose newest version stopped being HTML kept a frame that ran and
+// lost the grant list that frame's data comes from.
+//
+// Two owners are not page files whatever they hold. A document's text is markdown Dispatch
+// rewrites as edits settle rather than the bytes an author sent, so no version of one is a page.
+// An agent conversation's file belongs to no issue and no project: its uploads write no event,
+// so nothing could redraw a page from it, and it is neither a page a block shows nor data one is
+// given.
+func isPageFile(artifact model.Artifact, latestStoredType string) bool {
+	if artifact.Kind == "doc" || ownedByAnAgentConversation(artifact) {
+		return false
+	}
+	if mediaType, _, err := mime.ParseMediaType(latestStoredType); err == nil && mediaType == "text/html" {
+		return true
+	}
+	lowercase := strings.ToLower(artifact.Name)
+	return strings.HasSuffix(lowercase, ".html") || strings.HasSuffix(lowercase, ".htm")
+}
+
+// ownedByAnAgentConversation reports whether an artifact belongs to an agent's conversation
+// rather than to an issue or a project: it carries a session and neither key, which is the third
+// arm of artifacts_one_owner (0071_agent_artifacts.up.sql).
+func ownedByAnAgentConversation(artifact model.Artifact) bool {
+	return artifact.SessionID != nil && artifact.IssueKey == nil && artifact.Project == ""
+}
+
+// latestStoredTypeColumn is the stored type of the latest version of the artifact $1 names,
+// from one backwards probe of artifact_versions' (artifact_id, number) key, as the summary
+// reads its size; it is the empty string for an artifact with no version. It is the type the
+// page test reads (isPageFile), so every read that makes that test reads this one column and
+// they agree.
+const latestStoredTypeColumn = `coalesce((select latest.mime from artifact_versions latest
+		where latest.artifact_id = $1 order by latest.number desc limit 1), '')`
 
 // deref is the string a nullable column holds, or "".
 func deref(value *string) string {
@@ -1603,15 +1765,18 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 	return artifact, nil
 }
 
-// scanArtifact reads artifactColumns. A session-owned artifact's project is "".
-func scanArtifact(row pgx.Row) (model.Artifact, error) {
+// scanArtifact reads artifactColumns, and whatever columns the caller selected past them into
+// past - the latest version's stored type, for the read that makes the page test. A
+// session-owned artifact's project is "".
+func scanArtifact(row pgx.Row, past ...any) (model.Artifact, error) {
 	var artifact model.Artifact
 	var project *string
 	var createdBy []byte
-	if err := row.Scan(
+	targets := []any{
 		&artifact.ID, &artifact.IssueKey, &project, &artifact.SessionID, &artifact.RefKey, &artifact.Slug,
 		&artifact.Name, &artifact.Kind, &artifact.Primary, &artifact.Role, &createdBy, &artifact.CreatedAt,
-	); err != nil {
+	}
+	if err := row.Scan(append(targets, past...)...); err != nil {
 		return model.Artifact{}, err
 	}
 	artifact.Project = deref(project)

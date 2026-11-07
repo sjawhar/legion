@@ -17,6 +17,9 @@ GET /api/v1/artifacts/{id}/comments any
 POST /api/v1/artifacts/{id}/comments any
 POST /api/v1/artifacts/{id}/edits any
 GET /api/v1/artifacts/{id}/events any
+GET /api/v1/artifacts/{id}/grants any
+POST /api/v1/artifacts/{id}/grants any
+DELETE /api/v1/artifacts/{id}/grants/{grant_id} any
 POST /api/v1/artifacts/{id}/plan-reviews any
 POST /api/v1/artifacts/{id}/rebuild any
 GET /api/v1/artifacts/{id}/references any
@@ -27,6 +30,7 @@ DELETE /api/v1/artifacts/{id}/subscribers/{session_id} any
 GET /api/v1/artifacts/{id}/text any
 POST /api/v1/artifacts/{id}/versions any
 GET /api/v1/artifacts/{id}/versions/{number} any
+GET /api/v1/artifacts/{id}/versions/{number}/page any
 GET /api/v1/asks/open any
 GET /api/v1/asks/{id} any
 PATCH /api/v1/asks/{id} any

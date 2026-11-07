@@ -4,10 +4,9 @@ import type { Doc } from "yjs";
 import type { BlockSchema } from "../../api/types";
 import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
-import type { AnchoredBlock } from "./ask-block";
+import type { AnchoredBlock, TypedBlockHosts } from "./ask-block";
 import type { WatchPicture } from "./picture-view";
 import { MARKS_MAP_NAME } from "./roots";
-import type { AskBlockHost } from "./typed-block-drawing";
 
 export type {
   MarkAction,
@@ -27,8 +26,9 @@ export type EditorOptions = CreateProofEditorOptions & {
    *  document's own page passes none, and then no such view is installed at all. */
   anchoredBlock?: AnchoredBlock;
   blockSchema: BlockSchema;
-  /** The document's decision blocks, in document order, whenever the set changes. */
-  onAskBlockHosts: (hosts: readonly AskBlockHost[]) => void;
+  /** The document's typed blocks React draws into — its decision cards, in document order, and
+   *  the frame slot of every `view` block — whenever either set changes. */
+  onTypedBlockHosts: (hosts: TypedBlockHosts) => void;
   /** What a version-less picture's latest version is read through, for the `image` node view
    *  `installTypedBlocks` mounts below. The reading is the page's (`watchPicturePath`, bound to
    *  its query client), so a picture shares one summary read with the links and cards beside it;
@@ -67,7 +67,7 @@ export const createEditor: CreateEditor = async (root, options) => {
   installTypedBlocks(
     handle.view,
     options.blockSchema,
-    options.onAskBlockHosts,
+    options.onTypedBlockHosts,
     options.watchPicture,
     options.anchoredBlock
   );

@@ -9,7 +9,9 @@ import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { watchPicturePath } from "../refs/reference-target";
 import { Timestamp } from "../refs/Timestamp";
 import { textSourceOf } from "../refs/text-references";
+import { viewPortals } from "../view/ViewPortals";
 import { AskBlockCard } from "./AskBlockCard";
+import { NO_TYPED_BLOCKS, type TypedBlockHosts } from "./ask-block";
 import { changeMarksAgainst } from "./change-marks";
 import { colorForLogin } from "./connection";
 import { DocumentReferences, useReferenceClick } from "./document-references";
@@ -18,7 +20,6 @@ import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { refocusWhenSettled } from "./refocus-when-settled";
 import { DocumentRuntime } from "./runtime";
-import type { AskBlockHost } from "./typed-block-drawing";
 
 export interface VersionViewProps {
   artifactId: string;
@@ -47,7 +48,7 @@ export function VersionView({
   version,
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
-  const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  const [typedBlocks, setTypedBlocks] = useState<TypedBlockHosts>(NO_TYPED_BLOCKS);
   // The handle the version's references are drawn through: the titles are a render of their
   // own, so the surface that draws them re-renders with the editor it draws into.
   const [editorHandle, setEditorHandle] = useState<EditorHandle | undefined>(undefined);
@@ -114,7 +115,7 @@ export function VersionView({
         awareness: null,
         blockSchema,
         heatMapMode: "hidden",
-        onAskBlockHosts: setAskBlockHosts,
+        onTypedBlockHosts: setTypedBlocks,
         readOnly: true,
         user: { color: colorForLogin(user.login), name: user.login },
         watchPicture: (route, onPicture) => watchPicturePath(queryClient, route, onPicture),
@@ -210,7 +211,7 @@ export function VersionView({
       >
         <div ref={root} />
         <DocumentReferences editor={editorHandle} source={textSource} />
-        {askBlockHosts.map((host) => {
+        {typedBlocks.asks.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard
@@ -223,6 +224,7 @@ export function VersionView({
             />
           );
         })}
+        {viewPortals(typedBlocks.views)}
       </article>
     </section>
   );

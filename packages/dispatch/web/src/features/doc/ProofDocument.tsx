@@ -51,10 +51,11 @@ import {
 import { textSourceOf, uniquePrefixMatch } from "../refs/text-references";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { viewPortals } from "../view/ViewPortals";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
-import type { AnchoredBlockHost } from "./ask-block";
+import { type AnchoredBlockHost, NO_TYPED_BLOCKS, type TypedBlockHosts } from "./ask-block";
 import { ChangeView } from "./ChangeView";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
@@ -77,7 +78,6 @@ import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { readLineText, useSpecMarks } from "./spec-marks";
-import type { AskBlockHost } from "./typed-block-drawing";
 import { VersionView } from "./VersionView";
 
 /** The one block of `root` whose id starts with `prefix`, or undefined where none does or two
@@ -350,7 +350,7 @@ export function ProofDocument({
     [asksQuery.data, artifact.id]
   );
   const blocksReadOnly = isClosed || schemaReadOnly;
-  const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
+  const [typedBlocks, setTypedBlocks] = useState<TypedBlockHosts>(NO_TYPED_BLOCKS);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
   // its own beside its button.
@@ -840,7 +840,7 @@ export function ProofDocument({
                     ? null
                     : connection.awareness,
                 heatMapMode: "hidden",
-                onAskBlockHosts: setAskBlockHosts,
+                onTypedBlockHosts: setTypedBlocks,
                 onMarkAction: (action) => {
                   switch (action.kind) {
                     case "comment":
@@ -1089,7 +1089,7 @@ export function ProofDocument({
           ? null
           : createPortal(anchoredThread.children, anchoredHost.slot, String(anchoredHost.key))}
         <DocumentReferences editor={editorHandle} source={textSource} />
-        {askBlockHosts.map((host) => {
+        {typedBlocks.asks.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
             <AskBlockCard
@@ -1103,6 +1103,7 @@ export function ProofDocument({
             />
           );
         })}
+        {viewPortals(typedBlocks.views)}
         {blockReferencesQuery.data?.some(
           (block) => block.references.comments + block.references.asks > 0
         ) ? (

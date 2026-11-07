@@ -49,6 +49,7 @@ describe("omp.skills / prepack manifest contract", () => {
         "asd-ste100",
         "dispatch",
         "dispatch-first",
+        "dispatch-view",
         "dispatch-writing-specs",
         "envoy",
         "outside-message",

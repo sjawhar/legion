@@ -100,6 +100,27 @@ export const documentSummaryQuery = (project: string | undefined, slug: string |
     refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
+/**
+ * The data files a person has granted one page file (`GET /artifacts/{id}/grants`): the panel
+ * "Data this page may read" (`features/artifacts/ArtifactGrants.tsx`) and every `view` block
+ * that shows that page (`features/view/ViewBlock.tsx`) read this one key, which
+ * `eventRefreshTargets` refreshes on `artifact.grants_changed` and the panel's own two writes
+ * invalidate.
+ *
+ * Each caller says how long an answer stays fresh, because the two reads are not the same
+ * question. A block reads the grants to decide what it sends its page, and a new answer is a
+ * new frame, so it asks once and takes the rest from the event and the write
+ * (`Number.POSITIVE_INFINITY`). The panel is the page a person changes the grants on, from
+ * another tab or another browser as well as this one, so it reads again whenever it mounts or
+ * the reader comes back to it (`0`, the default a query has with no `staleTime`).
+ */
+export const artifactGrantsQuery = (id: string | undefined, staleTime: number) =>
+  queryOptions({
+    queryKey: ["artifact-grants", id],
+    queryFn: () => api.listArtifactGrants(id ?? ""),
+    staleTime,
+  });
+
 /** One issue message and its replies, as the Conversation's landing, a reference and the hover
  *  card read it. Outside the `["issue"]` prefix, so a refresh of issue details leaves it alone. */
 export const messageQuery = (key: string | undefined, id: string | undefined) =>

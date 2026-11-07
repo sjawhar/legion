@@ -57,6 +57,7 @@ const coreSummary: IssueReferenceSummary = {
       latest_version: 3,
       name: "design.md",
       primary: true,
+      size: null,
       slug: "design",
     },
   ],
@@ -140,6 +141,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     latest_version: 3,
     name: "Design notes",
     project: "CORE",
+    size: null,
     slug: "design-notes",
   });
   const getProjectArtifact = spyOn(api, "getProjectArtifact");
