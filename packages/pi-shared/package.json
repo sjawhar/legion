@@ -93,6 +93,10 @@
       "types": "./src/fallback-chain.ts",
       "bun": "./src/fallback-chain.ts"
     },
+    "./jj-attribution": {
+      "types": "./src/jj-attribution.ts",
+      "bun": "./src/jj-attribution.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"

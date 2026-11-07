@@ -1511,7 +1511,7 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
 // `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
 // Stage 3 state carries the defaults, the one typed key is a positive integer, the rest rides
 // loosely, and the block cannot be dropped: a plugin from before the field refuses the state.
-// `max_fix_attempts` rode here until contract 52 removed the key.
+// `max_fix_attempts` rode here until contract 54 removed the key.
 test("the state golden carries the daemon's settings with no credential, and the block cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
   expect(state.settings.max_fix_attempts).toBeUndefined();

@@ -1395,9 +1395,10 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 
 // runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's,
 // a Claude Code worker's and the controller's together: every name mainEnvironment sets with Env
-// empty and no secret of the spec's, every optional value configured. A name added to the
-// environment and not to runtimeOwned is one a spec could override; a name left in runtimeOwned
-// that the environment no longer sets is one a spec is refused for nothing.
+// empty and no secret of the spec's, every optional value configured — the tree agent works a
+// repository the project names, so it is told the issue key it stamps its commits with. A name
+// added to the environment and not to runtimeOwned is one a spec could override; a name left in
+// runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1407,8 +1408,10 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stamping := workerSpec(t)
+	stamping.IssueTrailer = stamping.Issue
 	told := map[string]bool{}
-	for _, spec := range []runtime.SpawnSpec{workerSpec(t), claudeWorkerSpec(t), controllerSpec(t)} {
+	for _, spec := range []runtime.SpawnSpec{stamping, claudeWorkerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
 		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
@@ -1417,6 +1420,52 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	if !maps.Equal(told, runtimeOwned) {
 		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
 			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// A pane stamps `Dispatch: <KEY>` into its commits where the project names its repository
+// (projects.<KEY>.commit_issue_trailer_repos, which internal/daemon's specs reads into
+// runtime.SpawnSpec.IssueTrailer), and the key reaches its jj overlay as LEGION_ISSUE_TRAILER.
+// The runtime sets it itself, from the spec's own field and never from its Env, beside the issue
+// every pane is told: a launch of any harness is told it by the one environment the pod's kind
+// builds for every role (issuePod.agentEnv under mainEnvironment), so a Claude Code worker
+// carries it as an Oh My Pi one does. A launch that stamps nothing carries no such variable
+// rather than an empty one, and the controller's pod, which works no repository and no issue,
+// carries none under any spec (validateControllerShape refuses one that asks).
+func TestAPodIsToldTheIssueKeyItStampsItsCommitsWith(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamping := workerSpec(t)
+	stamping.IssueTrailer = stamping.Issue
+	env := envOf(workerOf(t, r, stamping))
+	for name, expect := range map[string]struct {
+		want  string
+		owned bool
+	}{
+		"LEGION_ISSUE":         {want: stamping.Issue, owned: true},
+		"LEGION_ISSUE_TRAILER": {want: stamping.Issue, owned: true},
+	} {
+		if env[name] != expect.want {
+			t.Errorf("a pane whose repository the project names is told %s=%q, want %q", name, env[name], expect.want)
+		}
+		if owned := runtimeOwned[name]; owned != expect.owned {
+			t.Errorf("runtimeOwned[%s] = %t, want %t: the runtime owns the names it sets and no other", name, owned, expect.owned)
+		}
+	}
+	claude := stamping
+	claude.Backend = runtime.BackendClaude
+	if got := envOf(workerOf(t, r, claude))["LEGION_ISSUE_TRAILER"]; got != stamping.Issue {
+		t.Errorf("a Claude Code worker of the same claim is told LEGION_ISSUE_TRAILER=%q, want %q", got, stamping.Issue)
+	}
+	for name, spec := range map[string]runtime.SpawnSpec{
+		"a worker whose repository the project does not name": workerSpec(t),
+		"the controller": controllerSpec(t),
+	} {
+		if value, set := envOf(workerOf(t, r, spec))["LEGION_ISSUE_TRAILER"]; set {
+			t.Errorf("%s is told LEGION_ISSUE_TRAILER=%q, want no such variable", name, value)
+		}
 	}
 }
 
@@ -1939,9 +1988,10 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
 // of a spec's or the operator's. Among the goldens' cases is a Claude Code worker, which alone is
-// told three of the variables. A piece added to a pod and not to its list is one an
-// operator could collide with unrefused; one left in a list that no pod carries is refused for
-// nothing.
+// told three of the variables; none of them works a repository the project names, so the worker
+// below, which does, is built here for the one variable such a pod alone carries. A piece added
+// to a pod and not to its list is one an operator could collide with unrefused; one left in a
+// list that no pod carries is refused for nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1984,6 +2034,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		pod := podOf(t, r, spec)
 		carry(pod, workerOf(t, r, spec))
 	}
+	// A pane whose repository the project names is told the issue key it stamps its commits with
+	// (LEGION_ISSUE_TRAILER), and no golden case works such a repository.
+	stamping := workerSpec(t)
+	stamping.Env, stamping.Secrets = nil, nil
+	stamping.IssueTrailer = stamping.Issue
+	carry(podOf(t, r, stamping), workerOf(t, r, stamping))
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
 	for _, list := range []struct {

@@ -1,0 +1,5 @@
+kind: Changed
+body: 'The daemon API contract is 52: a pane is told `LEGION_ISSUE_TRAILER`, the issue key it stamps into its commits.'
+time: 2026-11-05T23:38:40.767882431Z
+custom:
+    Issue: pr2839

@@ -573,7 +573,30 @@ package api
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 //
-// 52: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
+// 52: INFRA-1307 -- a pane is told the issue key it stamps into its commits, LEGION_ISSUE_TRAILER:
+// the claim's own issue when `projects.<KEY>.commit_issue_trailer_repos` names the repository the
+// launch works, among the repositories Dispatch maps to the project, and set on no other pane, so
+// a squash landing the branch of such a repository carries `Dispatch: <KEY>` in its message. Each
+// runtime sets the name itself and owns it (tmux's `runtimeOwned`, the Sandbox's), so a spec, an
+// operator's `runtime.tmux.pane_env` and a `runtime.kubernetes.pod.env` are all refused for
+// setting it: no pane environment an operator writes can forge a key the daemon did not decide.
+// Both plugins read that variable and never LEGION_ISSUE
+// (`packages/pi-shared/src/jj-attribution.ts`, the one writer of the jj overlay they share), so a
+// plugin built before 52 stamps nothing on a daemon that expects the landing message to carry the
+// key, and a plugin from 52 under a daemon before it is told no key and stamps nothing either,
+// while the pane environment that daemon builds may still carry an operator's own
+// LEGION_ISSUE_TRAILER. The pane environment is one of this contract's surfaces, as it was at 34,
+// 42 and 44, so the boot gate and `legion probe-image` refuse the mixed pair. The key is left out
+// of the `settings` block on GET /legion/v1/state (api's settingsExcluded): that route
+// authenticates nobody, and the value names a deployment's own repositories. This change adds no
+// store migration.
+// (This branch took 50 while main held 49, and main has since reached 51, so this change takes
+// the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says. main held 51 at the forward merge that renumbered this entry, 71abec3650df; read main's
+// own number again at the next merge rather than from this line.)
+//
+// 54: INFRA-956 -- fix-attempt counting gone. `legion.yaml` no longer takes `max_fix_attempts`,
 // and a file carrying it loads with a warning naming the removal, which boot logs and
 // `legion start --check-config` prints, rather than a refusal, so the settings block of
 // `GET /legion/v1/state` no longer carries `max_fix_attempts` and `api.Settings` no longer
@@ -582,7 +605,7 @@ package api
 // now sends the work back to the implementer every time it stands, however many came before,
 // and the architect decides when to stop; no pull request is marked blocked and no `pr-blocked`
 // notice is published for a count. `packages/contracts/src/legion-api.ts` mirrors both
-// removals, and its reader of the settings block is loose, so a plugin before 52 reads a state
+// removals, and its reader of the settings block is loose, so a plugin before 54 reads a state
 // without `max_fix_attempts` — but its strict pull-request reader refuses one without
 // `fixAttempts`, and every worker's `read_record` parses the state through it, which is what
 // this number is for: the boot gate and `legion probe-image` hold plugin and daemon equal, so
@@ -624,11 +647,12 @@ package api
 // `provider_error_note`) and the claim's run of such turns (`claims.provider_error_run`). The
 // removal ships none; `fix_attempts`, `blocked_attempts` and `head_counted` stay as stopped
 // columns that nothing reads, each given its zero on an insert (`record`'s PutPullRequest).
-// (This branch took 47, then 48, then 50, as main's own changes took each number before it:
-// main merged the idle-pod release at 48 while this branch was open, landed the memory group at
-// 49 and released pi-legion v18.9.0 declaring it without these shapes, and has since landed the
-// admission cap over the issues at work at 51, whose release declares 51 without them too, so
-// this branch takes the number above them all, as
+// (This branch took 47, then 48, then 50, then 52, as main's own changes took each number
+// before it: main merged the idle-pod release at 48 while this branch was open, landed the
+// memory group at 49, the admission cap over the issues at work at 51 and the pane issue key at
+// 52, each release declaring its number without these shapes, and sjawhar/legion#2805 holds 53
+// on its own branch, so this change takes the number above them all, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
-// says.)
-const DaemonAPIVersion = 52
+// says. main held 52 at the forward merge that renumbered this entry; read main's own number
+// again at the next merge rather than from this line.)
+const DaemonAPIVersion = 54
