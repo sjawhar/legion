@@ -2,11 +2,7 @@ package record
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"net/url"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -14,81 +10,39 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 var _ Store = NewStore()
 
-// testDSN is the Postgres connection CI and the devbox provide for this package. The record has
-// no in-memory implementation: its transaction and locking semantics are PostgreSQL's.
-func testDSN(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv("LEGION_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test")
-	}
-	return dsn
-}
-
+// emptyStore is a store on an empty, unmigrated database of its own, dropped when the test ends.
+// The tests that apply part of the migration set by hand and count what Migrate then applies
+// need one. The record has no in-memory implementation — its transaction and locking semantics
+// are PostgreSQL's — so without LEGION_TEST_PG_DSN there is nothing to run against and the test
+// is skipped (testpg.Database).
 func emptyStore(t *testing.T) *store.Store {
 	t.Helper()
-	ctx := context.Background()
-	base, err := url.Parse(testDSN(t))
+	st, err := store.Open(context.Background(), testpg.Database(t, "legion_record_test"))
 	if err != nil {
-		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
-	}
-	adminURL := *base
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(ctx, adminURL.String())
-	if err != nil {
-		t.Fatalf("connect to the admin database: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	name := "legion_record_test_" + randomSuffix(t)
-	// A file copy of template1 (docs/testing.md, "A database a Go test creates").
-	if _, err := admin.Exec(ctx, "create database "+name+" strategy file_copy"); err != nil {
-		t.Fatalf("create %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop %s: %v", name, err)
-		}
-	})
-
-	testURL := *base
-	testURL.Path = "/" + name
-	st, err := store.Open(ctx, testURL.String())
-	if err != nil {
-		t.Fatalf("open %s: %v", name, err)
+		t.Fatalf("open the test database: %v", err)
 	}
 	t.Cleanup(st.Close)
 	return st
 }
 
+// migratedStore is a store on a database carrying every migration, cloned from the package's
+// template rather than migrated here. emptyStore stays an empty, unmigrated database: the tests
+// that apply part of the migration set by hand and count what Migrate then applies need one.
 func migratedStore(t *testing.T) *store.Store {
 	t.Helper()
-	st := emptyStore(t)
-	if _, err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return st
-}
-
-func randomSuffix(t *testing.T) string {
-	t.Helper()
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("random suffix: %v", err)
-	}
-	return hex.EncodeToString(b[:])
+	return testpg.CloneStore(t, "legion_record_test")
 }
 
 func inTx(t *testing.T, st *store.Store, fn func(pgx.Tx)) {

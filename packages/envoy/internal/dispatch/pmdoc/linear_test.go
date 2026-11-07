@@ -70,6 +70,62 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+	// A block shape: a list item whose typed block holds one list item per blank line. Reading a
+	// blank line inside such a block as the item's walked the whole block once for each of them,
+	// and the list again for each node of it, which is quadratic in a block of blank lines; the
+	// reading is taken once over the document now (readSpreads). A write is
+	// what reads it, so this one is timed through ParseForWrite. The unit is one item and 200
+	// blank lines, so the items and the lines grow together and a mebibyte of them stays under
+	// MaxDocumentElements: the write is accepted at every size here, and any refusal - of the
+	// elements above all, which would stop the read before the cost - fails the case rather than
+	// passing it.
+	{
+		open, closer := "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n", "  :::\n"
+		repeat := "  - p\n" + strings.Repeat("\n", 200)
+		full := parseFullTarget / len(repeat)
+		small := full / growthStep
+		name := "a typed block of spaced items in a list item"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * len(repeat), full * len(repeat)}, linearSlack, func(size int) (time.Duration, error) {
+				text := open + strings.Repeat(repeat, size/len(repeat)) + closer
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(text, nil); err != nil {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
+					}
+				}))
+			})
+		})
+	}
+	// A block shape of bare exits: a quoted typed block whose last line holds the quote's marker
+	// alone, then the blank lines that make the cost show. Each such block ends where its content
+	// did, which puts its exits into the stream before the events of the lines already read;
+	// writing them in one by one moved the stream and walked every line's marks per block, so the
+	// cost was the blocks times the lines, and the inserts are collected and written once now
+	// (insertEvents, writeInserts). The unit is one block and 200 blank lines, so the blocks and
+	// the lines grow together and a mebibyte of them stays under MaxDocumentElements: the write is
+	// accepted at every size here, and any refusal - of the elements above all, which would stop
+	// the read before the cost - fails the case rather than passing it.
+	{
+		repeat := "> :::callout{#c%d kind=\"note\" title=\"T\"}\n>\nb\n" + strings.Repeat("\n", 200)
+		unit := len(fmt.Sprintf(repeat, 1000))
+		full := parseFullTarget / unit
+		small := full / growthStep
+		name := "quoted typed blocks ending on a bare line"
+		t.Run(name, func(t *testing.T) {
+			growsLinearly(t, name, []int{small * unit, full * unit}, linearSlack, func(size int) (time.Duration, error) {
+				var text strings.Builder
+				for index := 0; index < size/unit; index++ {
+					fmt.Fprintf(&text, repeat, index)
+				}
+				body := text.String()
+				return cpuTimeOf(again(func() {
+					if _, err := ParseForWrite(body, nil); err != nil {
+						t.Fatalf("%s at %d bytes: %v", name, size, err)
+					}
+				}))
+			})
+		})
+	}
 	// Two-part shapes: an opener half repeated, then a closer half repeated, so each closer looks
 	// back past every run before it. goldmark's ProcessDelimiters walks a closer back over every
 	// earlier run of either character, so `~~a ` then `a* ` and `*a ` then `a~ ` took 3.8-4.2 s at

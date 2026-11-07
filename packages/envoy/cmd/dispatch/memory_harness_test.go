@@ -161,6 +161,15 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		// (peakResident, memory_trace.go). One file for each server, which its test's temporary
 		// directory takes away with it.
 		"DISPATCH_MEMORY_TRACE=" + trace,
+		// Every measured server collects at GOGC=25, so a peak above idle reads the memory a
+		// request holds plus the collector's margin at that setting, not the resident memory
+		// production shows at Go's default GOGC=100, where the collector lets the heap grow to
+		// twice the live set before it collects and an edit can raise resident memory by up to
+		// about twice what it holds. A test that needs another value sets GOGC in
+		// memoryHarness.env, which is appended after this and wins: the drives that judge the pod
+		// against its own Go memory limit set GOGC=100 there, since what they bound is the
+		// resident memory production shows (podServerEnv, INFRA-179).
+		"GOGC=25",
 	}
 	command.Env = append(command.Env, h.env...)
 	held.Pass(command, "DISPATCH_LISTEN_FD")

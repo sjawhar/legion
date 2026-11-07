@@ -34,15 +34,12 @@ func TestMain(m *testing.M) {
 		main()
 	}
 	// environment_test.go reads these variables again once every test before it has run, so the
-	// snapshot is taken here, ahead of Guard, the first thing that changes this binary's own
+	// snapshot is taken here, ahead of MustGuard, the first thing that changes this binary's own
 	// environment.
 	snapshotStartupEnvironment()
-	// The tests run real git and jj, in-process and as children (fixtureenv.Guard). LEGION_GH_PATH
-	// is kept: it names the real gh a capture test runs, a binary and no credential.
-	if err := fixtureenv.Guard("LEGION_GH_PATH"); err != nil {
-		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
-	}
+	// The tests run real git and jj, in-process and as children (fixtureenv.MustGuard).
+	// LEGION_GH_PATH is kept: it names the real gh a capture test runs, a binary and no credential.
+	fixtureenv.MustGuard("LEGION_GH_PATH")
 	os.Exit(runWithoutTheOperatorsJJConfig(m))
 }
 
@@ -69,12 +66,6 @@ func runWithoutTheOperatorsJJConfig(m *testing.M) int {
 		return 1
 	}
 	return m.Run()
-}
-
-// TestMain ran fixtureenv.Guard: no test here inherits a workspace, remote or credential of the
-// process that runs the tests.
-func TestTheTestProcessIsGuarded(t *testing.T) {
-	fixtureenv.RequireGuarded(t)
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or
