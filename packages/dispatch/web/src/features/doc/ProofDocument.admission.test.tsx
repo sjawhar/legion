@@ -1,7 +1,6 @@
 import { beforeEach, expect, spyOn, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http } from "msw";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -10,11 +9,12 @@ import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   flushLoadFailure,
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type { ArtifactText, DocumentRead, IssueAskRow, IssueDecisions } from "../../api/types";
+import type { ArtifactText } from "../../api/types";
 import { openPendingEdits } from "./pending-edits";
 
 // Whether the live editor may connect, and what the page shows when it may not or cannot: the
@@ -35,48 +35,8 @@ async function pendingEditCount(artifactId: string): Promise<number> {
 
 answerTextReadsWithTheSeededText();
 
-/**
- * The reads the document surface makes of its own record, blocks and read mark, and of the
- * issue's asks and decisions, each answered with the API's empty shape so the page renders its
- * loaded-empty state rather than its error state. An id the suite's artifact does not carry is
- * answered as the API answers an artifact nobody has.
- */
 beforeEach(() => {
-  answerRequests(
-    http.get("/api/v1/artifacts/:id", ({ params }) =>
-      params.id === artifact.id
-        ? Response.json(artifact)
-        : Response.json(
-            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
-            { status: 404 }
-          )
-    ),
-    http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
-    http.get("/api/v1/issues/:key/asks", () => Response.json([] satisfies IssueAskRow[])),
-    http.get("/api/v1/issues/:key/decisions", () =>
-      Response.json({
-        decisions: [],
-        document: null,
-        open_questions: [],
-      } satisfies IssueDecisions)
-    ),
-    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
-      Response.json({
-        artifact_id: String(params.id),
-        read_at: null,
-        version: null,
-      } satisfies DocumentRead)
-    ),
-    // Opening a document the viewer has never read records the version they are looking at.
-    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
-      const { version } = (await request.json()) as { version: number };
-      return Response.json({
-        artifact_id: String(params.id),
-        read_at: "2026-09-09T00:00:00Z",
-        version,
-      } satisfies DocumentRead);
-    })
-  );
+  answerRequests(...documentSurfaceHandlers());
 });
 
 // The repair replaces this document, so it uploads under the document's own name whatever the

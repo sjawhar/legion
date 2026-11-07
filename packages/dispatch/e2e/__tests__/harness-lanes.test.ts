@@ -200,6 +200,8 @@ test("psql names both variables when neither its lane nor the plain name has a d
   );
 });
 
+// The two `bunx playwright --list` runs below cost about five seconds together, Bun's default
+// deadline, so this case names a ceiling at which something is wrong rather than slow.
 test("the Playwright config refuses a --workers that is not the lane count", async () => {
   const listed = ["bunx", "playwright", "test", "--config", config, "--list", "--reporter=line"];
   const mismatched = await run([...listed, "--workers", "3"], {});
@@ -212,4 +214,4 @@ test("the Playwright config refuses a --workers that is not the lane count", asy
   expect(`${shorthand.stderr}${shorthand.stdout}`).toContain(
     "This run has 3 lanes, each a harness of its own, so --workers 2 would not match"
   );
-});
+}, 30_000);

@@ -14,18 +14,10 @@ import { answerRequests } from "../../__tests__/network";
 import {
   answerTextReadsWithTheSeededText,
   createQueryClient,
+  decisionsAndReadMarkHandlers,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type {
-  Artifact,
-  Ask,
-  AskRead,
-  Comment,
-  DocumentRead,
-  InboxRow,
-  IssueAskRow,
-  IssueDecisions,
-} from "../../api/types";
+import type { Artifact, Ask, AskRead, Comment, InboxRow, IssueAskRow } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { Margin } from "../margin/Margin";
 import { MarginProvider } from "../margin/margin-context";
@@ -36,40 +28,18 @@ import { ArtifactDocument } from "./ArtifactDocument";
 answerTextReadsWithTheSeededText();
 
 /**
- * The reads the document surface and the margin make of the issue's asks and decisions, of the
- * document's own asks and read mark, and of the inbox, each answered with the API's empty shape
- * so the page renders its loaded-empty state rather than its error state. No test here asserts
- * one of them: each is about the item the address names.
+ * The issue's decisions and the viewer's read mark (`decisionsAndReadMarkHandlers`), and the
+ * reads the document surface and the margin make beside them: the issue's asks, the document's
+ * own asks, and the inbox, each answered with the API's empty shape so the page renders its
+ * loaded-empty state rather than its error state. No test here asserts one of them: each is
+ * about the item the address names.
  */
 beforeEach(() => {
   answerRequests(
     http.get("/api/v1/issues/:key/asks", () => Response.json([] satisfies IssueAskRow[])),
-    http.get("/api/v1/issues/:key/decisions", () =>
-      Response.json({
-        decisions: [],
-        document: null,
-        open_questions: [],
-      } satisfies IssueDecisions)
-    ),
     http.get("/api/v1/artifacts/:id/asks", () => Response.json([] satisfies Ask[])),
     http.get("/api/v1/inbox", () => Response.json([] satisfies InboxRow[])),
-    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
-      Response.json({
-        artifact_id: String(params.id),
-        read_at: null,
-        version: null,
-      } satisfies DocumentRead)
-    ),
-    // Opening a document the viewer has never read records the version they are looking at: the
-    // page's own write of the route above.
-    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
-      const { version } = (await request.json()) as { version: number };
-      return Response.json({
-        artifact_id: String(params.id),
-        read_at: "2026-09-09T00:00:00Z",
-        version,
-      } satisfies DocumentRead);
-    })
+    ...decisionsAndReadMarkHandlers()
   );
 });
 

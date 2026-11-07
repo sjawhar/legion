@@ -11,6 +11,7 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerRequests } from "../../__tests__/network";
+import { decisionsAndReadMarkHandlers } from "../../__tests__/proof-document";
 import { answerIssuePatches } from "../../__tests__/send-answers";
 import { AGENT_LIST_REFILLING, ApiError, api } from "../../api/client";
 import type {
@@ -18,11 +19,9 @@ import type {
   ArtifactText,
   ArtifactVersionText,
   Ask,
-  DocumentRead,
   GraphReferences,
   InboxRow,
   IssueCoverage,
-  IssueDecisions,
   IssueDetails,
   IssueReferences,
   Subscriber,
@@ -212,10 +211,11 @@ function stubIssuePage(
 
 /**
  * The reads the issue page's own panels make: the header's repository and component lines, the
- * Spec tab's requirements, decisions and read marks, the Artifacts tab's lists, and each
- * document's own record, text, blocks and versions. Each is answered with the API's empty shape,
- * so a panel renders its loaded-empty state rather than its error state. A test that asserts one
- * of these spies the `api` method that fetches it (`spyOn(api, "getArtifactText")`) and never
+ * Spec tab's requirements, the Artifacts tab's lists, the issue's references, and each
+ * document's own record, text, blocks and versions, with the decisions and read marks
+ * `decisionsAndReadMarkHandlers` answers. Each is answered with the API's empty shape, so a
+ * panel renders its loaded-empty state rather than its error state. A test that asserts one of
+ * these spies the `api` method that fetches it (`spyOn(api, "getArtifactText")`) and never
  * reaches these handlers.
  */
 function answerIssuePageReads(): void {
@@ -231,34 +231,10 @@ function answerIssuePageReads(): void {
         spec_artifact_id: "",
       } satisfies IssueCoverage)
     ),
-    http.get("/api/v1/issues/:key/decisions", () =>
-      Response.json({
-        decisions: [],
-        document: null,
-        open_questions: [],
-      } satisfies IssueDecisions)
-    ),
     http.get("/api/v1/issues/:key/artifacts", () => Response.json([])),
     http.get("/api/v1/issues/:key/references", () =>
       Response.json({ members: [], truncated: false } satisfies IssueReferences)
     ),
-    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
-      Response.json({
-        artifact_id: String(params.id),
-        read_at: null,
-        version: null,
-      } satisfies DocumentRead)
-    ),
-    // Opening a document the viewer has never read records the version they are looking at: the
-    // page's own write of the route above.
-    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
-      const { version } = (await request.json()) as { version: number };
-      return Response.json({
-        artifact_id: String(params.id),
-        read_at: "2026-09-09T00:00:00Z",
-        version,
-      } satisfies DocumentRead);
-    }),
     http.get("/api/v1/references", ({ request }) =>
       Response.json({
         edges: [],
@@ -289,7 +265,8 @@ function answerIssuePageReads(): void {
             { status: 404 }
           )
         : Response.json(artifact);
-    })
+    }),
+    ...decisionsAndReadMarkHandlers()
   );
 }
 

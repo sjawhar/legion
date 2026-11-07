@@ -10,17 +10,11 @@ import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
-import type {
-  Ask,
-  DocumentRead,
-  IssueAskRow,
-  IssueDecisions,
-  IssueDetails,
-  IssueReferenceSummary,
-} from "../../api/types";
+import type { Ask, IssueDetails, IssueReferenceSummary } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
 import { appKeymap } from "../shell/keymap";
@@ -29,25 +23,12 @@ import { colorForLogin } from "./connection";
 answerTextReadsWithTheSeededText();
 
 /**
- * The reads the document surface makes of its own record, blocks and read mark, and of the
- * issue's asks and decisions, each answered with the API's empty shape so the page renders its
- * loaded-empty state rather than its error state. A test that asserts one of these spies the
- * `api` method that fetches it and never reaches these handlers.
+ * The document surface's own shared reads (`documentSurfaceHandlers`), and the read this file
+ * adds to them: a reference link the pointer rests on opens a preview card, which reads the
+ * issue the reference names and the documents it holds.
  */
 beforeEach(() => {
   answerRequests(
-    http.get("/api/v1/artifacts/:id", ({ params }) =>
-      params.id === artifact.id
-        ? Response.json(artifact)
-        : Response.json(
-            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
-            { status: 404 }
-          )
-    ),
-    http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
-    http.get("/api/v1/issues/:key/asks", () => Response.json([] satisfies IssueAskRow[])),
-    // A reference link the pointer rests on opens a preview card, which reads the issue the
-    // reference names and the documents it holds.
     http.get("/api/v1/issues/:key/summary", ({ params }) =>
       Response.json({
         documents: [
@@ -66,29 +47,7 @@ beforeEach(() => {
         title: "Review the spec",
       } satisfies IssueReferenceSummary)
     ),
-    http.get("/api/v1/issues/:key/decisions", () =>
-      Response.json({
-        decisions: [],
-        document: null,
-        open_questions: [],
-      } satisfies IssueDecisions)
-    ),
-    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
-      Response.json({
-        artifact_id: String(params.id),
-        read_at: null,
-        version: null,
-      } satisfies DocumentRead)
-    ),
-    // Opening a document the viewer has never read records the version they are looking at.
-    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
-      const { version } = (await request.json()) as { version: number };
-      return Response.json({
-        artifact_id: String(params.id),
-        read_at: "2026-09-09T00:00:00Z",
-        version,
-      } satisfies DocumentRead);
-    })
+    ...documentSurfaceHandlers()
   );
 });
 

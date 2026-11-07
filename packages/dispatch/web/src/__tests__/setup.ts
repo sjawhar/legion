@@ -1,6 +1,6 @@
 // The DOM this file's imports read is registered by `register-dom.ts`, the preload before this
 // one: Bun's preload list is the one order that holds, and an import written first inside a file
-// is not (`register-dom.ts` and `bunfig.toml` say why).
+// is not (`register-dom.ts` and package.json's `test:web` script say why).
 import { afterAll, afterEach, expect, jest } from "bun:test";
 import * as jestDomMatchers from "@testing-library/jest-dom/matchers";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on

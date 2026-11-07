@@ -12,16 +12,10 @@ import {
   answerTextReadsWithTheSeededText,
   artifact,
   createQueryClient,
+  documentSurfaceHandlers,
   renderProofDocument,
 } from "../../__tests__/proof-document";
-import type {
-  Ask,
-  AskRead,
-  DocumentRead,
-  IssueAskRow,
-  IssueDecisions,
-  IssueReferenceSummary,
-} from "../../api/types";
+import type { Ask, AskRead, IssueReferenceSummary } from "../../api/types";
 import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
@@ -29,50 +23,16 @@ import { VersionView } from "./VersionView";
 answerTextReadsWithTheSeededText();
 
 /**
- * The reads the document surface makes of its own record, blocks and read mark, and of the
- * issue's asks and decisions, each answered with the API's empty shape so the page renders its
- * loaded-empty state rather than its error state. The two issues the text names are seeded in
- * the query cache below, so the only key that reaches the summary route is one no issue holds.
+ * The document surface's own shared reads (`documentSurfaceHandlers`), and the read this file
+ * adds to them: the two issues the text names are seeded in the query cache below, so the only
+ * key that reaches the summary route is one no issue holds.
  */
 beforeEach(() => {
   answerRequests(
-    http.get("/api/v1/artifacts/:id", ({ params }) =>
-      params.id === artifact.id
-        ? Response.json(artifact)
-        : Response.json(
-            { code: "ARTIFACT_NOT_FOUND", error: `no artifact ${String(params.id)}` },
-            { status: 404 }
-          )
-    ),
-    http.get("/api/v1/artifacts/:id/blocks", () => Response.json([])),
-    http.get("/api/v1/issues/:key/asks", () => Response.json([] satisfies IssueAskRow[])),
-    http.get("/api/v1/issues/:key/decisions", () =>
-      Response.json({
-        decisions: [],
-        document: null,
-        open_questions: [],
-      } satisfies IssueDecisions)
-    ),
     http.get("/api/v1/issues/:key/summary", ({ params }) =>
       Response.json({ code: "NOT_FOUND", error: `no issue ${String(params.key)}` }, { status: 404 })
     ),
-    http.get("/api/v1/me/documents/:id/read", ({ params }) =>
-      Response.json({
-        artifact_id: String(params.id),
-        read_at: null,
-        version: null,
-      } satisfies DocumentRead)
-    ),
-    // Opening a document the viewer has never read records the version they are looking at: the
-    // page's own write of the route above.
-    http.put("/api/v1/me/documents/:id/read", async ({ params, request }) => {
-      const { version } = (await request.json()) as { version: number };
-      return Response.json({
-        artifact_id: String(params.id),
-        read_at: "2026-09-09T00:00:00Z",
-        version,
-      } satisfies DocumentRead);
-    })
+    ...documentSurfaceHandlers()
   );
 });
 
