@@ -1826,9 +1826,13 @@ jobs:
     # setup before the plain step starts, then that step's 839 s (measured while it still ran
     # internal/daemon, so an upper bound for it now) and its 15 minutes, then the race step's
     # 694 s and its 30, then 13 s for the steps after it and 7 s for the cache save that runs only
-    # on a miss, which is 4578 s, or about 76 minutes (dispatch://INFRA-1052 measured them over the
-    # 30 newest counted test jobs of main push runs).
-    timeout-minutes: 80
+    # on a miss, which was 4578 s (dispatch://INFRA-1052 measured them over the 30 newest counted
+    # test jobs of main push runs). dispatch://INFRA-1545 added two steps to the end of the list
+    # whose cost is not in that 13 s, because each waits out a time bound rather than computing:
+    # the retry helper's test, 192 s measured, which spends 160 s proving the 120 s floor by
+    # waiting it out, and the fault proxy's test, 10 s measured. That is 4780 s, or about 80
+    # minutes.
+    timeout-minutes: 84
     services:
       postgres:
         # ghcr.io/cybermonklabs/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -1968,6 +1972,17 @@ jobs:
 
       - name: Test the disk watch
         run: .github/scripts/disk_watch.test.sh
+
+      # The retry every download in CI is routed through, and the proxy that injects the
+      # download fault it answers. The retry test measures the floor the rule sets rather
+      # than reading it off the source — five attempts against a host that sends nothing, the
+      # fifth starting at least 120 s after the first — so it costs about 190 s of this job's
+      # budget, almost all of it in that one case.
+      - name: Test the download retry helper
+        run: .github/scripts/ci-retry.test.sh
+
+      - name: Test the CI fault proxy
+        run: .github/scripts/ci-fault-proxy.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
